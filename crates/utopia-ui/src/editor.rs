@@ -139,8 +139,9 @@ pub enum Autocomplete {
     #[default]
     Closed,
     /// The user dismissed this trigger (Escape, a link they just wrapped, a tag they
-    /// accepted); it stays shut until the caret leaves it.
-    Suppressed { trigger_start: usize },
+    /// accepted). It stays shut for this query at this offset only: a different trigger
+    /// that later lands on the same offset is a new menu, not the dismissed one.
+    Suppressed { trigger_start: usize, query: String },
     /// A trigger was found and its items computed. `items` may be empty (`/xyz`, `#zzz`,
     /// `((zzz` with no hits): then nothing is drawn and no key is captured, which is why
     /// no handler asks whether the variant is `Open`.
@@ -183,9 +184,12 @@ impl Autocomplete {
         self.menu().map(|m| m.kind)
     }
 
-    /// Keep this trigger shut until the caret leaves it.
-    fn suppress(&mut self, trigger_start: usize) {
-        *self = Autocomplete::Suppressed { trigger_start };
+    /// Keep this trigger shut until the caret leaves it or its query changes.
+    fn suppress(&mut self, trigger_start: usize, query: String) {
+        *self = Autocomplete::Suppressed {
+            trigger_start,
+            query,
+        };
     }
 }
 
@@ -1009,8 +1013,14 @@ impl BlockEditor {
             self.ac = Autocomplete::Closed;
             return;
         };
-        if let Autocomplete::Suppressed { trigger_start } = &self.ac {
-            if *trigger_start == start {
+        if let Autocomplete::Suppressed {
+            trigger_start,
+            query: dismissed,
+        } = &self.ac
+        {
+            // A raw offset is not enough: an edit elsewhere (a paste, an undo) can put a
+            // different trigger on the same byte offset, and that one was never dismissed.
+            if *trigger_start == start && *dismissed == query {
                 return;
             }
         }
@@ -1164,7 +1174,7 @@ impl BlockEditor {
     fn dismiss_trigger(&mut self) {
         let cursor = self.field.cursor();
         match detect_trigger(&self.field.text, cursor) {
-            Some((_, trigger_start, _)) => self.ac.suppress(trigger_start),
+            Some((_, trigger_start, query)) => self.ac.suppress(trigger_start, query),
             None => self.ac = Autocomplete::Closed,
         }
     }

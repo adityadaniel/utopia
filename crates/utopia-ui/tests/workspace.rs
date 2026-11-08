@@ -6341,3 +6341,27 @@ fn ac_13_5_mouse_down_does_not_open_a_menu_mid_composition(cx: &mut TestAppConte
         "the menu belongs to committed text, not to the input method's glyphs"
     );
 }
+
+/// FR-2.17: a dismissed trigger stays closed for the query it was dismissed at, not for
+/// whatever trigger later lands on the same byte offset (machine issue 4). Select-all and
+/// paste is one edit, so nothing in between clears the suppression.
+#[gpui::test]
+fn fr_2_17_a_dismissed_trigger_follows_its_query(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("random").unwrap();
+    });
+    cx.simulate_input("#ran");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-a");
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("#rod".into()));
+    cx.simulate_keystrokes("cmd-v");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().is_open()),
+        "a different query at the same offset is a fresh menu"
+    );
+}
