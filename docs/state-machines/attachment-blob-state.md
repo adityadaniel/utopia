@@ -12,13 +12,18 @@ Fixed on `fix/attachment-blob-state` (schema v9). Line numbers below are from th
   rebuilds the table and backfills `uploaded = 1` to `Uploaded`, so a v8 graph opens with
   the same queue it had. `add_blob` records pending (an already-uploaded row stays
   uploaded, and a re-attached file revives a lost one), `put_synced_blob` records uploaded.
-- **Issue 1 fixed.** `blobs_to_upload` no longer puts `LIMIT` in the SQL. It reads the
-  hashes and states of every row that still owes bytes, checks each file, marks a pending
-  row without one `Lost` (logged once) and only then takes up to `limit` live rows, so a
-  dead row can never occupy a slot again. A lost row whose bytes come back (a restored
-  `.blobs` directory) is revived to pending on the next round. The "row without file"
+- **Issue 1 fixed.** `blobs_to_upload` no longer puts `LIMIT` in the SQL and never walks a
+  backlog it does not need: it reads pending rows one at a time, stops as soon as the batch
+  is full, marks a pending row without a file `Lost` (logged once) and carries on, so a
+  dead row can never occupy a slot again. Because `prepare` runs on the UI thread, a call is
+  bounded (rule 10): a dead row is met once and then leaves that scan for good, and the lost
+  set is re-checked only in the upload slots the batch leaves unused — oldest check first,
+  with `lost_at` refreshed on every still-missing row so the pass rotates instead of
+  retrying the same head. A lost row whose bytes come back (a restored `.blobs` directory)
+  is revived and uploaded in the round that reaches it. The v9 indexes follow the two
+  queries (`created_at` for pending, `lost_at` for the rotation). The "row without file"
   entry paths the doc names — a graph moved without its `.blobs`, a `backup()` copy — now
-  cost one round instead of every later upload.
+  cost one pass instead of every later upload.
 - **Issue 2 is left as designed.** Unreferenced but unuploaded rows still upload: it only
   costs bandwidth, and filtering by reference would tie the upload queue to index freshness
   (debounced mode commits block text after an idle delay), so an attach-then-sync could
@@ -80,7 +85,7 @@ stateDiagram-v2
     [*] --> Pending : add_blob (row + file)
     Pending --> Uploaded : put_blob ok -> mark_blobs_uploaded
     Pending --> Lost : blobs_to_upload finds no file (marked once, logged)
-    Lost --> Pending : the bytes are back (restored .blobs / add_blob again)
+    Lost --> Pending : the bytes are back (restored .blobs, checked in a spare upload slot / add_blob again)
     Uploaded --> Uploaded : never re-sent (content-addressed)
     [*] --> Missing : block references blob:<sha> with no file
     Missing --> Uploaded : get_blob -> put_synced_blob (hash verified)

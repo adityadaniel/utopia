@@ -231,8 +231,11 @@ INSERT INTO attachment_v9(hash, name, mime, size, created_at, state, lost_at)
   FROM attachment;
 DROP TABLE attachment;
 ALTER TABLE attachment_v9 RENAME TO attachment;
-CREATE INDEX attachment_pending ON attachment(created_at, hash)
-  WHERE state <> 'uploaded';
+-- One partial index per queue query, so the rows that are done (most of them, once a graph
+-- has synced) cost neither read nor write. The pending scan stops early on `created_at`;
+-- the lost reconciliation rotates on `lost_at`.
+CREATE INDEX attachment_pending ON attachment(created_at, hash) WHERE state = 'pending';
+CREATE INDEX attachment_lost ON attachment(lost_at, hash) WHERE state = 'lost';
 "#;
 
 /// Attribute row values for a block's text, if it is an attribute block.

@@ -41,7 +41,8 @@ pub enum BlobState {
     /// On this device and on a relay. Never leaves this state.
     Uploaded,
     /// The row outlived its file (`.blobs` not moved with the graph, a `backup()` copy, a
-    /// deleted file). Not uploadable until the bytes come back.
+    /// deleted file). Not uploadable until the bytes come back. `noticed_at` is when the
+    /// loss was last confirmed, which is what orders the reconciliation rotation.
     Lost { noticed_at: i64 },
 }
 
@@ -292,43 +293,68 @@ impl Store {
     /// marked [`BlobState::Lost`] and skipped *before* the limit applies: the previous
     /// version put `LIMIT` in the SQL and only then looked for the file, so a few dead rows
     /// at the head of the queue starved every newer attachment forever
-    /// (docs/state-machines/attachment-blob-state.md issue 1). A lost row whose bytes come
-    /// back is revived here, because the file is the truth about whether it can be sent.
+    /// (docs/state-machines/attachment-blob-state.md issue 1).
+    ///
+    /// This runs in `SyncEngine::prepare` on the UI thread, so the work is bounded per call
+    /// (rule 10): the pending rows are read one at a time and the scan stops as soon as the
+    /// batch is full. A dead row is met once, marked, and then leaves this scan for good, so
+    /// a backlog of dead files costs one pass in total, not one per round. The slots the
+    /// batch leaves unused re-check the lost rows ([`Store::revive_lost`]).
     pub fn blobs_to_upload(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        // Rows and states only, so a long queue costs one indexed read and no payloads.
-        let queue: Vec<(String, String)> = {
+        let mut out = Vec::new();
+        let mut dead = Vec::new();
+        {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT hash, state FROM attachment WHERE state <> 'uploaded'
+                "SELECT hash FROM attachment WHERE state = 'pending'
                  ORDER BY created_at, hash",
             )?;
-            let rows = stmt
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            rows
-        };
-        let mut ready = Vec::new();
-        for (hash, state) in queue {
-            if !self.has_blob(&hash) {
-                self.mark_blob_lost(&hash)?;
-                continue;
-            }
-            if matches!(BlobState::from_row(&state, None), BlobState::Lost { .. }) {
-                self.revive_blob(&hash)?;
-            }
-            if ready.len() < limit {
-                ready.push(hash);
+            let mut rows = stmt.query([])?;
+            while out.len() < limit {
+                let Some(row) = rows.next()? else { break };
+                let hash: String = row.get(0)?;
+                match self.blob(&hash)? {
+                    Some(bytes) => out.push((hash, bytes)),
+                    None => dead.push(hash),
+                }
             }
         }
-        let mut out = Vec::with_capacity(ready.len());
-        for hash in ready {
-            match self.blob(&hash)? {
-                Some(bytes) => out.push((hash, bytes)),
-                // Deleted between the check above and the read: notice it and leave it for
-                // the next round instead of failing the sync round.
-                None => self.mark_blob_lost(&hash)?,
-            }
+        // Marked after the cursor closes: changing the rows a SELECT is walking has no
+        // defined order.
+        for hash in dead {
+            self.mark_blob_lost(&hash)?;
+        }
+        if out.len() < limit {
+            self.revive_lost(limit - out.len(), &mut out)?;
         }
         Ok(out)
+    }
+
+    /// Spend the upload slots the queue did not fill on the rows whose file was gone: their
+    /// bytes may be back (a restored `.blobs` directory), and a revived row is uploaded in
+    /// the same round it is noticed.
+    ///
+    /// The pass is bounded by `slots` and ordered by `lost_at`, which every still-missing
+    /// row refreshes ([`Store::refresh_lost_at`]): without that, a lost set larger than the
+    /// slots would retry the same head forever and never reach the rest.
+    fn revive_lost(&self, slots: usize, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+        let lost: Vec<String> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT hash FROM attachment WHERE state = 'lost'
+                 ORDER BY lost_at, hash LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([slots as i64], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for hash in lost {
+            match self.blob(&hash)? {
+                Some(bytes) => {
+                    self.revive_blob(&hash)?;
+                    out.push((hash, bytes));
+                }
+                None => self.refresh_lost_at(&hash)?,
+            }
+        }
+        Ok(())
     }
 
     /// Notice, once, that a queued row has no bytes. Not fatal: the file may come back
@@ -344,6 +370,16 @@ impl Store {
                 "utopia-store: attachment {hash} has no file; not uploading it until the bytes are back"
             );
         }
+        Ok(())
+    }
+
+    /// `lost_at` is when the loss was last confirmed: refresh it so a row that is still
+    /// missing goes to the back of the reconciliation rotation.
+    fn refresh_lost_at(&self, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachment SET lost_at = ?2 WHERE hash = ?1 AND state = 'lost'",
+            params![hash, self.now()],
+        )?;
         Ok(())
     }
 
