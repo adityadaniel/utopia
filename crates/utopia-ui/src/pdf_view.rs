@@ -26,6 +26,35 @@ pub enum PdfEvent {
     OpenBlock { page: PageId, block: BlockId },
 }
 
+/// What a drag will create when it ends.
+#[derive(Debug)]
+enum DragBody {
+    /// Select text: the line rectangles of the selection so far, drawn as a preview.
+    Text { preview: Vec<[f32; 4]> },
+    /// Option-drag: one rectangle from `start` to `cur`, drawn as an outline.
+    Area,
+}
+
+/// A highlight drag in progress, and the page it started on (both ends in window
+/// coordinates). The page travels with the drag so a release can be checked against it.
+#[derive(Debug)]
+struct Drag {
+    page: usize,
+    start: Point<Pixels>,
+    cur: Point<Pixels>,
+    body: DragBody,
+}
+
+/// The viewer's pointer state: idle, or drawing exactly one highlight on one page.
+/// The page and the kind of highlight live inside `Drag`, so a mode left over from the
+/// previous drag, or a preview with no drag, cannot be represented.
+#[derive(Debug, Default)]
+enum Gesture {
+    #[default]
+    Idle,
+    Drag(Drag),
+}
+
 pub struct PdfView {
     app: gpui::Entity<AppState>,
     hash: String,
@@ -40,12 +69,8 @@ pub struct PdfView {
     pages: Vec<(f32, f32)>,
     highlights: Vec<PdfHighlight>,
     list: ListState,
-    /// `(page, start, current)` in window coordinates while dragging.
-    drag: Option<(usize, Point<Pixels>, Point<Pixels>)>,
-    /// Option-drag: highlight an area (a figure) instead of selecting text.
-    area_drag: bool,
-    /// Line rectangles of the text the current drag selects (live preview).
-    preview: Vec<[f32; 4]>,
+    /// The live highlight drag, if any.
+    gesture: Gesture,
     page_bounds: Rc<RefCell<HashMap<usize, Bounds<Pixels>>>>,
     /// Decoded page images, kept while the viewer is open.
     images: HashMap<usize, std::sync::Arc<gpui::RenderImage>>,
@@ -99,9 +124,7 @@ impl PdfView {
             pages,
             highlights: Vec::new(),
             list,
-            drag: None,
-            area_drag: false,
-            preview: Vec::new(),
+            gesture: Gesture::Idle,
             page_bounds: Rc::default(),
             images: HashMap::new(),
             focus: cx.focus_handle(),
@@ -125,6 +148,11 @@ impl PdfView {
     /// Where a page is drawn (after a frame), for tests.
     pub fn page_bounds(&self, page: usize) -> Option<Bounds<Pixels>> {
         self.page_bounds.borrow().get(&page).copied()
+    }
+
+    /// Whether a highlight drag is in progress, for tests.
+    pub fn dragging(&self) -> bool {
+        matches!(self.gesture, Gesture::Drag(_))
     }
 
     fn reload_highlights(&mut self, cx: &mut Context<Self>) {
@@ -239,11 +267,10 @@ impl PdfView {
     }
 
     fn finish_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
-        self.preview.clear();
-        let Some((page, start, _)) = self.drag.take() else {
+        let Gesture::Drag(drag) = std::mem::take(&mut self.gesture) else {
             return;
         };
-        let (Some(a), Some(b)) = (self.rel(page, start), self.rel(page, at)) else {
+        let (Some(a), Some(b)) = (self.rel(drag.page, drag.start), self.rel(drag.page, at)) else {
             return;
         };
         let rect = [
@@ -257,14 +284,58 @@ impl PdfView {
             cx.notify();
             return;
         }
-        if !self.area_drag && self.highlight_text(page, a, b, cx) {
+        if matches!(drag.body, DragBody::Text { .. }) && self.highlight_text(drag.page, a, b, cx) {
             return;
         }
         // No text under the drag (or Option held): an area highlight.
         if rect[2] >= 0.01 && rect[3] >= 0.005 {
-            self.highlight_area(page, rect, cx);
+            self.highlight_area(drag.page, rect, cx);
         }
         cx.notify();
+    }
+
+    /// Start a drag on `page`; an Option-drag highlights an area (a figure) instead of
+    /// selecting text.
+    fn begin_drag(&mut self, page: usize, at: Point<Pixels>, area: bool) {
+        self.gesture = Gesture::Drag(Drag {
+            page,
+            start: at,
+            cur: at,
+            body: if area {
+                DragBody::Area
+            } else {
+                DragBody::Text {
+                    preview: Vec::new(),
+                }
+            },
+        });
+    }
+
+    /// Track the pointer on `page`; returns whether the drag changed.
+    fn move_drag(&mut self, page: usize, at: Point<Pixels>, pressed: bool) -> bool {
+        let (start, selecting) = match &self.gesture {
+            Gesture::Drag(d) if d.page == page && pressed && d.cur != at => {
+                (d.start, matches!(d.body, DragBody::Text { .. }))
+            }
+            _ => return false,
+        };
+        // PDFKit does the selection work; an area drag draws its own rectangle instead.
+        let preview = if selecting {
+            match (self.rel(page, start), self.rel(page, at)) {
+                (Some(a), Some(b)) => self.selection(page, a, b).map(|s| s.1),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        let Gesture::Drag(drag) = &mut self.gesture else {
+            return false; // the guard above matched a live drag (rule 11: no panic)
+        };
+        drag.cur = at;
+        if let DragBody::Text { preview: rects } = &mut drag.body {
+            *rects = preview.unwrap_or_default();
+        }
+        true
     }
 
     fn render_page(&mut self, i: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -300,26 +371,13 @@ impl PdfView {
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
                     window.focus(&this.focus);
-                    this.area_drag = e.modifiers.alt;
-                    this.preview.clear();
-                    this.drag = Some((i, e.position, e.position));
+                    this.begin_drag(i, e.position, e.modifiers.alt);
                     cx.notify();
                 }),
             )
             .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                if let Some((p, start, _)) = this.drag {
-                    if p == i && e.pressed_button == Some(MouseButton::Left) {
-                        this.drag = Some((p, start, e.position));
-                        if !this.area_drag {
-                            this.preview = match (this.rel(p, start), this.rel(p, e.position)) {
-                                (Some(a), Some(b)) => {
-                                    this.selection(p, a, b).map(|s| s.1).unwrap_or_default()
-                                }
-                                _ => Vec::new(),
-                            };
-                        }
-                        cx.notify();
-                    }
+                if this.move_drag(i, e.position, e.pressed_button == Some(MouseButton::Left)) {
+                    cx.notify();
                 }
             }))
             .on_mouse_up(
@@ -359,37 +417,51 @@ impl PdfView {
                 );
             }
         }
-        let previewing = self.drag.is_some_and(|d| d.0 == i) && !self.preview.is_empty();
-        if previewing {
-            for r in &self.preview {
+        // Live feedback: the text lines the drag selects, or its rectangle where there is
+        // no selection (an area drag, or blank paper). Only the page the drag started on
+        // shows it.
+        let none: &[[f32; 4]] = &[];
+        let (preview, ends) = match &self.gesture {
+            Gesture::Drag(Drag {
+                page,
+                start,
+                cur,
+                body,
+            }) if *page == i => (
+                match body {
+                    DragBody::Text { preview } => preview.as_slice(),
+                    DragBody::Area => none,
+                },
+                Some((*start, *cur)),
+            ),
+            _ => (none, None),
+        };
+        for r in preview {
+            page = page.child(
+                div()
+                    .absolute()
+                    .left(px(r[0] * PAGE_WIDTH))
+                    .top(px(r[1] * height))
+                    .w(px(r[2] * PAGE_WIDTH))
+                    .h(px(r[3] * height))
+                    .bg(th.pdf_selection),
+            );
+        }
+        if let (Some((start, cur)), true) = (ends, preview.is_empty()) {
+            if let Some(b) = self.page_bounds.borrow().get(&i).copied() {
+                let x0 = f32::from(start.x.min(cur.x) - b.origin.x);
+                let y0 = f32::from(start.y.min(cur.y) - b.origin.y);
                 page = page.child(
                     div()
                         .absolute()
-                        .left(px(r[0] * PAGE_WIDTH))
-                        .top(px(r[1] * height))
-                        .w(px(r[2] * PAGE_WIDTH))
-                        .h(px(r[3] * height))
-                        .bg(th.pdf_selection),
+                        .left(px(x0))
+                        .top(px(y0))
+                        .w(px(f32::from((start.x - cur.x).abs())))
+                        .h(px(f32::from((start.y - cur.y).abs())))
+                        .border_1()
+                        .border_color(th.accent)
+                        .bg(yellow),
                 );
-            }
-        }
-        if let (Some((p, start, cur)), false) = (self.drag, previewing) {
-            if p == i {
-                if let Some(b) = self.page_bounds.borrow().get(&i).copied() {
-                    let x0 = f32::from(start.x.min(cur.x) - b.origin.x);
-                    let y0 = f32::from(start.y.min(cur.y) - b.origin.y);
-                    page = page.child(
-                        div()
-                            .absolute()
-                            .left(px(x0))
-                            .top(px(y0))
-                            .w(px(f32::from((start.x - cur.x).abs())))
-                            .h(px(f32::from((start.y - cur.y).abs())))
-                            .border_1()
-                            .border_color(th.accent)
-                            .bg(yellow),
-                    );
-                }
             }
         }
         div()
