@@ -128,13 +128,69 @@ pub enum AcItem {
     },
 }
 
-#[derive(Debug, Clone)]
-pub struct Autocomplete {
+/// The completion menu as one explicit state
+/// (`docs/state-machines/block-editor-autocomplete.md`, FR-2.17). "A trigger is under the
+/// caret" and "there is a suggestion to take" used to be two different questions answered
+/// with `is_some()` and `is_some_and(|a| !a.items.is_empty())` at six call sites; every
+/// handler now asks [`Autocomplete::captures_keys`] instead.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum Autocomplete {
+    /// No trigger under the caret: nothing draws, nothing captures a key.
+    #[default]
+    Closed,
+    /// The user dismissed this trigger (Escape, a link they just wrapped, a tag they
+    /// accepted). It stays shut for this query at this offset only: a different trigger
+    /// that later lands on the same offset is a new menu, not the dismissed one.
+    Suppressed { trigger_start: usize, query: String },
+    /// A trigger was found and its items computed. `items` may be empty (`/xyz`, `#zzz`,
+    /// `((zzz` with no hits): then nothing is drawn and no key is captured, which is why
+    /// no handler asks whether the variant is `Open`.
+    Open(AutocompleteMenu),
+}
+
+/// An open menu's frozen query: the items, the range they replace and the highlight.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutocompleteMenu {
     pub kind: AcKind,
     pub start: usize,
     pub query: String,
     pub items: Vec<AcItem>,
     pub selected: usize,
+    /// The caret when `items` were computed. `accept` replaces `start..caret`, so moving
+    /// the caret after the menu opened (Shift+Left selects the last character) cannot
+    /// replace a different range than the one the query covers.
+    pub caret: usize,
+}
+
+impl Autocomplete {
+    /// The menu owns the keyboard: it has suggestions to choose from.
+    pub fn captures_keys(&self) -> bool {
+        matches!(self, Autocomplete::Open(menu) if !menu.items.is_empty())
+    }
+
+    /// A trigger is under the caret (its menu may be empty, and so invisible).
+    pub fn is_open(&self) -> bool {
+        matches!(self, Autocomplete::Open(_))
+    }
+
+    pub fn menu(&self) -> Option<&AutocompleteMenu> {
+        match self {
+            Autocomplete::Open(menu) => Some(menu),
+            _ => None,
+        }
+    }
+
+    pub fn kind(&self) -> Option<AcKind> {
+        self.menu().map(|m| m.kind)
+    }
+
+    /// Keep this trigger shut until the caret leaves it or its query changes.
+    fn suppress(&mut self, trigger_start: usize, query: String) {
+        *self = Autocomplete::Suppressed {
+            trigger_start,
+            query,
+        };
+    }
 }
 
 /// The reference trigger the caret is inside, if any (FR-2.17).
@@ -305,8 +361,7 @@ pub struct BlockEditor {
     field: TextField,
     focus: FocusHandle,
     session: EditorSession,
-    pub ac: Option<Autocomplete>,
-    ac_dismissed: Option<usize>,
+    ac: Autocomplete,
     _sub: Subscription,
     _page_sub: Subscription,
 }
@@ -359,8 +414,7 @@ impl BlockEditor {
             field: TextField::new(true),
             focus: cx.focus_handle(),
             session: EditorSession::Idle,
-            ac: None,
-            ac_dismissed: None,
+            ac: Autocomplete::Closed,
             _sub: sub,
             _page_sub: page_sub,
         }
@@ -370,6 +424,13 @@ impl BlockEditor {
     /// editor-bound command (QJ-5) and the views to draw its row as an editor (PG-1).
     pub fn target(&self) -> Option<&EditTarget> {
         self.session.target()
+    }
+
+    /// The completion menu's state (FR-2.17,
+    /// `docs/state-machines/block-editor-autocomplete.md`). Read-only: only this editor
+    /// moves it.
+    pub fn autocomplete(&self) -> &Autocomplete {
+        &self.ac
     }
 
     pub fn is_editing(&self, host: EntityId, page: &PageId, block: &BlockId) -> bool {
@@ -422,16 +483,14 @@ impl BlockEditor {
                 // edit, and keeping the previous target would leave the editor on a block
                 // the host has already left.
                 self.session = EditorSession::Idle;
-                self.ac = None;
-                self.ac_dismissed = None;
+                self.ac = Autocomplete::Closed;
                 cx.emit(EditorEvent::Blurred);
                 cx.notify();
                 return;
             };
             self.field.set_text(&text, caret.unwrap_or(text.len()));
             self.session = EditorSession::Editing(Editing::new(target));
-            self.ac = None;
-            self.ac_dismissed = None;
+            self.ac = Autocomplete::Closed;
         } else if let Some(c) = caret {
             self.field.move_to(c);
         }
@@ -456,8 +515,7 @@ impl BlockEditor {
         // Dropping the session drops the idle commit and the caret anchor with it: neither
         // may outlive the block they belong to (machine issues 2 and 4).
         self.session = EditorSession::Idle;
-        self.ac = None;
-        self.ac_dismissed = None;
+        self.ac = Autocomplete::Closed;
         if was_editing {
             cx.emit(EditorEvent::Blurred);
         }
@@ -487,6 +545,10 @@ impl BlockEditor {
                 let c = anchored.unwrap_or_else(|| self.field.cursor().min(text.len()));
                 self.field.set_text(&text, c);
                 self.anchor_caret(cx);
+                // The buffer was replaced wholesale, so the menu's frozen range and items
+                // describe text that is gone (an undo, a remote edit, a plugin through the
+                // store). Re-derive it from the text that is here now (FR-2.17).
+                self.refresh_autocomplete(cx);
                 cx.notify();
             }
             Some(_) => {}
@@ -509,8 +571,7 @@ impl BlockEditor {
     /// Stop editing: the block went away (undo of its creation, deletion, merge).
     fn detach(&mut self, cx: &mut Context<Self>) {
         self.session = EditorSession::Idle;
-        self.ac = None;
-        self.ac_dismissed = None;
+        self.ac = Autocomplete::Closed;
         cx.emit(EditorEvent::Blurred);
         cx.notify();
     }
@@ -677,9 +738,7 @@ impl BlockEditor {
         self.after_edit(window, cx);
         // `[[word` now looks like a link being typed, but the user just made the link;
         // a menu here would let Enter swap their word for some other page.
-        if let Some(ac) = self.ac.take() {
-            self.ac_dismissed = Some(ac.start);
-        }
+        self.dismiss_trigger();
         true
     }
 
@@ -755,8 +814,7 @@ impl BlockEditor {
         // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
         // above may also have rewritten the text it was offering completions for (an
         // expanded relative date), so accepting from it later would edit the wrong range.
-        self.ac = None;
-        self.ac_dismissed = None;
+        self.ac = Autocomplete::Closed;
     }
 
     /// Queue a host request that must wait for the input method (§13.5). The latest request
@@ -894,6 +952,10 @@ impl BlockEditor {
             // The commit may rewrite the text under the caret; the anchor has to move with
             // it, or a remote edit lands the caret where the old text put it.
             self.anchor_caret(cx);
+            // An open menu's frozen range was measured on the text before the rewrite
+            // (NFC normalization shortens `cafe` + U+0301 to `café`), so accepting it now
+            // would replace the wrong bytes and eat the text that follows the query.
+            self.refresh_autocomplete(cx);
             cx.notify();
         }
     }
@@ -939,19 +1001,34 @@ impl BlockEditor {
             // CRDT anchor must move too or the next store change resolves the caret back
             // into the expanded link.
             self.anchor_caret(cx);
+            // A menu that was open described the phrase that was just replaced.
+            self.refresh_autocomplete(cx);
             cx.notify();
         }
     }
 
     fn refresh_autocomplete(&mut self, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            // §13.5: the buffer is provisional, so a menu over it would name text the store
+            // has never seen. Nothing may open one mid-composition; the end of the
+            // composition (`settle`) is where the trigger is read again.
+            return;
+        }
         let cursor = self.field.cursor();
         let Some((kind, start, query)) = detect_trigger(&self.field.text, cursor) else {
-            self.ac = None;
-            self.ac_dismissed = None;
+            self.ac = Autocomplete::Closed;
             return;
         };
-        if self.ac_dismissed == Some(start) {
-            return;
+        if let Autocomplete::Suppressed {
+            trigger_start,
+            query: dismissed,
+        } = &self.ac
+        {
+            // A raw offset is not enough: an edit elsewhere (a paste, an undo) can put a
+            // different trigger on the same byte offset, and that one was never dismissed.
+            if *trigger_start == start && *dismissed == query {
+                return;
+            }
         }
         let own = self.target().map(|t| t.block.clone());
         let items = self.app.update(cx, |app, _| -> Vec<AcItem> {
@@ -1024,15 +1101,16 @@ impl BlockEditor {
         });
         let selected = self
             .ac
-            .as_ref()
-            .filter(|a| a.start == start)
-            .map_or(0, |a| a.selected.min(items.len().saturating_sub(1)));
-        self.ac = Some(Autocomplete {
+            .menu()
+            .filter(|m| m.start == start)
+            .map_or(0, |m| m.selected.min(items.len().saturating_sub(1)));
+        self.ac = Autocomplete::Open(AutocompleteMenu {
             kind,
             start,
             query,
             items,
             selected,
+            caret: cursor,
         });
         cx.notify();
     }
@@ -1051,15 +1129,17 @@ impl BlockEditor {
             // now would replace a range of its provisional glyphs.
             return;
         }
-        let Some(ac) = self.ac.take() else { return };
+        let Autocomplete::Open(menu) = std::mem::replace(&mut self.ac, Autocomplete::Closed) else {
+            return;
+        };
         let item = if create {
-            if ac.kind == AcKind::Block || ac.query.trim().is_empty() {
-                self.ac = Some(ac);
+            if menu.kind == AcKind::Block || menu.query.trim().is_empty() {
+                self.ac = Autocomplete::Open(menu);
                 return;
             }
-            AcItem::Create(ac.query.trim().to_string())
+            AcItem::Create(menu.query.trim().to_string())
         } else {
-            match ac.items.get(ix.unwrap_or(ac.selected)) {
+            match menu.items.get(ix.unwrap_or(menu.selected)) {
                 Some(i) => i.clone(),
                 None => return,
             }
@@ -1071,20 +1151,38 @@ impl BlockEditor {
                 app.changed(Vec::new(), true, cx);
             });
         }
-        let cursor = self.field.cursor();
+        // The range the menu was opened for, not the caret now: selecting or clicking
+        // after the menu opened leaves the query the items describe, so replacing
+        // `start..cursor` would leave the tail of it behind (FR-2.17).
+        let end = menu.caret;
+        if self.field.text.get(menu.start..end).is_none() {
+            // Belt and braces: a buffer replaced under the menu could leave the frozen
+            // range off a character boundary. `sync_from_store` closes the menu in that
+            // case, so this only guards the offsets themselves (rule 11).
+            return;
+        }
         if let AcItem::Command { cmd, .. } = item {
-            self.field.replace(ac.start..cursor, "");
+            self.field.replace(menu.start..end, "");
+            self.ac = Autocomplete::Closed;
             self.after_edit(window, cx);
-            self.ac = None;
             return self.run_slash(cmd, window, cx);
         }
-        let (insert, skip) = completion_text(ac.kind, &item, &self.field.text[cursor..]);
-        self.field.replace(ac.start..cursor + skip, &insert);
+        let (insert, skip) = completion_text(menu.kind, &item, &self.field.text[end..]);
+        self.field.replace(menu.start..end + skip, &insert);
         // An accepted `#tag` still looks like a trigger; don't reopen on it.
-        self.ac_dismissed = Some(ac.start);
+        self.dismiss_trigger();
         self.after_edit(window, cx);
-        self.ac = None;
         cx.notify();
+    }
+
+    /// Keep the trigger under the caret shut: the editor just produced the text a menu
+    /// would offer to replace (a wrapped selection, an accepted completion, FR-2.17).
+    fn dismiss_trigger(&mut self) {
+        let cursor = self.field.cursor();
+        match detect_trigger(&self.field.text, cursor) {
+            Some((_, trigger_start, query)) => self.ac.suppress(trigger_start, query),
+            None => self.ac = Autocomplete::Closed,
+        }
     }
 
     fn run_slash(&mut self, cmd: SlashCmd, window: &mut Window, cx: &mut Context<Self>) {
@@ -1204,7 +1302,7 @@ impl BlockEditor {
             // §13.5: Enter confirms a candidate in the input method; it never splits here.
             return;
         }
-        if self.ac.as_ref().is_some_and(|a| !a.items.is_empty()) {
+        if self.ac.captures_keys() {
             return self.accept(false, None, window, cx);
         }
         // Split where the caret is once the block is finished: committing can rewrite the
@@ -1223,7 +1321,7 @@ impl BlockEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ac.as_ref().is_some_and(|a| !a.items.is_empty()) {
+        if self.ac.captures_keys() {
             self.accept(false, None, window, cx);
         } else {
             cx.propagate();
@@ -1231,7 +1329,7 @@ impl BlockEditor {
     }
 
     fn insert_above(&mut self, _: &InsertAbove, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ac.is_some() {
+        if self.ac.captures_keys() {
             return self.accept(true, None, window, cx);
         }
         self.emit_after_commit(EditorEvent::InsertAbove, cx);
@@ -1248,12 +1346,12 @@ impl BlockEditor {
     }
 
     fn indent(&mut self, _: &Indent, _: &mut Window, cx: &mut Context<Self>) {
-        self.ac = None;
+        self.ac = Autocomplete::Closed;
         cx.emit(EditorEvent::Indent);
     }
 
     fn outdent(&mut self, _: &Outdent, _: &mut Window, cx: &mut Context<Self>) {
-        self.ac = None;
+        self.ac = Autocomplete::Closed;
         cx.emit(EditorEvent::Outdent);
     }
 
@@ -1265,7 +1363,7 @@ impl BlockEditor {
         }
         if self.field.sel.is_empty() {
             if self.field.cursor() == 0 {
-                self.ac = None;
+                self.ac = Autocomplete::Closed;
                 return self.emit_after_commit(EditorEvent::MergeBackward, cx);
             }
             // `(|)` → `|`: the closer was put there by the opener, so it goes with it.
@@ -1391,13 +1489,13 @@ impl BlockEditor {
     }
 
     fn vertical(&mut self, up: bool, cx: &mut Context<Self>) {
-        if let Some(ac) = &mut self.ac {
-            if !ac.items.is_empty() {
-                let n = ac.items.len();
-                ac.selected = if up {
-                    (ac.selected + n - 1) % n
+        if self.ac.captures_keys() {
+            if let Autocomplete::Open(menu) = &mut self.ac {
+                let n = menu.items.len();
+                menu.selected = if up {
+                    (menu.selected + n - 1) % n
                 } else {
-                    (ac.selected + 1) % n
+                    (menu.selected + 1) % n
                 };
                 cx.notify();
                 return;
@@ -1558,8 +1656,11 @@ impl BlockEditor {
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ac) = self.ac.take() {
-            self.ac_dismissed = Some(ac.start);
+        // Only a menu with suggestions is dismissed. One that found nothing to offer
+        // (`/xyz`, `#zzz`) never drew, so Escape must leave the block the first time
+        // instead of silently closing something invisible (FR-2.17).
+        if self.ac.captures_keys() {
+            self.dismiss_trigger();
             cx.notify();
             return;
         }
@@ -1602,6 +1703,13 @@ impl BlockEditor {
     }
 
     fn mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            // §13.5: the buffer and the caret belong to the input method. Moving the caret
+            // and re-reading the trigger here would open a menu over provisional glyphs
+            // the store has never seen; a click is not an edit, so there is nothing to
+            // settle either.
+            return;
+        }
         let ix = self.field.index_at(e.position);
         if e.click_count >= 2 {
             let r = utopia_core::text::word_range_at(&self.field.text, ix);
@@ -1631,8 +1739,10 @@ impl BlockEditor {
     }
 
     fn render_autocomplete(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let ac = self.ac.as_ref()?;
-        if ac.items.is_empty() {
+        // Nothing to show means nothing to draw: an open menu with no items is invisible,
+        // which is why it must not capture a key either (`captures_keys`).
+        let ac = self.ac.menu()?;
+        if !self.ac.captures_keys() {
             return None;
         }
         let th = theme(cx).clone();
@@ -1733,7 +1843,7 @@ impl Render for BlockEditor {
         };
         let mut key_context = gpui::KeyContext::default();
         key_context.add(EDITOR_CONTEXT);
-        if self.ac.as_ref().is_some_and(|a| !a.items.is_empty()) {
+        if self.ac.captures_keys() {
             key_context.add(AUTOCOMPLETE_CONTEXT);
         }
         div()

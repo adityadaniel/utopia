@@ -31,9 +31,9 @@ What was deliberately not done:
   dropped and nothing runs while the caret is away. Ending the edit there would require the
   palette to reopen the session before dispatching an editor command, which is a change to
   this machine's host and to QJ's behaviour, not to this machine.
-- **`ac` / `ac_dismissed` stay beside the session**, not inside `Editing`: they are the
-  autocomplete machine's state (`block-editor-autocomplete.md`) and are cleared wherever the
-  session ends.
+- **The autocomplete menu (`ac`, one `Autocomplete` value) stays beside the session**, not
+  inside `Editing`: it is the autocomplete machine's state
+  (`block-editor-autocomplete.md`) and is cleared wherever the session ends.
 
 ## What it controls
 

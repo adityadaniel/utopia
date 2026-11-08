@@ -4594,7 +4594,7 @@ fn opening_bracket_wraps_the_selection(cx: &mut TestAppContext) {
     assert_eq!(rows(&app, &page, cx)[0].0, "Met Ana about [[launch]]");
     assert_eq!(selected_text(&ws, cx), "launch");
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).ac.is_none()),
+        ws.update(cx, |w, cx| !w.editor().read(cx).autocomplete().is_open()),
         "the user made the link; no menu offers to replace it"
     );
     // Leaving the block commits it like any typed link.
@@ -4675,7 +4675,7 @@ fn highlighted(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
     use utopia_ui::editor::AcItem;
     ws.update(cx, |w, cx| {
         let e = w.editor().read(cx);
-        let ac = e.ac.as_ref().expect("a menu is open");
+        let ac = e.autocomplete().menu().expect("a menu is open");
         match &ac.items[ac.selected] {
             AcItem::Page { title, .. } | AcItem::Create(title) => title.clone(),
             AcItem::Command { label, .. } => label.clone(),
@@ -4935,7 +4935,7 @@ fn auto_closed_links_complete_cleanly(cx: &mut TestAppContext) {
     cx.simulate_input("An");
     cx.run_until_parked();
     assert_eq!(
-        ws.update(cx, |w, cx| w.editor().read(cx).ac.as_ref().map(|a| a.kind)),
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().kind()),
         Some(AcKind::Page),
         "the [[ menu is open inside the auto-closed link"
     );
@@ -5717,7 +5717,7 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     );
     let editor = ws.update(cx, |w, _| w.editor());
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_some()),
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
         "the [[ menu is open"
     );
     // The keyboard goes to the workspace; no host calls `end` (a click into the search box
@@ -5732,7 +5732,7 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, today(), cx), ["f [[November 3rd, 2026]]"]);
     assert_tomorrow_linked(&app, cx);
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_none()),
+        editor.read_with(cx, |e, _| !e.autocomplete().is_open()),
         "the menu was about text the commit rewrote"
     );
 }
@@ -6169,7 +6169,7 @@ fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
     let editor = ws.update(cx, |w, _| w.editor());
     let block = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_some()),
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
         "the link menu is open"
     );
 
@@ -6213,7 +6213,233 @@ fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "rewritten");
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_none()),
+        editor.read_with(cx, |e, _| !e.autocomplete().is_open()),
         "the menu was about the text the plugin replaced"
+    );
+}
+
+/// FR-2.17: `/zzz` matches no command, so the menu draws nothing — and must not exist as a
+/// state either: Escape leaves the block the first time it is pressed (machine issue 1).
+#[gpui::test]
+fn fr_2_17_escape_leaves_a_menu_with_nothing_to_show(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("/zzz");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "/zzz");
+    assert!(
+        editor.read_with(cx, |e, _| e.target().is_none()),
+        "one Escape leaves a block whose menu drew nothing"
+    );
+}
+
+/// FR-2.17: Cmd+Enter starts a block above; whether it does must not depend on a menu with
+/// no suggestions counting as "open" (machine issue 1).
+#[gpui::test]
+fn fr_2_17_cmd_enter_is_not_swallowed_by_an_empty_menu(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("/zzz");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(rows_str(&rows(&app, &page, cx)), [("", 0), ("/zzz", 0)]);
+    app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        assert!(
+            app.store.find_page("zzz").unwrap().is_none(),
+            "no page is created from a slash query the menu never offered"
+        );
+    });
+}
+
+/// FR-2.17: the menu replaces the query it was opened for, not whatever range the caret
+/// happens to sit in when Enter arrives (machine issue 2). Shift+Left puts the caret at the
+/// start of a selection, one byte before the end of the query.
+#[gpui::test]
+fn fr_2_17_accept_replaces_the_query_the_menu_was_opened_for(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Alpha").unwrap();
+    });
+    cx.simulate_input("Met [[Alp");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().is_open()),
+        "the [[ menu is open"
+    );
+    cx.simulate_keystrokes("shift-left");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "Met [[Alpha]]");
+}
+
+/// FR-2.17: a menu describes the buffer it was opened on. When the buffer is replaced
+/// wholesale under it (an undo, a remote edit, a plugin through the store), its frozen
+/// `start..caret` range names text that is gone; accepting from it would insert a
+/// completion into the middle of another string.
+#[gpui::test]
+fn fr_2_17_a_menu_does_not_outlive_the_text_it_was_opened_for(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Alpha").unwrap();
+    });
+    cx.simulate_input("[[Al");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    let block = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the [[ menu is open"
+    );
+    // The store rewrites the block: the caret offset 4 now falls inside a three-byte
+    // character, so the menu's range is not even a character boundary any more.
+    app.update(cx, |app, cx| {
+        let r = app
+            .store
+            .set_block_text(&page, &block, "ab日", None, Some(2));
+        assert!(app.report(r).is_some());
+        app.changed(vec![page.clone()], false, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "ab日");
+    assert!(
+        !editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the menu was about text that is no longer there"
+    );
+    // Enter is the block's again: it splits rather than taking a suggestion.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows_str(&rows(&app, &page, cx)), [("ab日", 0), ("", 0)]);
+}
+
+/// §13.5: the buffer belongs to the input method while it composes, so a click must not
+/// open a menu over provisional glyphs (machine issue 3).
+#[gpui::test]
+fn ac_13_5_mouse_down_does_not_open_a_menu_mid_composition(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (app, ws, cx) = setup(cx);
+    today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Ana Lovelace").unwrap();
+    });
+    let editor = ws.update(cx, |w, _| w.editor());
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "[[An", None, window, cx)
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("block-editor").expect("editor bounds");
+    cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        !editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the menu belongs to committed text, not to the input method's glyphs"
+    );
+}
+
+/// FR-2.17: a dismissed trigger stays closed for the query it was dismissed at, not for
+/// whatever trigger later lands on the same byte offset (machine issue 4). Select-all and
+/// paste is one edit, so nothing in between clears the suppression.
+#[gpui::test]
+fn fr_2_17_a_dismissed_trigger_follows_its_query(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("random").unwrap();
+    });
+    cx.simulate_input("#ran");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-a");
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("#rod".into()));
+    cx.simulate_keystrokes("cmd-v");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().is_open()),
+        "a different query at the same offset is a fresh menu"
+    );
+}
+
+/// FR-2.17, §5.5: a commit normalizes the block text to NFC, which shortens the buffer
+/// under an open menu (`cafe` + U+0301 → `café`). The menu's frozen range has to follow
+/// the rewrite, or accepting a block ref replaces the wrong bytes and leaves `((uid)))`.
+#[gpui::test]
+fn fr_2_17_a_commit_that_normalizes_the_text_moves_the_menu_with_it(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    // A block the `((` menu can offer for "notes".
+    let target = app.update(cx, |app, _| {
+        let p = app.store.create_page("Coffee").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "coffee notes", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        b
+    });
+    cx.simulate_input("cafe");
+    let editor = ws.update(cx, |w, _| w.editor());
+    // The input method commits a combining acute: the buffer holds the decomposed form
+    // until the block is committed.
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(None, "\u{301}", window, cx)
+    });
+    cx.simulate_input(" ((notes");
+    cx.run_until_parked();
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the (( menu is open"
+    );
+    // The idle commit (300 ms) normalizes the text to NFC: one byte shorter, with the
+    // caret and the trigger one byte earlier.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, format!("café (({target}))"));
+}
+
+/// FR-2.17, §10.3.1: the idle commit also expands a relative date elsewhere in the block
+/// (`[[tomorrow]]` → the day's title), shifting the open menu's offsets the same way NFC
+/// normalization does. The menu has to be re-read before Enter takes a suggestion.
+#[gpui::test]
+fn fr_2_17_an_expanded_relative_date_moves_the_open_menu_with_it(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    let target = app.update(cx, |app, _| {
+        let p = app.store.create_page("Coffee").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "coffee notes", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        b
+    });
+    cx.simulate_input("see [[tomorrow]] and ((notes");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the (( menu is open"
+    );
+    // The idle commit expands the link before the trigger, so the whole block grows.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        format!("see [[November 3rd, 2026]] and (({target}))")
     );
 }
