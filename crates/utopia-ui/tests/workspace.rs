@@ -3847,6 +3847,75 @@ fn graph_panel_refreshes_after_new_links(cx: &mut TestAppContext) {
     assert_eq!(panel.update(cx, |g, _| g.edge_count()), 3);
 }
 
+/// GR-5: a graph panel hidden with the right sidebar is not drawn, so reloading its layout
+/// on every main-page change and every index update is work for nobody. It catches up when
+/// the sidebar comes back (workspace-main-pane-content.md, issue 3).
+#[gpui::test]
+fn hidden_graph_panel_does_no_work(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    cx.simulate_input("[[Alpha]] meets [[Beta]]");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1280.), px(820.)));
+    cx.simulate_keystrokes("cmd-shift-g");
+    cx.run_until_parked();
+    let local = cx
+        .debug_bounds("graph-local")
+        .expect("Around this page filter")
+        .center();
+    cx.simulate_click(local, Modifiers::default());
+    cx.run_until_parked();
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel open");
+    let today = ws.update(cx, |w, cx| w.main_page(cx)).expect("a page");
+    assert_eq!(panel.update(cx, |g, _| g.origin()), Some(today.clone()));
+    assert_eq!(panel.update(cx, |g, _| g.node_count()), 3);
+
+    // Hide the sidebar: the panel stays (reopening brings it back) but is not rendered.
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    let block = app.update(cx, |app, _| {
+        app.store
+            .page_state(&today)
+            .unwrap()
+            .live_roots()
+            .first()
+            .cloned()
+            .unwrap()
+    });
+    app.update(cx, |app, cx| {
+        let r = app
+            .store
+            .set_block_text(&today, &block, "[[Alpha]] [[Beta]] [[Gamma]]", None, None);
+        app.report(r);
+        let r = app.store.commit_block(&today, &block);
+        app.report(r);
+        app.changed(vec![today.clone()], true, cx);
+    });
+    let alpha = app.update(cx, |a, _| a.store.find_page("Alpha").unwrap().unwrap());
+    ws.update_in(cx, |w, window, cx| {
+        w.open(alpha.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        panel.update(cx, |g, _| g.node_count()),
+        3,
+        "a panel nobody sees did not reload"
+    );
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(today),
+        "nor did it follow the page behind it"
+    );
+
+    // Reopening the sidebar refreshes it once, from the index and the page now open.
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("right-sidebar").is_some(), "sidebar reopened");
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel stays");
+    assert_eq!(panel.update(cx, |g, _| g.node_count()), 4);
+    assert_eq!(panel.update(cx, |g, _| g.origin()), Some(alpha));
+}
+
 /// AGENTS.md focus invariant: removing the focused graph must hand focus back, or every
 /// workspace shortcut dies with it.
 #[gpui::test]

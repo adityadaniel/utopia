@@ -356,9 +356,14 @@ impl Workspace {
             _tasks: Vec::new(),
         };
         // GR-5: the sidebar graph follows the page open beside it, so "around this page"
-        // keeps meaning the page you are reading or editing.
+        // keeps meaning the page you are reading or editing. A panel hidden with the sidebar
+        // is not drawn, so it does no work; `show_right` brings it up to date when the
+        // sidebar returns (workspace-main-pane-content.md, issue 3).
         let main = me.main.clone();
         me.subs.push(cx.observe(&main, |this, main, cx| {
+            if !this.right_open {
+                return;
+            }
             let page = main.read(cx).page();
             if let Some(panel) = this.graph_panel.clone() {
                 panel.update(cx, |graph, cx| graph.set_origin(page, cx));
@@ -369,6 +374,9 @@ impl Workspace {
         let app = me.app.clone();
         me.subs
             .push(cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
+                if !this.right_open {
+                    return;
+                }
                 if let Some(panel) = this.graph_panel.clone() {
                     panel.update(cx, |graph, cx| graph.refresh(cx));
                 }
@@ -854,7 +862,7 @@ impl Workspace {
                 }
             };
             self.panes.insert(0, pane);
-            self.right_open = true;
+            self.show_right(cx);
         } else {
             // A page opened in the main column replaces whatever it was showing: a PDF is
             // closed and a full-screen graph gives way, or the page opens behind it
@@ -1039,7 +1047,7 @@ impl Workspace {
         let view = cx.new(|cx| GraphView::new(self.app.clone(), Some(origin), true, cx));
         self.subs
             .push(cx.subscribe_in(&view, window, Self::on_graph_event));
-        self.right_open = true;
+        self.show_right(cx);
         self.graph_panel = Some(view);
         window.focus(&self.focus);
         cx.notify();
@@ -1402,8 +1410,27 @@ impl Workspace {
         if self.right_open {
             self.hide_right(window, cx);
         } else {
-            self.right_open = true;
+            self.show_right(cx);
             cx.notify();
+        }
+    }
+
+    /// Show the sidebar (RS-4). A graph panel kept from last time did no work while the
+    /// sidebar was hidden (it was not drawn), so it is brought up to date here instead:
+    /// the origin may have moved to another page and the index may have changed under it
+    /// (workspace-main-pane-content.md, issue 3). `set_origin` reloads on a new origin and
+    /// `refresh` re-reads the index, keeping the pan and zoom the user set.
+    fn show_right(&mut self, cx: &mut Context<Self>) {
+        if self.right_open {
+            return;
+        }
+        self.right_open = true;
+        if let Some(panel) = self.graph_panel.clone() {
+            let origin = self.main.read(cx).page();
+            panel.update(cx, |graph, cx| {
+                graph.set_origin(origin, cx);
+                graph.refresh(cx);
+            });
         }
     }
 
@@ -1425,7 +1452,8 @@ impl Workspace {
     /// Close the sidebar: end any edit a stacked card hosts (the same invariant as folding
     /// one card, RS-5) and hand focus back from the graph panel, whose drawing stops with
     /// the sidebar (GR-5). Either way a focused element that is no longer rendered would
-    /// swallow every shortcut.
+    /// swallow every shortcut. The panel itself is kept — reopening the sidebar brings it
+    /// back — but it does no work while it is hidden (`show_right`).
     fn hide_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let hosts: Vec<EntityId> = self.panes.iter().map(|p| p.view.entity_id()).collect();
         for host in hosts {
@@ -1514,7 +1542,7 @@ impl Workspace {
         if self.right_open && self.inspector_open {
             self.inspector_open = false;
         } else {
-            self.right_open = true;
+            self.show_right(cx);
             self.inspector_open = true;
         }
         cx.notify();
