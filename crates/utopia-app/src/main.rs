@@ -196,6 +196,16 @@ struct Ready {
     _inbox: gpui::Task<()>,
 }
 
+/// The open graph, held at app level rather than inside the window so the quit path can
+/// still flush its store after the window has closed (issue 2).
+struct Running {
+    /// `None` once the main window has gone: there is no editor left to finish.
+    root: Option<gpui::WeakEntity<Root>>,
+    app: Entity<AppState>,
+}
+
+impl Global for Running {}
+
 /// How this process runs: a person at the window, a `UTOPIA_SHOT_SCRIPT`, or the startup
 /// probe (§15.1). Read from the environment once and carried by [`Root`], so the script,
 /// the hotkey and the probe all decide from one value (issue 1).
@@ -284,6 +294,13 @@ impl Root {
         let hooks = Box::new(ScriptHooks(cx.entity().downgrade()));
         cx.spawn(async move |_, cx| shot::run(steps, handle, hooks, cx).await)
             .detach();
+    }
+
+    /// Commit the block being edited before the store is flushed on quit (rule 5, AC-1.1).
+    fn end_edit(&mut self, cx: &mut Context<Self>) {
+        if let RootState::Ready(ready) = &self.state {
+            ready.ws.update(cx, |ws, cx| ws.finish_edit(cx));
+        }
     }
 
     fn onboarding(window: &mut Window, cx: &mut Context<Root>) -> RootState {
@@ -540,6 +557,12 @@ impl Root {
                         break;
                     }
                 });
+                // The quit path flushes through this handle, which therefore keeps the
+                // store alive after the window is gone (issue 2).
+                cx.set_global(Running {
+                    root: Some(cx.weak_entity()),
+                    app: app.clone(),
+                });
                 RootState::Ready(Ready {
                     ws,
                     _hotkey: hotkey,
@@ -749,6 +772,27 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
+/// The one way out of the app (issue 2). Cmd+Q in any window, the Quit menu item and the
+/// last window closing all end here: finish the block being edited, make every pending edit
+/// durable, then quit. `AppState::flush_for_quit` reports a writer failure instead of
+/// swallowing it, so a quit can no longer pretend a commit reached disk (rule 2, AC-1.1).
+///
+/// `Running` keeps the store reachable after its window has closed, which is the case the
+/// old `on_window_closed → cx.quit()` path skipped (issue 2).
+fn quit_app(cx: &mut App) {
+    let running = cx
+        .try_global::<Running>()
+        .map(|running| (running.root.clone(), running.app.clone()));
+    if let Some((root, app)) = running {
+        // Marked text lives only in the field until `end` commits it (rule 5).
+        if let Some(root) = root.and_then(|root| root.upgrade()) {
+            root.update(cx, |root, cx| root.end_edit(cx));
+        }
+        app.update(cx, |app, _| app.flush_for_quit());
+    }
+    cx.quit();
+}
+
 fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
     // Decided once, before a window exists: a malformed `UTOPIA_SHOT_SCRIPT` is reported
     // and the run exits, so a scripted run can never look like a normal launch (issue 1).
@@ -764,7 +808,17 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
         utopia_ui::appearance::install(cx, &config);
         install_keymap(cx, keymap.as_deref());
         cx.set_menus(menus());
-        cx.on_action(|_: &Quit, cx| cx.quit());
+        cx.on_action(|_: &Quit, cx| quit_app(cx));
+        // The backstop for a quit the app is never asked about (a logout, the system
+        // terminating it): the store is still reachable through `Running` (issue 2). On
+        // the normal path it finds nothing left to flush.
+        cx.on_app_quit(|cx| {
+            if let Some(app) = cx.try_global::<Running>().map(|running| running.app.clone()) {
+                app.update(cx, |app, _| app.flush_for_quit());
+            }
+            async {}
+        })
+        .detach();
         cx.on_action(|_: &OpenSettings, cx| open_settings(SettingsTab::Keybindings, cx));
         cx.on_action(|_: &ShowShortcuts, cx| open_settings(SettingsTab::Shortcuts, cx));
         cx.on_action(|_: &UtopiaHelp, cx| open_settings(SettingsTab::Help, cx));
@@ -789,8 +843,9 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
             return;
         }
         cx.on_window_closed(|cx| {
+            // AC-1.1: the last window closing is a quit path like any other (issue 2).
             if cx.windows().is_empty() {
-                cx.quit();
+                quit_app(cx);
             }
         })
         .detach();
@@ -875,6 +930,7 @@ fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
 
     /// Issue 1: a script that does not parse used to be logged and dropped while the
     /// hotkey registration was skipped anyway — a normal window that no step drove and
@@ -896,5 +952,55 @@ mod tests {
         assert!(matches!(RunMode::from_parts(None, true), Ok(RunMode::Probe)));
         let scripted = RunMode::from_parts(Some("wait 10"), true).unwrap();
         assert_eq!(scripted, RunMode::Scripted(shot::parse("wait 10").unwrap()));
+    }
+
+    /// A graph with one block, opened and committed in strict mode.
+    fn graph(path: &Path) -> (Store, utopia_core::PageId, utopia_core::BlockId) {
+        let mut store = Store::open(path).unwrap();
+        let (page, block) = store.open_daily(store.today()).unwrap();
+        store
+            .set_block_text(&page, &block, "first", None, None)
+            .unwrap();
+        store.sync_index().unwrap();
+        (store, page, block)
+    }
+
+    /// AC-1.1: the last keystroke survives a quit. The main window is already gone here,
+    /// which is the path that used to quit without `sync_index` (issue 2); the store is
+    /// still reachable through `Running`, so the flush happens where the quit does.
+    #[gpui::test]
+    fn ac_1_1_the_last_keystroke_survives_a_quit(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.utopia");
+        let (store, page, block) = graph(&path);
+        // `AppState::new` switches the store to debounced mode: the edit is in memory only.
+        let app = cx.new(|_| AppState::new(store));
+        app.update(cx, |app, _| {
+            app.store
+                .set_block_text(&page, &block, "hello", None, None)
+                .unwrap();
+            assert!(app.store.has_pending(), "the edit has not reached disk");
+        });
+        cx.update(|cx| {
+            cx.set_global(Running {
+                root: None,
+                app: app.clone(),
+            })
+        });
+        cx.update(quit_app);
+        assert!(
+            !app.read_with(cx, |app, _| app.store.has_pending()),
+            "the quit flushed the writer"
+        );
+        // The relaunch reads the same file.
+        let mut reopened = Store::open(&path).unwrap();
+        let text = reopened
+            .page_state(&page)
+            .unwrap()
+            .block(&block)
+            .unwrap()
+            .text
+            .clone();
+        assert_eq!(text, "hello");
     }
 }

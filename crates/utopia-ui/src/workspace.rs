@@ -277,7 +277,6 @@ impl Workspace {
             ),
             cx.observe(&app, |_, _, cx| cx.notify()),
         ];
-        app.update(cx, |a, cx| a.install_quit_hook(cx));
         let flag = |key: &str, default: bool| {
             app.read(cx)
                 .store
@@ -1522,13 +1521,11 @@ impl Workspace {
         }
     }
 
-    fn quit(&mut self, _: &Quit, _: &mut Window, cx: &mut Context<Self>) {
+    /// Commit the block being edited, marked (IME) text included, without moving focus.
+    /// The app's single quit path calls this before it flushes the store (AC-1.1); quitting
+    /// itself is the app's job (`main.rs`), so no window owns a half of it.
+    pub fn finish_edit(&mut self, cx: &mut Context<Self>) {
         self.editor.update(cx, |e, cx| e.end(cx));
-        self.app.update(cx, |app, _| {
-            let r = app.store.sync_index();
-            app.report(r);
-        });
-        cx.quit();
     }
 
     fn pick_date(
@@ -3016,7 +3013,6 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_refs))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
-            .on_action(cx.listener(Self::quit))
             .relative()
             .size_full()
             .flex()

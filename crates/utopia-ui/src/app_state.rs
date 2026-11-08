@@ -8,7 +8,7 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use gpui::{Context, EventEmitter, Subscription, Task};
+use gpui::{Context, EventEmitter, Task};
 use utopia_core::PageId;
 use utopia_store::Store;
 
@@ -60,7 +60,6 @@ pub struct AppState {
     /// When a failed writer may be repaired again (backoff, review P3).
     repair_at: Option<Instant>,
     repair_task: Option<Task<()>>,
-    _quit: Option<Subscription>,
 }
 
 impl EventEmitter<Changed> for AppState {}
@@ -88,19 +87,18 @@ impl AppState {
             wait_task: None,
             repair_at: None,
             repair_task: None,
-            _quit: None,
         }
     }
 
-    /// Make every pending edit durable before the app exits (no typing is lost).
-    pub fn install_quit_hook(&mut self, cx: &mut Context<Self>) {
-        self._quit = Some(cx.on_app_quit(|this, _| {
-            let r = this.store.sync_index();
-            this.report(r);
-            let r = this.store.compact();
-            this.report(r);
-            async {}
-        }));
+    /// Make every pending edit durable before the process exits, and say so when the writer
+    /// failed: a quit that drops the last keystroke or hides a failed commit is the bug this
+    /// exists to prevent (rule 2, AC-1.1). The app's one quit path calls this; the
+    /// `on_app_quit` backstop calls it again and finds nothing left to flush.
+    pub fn flush_for_quit(&mut self) {
+        let r = self.store.sync_index();
+        self.report(r);
+        let r = self.store.compact();
+        self.report(r);
     }
 
     pub fn changed(&mut self, pages: Vec<PageId>, structural: bool, cx: &mut Context<Self>) {
@@ -383,6 +381,23 @@ mod tests {
                 app.refs_version, 0,
                 "a repair that also failed did not move the index"
             );
+        });
+    }
+
+    /// Issue 2: a quit whose flush fails reports the writer error. The quit path is the
+    /// last place the message is visible, and swallowing it there would silently drop the
+    /// edit this flush exists to keep (rule 2).
+    #[gpui::test]
+    fn a_failed_quit_flush_is_reported(cx: &mut TestAppContext) {
+        let (store, page, block) = store();
+        store.conn().execute_batch(FAIL_COMMIT).unwrap();
+        let app = cx.new(|_| AppState::new(store));
+        app.update(cx, |app, _| {
+            app.store
+                .set_block_text(&page, &block, "hello", None, None)
+                .unwrap();
+            app.flush_for_quit();
+            assert!(app.last_error.is_some(), "the writer failure is reported");
         });
     }
 
