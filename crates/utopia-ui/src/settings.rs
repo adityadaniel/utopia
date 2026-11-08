@@ -172,7 +172,11 @@ enum Captured {
 
 impl From<Keystroke> for Captured {
     fn from(ks: Keystroke) -> Self {
-        if ks.key == "escape" && !has_modifier(&ks) {
+        // Escape cancels whatever modifiers are held: a modified Escape reads as "back out"
+        // to the user, so binding it silently installed a shortcut nobody meant, on a chord
+        // that would also look like the cancel key in the row (`settings-key-capture.md`,
+        // issue 3).
+        if ks.key == "escape" {
             Captured::Cancel
         } else {
             Captured::Chord(ks)
@@ -638,11 +642,6 @@ fn is_modifier_only(ks: &Keystroke) -> bool {
         ks.key.as_str(),
         "" | "cmd" | "ctrl" | "alt" | "shift" | "function" | "fn" | "capslock"
     )
-}
-
-fn has_modifier(ks: &Keystroke) -> bool {
-    let m = &ks.modifiers;
-    m.control || m.alt || m.shift || m.platform || m.function
 }
 
 impl Render for SettingsView {

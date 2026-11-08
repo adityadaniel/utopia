@@ -83,6 +83,38 @@ fn escape_cancels_capture(cx: &mut TestAppContext) {
     assert!(keymap_json(dir.path()).is_none(), "nothing to save");
 }
 
+/// `settings-key-capture.md`, issue 3: Escape means "back out" whatever modifiers are held.
+/// A modified Escape used to be treated as a chord, so the action was quietly bound to a
+/// combination that reads to the user as a cancel — and nothing in the app answers to it.
+#[gpui::test]
+fn escape_cancels_capture_with_modifiers_too(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+
+    let today = doc("GoToday").unwrap();
+    for chord in ["escape", "shift-escape", "cmd-escape", "alt-shift-escape"] {
+        view.update_in(cx, |v, window, cx| v.start_capture(today, window, cx));
+        cx.simulate_keystrokes(chord);
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            assert!(v.capturing().is_none(), "{chord} ends the capture");
+            assert!(
+                v.overrides().is_empty(),
+                "{chord} must not become a binding"
+            );
+            assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
+            assert_eq!(v.status(), Some("Left unchanged."), "{chord} says so");
+        });
+    }
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
 /// The keys being recorded must not also fire their own action. Rebinding onto Cmd+Q would
 /// otherwise quit the app in the middle of the edit.
 #[gpui::test]
