@@ -27,8 +27,7 @@ use gpui::{
 use std::path::PathBuf;
 
 use crate::actions::{
-    by_category, canonical_keys, doc, pretty_keys, reinstall, ActionDoc, Category, Overrides,
-    CATALOG,
+    by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
 use crate::appearance::{self, AttributeBlocks, Density, UiFont};
 use crate::help::{shot_image, TOPICS};
@@ -140,6 +139,11 @@ pub struct SettingsView {
     /// Only accept captured keys that arrive in this window.
     window: Option<AnyWindowHandle>,
     status: Option<SharedString>,
+    /// The last write of `keymap.json` failed. The keys are live for this session but disk
+    /// still holds the old ones, so the next launch would silently undo them: a state of its
+    /// own, drawn next to the status line, not a status message the next action overwrites
+    /// (keymap machine doc, issue 2).
+    save_error: Option<SharedString>,
     topic: usize,
     /// The filter at the top of the key list (ST-4), by name, description or key.
     search: Entity<LineInput>,
@@ -211,6 +215,7 @@ impl SettingsView {
             // A malformed keymap.json or settings.json is worth saying out loud: what is in
             // force is not what the user wrote (rule 11: degrade, never panic).
             status: warnings.first().map(|w| SharedString::from(w.clone())),
+            save_error: None,
             topic: 0,
             search,
             query: String::new(),
@@ -289,12 +294,10 @@ impl SettingsView {
 
     fn rebind(&mut self, d: &'static ActionDoc, keys: String, cx: &mut Context<Self>) {
         let pretty = pretty_keys(&keys);
-        if canonical_keys(&keys) == canonical_keys(&crate::actions::platform_keys(d.keys)) {
-            // Back to the default: drop the override instead of storing a copy of it.
-            self.overrides.reset(d.action);
-        } else {
-            self.overrides.set(d.action, &keys);
-        }
+        // `set` drops an entry that only repeats the catalog default, so rebinding to the
+        // chord an action already has puts it back to default rather than storing a copy
+        // (keymap machine doc, issue 4).
+        self.overrides.set(d.action, &keys);
         self.apply(cx);
         let taken: Vec<&str> = self
             .overrides
@@ -337,7 +340,7 @@ impl SettingsView {
     }
 
     pub fn reset_all(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.0.is_empty() {
+        if self.overrides.is_empty() {
             self.status = Some("Nothing to reset: these are the defaults.".into());
             cx.notify();
             return;
@@ -348,13 +351,17 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Put the bindings live and write them down. A failed write is reported, not fatal:
-    /// the bindings still work for this session.
+    /// Put the bindings live and write them down. The two outcomes are kept apart: a failed
+    /// write leaves the keys working but the file behind, so it is remembered as such rather
+    /// than reported as a status the next rebind overwrites.
     fn apply(&mut self, cx: &mut Context<Self>) {
         reinstall(cx, &self.overrides);
-        if let Err(e) = self.overrides.save(&self.config_dir) {
-            self.status = Some(format!("Could not save keymap.json: {e}").into());
-        }
+        self.save_error = match self.overrides.save(&self.config_dir) {
+            Ok(()) => None,
+            Err(e) => Some(
+                format!("Could not save keymap.json: {e}. These keys work until you quit.").into(),
+            ),
+        };
     }
 
     pub fn overrides(&self) -> &Overrides {
@@ -368,6 +375,11 @@ impl SettingsView {
 
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref().map(|v| &**v)
+    }
+
+    /// Why the last write failed, while disk still disagrees with the keys in force.
+    pub fn unsaved(&self) -> Option<&str> {
+        self.save_error.as_deref().map(|v| &**v)
     }
 
     pub fn tab(&self) -> Tab {
@@ -722,6 +734,18 @@ impl Render for SettingsView {
                     .text_color(th.muted)
                     .child(s)
             }))
+            .children(self.save_error.clone().map(|e| {
+                div()
+                    .debug_selector(|| "settings-unsaved".into())
+                    .px_6()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(th.line)
+                    .bg(th.banner_bg)
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(e)
+            }))
     }
 }
 
@@ -952,7 +976,7 @@ impl SettingsView {
         let th = theme(cx).clone();
         let density = appearance::density(cx);
         let conflicts = self.overrides.conflicts();
-        let changed = self.overrides.0.len();
+        let changed = self.overrides.len();
         let groups = self.visible_groups();
         let shown: usize = groups.iter().map(|(_, rows)| rows.len()).sum();
 
@@ -1028,6 +1052,12 @@ impl SettingsView {
         let capturing = self.capturing.map(|c| c.action) == Some(d.action);
         let keys = self.overrides.keys_for(d);
         let changed = self.overrides.is_changed(d.action);
+        // An entry gpui cannot bind is shown as the user wrote it, with the reason, instead of
+        // pretending it is the binding (keymap machine doc, issue 1).
+        let invalid = match self.overrides.entry(d.action) {
+            Some(Override::Invalid { raw, why }) => Some((raw.clone(), why.clone())),
+            _ => None,
+        };
         let flashed = self.flash == Some(d.action);
         // ST-3: whoever else answers to these keys in the same place, said under the row
         // itself rather than in a banner at the top of the window.
@@ -1053,14 +1083,26 @@ impl SettingsView {
             .py_1()
             .rounded_md()
             .border_1()
-            .border_color(if capturing { th.accent } else { th.line })
+            .border_color(if capturing || invalid.is_some() {
+                th.accent
+            } else {
+                th.line
+            })
             .bg(if capturing { th.banner_bg } else { th.chip_bg })
-            .text_color(if capturing { th.accent } else { th.text })
+            .text_color(if invalid.is_some() {
+                th.warning
+            } else if capturing {
+                th.accent
+            } else {
+                th.text
+            })
             .text_size(px(crate::theme::CAPTION_SIZE))
             .cursor_pointer()
             .hover(|x| x.border_color(th.accent))
             .child(if capturing {
                 "Press keys…".to_string()
+            } else if let Some((raw, _)) = &invalid {
+                raw.clone()
             } else {
                 pretty_keys(&keys)
             })
@@ -1131,6 +1173,20 @@ impl SettingsView {
                     ),
             );
 
+        if let Some((_, why)) = &invalid {
+            row = row.child(
+                div()
+                    .debug_selector(move || format!("settings-invalid-{}", d.action))
+                    .flex_wrap()
+                    .pt_1()
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(format!(
+                        "Not a shortcut: {why}. {} is in force.",
+                        pretty_keys(&keys)
+                    )),
+            );
+        }
         if !others.is_empty() {
             let mut line = div()
                 .debug_selector(move || format!("settings-clash-{}", d.action))

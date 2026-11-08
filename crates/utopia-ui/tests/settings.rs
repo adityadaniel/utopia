@@ -40,7 +40,7 @@ fn rebinding_is_applied_and_saved(cx: &mut TestAppContext) {
             "gpui canonical order"
         );
         // Untouched actions are not written down, so later default changes still reach you.
-        assert_eq!(v.overrides().0.len(), 1);
+        assert_eq!(v.overrides().len(), 1);
     });
     let saved = keymap_json(dir.path()).expect("keymap.json written");
     assert!(
@@ -77,7 +77,7 @@ fn escape_cancels_capture(cx: &mut TestAppContext) {
 
     view.update(cx, |v, _| {
         assert!(v.capturing().is_none());
-        assert!(v.overrides().0.is_empty(), "nothing was rebound");
+        assert!(v.overrides().is_empty(), "nothing was rebound");
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
     assert!(keymap_json(dir.path()).is_none(), "nothing to save");
@@ -163,7 +163,7 @@ fn reset_restores_the_default(cx: &mut TestAppContext) {
 
     view.update(cx, |v, cx| v.reset_one(today, cx));
     view.update(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
     assert_eq!(keymap_json(dir.path()).unwrap().trim(), "[]");
@@ -495,7 +495,7 @@ fn the_key_chip_records_and_resets(cx: &mut TestAppContext) {
     cx.simulate_click(reset.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
 }
@@ -719,7 +719,7 @@ fn a_broken_keymap_is_reported_not_fatal(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
     cx.run_until_parked();
     view.update(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert!(
             v.status().is_some(),
             "the user is told the file was unreadable"
@@ -776,14 +776,16 @@ fn rebinding_replaces_the_default_keys(cx: &mut TestAppContext) {
 
 /// Review fix: an override whose keys cannot be used (empty, or not a keystroke) is
 /// ignored with a warning, and the action keeps its default rather than ending up with
-/// no binding at all (rule 11: degrade, don't break).
+/// no binding at all (rule 11: degrade, don't break). Since the keymap overrides fix, the
+/// warning names the action: an entry that cannot be bound is a state the editor shows.
 #[gpui::test]
 fn an_unusable_override_keeps_the_default(cx: &mut TestAppContext) {
     use utopia_ui::actions::{install, GoToday};
     for bad in ["", "   ", "nonsense-key"] {
         let (o, warnings) =
             Overrides::from_json(&format!(r#"[{{"key":"{bad}","action":"GoToday"}}]"#));
-        assert!(warnings.is_empty(), "a known action is read as before");
+        assert_eq!(warnings.len(), 1, "the unusable entry is reported: {bad:?}");
+        assert!(warnings[0].contains("GoToday"), "{}", warnings[0]);
         cx.update(|cx| {
             cx.clear_key_bindings();
             install(cx, &o);
@@ -803,6 +805,118 @@ fn an_unusable_override_keeps_the_default(cx: &mut TestAppContext) {
         });
         assert_eq!(keys, [platform_keys("cmd-shift-t")], "override {bad:?}");
     }
+}
+
+/// Keymap machine doc, issue 1: a `keymap.json` entry whose keys gpui cannot parse used to
+/// be shown as the row's binding while the app kept the default. The row must show what the
+/// user wrote *and* say that the default is what works (§9.1, ST-3, rule 11).
+#[gpui::test]
+fn an_unusable_entry_is_marked_and_the_default_is_in_force(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("keymap.json"),
+        r#"[{"key":"nonsense-key","action":"GoToday"}]"#,
+    )
+    .unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.overrides().keys_for(today),
+            platform_keys("cmd-shift-t"),
+            "the default is what gpui uses, so it is what the row shows as in force"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-invalid-GoToday").is_some(),
+        "the row says the written keys cannot be used"
+    );
+}
+
+/// Keymap machine doc, issue 2: a write that fails was overwritten by the rebind's own status
+/// line, so the next launch silently went back to the old file. The failure is now a state of
+/// its own and stays on screen next to the message (§9.1).
+#[gpui::test]
+fn a_failed_save_is_reported_after_the_rebind(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should go: `Overrides::save` fails every time.
+    std::fs::create_dir(dir.path().join("keymap.json")).unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.update_in(cx, |v, window, cx| v.start_capture(today, window, cx));
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.overrides().keys_for(today),
+            "alt-cmd-t",
+            "the keys are live for this session"
+        );
+        assert!(
+            v.status().unwrap_or_default().contains("Today is now"),
+            "the rebind is still reported"
+        );
+        assert!(
+            v.unsaved().is_some_and(|e| e.contains("Could not save")),
+            "the failed write is a state of its own"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-unsaved").is_some(),
+        "and so is the fact that it is not on disk"
+    );
+}
+
+/// Keymap machine doc, issue 3: rebinding Bold (editor only) onto Cmd+C, which Copy answers
+/// to in the editor as well, is a clash with the action it fights (ST-3, §9.1).
+#[gpui::test]
+fn a_clash_across_contexts_is_reported(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let bold = doc("Bold").unwrap();
+    view.update_in(cx, |v, window, cx| v.start_capture(bold, window, cx));
+    cx.simulate_keystrokes("cmd-c");
+    cx.run_until_parked();
+
+    view.read_with(cx, |v, _| {
+        let status = v.status().unwrap_or_default();
+        assert!(
+            status.contains("Copy"),
+            "Copy is dead in the editor now: {status}"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-clash-Bold").is_some(),
+        "the row carries the clash line"
+    );
 }
 
 mod appearance {

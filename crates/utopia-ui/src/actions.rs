@@ -9,7 +9,7 @@
 
 use gpui::{actions, App, KeyBinding};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 actions!(
@@ -797,14 +797,24 @@ macro_rules! binding_for {
     };
 }
 
+/// Why `keys` cannot become a binding, if they cannot: the one validation [`binding`] applies,
+/// shared with [`Override::parse`] so the editor can say what is wrong instead of only that
+/// something is (rule 11).
+fn keys_problem(keys: &str) -> Option<String> {
+    let chords: Vec<&str> = keys.split_whitespace().collect();
+    if chords.is_empty() {
+        return Some("it lists no keys".to_string());
+    }
+    chords
+        .iter()
+        .find(|k| gpui::Keystroke::parse(k).is_err())
+        .map(|k| format!("“{k}” is not a keystroke"))
+}
+
 /// Build a binding from an action name; `None` for unknown names or invalid keys.
 pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBinding> {
     // Validate keystrokes first: KeyBinding::new panics on invalid input.
-    if keys.split_whitespace().count() == 0
-        || keys
-            .split_whitespace()
-            .any(|k| gpui::Keystroke::parse(k).is_err())
-    {
+    if keys_problem(keys).is_some() {
         return None;
     }
     let keys = keys.to_string();
@@ -909,10 +919,69 @@ pub fn read_entries(json: &str) -> (Vec<KeymapEntry>, Vec<String>) {
     }
 }
 
-/// User keybinding overrides: action name → keystrokes. Only actions the user actually
-/// changed are stored, so a default that moves in a later release still moves for them.
+/// What an override says about one action, read once so every reader asks the same value:
+/// [`install`] from it, the Settings editor and the cheat sheet show it, [`Overrides::conflicts`]
+/// measures chords against it, Quick Jump reads the result of it, and [`Overrides::to_json`]
+/// writes it back. The overrides live in three places — the file, the live keymap and the
+/// editor — and letting each interpret the file for itself is what made them disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Override {
+    /// Keys gpui can bind.
+    Valid(String),
+    /// Keys the user wrote that gpui cannot bind. Carried verbatim so the editor can show
+    /// what they typed and say why, while the default stays in force (rule 11).
+    Invalid { raw: String, why: String },
+    /// The catalog default, written down. Not an override: [`Overrides`] drops it when it
+    /// reads or sets an entry, so a hand-edited file cannot make a row look changed while it
+    /// binds exactly what the app already binds (keymap machine doc, issue 4).
+    SameAsDefault,
+}
+
+impl Override {
+    /// Read one entry of `keymap.json`. The verdict is computed here, once, so no reader has
+    /// to decide for itself whether the keys are usable or different from the default.
+    fn parse(action: &str, raw: &str) -> Self {
+        let default = doc(action)
+            .map(|d| platform_keys(d.keys))
+            .unwrap_or_default();
+        if canonical_keys(raw) == canonical_keys(&default) {
+            return Override::SameAsDefault;
+        }
+        match keys_problem(raw) {
+            Some(why) => Override::Invalid {
+                raw: raw.to_string(),
+                why,
+            },
+            None => Override::Valid(raw.to_string()),
+        }
+    }
+
+    /// The keys this override binds, if it binds any: the default is in force otherwise.
+    pub fn keys(&self) -> Option<&str> {
+        match self {
+            Override::Valid(keys) => Some(keys),
+            Override::Invalid { .. } | Override::SameAsDefault => None,
+        }
+    }
+
+    /// What to write back to `keymap.json`: the unusable text is not thrown away, so saving
+    /// some other binding does not silently destroy what the user wrote. Nothing is written
+    /// for an entry that only repeats the default.
+    fn written(&self) -> Option<&str> {
+        match self {
+            Override::Valid(keys) => Some(keys),
+            Override::Invalid { raw, .. } => Some(raw),
+            Override::SameAsDefault => None,
+        }
+    }
+}
+
+/// User keybinding overrides: action name → what the user asked for. Only actions the user
+/// actually changed are stored, so a default that moves in a later release still moves for
+/// them. The map is private so that nothing can put an entry in it that the readers would
+/// have to second-guess.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Overrides(pub BTreeMap<String, String>);
+pub struct Overrides(BTreeMap<String, Override>);
 
 impl Overrides {
     /// Read overrides out of a `keymap.json`. Entries for actions that are not in the
@@ -921,10 +990,24 @@ impl Overrides {
         let (entries, mut warnings) = read_entries(json);
         let mut map = BTreeMap::new();
         for e in entries {
-            if doc(&e.action).is_some() {
-                map.insert(e.action, e.key);
-            } else {
-                warnings.push(format!("keymap.json: unknown action {}", e.action));
+            match doc(&e.action) {
+                Some(_) => {
+                    let o = Override::parse(&e.action, &e.key);
+                    if let Override::Invalid { why, .. } = &o {
+                        warnings.push(format!(
+                            "keymap.json: {} keeps its default: {why}",
+                            e.action
+                        ));
+                    }
+                    // A later entry wins, as it did before entries were validated: one that
+                    // restores the default removes an earlier override instead of being
+                    // skipped next to it — the same rule as [`Overrides::set`].
+                    match o {
+                        Override::SameAsDefault => map.remove(&e.action),
+                        o => map.insert(e.action, o),
+                    };
+                }
+                None => warnings.push(format!("keymap.json: unknown action {}", e.action)),
             }
         }
         (Self(map), warnings)
@@ -943,10 +1026,10 @@ impl Overrides {
         let entries: Vec<KeymapEntry> = self
             .0
             .iter()
-            .filter_map(|(action, key)| {
+            .filter_map(|(action, o)| {
                 let d = doc(action)?;
                 Some(KeymapEntry {
-                    key: key.clone(),
+                    key: o.written()?.to_string(),
                     action: action.clone(),
                     context: d.context.map(str::to_string),
                 })
@@ -960,21 +1043,51 @@ impl Overrides {
         std::fs::write(config_dir.join("keymap.json"), self.to_json())
     }
 
-    /// The keys in force for an action: the override if there is one, else the default.
+    /// The keys in force for an action: the override if it binds any, else the default. An
+    /// entry gpui cannot bind is not in force, so every reader reports the default — the
+    /// three copies used to disagree here (keymap machine doc, issue 1).
     pub fn keys_for(&self, d: &ActionDoc) -> String {
         self.0
             .get(d.action)
-            .cloned()
+            .and_then(|o| o.keys())
+            .map(str::to_string)
             .unwrap_or_else(|| platform_keys(d.keys))
     }
 
+    /// Whether the row differs from the catalog: an entry exists in the map only when it
+    /// does.
     pub fn is_changed(&self, action: &str) -> bool {
         self.0.contains_key(action)
     }
 
+    /// The state of one action's override, for readers that need more than the keys (the
+    /// editor marks an unusable entry).
+    pub fn entry(&self, action: &str) -> Option<&Override> {
+        self.0.get(action)
+    }
+
+    /// How many actions the user changed.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn set(&mut self, action: &str, keys: &str) {
-        if doc(action).is_some() {
-            self.0.insert(action.to_string(), keys.to_string());
+        if doc(action).is_none() {
+            return;
+        }
+        // The default is carried as an absence, so "rebind to the chord it already has" and
+        // "reset it" are one state (keymap machine doc, issue 4).
+        match Override::parse(action, keys) {
+            Override::SameAsDefault => {
+                self.0.remove(action);
+            }
+            o => {
+                self.0.insert(action.to_string(), o);
+            }
         }
     }
 
@@ -983,14 +1096,15 @@ impl Overrides {
         self.0.remove(action);
     }
 
-    /// Actions that would answer to the same keys in the same context. Two actions in
-    /// different contexts (the editor vs. the whole window) do not conflict.
+    /// Actions that would answer to the same keys in the same place. The test is where a
+    /// binding is live, not how its context string is spelled, so a binding in the editor and
+    /// one in the editor-or-line-input are compared (keymap machine doc, issue 3).
     pub fn conflicts(&self) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
         let mut out = Vec::new();
         for (i, a) in CATALOG.iter().enumerate() {
             for b in CATALOG.iter().skip(i + 1) {
-                if a.context == b.context
-                    && canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                if canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                    && scopes_touch(a.context, b.context)
                 {
                     out.push((a, b));
                 }
@@ -998,6 +1112,53 @@ impl Overrides {
         }
         out
     }
+}
+
+/// Whether two context predicates can answer to a chord in the same place.
+///
+/// A predicate is read as the places it names: its disjunctive normal form over identifiers.
+/// Two bindings fight when they name *the same* place, so `BlockEditor` and
+/// `BlockEditor || LineInput` clash in the editor, and `None` (the whole window) is every
+/// place. A clause with extra identifiers is a narrower layer of a place rather than a second
+/// one: `BlockEditor && autocomplete` is the editor with the completion menu open, which is
+/// how Tab accepts a suggestion while the menu is up and indents otherwise — reporting that
+/// against `Indent` would put a permanent warning on two default rows.
+fn scopes_touch(a: Option<&str>, b: Option<&str>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else {
+        return true;
+    };
+    match (clauses(a), clauses(b)) {
+        (Some(a), Some(b)) => a.iter().any(|x| b.contains(x)),
+        // A predicate this code does not model: compare the strings, as before.
+        _ => a == b,
+    }
+}
+
+/// The places a context string names: each clause is the set of identifiers it requires.
+/// `None` for a construct that is not a plain conjunction/disjunction of identifiers (`!`,
+/// `==`, `>`): the catalog uses none, but `keymap.json` must never panic a release.
+fn clauses(context: &str) -> Option<Vec<BTreeSet<String>>> {
+    fn walk(p: &gpui::KeyBindingContextPredicate) -> Option<Vec<BTreeSet<String>>> {
+        use gpui::KeyBindingContextPredicate as P;
+        match p {
+            P::Identifier(name) => Some(vec![BTreeSet::from([name.to_string()])]),
+            P::And(left, right) => {
+                let (left, right) = (walk(left)?, walk(right)?);
+                Some(
+                    left.iter()
+                        .flat_map(|a| right.iter().map(move |b| a.union(b).cloned().collect()))
+                        .collect(),
+                )
+            }
+            P::Or(left, right) => {
+                let mut out = walk(left)?;
+                out.extend(walk(right)?);
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+    walk(&gpui::KeyBindingContextPredicate::parse(context).ok()?)
 }
 
 /// The keys the app has bound for an action right now, in `keymap.json` spelling.
@@ -1032,8 +1193,13 @@ pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
 pub fn install(cx: &mut App, overrides: &Overrides) {
     let mut replaced = std::collections::BTreeSet::new();
     let mut user = Vec::new();
-    for (action, keys) in &overrides.0 {
+    for (action, o) in &overrides.0 {
         let ctx = doc(action).and_then(|d| d.context);
+        let Some(keys) = o.keys() else {
+            // Still reported: the editor shows what was written and why it is not in force.
+            eprintln!("utopia: ignoring keybinding -> {action}");
+            continue;
+        };
         match binding(action, keys, ctx) {
             Some(b) => {
                 replaced.insert(action.as_str());
@@ -1147,7 +1313,7 @@ mod tests {
         let mut o = Overrides::default();
         o.set("GoToday", "cmd-alt-t");
         o.set("Nope", "cmd-j"); // not in the catalog: ignored
-        assert_eq!(o.0.len(), 1);
+        assert_eq!(o.len(), 1);
         let (back, warnings) = Overrides::from_json(&o.to_json());
         assert_eq!(back, o);
         assert!(warnings.is_empty());
@@ -1180,6 +1346,121 @@ mod tests {
         assert_eq!(c.len(), 1);
         let names = [c[0].0.action, c[0].1.action];
         assert!(names.contains(&"GoToday") && names.contains(&"GoYesterday"));
+    }
+
+    /// Keymap machine doc, issue 1: a `keymap.json` entry whose keys gpui cannot parse used
+    /// to be what the editor showed while gpui kept the default. It is carried as invalid:
+    /// the default is what every reader reports, and the text the user wrote survives a save
+    /// of some other binding (§9.1, rule 11).
+    #[test]
+    fn unusable_keys_are_invalid_and_stay_out_of_force() {
+        let (o, warnings) = Overrides::from_json(
+            r#"[{"key":"nonsense-key","action":"GoToday"},
+                {"key":"cmd-alt-t","action":"GoYesterday"}]"#,
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the unusable entry is reported: {warnings:?}"
+        );
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t"),
+            "the default is in force, so every reader must show it"
+        );
+        assert!(
+            o.is_changed("GoToday"),
+            "the row still holds the keys the user wrote"
+        );
+        assert!(matches!(o.entry("GoToday"), Some(Override::Invalid { .. })));
+        let saved = o.to_json();
+        assert!(saved.contains("nonsense-key"), "not thrown away: {saved}");
+        assert!(
+            saved.contains("cmd-alt-t"),
+            "the usable one is kept: {saved}"
+        );
+    }
+
+    /// Keymap machine doc, issue 4: an entry that only repeats the catalog default is not an
+    /// override — no changed marker, no identical binding, nothing written back.
+    #[test]
+    fn an_entry_equal_to_the_default_is_not_an_override() {
+        let (o, warnings) = Overrides::from_json(&format!(
+            r#"[{{"key":"{}","action":"GoToday"}}]"#,
+            platform_keys("cmd-shift-t")
+        ));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!o.is_changed("GoToday"));
+        assert_eq!(o.to_json().trim(), "[]", "nothing to write back");
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t")
+        );
+        // And recording the default again drops an existing override.
+        let mut o = Overrides::default();
+        o.set("GoToday", "alt-cmd-t");
+        o.set("GoToday", &platform_keys("cmd-shift-t"));
+        assert!(!o.is_changed("GoToday"));
+    }
+
+    /// A `keymap.json` may list an action more than once; the last entry wins, as it did
+    /// before overrides were validated. A later entry that restores the default must therefore
+    /// remove the earlier override, not be skipped next to it (review of the three-copies
+    /// fix).
+    #[test]
+    fn a_later_default_entry_removes_an_earlier_override() {
+        let (o, warnings) = Overrides::from_json(&format!(
+            r#"[{{"key":"cmd-alt-t","action":"GoToday"}},
+                {{"key":"{}","action":"GoToday"}}]"#,
+            platform_keys("cmd-shift-t")
+        ));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            !o.is_changed("GoToday"),
+            "the last entry restores the default, so nothing is overridden"
+        );
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t")
+        );
+        assert_eq!(o.to_json().trim(), "[]", "and nothing is written back");
+    }
+
+    /// Keymap machine doc, issue 3: clashes were compared by the literal context string, so a
+    /// binding in the editor and one in the editor-or-line-input looked unrelated. They answer
+    /// to the same chord in the editor, so it is said out loud (§9.1, ST-3).
+    #[test]
+    fn a_clash_across_two_overlapping_contexts_is_reported() {
+        let mut o = Overrides::default();
+        o.set("Bold", "cmd-c"); // Copy's default, context "BlockEditor || LineInput"
+        let c = o.conflicts();
+        let names: Vec<(&str, &str)> = c.iter().map(|(a, b)| (a.action, b.action)).collect();
+        assert!(
+            names
+                .iter()
+                .any(|(a, b)| { (*a == "Bold" && *b == "Copy") || (*a == "Copy" && *b == "Bold") }),
+            "Bold is live wherever Copy is, in the editor: {names:?}"
+        );
+    }
+
+    /// The scope rule reads contexts as the set of places a binding is live in, so a narrower
+    /// layer of the same place (`BlockEditor && autocomplete`) is not a clash — that is how
+    /// Tab accepts a suggestion while the menu is open and indents the rest of the time.
+    #[test]
+    fn a_narrower_context_is_a_layer_not_a_clash() {
+        assert!(
+            !scopes_touch(EDITOR, COMPLETING),
+            "the menu's Tab is a narrower editor, not a second place"
+        );
+        assert!(scopes_touch(EDITOR, TEXT), "both are live in the editor");
+        assert!(
+            scopes_touch(None, EDITOR),
+            "a window-wide key is live in the editor too"
+        );
+        assert!(
+            !scopes_touch(EDITOR, Some("LineInput")),
+            "the editor and a line input are different places"
+        );
     }
 
     #[test]

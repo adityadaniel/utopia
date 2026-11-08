@@ -1,5 +1,58 @@
 # Keymap overrides: editor copy, live gpui bindings, keymap.json
 
+## Status
+
+The machine is explicit. Per action the override is
+`Override::{Valid(String), Invalid { raw, why }, SameAsDefault}` (`actions.rs:928`), computed
+once when the file is read or an override is set (`Override::parse :943`). `Overrides`
+(`actions.rs:984`) is a private map of those, so no reader can form a fourth opinion:
+`install` (`:1189`) binds only `Valid`; `keys_for` (`:1045`) answers with the default for
+`Invalid` and for an absent entry; `to_json` writes `Valid` and keeps the raw text of
+`Invalid` but never writes `SameAsDefault`; the editor, the cheat sheet, the clash line and
+the filter go through `keys_for`/`entry`; Quick Jump reads the live keymap (`active_keys`).
+All five listed combinations are now dealt with:
+
+1. **Fixed** — `from_json` (`:989`) runs the same check `binding` does (`keys_problem :803`)
+   and carries an entry gpui cannot bind as `Invalid`, warning once (startup and Settings both
+   show it). It is never in force, so the editor, the Shortcuts sheet and Quick Jump all
+   report the default, and the row shows the text the user wrote in amber with
+   "Not a shortcut: …; ⇧⌘T is in force." (`settings.rs:1179`). Tests:
+   `unusable_keys_are_invalid_and_stay_out_of_force` (`actions.rs:1352`),
+   `an_unusable_entry_is_marked_and_the_default_is_in_force` (`tests/settings.rs:814`).
+2. **Fixed** — a failed write is its own state: `SettingsView.save_error` (`settings.rs:146`),
+   set and cleared by `apply` (`:357`), drawn as the `settings-unsaved` footer (`:739`) and
+   read by `unsaved()` (`:381`). It used to be written into `status`, which every caller
+   overwrote one line later, so it was never actually shown; the chip still reports the
+   rebind, and the two lines sit side by side. Test:
+   `a_failed_save_is_reported_after_the_rebind` (`tests/settings.rs:849`).
+3. **Fixed, with a refinement of the sketch** — `conflicts` (`actions.rs:1098`) compares
+   scopes instead of context strings. The sketch says "scope = the set of contexts the binding
+   is live in"; taken literally that reports `Indent` (`BlockEditor`, Tab) against
+   `AcceptCompletion` (`BlockEditor && autocomplete`, Tab), which is the deliberate layering
+   the catalog documents, and would put a permanent clash line on two default rows
+   (`defaults_do_not_conflict`). So the scope is each predicate's disjunctive normal form over
+   identifiers (`clauses :1136`): two bindings clash when they name the same place, a clause
+   with extra identifiers is a narrower layer of that place, and `None` is the whole window,
+   live everywhere (`scopes_touch :1122`). A predicate this code does not model (`!`, `==`,
+   `>`) falls back to string equality. Tests:
+   `a_clash_across_two_overlapping_contexts_is_reported` (`actions.rs:1406`),
+   `a_narrower_context_is_a_layer_not_a_clash` (`actions.rs:1423`),
+   `a_clash_across_contexts_is_reported` (`tests/settings.rs:892`).
+4. **Fixed by construction** — `Override::parse` returns `SameAsDefault` when the canonical
+   keys equal the platform default, and both `from_json` (`:989`) and `set` (`:1074`) drop
+   that state, so the map never holds an entry that binds what the app already binds: no
+   changed marker, no identical binding, nothing written back. `rebind` (`settings.rs:295`)
+   now only calls `set`, which makes "rebind to the chord it already has" and "reset it" the
+   same state. Test: `an_entry_equal_to_the_default_is_not_an_override` (`actions.rs:1383`).
+5. **Not fixed** — there is still no file watcher: both copies are read at open, so an
+   external edit while Settings is open waits for the next launch. A watcher is a side task
+   with its own lifecycle (the app-root machine owns those), and re-reading the file whenever
+   the window is raised (`open_settings_now` raises the existing window rather than making a
+   new one) would silently discard the unsaved state issue 2 now reports. Left as it was.
+
+Verified by eye with `UTOPIA_SHOT_SCRIPT` against a scratch graph and config dir, shots in
+`docs/verification/keymap-overrides-three-copies/`.
+
 ## What it controls
 
 Which keys fire which action, what the Keybindings editor and the Shortcuts sheet show, what
