@@ -350,7 +350,7 @@ impl Workspace {
         // keeps meaning the page you are reading or editing.
         let main = me.main.clone();
         me.subs.push(cx.observe(&main, |this, main, cx| {
-            let page = main.read(cx).page.clone();
+            let page = main.read(cx).page();
             if let Some(panel) = this.graph_panel.clone() {
                 panel.update(cx, |graph, cx| graph.set_origin(page, cx));
             }
@@ -654,19 +654,19 @@ impl Workspace {
 
     /// The page shown in the main pane.
     pub fn main_page(&self, cx: &gpui::App) -> Option<PageId> {
-        self.main.read(cx).page.clone()
+        self.main.read(cx).page()
     }
 
     /// The block the main pane is zoomed into, if any.
     pub fn main_zoom(&self, cx: &gpui::App) -> Option<BlockId> {
-        self.main.read(cx).zoom.clone()
+        self.main.read(cx).zoom()
     }
 
     /// Pages open in split panes beside the main one.
     pub fn split_pages(&self, cx: &gpui::App) -> Vec<PageId> {
         self.splits
             .iter()
-            .filter_map(|p| p.read(cx).page.clone())
+            .filter_map(|p| p.read(cx).page())
             .collect()
     }
 
@@ -698,7 +698,7 @@ impl Workspace {
     pub fn sidebar_pages(&self, cx: &gpui::App) -> Vec<PageId> {
         self.panes
             .iter()
-            .filter_map(|p| p.view.read(cx).page.clone())
+            .filter_map(|p| p.view.read(cx).page())
             .collect()
     }
 
@@ -819,7 +819,7 @@ impl Workspace {
         if sidebar {
             // Shift-click stacks the page beside the current one (§0, W6).
             let existing = self.panes.iter().position(|p| {
-                p.view.read(cx).page.as_ref() == Some(&page) && p.view.read(cx).zoom == zoom
+                p.view.read(cx).page().as_ref() == Some(&page) && p.view.read(cx).zoom() == zoom
             });
             let pane = match existing {
                 // Re-opening moves the card back to the top but keeps it folded if it was.
@@ -991,7 +991,7 @@ impl Workspace {
     }
 
     fn open_graph_full(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let origin = self.main.read(cx).page.clone();
+        let origin = self.main.read(cx).page();
         self.open_graph(origin, window, cx);
     }
 
@@ -1019,7 +1019,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let origin = origin.or_else(|| self.main.read(cx).page.clone());
+        let origin = origin.or_else(|| self.main.read(cx).page());
         let Some(origin) = origin else {
             return;
         };
@@ -1134,7 +1134,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(page) = self.main.read(cx).page.clone() else {
+        let Some(page) = self.main.read(cx).page() else {
             return;
         };
         self.app.update(cx, |app, cx| {
@@ -1349,7 +1349,7 @@ impl Workspace {
     }
 
     fn current_date(&self, cx: &mut Context<Self>) -> NaiveDate {
-        let page = self.main.read(cx).page.clone();
+        let page = self.main.read(cx).page();
         page.and_then(|p| {
             self.app
                 .update(cx, |app, _| app.store.page_state(&p).ok()?.meta.daily_date)
@@ -1571,11 +1571,8 @@ impl Workspace {
                 all,
             };
             // Card headers name their page (RS-5); a rename must reach them.
-            let pages: Vec<Option<PageId>> = self
-                .panes
-                .iter()
-                .map(|p| p.view.read(cx).page.clone())
-                .collect();
+            let pages: Vec<Option<PageId>> =
+                self.panes.iter().map(|p| p.view.read(cx).page()).collect();
             let titles: Vec<SharedString> = self.app.update(cx, |app, _| {
                 let fmt = app.store.date_format().clone();
                 pages
@@ -1596,7 +1593,7 @@ impl Workspace {
                 pane.title = title;
             }
         }
-        let Some(page) = self.main.read(cx).page.clone() else {
+        let Some(page) = self.main.read(cx).page() else {
             return;
         };
         if self.inspector_seen.as_ref() != Some(&(page.clone(), v)) {
@@ -1677,7 +1674,7 @@ impl Workspace {
         let th = theme(cx).clone();
         let density = crate::appearance::density(cx);
         let main = self.main.read(cx);
-        let active = page.is_some() && !main.is_journal() && main.page == page;
+        let active = page.is_some() && !main.is_journal() && main.page() == page;
         div()
             .id(id)
             .px_2()
@@ -1714,7 +1711,7 @@ impl Workspace {
         let th = theme(cx).clone();
         let density = crate::appearance::density(cx);
         let main = self.main.read(cx);
-        let active = !main.is_journal() && main.page.as_ref() == Some(&page.id);
+        let active = !main.is_journal() && main.page().as_ref() == Some(&page.id);
         let id = page.id.clone();
         let key = page.title_key.clone();
         let group = if unpin { "pinned" } else { "page" };
@@ -1806,7 +1803,7 @@ impl Workspace {
     ) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
         let main = self.main.read(cx);
-        let active = !main.is_journal() && main.page.as_ref() == Some(&entry.page.id);
+        let active = !main.is_journal() && main.page().as_ref() == Some(&entry.page.id);
         let page = entry.page.id.clone();
         let title = entry.page.title.clone();
         let blocks = entry.blocks;
@@ -2574,7 +2571,7 @@ impl Workspace {
     /// Pinning is local UI state, kept in `settings.json` (rule 9) and never synced.
     fn render_pinned(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let current = self.main.read(cx).page.clone();
+        let current = self.main.read(cx).page();
         let pinned_here = current
             .as_ref()
             .is_some_and(|p| self.pinned.iter().any(|(q, _)| q == p));
