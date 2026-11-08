@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde_json::{json, Value};
-use utopia_api::{serve, ApiServer};
+use utopia_api::{serve, serve_with, ApiServer, Limits};
 use utopia_store::Store;
 
 struct Running {
@@ -202,4 +202,79 @@ fn only_authorized_local_non_browser_requests() {
         );
     }
     assert_eq!(utopia_api::new_token().len(), 64);
+}
+
+/// AC §4.1 (local automation API): a request that gets a 504 has been cancelled, so the
+/// retry cannot apply the same capture twice (docs/state-machines/api-call-inbox.md).
+#[test]
+fn ac_4_1_a_timed_out_capture_is_not_written_when_the_owner_gets_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(
+        serve_with(
+            "127.0.0.1:0",
+            "secret-token".into(),
+            Limits {
+                wait: Duration::from_millis(150),
+            },
+        )
+        .unwrap(),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // Sit on the first call past the client's wait, then drain like the app does.
+        let stalled = s2
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a call arrived");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            stalled.run(&mut store).is_empty(),
+            "the call whose client timed out must not run"
+        );
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    #[allow(clippy::result_large_err)]
+    let capture = || {
+        ureq::post(&format!("{}/v1/capture", server.url()))
+            .set("Authorization", "Bearer secret-token")
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(5))
+            .send_string(&json!({ "text": "one" }).to_string())
+    };
+    match capture() {
+        Err(ureq::Error::Status(504, r)) => {
+            let body: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nothing was written"),
+                "a 504 says whether the write happened: {body}"
+            );
+        }
+        Ok(r) => panic!("expected 504, got {}", r.status()),
+        Err(e) => panic!("{e}"),
+    }
+    // The retry is the first call the owner actually runs (once it is awake again).
+    std::thread::sleep(Duration::from_millis(500));
+    ok(capture());
+    stop.store(true, Ordering::SeqCst);
+    let mut store = owner.join().unwrap();
+    let pages = store.list_pages(true).unwrap();
+    assert_eq!(pages.len(), 1, "one page: today");
+    let st = store.page_state(&pages[0].id).unwrap().clone();
+    let texts: Vec<String> = st
+        .live_preorder()
+        .into_iter()
+        .map(|(id, _)| st.block(&id).unwrap().text.clone())
+        .collect();
+    assert_eq!(texts, ["one"], "the timed-out call wrote nothing");
 }
