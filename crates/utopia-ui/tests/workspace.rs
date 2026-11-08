@@ -4594,7 +4594,7 @@ fn opening_bracket_wraps_the_selection(cx: &mut TestAppContext) {
     assert_eq!(rows(&app, &page, cx)[0].0, "Met Ana about [[launch]]");
     assert_eq!(selected_text(&ws, cx), "launch");
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).ac.is_none()),
+        ws.update(cx, |w, cx| !w.editor().read(cx).autocomplete().is_open()),
         "the user made the link; no menu offers to replace it"
     );
     // Leaving the block commits it like any typed link.
@@ -4675,7 +4675,7 @@ fn highlighted(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
     use utopia_ui::editor::AcItem;
     ws.update(cx, |w, cx| {
         let e = w.editor().read(cx);
-        let ac = e.ac.as_ref().expect("a menu is open");
+        let ac = e.autocomplete().menu().expect("a menu is open");
         match &ac.items[ac.selected] {
             AcItem::Page { title, .. } | AcItem::Create(title) => title.clone(),
             AcItem::Command { label, .. } => label.clone(),
@@ -4935,7 +4935,7 @@ fn auto_closed_links_complete_cleanly(cx: &mut TestAppContext) {
     cx.simulate_input("An");
     cx.run_until_parked();
     assert_eq!(
-        ws.update(cx, |w, cx| w.editor().read(cx).ac.as_ref().map(|a| a.kind)),
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().kind()),
         Some(AcKind::Page),
         "the [[ menu is open inside the auto-closed link"
     );
@@ -5717,7 +5717,7 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     );
     let editor = ws.update(cx, |w, _| w.editor());
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_some()),
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
         "the [[ menu is open"
     );
     // The keyboard goes to the workspace; no host calls `end` (a click into the search box
@@ -5732,7 +5732,7 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, today(), cx), ["f [[November 3rd, 2026]]"]);
     assert_tomorrow_linked(&app, cx);
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_none()),
+        editor.read_with(cx, |e, _| !e.autocomplete().is_open()),
         "the menu was about text the commit rewrote"
     );
 }
@@ -6169,7 +6169,7 @@ fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
     let editor = ws.update(cx, |w, _| w.editor());
     let block = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_some()),
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
         "the link menu is open"
     );
 
@@ -6213,7 +6213,7 @@ fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "rewritten");
     assert!(
-        editor.read_with(cx, |e, _| e.ac.is_none()),
+        editor.read_with(cx, |e, _| !e.autocomplete().is_open()),
         "the menu was about the text the plugin replaced"
     );
 }
