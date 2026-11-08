@@ -312,7 +312,7 @@ impl Plugin {
         // From here on the module can run (a start function can call the host too), so
         // both the success and the failure path report what it did.
         let outcome = self.execute(&mut linker, &mut wstore, command, input);
-        let fuel_used = FUEL_PER_RUN - wstore.get_fuel().unwrap_or(0);
+        let fuel_used = fuel_used(wstore.get_fuel().ok());
         let host = wstore.into_data();
         RunResult {
             outcome,
@@ -387,6 +387,13 @@ impl Plugin {
     }
 }
 
+/// Instructions a run consumed. `Store::get_fuel` cannot fail while metering is on
+/// (`Config::consume_fuel`), but if it ever did, the honest answer is "unknown" (0), not
+/// the whole budget: that reads as "this plugin ran out of fuel" (issue 3).
+fn fuel_used(left: Option<u64>) -> u64 {
+    left.map_or(0, |left| FUEL_PER_RUN - left)
+}
+
 /// The two host imports a plugin may use (`call`, `log`).
 fn link(linker: &mut Linker<Host>) -> Result<()> {
     linker
@@ -432,4 +439,18 @@ pub fn load_all(root: &Path) -> Vec<(PathBuf, Result<Plugin>)> {
     dirs.into_iter()
         .map(|d| (d.clone(), Plugin::load(&d)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 3: an unreadable fuel counter reported the whole budget as spent. Nothing is
+    /// known about the run, so report nothing.
+    #[test]
+    fn unknown_fuel_is_not_a_whole_budget() {
+        assert_eq!(fuel_used(None), 0, "unknown is not \"all of it\"");
+        assert_eq!(fuel_used(Some(FUEL_PER_RUN)), 0);
+        assert_eq!(fuel_used(Some(FUEL_PER_RUN - 1_234)), 1_234);
+    }
 }
