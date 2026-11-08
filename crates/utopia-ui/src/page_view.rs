@@ -3627,7 +3627,24 @@ impl PageView {
             .children(rows)
     }
 
+    /// Build one list item. The list calls this lazily while it lays out a frame, after
+    /// `render` has returned, so the frame-read counters have to be armed here too
+    /// (issue 6); `in_render` is restored because a handler that makes the list render an
+    /// item must not have its own reads counted as frame reads.
     fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let was = self.in_render;
+        self.in_render = true;
+        let item = self.render_item_inner(ix, window, cx);
+        self.in_render = was;
+        item
+    }
+
+    fn render_item_inner(
         &mut self,
         ix: usize,
         _window: &mut Window,
