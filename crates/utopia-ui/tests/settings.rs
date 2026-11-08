@@ -83,6 +83,137 @@ fn escape_cancels_capture(cx: &mut TestAppContext) {
     assert!(keymap_json(dir.path()).is_none(), "nothing to save");
 }
 
+/// `settings-key-capture.md`, issue 2: a recording belongs to the Settings window. Clicking
+/// into the filter field used to leave it running: the chip kept saying "Press keys…" and
+/// the interceptor swallowed the Escape meant for the field (issue 5).
+#[gpui::test]
+fn clicking_into_the_filter_ends_the_capture(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    // Focus events only reach a listener while the window is active (as it is in the app,
+    // where Settings is the front window).
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    let chip = cx
+        .debug_bounds("settings-chip-GoToday")
+        .expect("the key chip is the control");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.capturing().map(|d| d.action)),
+        Some("GoToday"),
+        "clicking the chip starts recording"
+    );
+
+    let field = cx
+        .debug_bounds("settings-search")
+        .expect("the filter field");
+    cx.simulate_click(field.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.capturing().is_none(),
+            "focus moving into another control ends the recording"
+        );
+        assert!(v.overrides().is_empty(), "nothing was rebound");
+        assert_eq!(v.status(), Some("Capture cancelled."));
+    });
+
+    // And the field's own Escape works again instead of being swallowed.
+    cx.simulate_input("zoom");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.query().to_string()), "zoom");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.query().to_string()),
+        "",
+        "escape reaches the field again"
+    );
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
+/// `settings-key-capture.md`, issue 2: Cmd+Tab (or clicking the main window) deactivates the
+/// Settings window. The recording must not outlive it, or coming back shows a chip waiting
+/// for keys pressed somewhere else.
+#[gpui::test]
+fn leaving_the_window_ends_the_capture(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.update_in(cx, |v, window, cx| {
+        window.activate_window();
+        v.start_capture(today, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.capturing().map(|d| d.action)),
+        Some("GoToday")
+    );
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.capturing().is_none(),
+            "the recording ends when the window loses the keyboard"
+        );
+        assert!(v.overrides().is_empty(), "nothing was rebound");
+        assert_eq!(v.status(), Some("Capture cancelled."));
+    });
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
+/// `settings-key-capture.md`, issue 3: Escape means "back out" whatever modifiers are held.
+/// A modified Escape used to be treated as a chord, so the action was quietly bound to a
+/// combination that reads to the user as a cancel — and nothing in the app answers to it.
+#[gpui::test]
+fn escape_cancels_capture_with_modifiers_too(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+
+    let today = doc("GoToday").unwrap();
+    for chord in ["escape", "shift-escape", "cmd-escape", "alt-shift-escape"] {
+        view.update_in(cx, |v, window, cx| v.start_capture(today, window, cx));
+        cx.simulate_keystrokes(chord);
+        cx.run_until_parked();
+        view.update(cx, |v, _| {
+            assert!(v.capturing().is_none(), "{chord} ends the capture");
+            assert!(
+                v.overrides().is_empty(),
+                "{chord} must not become a binding"
+            );
+            assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
+            assert_eq!(v.status(), Some("Left unchanged."), "{chord} says so");
+        });
+    }
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
 /// The keys being recorded must not also fire their own action. Rebinding onto Cmd+Q would
 /// otherwise quit the app in the middle of the edit.
 #[gpui::test]
@@ -184,12 +315,12 @@ fn keybindings_scroll_inside_a_short_window(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
     cx.simulate_resize(size(px(720.), px(480.)));
     cx.run_until_parked();
-    let status = cx
-        .debug_bounds("settings-status")
-        .expect("the unreadable keymap status is shown");
+    let warning = cx
+        .debug_bounds("settings-warning")
+        .expect("the unreadable keymap is shown");
     assert!(
-        status.origin.y + status.size.height <= px(480.) + px(0.5),
-        "the status line stays inside the window: {status:?}"
+        warning.origin.y + warning.size.height <= px(480.) + px(0.5),
+        "the notice stays inside the window: {warning:?}"
     );
 }
 
@@ -721,10 +852,54 @@ fn a_broken_keymap_is_reported_not_fatal(cx: &mut TestAppContext) {
     view.update(cx, |v, _| {
         assert!(v.overrides().is_empty());
         assert!(
-            v.status().is_some(),
+            v.warning().is_some(),
             "the user is told the file was unreadable"
         );
     });
+}
+
+/// `settings-key-capture.md`, issue 4: the startup warning ("keymap.json: …") shared the
+/// status line with action messages, and `start_capture` cleared that line, so the first
+/// chip click erased the only sign that what is in force is not what is on disk. A warning
+/// is a condition, not the result of an action: it keeps its own line.
+#[gpui::test]
+fn a_startup_warning_outlives_a_rebind(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("keymap.json"), "{ not json").unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-warning").is_some(),
+        "the unreadable keymap is reported when the window opens"
+    );
+
+    let today = doc("GoToday").unwrap();
+    view.update_in(cx, |v, window, cx| v.start_capture(today, window, cx));
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.status().unwrap_or_default().contains("Today is now"),
+            "the rebind is reported"
+        );
+        assert!(
+            v.warning().is_some_and(|w| w.contains("keymap.json")),
+            "the warning is still there: {:?}",
+            v.warning()
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-warning").is_some(),
+        "and its line is still drawn after the message"
+    );
 }
 
 /// QJ-5: what the palette shows for a command is the keys in force. Settings installs a
@@ -1353,13 +1528,13 @@ mod appearance {
         let mut w = VisualTestContext::from_window(main, cx);
         assert!(w.debug_bounds("ui-font-system").is_some());
         let view = settings.downcast::<SettingsView>().unwrap();
-        let status = cx
-            .read(|cx| view.read(cx).map(|v| v.status().map(str::to_string)))
+        let warning = cx
+            .read(|cx| view.read(cx).map(|v| v.warning().map(str::to_string)))
             .unwrap()
             .unwrap_or_default();
         assert!(
-            status.contains("comic-sans"),
-            "the user is told: {status:?}"
+            warning.contains("comic-sans"),
+            "the user is told: {warning:?}"
         );
         // The file is left as it was until the user picks something.
         assert!(std::fs::read_to_string(dir.path().join("settings.json"))

@@ -21,8 +21,8 @@
 //! Cmd+Q would quit the app mid-edit.
 
 use gpui::{
-    div, img, prelude::*, px, AnyWindowHandle, App, Context, Div, Entity, FocusHandle, Focusable,
-    FontWeight, Keystroke, ScrollHandle, SharedString, Subscription, Window,
+    div, img, prelude::*, px, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
+    Keystroke, ScrollHandle, SharedString, Subscription, Window,
 };
 use std::path::PathBuf;
 
@@ -128,16 +128,76 @@ impl Tab {
     }
 }
 
+/// Whether the window is recording a binding (§9.1, `settings-key-capture.md`).
+///
+/// The action waiting for a keystroke and the interceptor that records it are one value:
+/// they used to be two `Option`s that always moved together, so a capture with no
+/// interceptor (or the reverse) was representable. The window a capture belongs to is not
+/// kept here — the interceptor's closure carries the handle it was installed for, and both
+/// the focus and the activation observers are registered on this view's own window, so a
+/// second copy would be state nothing reads.
+#[derive(Default)]
+enum Capture {
+    /// Keystrokes are the window's own.
+    #[default]
+    Idle,
+    /// The next keystroke in this window is recorded for `action`. Replacing the value with
+    /// `Idle` drops the subscription and so stops intercepting.
+    Listening {
+        action: &'static ActionDoc,
+        _interceptor: Subscription,
+    },
+}
+
+impl Capture {
+    /// The action waiting for a keystroke, if one is.
+    fn action(&self) -> Option<&'static ActionDoc> {
+        match self {
+            Capture::Idle => None,
+            Capture::Listening { action, .. } => Some(action),
+        }
+    }
+}
+
+/// What a recorded keystroke is, as opposed to the raw keys (§9.1).
+///
+/// Naming the two outcomes keeps the cancel path visible: without it, "this keystroke is
+/// not a binding" is a condition buried in the middle of `captured`.
+enum Captured {
+    /// The user backed out; nothing is written.
+    Cancel,
+    /// A combination to bind, if the catalog accepts it.
+    Chord(Keystroke),
+}
+
+impl From<Keystroke> for Captured {
+    fn from(ks: Keystroke) -> Self {
+        // Escape cancels whatever modifiers are held: a modified Escape reads as "back out"
+        // to the user, so binding it silently installed a shortcut nobody meant, on a chord
+        // that would also look like the cancel key in the row (`settings-key-capture.md`,
+        // issue 3).
+        if ks.key == "escape" {
+            Captured::Cancel
+        } else {
+            Captured::Chord(ks)
+        }
+    }
+}
+
 pub struct SettingsView {
     config_dir: PathBuf,
     overrides: Overrides,
     tab: Tab,
-    /// The action currently waiting for a keystroke, if any.
-    capturing: Option<&'static ActionDoc>,
-    /// Dropped to stop intercepting keystrokes.
-    capture: Option<Subscription>,
-    /// Only accept captured keys that arrive in this window.
-    window: Option<AnyWindowHandle>,
+    /// What the window is doing with keystrokes.
+    capture: Capture,
+    /// A file this window read was not what it says: what is in force is not what the user
+    /// wrote (rule 11: degrade, never panic). A condition about the disk, so it has a slot
+    /// of its own rather than sharing the status line with the result of the last action
+    /// (`settings-key-capture.md`, issue 4).
+    warning: Option<SharedString>,
+    /// The result of the last thing the user did in this window: a rebind, a reset, a
+    /// preference change. Transient by nature — one slot is right for these, because only
+    /// the newest one is news.
     status: Option<SharedString>,
     /// The last write of `keymap.json` failed. The keys are live for this session but disk
     /// still holds the old ones, so the next launch would silently undo them: a state of its
@@ -205,23 +265,49 @@ impl SettingsView {
             cx.set_global(Theme::for_appearance(window.appearance()));
             cx.notify();
         }));
+        let focus = cx.focus_handle();
+        // A recording belongs to this window, so it ends when the keyboard goes elsewhere:
+        // another control taking focus here (the filter field — the only other focusable
+        // thing in the window), focus leaving the view, or the window losing activation
+        // (Cmd+Tab, a click in the main window). Otherwise the chip keeps saying
+        // "Press keys…" for a keystroke typed somewhere else, and the interceptor swallows
+        // the Escape the field is waiting for (`settings-key-capture.md`, issues 2 and 5).
+        //
+        // Focus on *this* handle is not enough: the field is a descendant, so moving into it
+        // is not a focus-out of the window's own handle. A focusable control added to this
+        // window later needs its own listener here.
+        //
+        // The two halves are not redundant: gpui only reports focus changes while the window
+        // is active (it blanks the focus path for an inactive one), so leaving the app is
+        // seen by the activation observer and moving between controls by the focus one.
+        let search_focus = search.read(cx).focus_handle(cx);
+        subs.push(cx.on_focus(&search_focus, window, |this, _, cx| {
+            this.capture_left_the_window(cx);
+        }));
+        subs.push(cx.on_focus_out(&focus, window, |this, _, _, cx| {
+            this.capture_left_the_window(cx);
+        }));
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.capture_left_the_window(cx);
+            }
+        }));
         Self {
             config_dir,
             overrides,
             tab,
-            capturing: None,
-            capture: None,
-            window: None,
+            capture: Capture::Idle,
             // A malformed keymap.json or settings.json is worth saying out loud: what is in
             // force is not what the user wrote (rule 11: degrade, never panic).
-            status: warnings.first().map(|w| SharedString::from(w.clone())),
+            warning: warnings.first().map(|w| SharedString::from(w.clone())),
+            status: None,
             save_error: None,
             topic: 0,
             search,
             query: String::new(),
             flash: None,
             keys_scroll: ScrollHandle::default(),
-            focus: cx.focus_handle(),
+            focus,
             _subs: subs,
         }
     }
@@ -238,9 +324,20 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Stop recording, if a recording is in progress.
     fn cancel_capture(&mut self) {
-        self.capturing = None;
-        self.capture = None;
+        self.capture = Capture::Idle;
+    }
+
+    /// End a capture because the keyboard went somewhere else. Said out loud: the chip going
+    /// back to the keys in force without a word looks like the recording was applied.
+    fn capture_left_the_window(&mut self, cx: &mut Context<Self>) {
+        if self.capture.action().is_none() {
+            return;
+        }
+        self.cancel_capture();
+        self.status = Some("Capture cancelled.".into());
+        cx.notify();
     }
 
     /// Start listening for the next keystroke and bind it to `d`.
@@ -250,12 +347,10 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.capturing = Some(d);
         self.status = None;
         let handle = window.window_handle();
-        self.window = Some(handle);
         let me = cx.entity().downgrade();
-        self.capture = Some(cx.intercept_keystrokes(move |ev, window, cx| {
+        let interceptor = cx.intercept_keystrokes(move |ev, window, cx| {
             // Another window's typing is none of our business.
             if window.window_handle() != handle {
                 return;
@@ -264,23 +359,33 @@ impl SettingsView {
             cx.stop_propagation();
             let ks = ev.keystroke.clone();
             let _ = me.update(cx, |this, cx| this.captured(ks, cx));
-        }));
+        });
+        self.capture = Capture::Listening {
+            action: d,
+            _interceptor: interceptor,
+        };
         cx.notify();
     }
 
     /// A keystroke arrived while capturing.
     fn captured(&mut self, ks: Keystroke, cx: &mut Context<Self>) {
-        let Some(d) = self.capturing else { return };
+        let Some(d) = self.capture.action() else {
+            return;
+        };
         if is_modifier_only(&ks) {
             return; // still waiting for a real key
         }
+        // One keystroke ends the recording, whichever way it is read: a capture that stayed
+        // open after a cancel would swallow the window's own keys.
         self.cancel_capture();
-        if ks.key == "escape" && !has_modifier(&ks) {
-            self.status = Some("Left unchanged.".into());
-            cx.notify();
-            return;
-        }
-        let keys = ks.unparse();
+        let keys = match Captured::from(ks) {
+            Captured::Cancel => {
+                self.status = Some("Left unchanged.".into());
+                cx.notify();
+                return;
+            }
+            Captured::Chord(ks) => ks.unparse(),
+        };
         // Round-trip through the catalog's own validation: whatever gpui hands us has to be
         // something `binding` will accept later, or the override would silently do nothing.
         if crate::actions::binding(d.action, &keys, d.context).is_none() {
@@ -370,11 +475,16 @@ impl SettingsView {
 
     /// Whether a keystroke is being recorded right now.
     pub fn capturing(&self) -> Option<&'static ActionDoc> {
-        self.capturing
+        self.capture.action()
     }
 
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref().map(|v| &**v)
+    }
+
+    /// What was wrong with a file this window read, while it is still wrong.
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref().map(|v| &**v)
     }
 
     /// Why the last write failed, while disk still disagrees with the keys in force.
@@ -586,11 +696,6 @@ fn is_modifier_only(ks: &Keystroke) -> bool {
     )
 }
 
-fn has_modifier(ks: &Keystroke) -> bool {
-    let m = &ks.modifiers;
-    m.control || m.alt || m.shift || m.platform || m.function
-}
-
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
@@ -722,6 +827,18 @@ impl Render for SettingsView {
                             .child(body),
                     ),
             )
+            .children(self.warning.clone().map(|w| {
+                div()
+                    .debug_selector(|| "settings-warning".into())
+                    .px_6()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(th.line)
+                    .bg(th.banner_bg)
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(w)
+            }))
             .children(self.status.clone().map(|s| {
                 div()
                     .debug_selector(|| "settings-status".into())
@@ -1049,7 +1166,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let th = theme(cx).clone();
-        let capturing = self.capturing.map(|c| c.action) == Some(d.action);
+        let capturing = self.capture.action().map(|c| c.action) == Some(d.action);
         let keys = self.overrides.keys_for(d);
         let changed = self.overrides.is_changed(d.action);
         // An entry gpui cannot bind is shown as the user wrote it, with the reason, instead of
@@ -1107,7 +1224,7 @@ impl SettingsView {
                 pretty_keys(&keys)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
-                if this.capturing.map(|c| c.action) == Some(d.action) {
+                if this.capture.action().map(|c| c.action) == Some(d.action) {
                     this.cancel_capture();
                     this.status = Some("Left unchanged.".into());
                     cx.notify();
