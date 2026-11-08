@@ -6107,3 +6107,65 @@ fn p2_a_failed_plugin_run_announces_the_pages_it_wrote(cx: &mut TestAppContext) 
         seen.borrow()
     );
 }
+/// §4.2 P2: a plugin that rewrites the block being edited through the API replaces the
+/// buffer under the editor. The caret's CRDT anchor and the autocomplete menu were derived
+/// from the old text, so both have to follow the text that is now there (machine issue 3).
+#[gpui::test]
+fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
+    use std::rc::Rc;
+
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("see [[Al");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    let block = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
+    assert!(
+        editor.read_with(cx, |e, _| e.ac.is_some()),
+        "the link menu is open"
+    );
+
+    // A plugin that replaces this block's text through the API.
+    let req = format!(r#"{{"op":"update_block","id":"{block}","text":"rewritten"}}"#);
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("plugin.wat"),
+        format!(
+            r#"(module
+  (import "utopia" "call" (func $call (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{data}")
+  (func (export "utopia_alloc") (param i32) (result i32) (i32.const 8192))
+  (func (export "utopia_run") (param i32) (param i32) (result i64)
+    (drop (call $call (i32.const 0) (i32.const {len})))
+    (i64.const 0)))"#,
+            data = req.replace('"', "\\\""),
+            len = req.len()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugin.json"),
+        serde_json::json!({
+            "name": "rewriter",
+            "commands": [{"id": "go", "title": "Go"}],
+            "permissions": ["write"],
+            "module": "plugin.wat",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let plugin = Rc::new(utopia_plugin::Plugin::load(dir.path()).unwrap());
+    app.update(cx, |app, _| app.plugins.push(plugin));
+
+    ws.update_in(cx, |w, window, cx| {
+        let editor = w.editor();
+        editor.update(cx, |e, cx| e.run_plugin(0, "go", window, cx));
+    });
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "rewritten");
+    assert!(
+        editor.read_with(cx, |e, _| e.ac.is_none()),
+        "the menu was about the text the plugin replaced"
+    );
+}

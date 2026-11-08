@@ -564,10 +564,11 @@ impl BlockEditor {
         };
         let out = run.outcome.as_ref().ok();
         let replace = out.and_then(|o| o.replace.clone());
+        let mut rewrote = false;
         if let Some(text) = replace {
             let len = text.len();
             self.field.set_text(&text, len);
-            self.after_edit(window, cx);
+            rewrote = true;
         } else if run.changed.contains(&t.page) {
             // The plugin edited this page through the API: show the stored text.
             let stored = self.app.update(cx, |app, _| {
@@ -579,7 +580,17 @@ impl BlockEditor {
             if let Some(s) = stored.filter(|s| *s != self.field.text) {
                 let len = s.len();
                 self.field.set_text(&s, len);
+                rewrote = true;
             }
+        }
+        if rewrote || run.changed.contains(&t.page) {
+            // A plugin replaced the buffer under the editor: persist what it asked for,
+            // move the CRDT caret with the new text and re-read the trigger. The anchor
+            // and the autocomplete menu were derived from the text that is gone (machine
+            // issue 3), and `settle` is the one path that makes a rewritten buffer
+            // consistent again (§13.5).
+            let persisted = self.settle(cx);
+            self.after_composition(window, cx, persisted);
         }
         let insert = out.and_then(|o| o.insert.clone());
         if let Some(text) = insert {
