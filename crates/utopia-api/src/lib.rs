@@ -367,7 +367,8 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// How many calls may wait for the store's owner before new requests are refused with
-    /// 429. A stalled UI thread must not let the queue grow without bound.
+    /// 429. A stalled UI thread must not let the queue grow without bound. At least one
+    /// slot always exists, so the queue cannot be turned into a refuse-everything channel.
     pub queue: usize,
     /// How long a request waits for its answer before its call is cancelled (504). A call
     /// older than this never runs, so a client that gave up and retried cannot write twice.
@@ -488,7 +489,7 @@ impl ApiCall {
     ///
     /// A call that nobody waits for any more — the request timed out, the client
     /// disconnected, or the call sat in the queue past its deadline — is dropped without
-    /// touching the store (`AC §4.1`, local automation API).
+    /// touching the store (§4.1, P2 local automation API).
     pub fn run(self, store: &mut Store) -> Vec<PageId> {
         if self.reply.is_closed() || Instant::now() >= self.deadline || !self.state.claim() {
             self.state.expire();
