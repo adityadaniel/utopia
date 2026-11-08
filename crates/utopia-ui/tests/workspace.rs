@@ -1218,6 +1218,70 @@ fn outline_reaches_headings_that_are_folded_away(cx: &mut TestAppContext) {
     );
 }
 
+/// FR-3.9 (LR-5): a reveal that leaves the zoom is a navigation like `open`, so the page's
+/// unlinked count is fetched before the next frame. `reveal_block` used to clear the zoom
+/// without running the navigation reset, so the header drew too late to know the count and
+/// the section stayed blank until an unrelated index update arrived.
+#[gpui::test]
+fn fr_3_9_leaving_a_zoom_to_reveal_a_block_counts_unlinked_mentions(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, in_zoom, outside) = app.update(cx, |app, _| {
+        let page = app.store.create_page("Mindfulness").unwrap();
+        let a = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &a, "Meeting", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &a).unwrap();
+        let plan = utopia_core::outline::append_block(app.store.page_state(&page).unwrap(), None);
+        let b = app
+            .store
+            .execute_plan(&page, plan, None)
+            .unwrap()
+            .unwrap()
+            .block;
+        app.store
+            .set_block_text(&page, &b, "Risks", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &b).unwrap();
+        // A plain mention of the page's title on another page (FR-3.9).
+        let src = app.store.create_page("Reading").unwrap();
+        let s = app.store.ensure_first_block(&src).unwrap();
+        app.store
+            .set_block_text(&src, &s, "practising mindfulness daily", None, None)
+            .unwrap();
+        app.store.commit_block(&src, &s).unwrap();
+        app.store.sync_index().unwrap();
+        (page, a, b)
+    });
+    // Opened zoomed, so the unlinked section was never on screen and never counted.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), Some(in_zoom), None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("unlinked-count-1").is_none(),
+        "a zoomed block has no Unlinked References section"
+    );
+    let scans = app.read_with(cx, |app, _| app.store.unlinked_scans());
+
+    // The Outline tab would do this: reveal a heading outside the zoom.
+    ws.update_in(cx, |w, window, cx| {
+        let view = w.main_view();
+        view.update(cx, |view, cx| view.reveal_block(&outside, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_zoom(cx)).is_none(),
+        "revealing a block outside the zoom leaves it"
+    );
+    assert!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()) > scans,
+        "the count is fetched by the navigation handler, not by a frame"
+    );
+    cx.debug_bounds("unlinked-count-1")
+        .expect("the whole page is back, with its unlinked count");
+}
+
 /// RS-3: a pinned row's title comes from the shard, so renaming the page reaches the
 /// Pinned tab without toggling another pin or restarting.
 #[gpui::test]

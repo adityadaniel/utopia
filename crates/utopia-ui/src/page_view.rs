@@ -1106,10 +1106,10 @@ impl PageView {
             inside
         });
         if !reachable {
-            if let Mode::Zoomed { page, .. } = &self.mode {
-                self.mode = Mode::Page { page: page.clone() };
-            }
-            self.cycle.invalidate(Invalidation::rows());
+            // Leaving the zoom is a navigation like `open`: run the same reset, so the
+            // unlinked count, the reference cache and the popups do not stay those of the
+            // zoomed view (machine issue 1).
+            self.set_mode(Mode::Page { page }, cx);
         } else if unfolded {
             self.cycle.invalidate(Invalidation::rows());
         }
