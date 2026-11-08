@@ -3555,6 +3555,36 @@ fn graph_view_lays_out_and_opens_pages(cx: &mut TestAppContext) {
     assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
 }
 
+/// §9.2 main window: the main column shows one page. Opening a page there — the sidebar's
+/// page rows, the recent days, a pinned page, Quick jump, a date shortcut — closes the
+/// full-screen graph, or the page "opens" invisibly and the graph keeps focus
+/// (workspace-main-pane-content.md, issue 1).
+#[gpui::test]
+fn opening_a_page_closes_the_graph(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let alpha = app.update(cx, |a, _| {
+        let p = a.store.create_page("Alpha").unwrap();
+        a.store.ensure_first_block(&p).unwrap();
+        p
+    });
+    cx.simulate_keystrokes("escape cmd-shift-g");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_some(),
+        "the graph is up"
+    );
+    // Every one of those paths calls `Workspace::open` for the main pane.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(alpha.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_none(),
+        "the graph gives way to the page it was hiding"
+    );
+    assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(alpha));
+}
+
 /// GR-1: pages grow with their link count, from 6 px to 18 px across.
 #[gpui::test]
 fn graph_sizes_nodes_by_links(cx: &mut TestAppContext) {
@@ -3764,6 +3794,74 @@ fn graph_panel_keeps_the_sidebar_pages_origin(cx: &mut TestAppContext) {
     assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(a));
 }
 
+/// GR-5 review: hiding the sidebar and bringing it back is not navigation. A panel opened
+/// around a sidebar page's graph keeps its own origin and the pan/zoom the user set; only a
+/// main-page change made while the sidebar was away may move it (and re-read the index).
+#[gpui::test]
+fn reopening_the_sidebar_keeps_the_graph_panels_origin(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (a, b) = app.update(cx, |app, _| {
+        let a = app.store.create_page("Alpha Page").unwrap();
+        app.store.ensure_first_block(&a).unwrap();
+        let b = app.store.create_page("Beta Page").unwrap();
+        app.store.ensure_first_block(&b).unwrap();
+        (a, b)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(a.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1280.), px(820.)));
+    // Beta beside Alpha, then its menu's "Open in graph" and the sidebar panel, so the
+    // panel's origin is Beta while the main pane still shows Alpha.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(b.clone(), None, None, true, window, cx)
+    });
+    cx.run_until_parked();
+    let menu = cx.debug_bounds("page-menu").expect("a page menu");
+    cx.simulate_click(menu.center(), Modifiers::default());
+    cx.run_until_parked();
+    let item = cx.debug_bounds("page-menu-graph").expect("Open in graph");
+    cx.simulate_click(item.center(), Modifiers::default());
+    cx.run_until_parked();
+    let local = cx
+        .debug_bounds("graph-local")
+        .expect("Around this page filter")
+        .center();
+    cx.simulate_click(local, Modifiers::default());
+    cx.run_until_parked();
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel open");
+    assert_eq!(panel.update(cx, |g, _| g.origin()), Some(b.clone()));
+    // Zoom the panel, so a view reset on reopen is visible as well as the origin move.
+    let canvas = cx.debug_bounds("graph-canvas").expect("panel canvas");
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: canvas.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.), gpui::px(120.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    let zoom = panel.update(cx, |g, _| g.zoom());
+    assert!(zoom != 1.0, "the wheel zoomed the panel: {zoom}");
+
+    // Hiding and reopening the sidebar without opening anything is not a navigation.
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel stays");
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(b),
+        "reopening the sidebar is not navigation"
+    );
+    assert_eq!(
+        panel.update(cx, |g, _| g.zoom()),
+        zoom,
+        "the viewport is still the user's"
+    );
+    assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(a));
+}
+
 /// GR-5: the panel is a projection of the index, so a new link while it is open must show
 /// up even though the page id did not change.
 #[gpui::test]
@@ -3815,6 +3913,78 @@ fn graph_panel_refreshes_after_new_links(cx: &mut TestAppContext) {
         "the panel shows the new page"
     );
     assert_eq!(panel.update(cx, |g, _| g.edge_count()), 3);
+}
+
+/// GR-5: a graph panel hidden with the right sidebar is not drawn, so reloading its layout
+/// on every main-page change and every index update is work for nobody. It catches up when
+/// the sidebar comes back (workspace-main-pane-content.md, issue 3).
+#[gpui::test]
+fn hidden_graph_panel_does_no_work(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    cx.simulate_input("[[Alpha]] meets [[Beta]]");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_resize(size(px(1280.), px(820.)));
+    cx.simulate_keystrokes("cmd-shift-g");
+    cx.run_until_parked();
+    let local = cx
+        .debug_bounds("graph-local")
+        .expect("Around this page filter")
+        .center();
+    cx.simulate_click(local, Modifiers::default());
+    cx.run_until_parked();
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel open");
+    let today = ws.update(cx, |w, cx| w.main_page(cx)).expect("a page");
+    assert_eq!(panel.update(cx, |g, _| g.origin()), Some(today.clone()));
+    assert_eq!(panel.update(cx, |g, _| g.node_count()), 3);
+
+    // Hide the sidebar: the panel stays (reopening brings it back) but is not rendered.
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    let block = app.update(cx, |app, _| {
+        app.store
+            .page_state(&today)
+            .unwrap()
+            .live_roots()
+            .first()
+            .cloned()
+            .unwrap()
+    });
+    app.update(cx, |app, cx| {
+        let r =
+            app.store
+                .set_block_text(&today, &block, "[[Alpha]] [[Beta]] [[Gamma]]", None, None);
+        app.report(r);
+        let r = app.store.commit_block(&today, &block);
+        app.report(r);
+        app.changed(vec![today.clone()], true, cx);
+    });
+    let alpha = app.update(cx, |a, _| a.store.find_page("Alpha").unwrap().unwrap());
+    ws.update_in(cx, |w, window, cx| {
+        w.open(alpha.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        panel.update(cx, |g, _| g.node_count()),
+        3,
+        "a panel nobody sees did not reload"
+    );
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(today),
+        "nor did it follow the page behind it"
+    );
+
+    // Reopening the sidebar refreshes it once, from the index and the page now open.
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("right-sidebar").is_some(),
+        "sidebar reopened"
+    );
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel stays");
+    assert_eq!(panel.update(cx, |g, _| g.node_count()), 4);
+    assert_eq!(panel.update(cx, |g, _| g.origin()), Some(alpha));
 }
 
 /// AGENTS.md focus invariant: removing the focused graph must hand focus back, or every
@@ -4048,6 +4218,32 @@ fn pdf_viewer(
     cx.run_until_parked();
     let view = ws.update(cx, |w, _| w.pdf_view()).expect("viewer open");
     (dir, app, ws, view, cx)
+}
+
+/// §9.2 main window: the graph replaces what the main column was showing instead of being
+/// painted over a PDF that stays alive underneath and silently reappears when the graph
+/// closes (workspace-main-pane-content.md, issue 2).
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn graph_over_a_pdf_does_not_bring_it_back(cx: &mut TestAppContext) {
+    let (_dir, _app, ws, _view, cx) = pdf_viewer(cx, size(px(1280.), px(900.)));
+    cx.simulate_keystrokes("cmd-shift-g");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_some(),
+        "the graph is up"
+    );
+    assert!(
+        ws.update(cx, |w, _| w.pdf_view()).is_none(),
+        "the graph replaced the PDF; it is not hidden behind it"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
+    assert!(
+        ws.update(cx, |w, _| w.pdf_view()).is_none(),
+        "closing the graph returns to the page, not to a PDF from under it"
+    );
 }
 
 /// P2 "PDF highlights": a release that no page claims — the gutter, the header, or
