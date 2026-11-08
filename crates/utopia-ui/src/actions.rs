@@ -909,10 +909,32 @@ pub fn read_entries(json: &str) -> (Vec<KeymapEntry>, Vec<String>) {
     }
 }
 
-/// User keybinding overrides: action name → keystrokes. Only actions the user actually
-/// changed are stored, so a default that moves in a later release still moves for them.
+/// What an override says about one action, read once so every reader asks the same value:
+/// [`install`] from it, the Settings editor and the cheat sheet show it, [`Overrides::conflicts`]
+/// measures chords against it, Quick Jump reads the result of it, and [`Overrides::to_json`]
+/// writes it back. The overrides live in three places — the file, the live keymap and the
+/// editor — and letting each interpret the file for itself is what made them disagree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Override {
+    /// Keys gpui can bind.
+    Valid(String),
+}
+
+impl Override {
+    /// The keys this override binds.
+    pub fn keys(&self) -> &str {
+        match self {
+            Override::Valid(keys) => keys,
+        }
+    }
+}
+
+/// User keybinding overrides: action name → what the user asked for. Only actions the user
+/// actually changed are stored, so a default that moves in a later release still moves for
+/// them. The map is private so that nothing can put an entry in it that the readers would
+/// have to second-guess.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Overrides(pub BTreeMap<String, String>);
+pub struct Overrides(BTreeMap<String, Override>);
 
 impl Overrides {
     /// Read overrides out of a `keymap.json`. Entries for actions that are not in the
@@ -922,7 +944,7 @@ impl Overrides {
         let mut map = BTreeMap::new();
         for e in entries {
             if doc(&e.action).is_some() {
-                map.insert(e.action, e.key);
+                map.insert(e.action, Override::Valid(e.key));
             } else {
                 warnings.push(format!("keymap.json: unknown action {}", e.action));
             }
@@ -943,10 +965,10 @@ impl Overrides {
         let entries: Vec<KeymapEntry> = self
             .0
             .iter()
-            .filter_map(|(action, key)| {
+            .filter_map(|(action, o)| {
                 let d = doc(action)?;
                 Some(KeymapEntry {
-                    key: key.clone(),
+                    key: o.keys().to_string(),
                     action: action.clone(),
                     context: d.context.map(str::to_string),
                 })
@@ -964,17 +986,35 @@ impl Overrides {
     pub fn keys_for(&self, d: &ActionDoc) -> String {
         self.0
             .get(d.action)
-            .cloned()
+            .map(|o| o.keys().to_string())
             .unwrap_or_else(|| platform_keys(d.keys))
     }
 
+    /// Whether the row differs from the catalog: an entry exists in the map only when it
+    /// does.
     pub fn is_changed(&self, action: &str) -> bool {
         self.0.contains_key(action)
     }
 
+    /// The state of one action's override, for readers that need more than the keys (the
+    /// editor marks an unusable entry).
+    pub fn entry(&self, action: &str) -> Option<&Override> {
+        self.0.get(action)
+    }
+
+    /// How many actions the user changed.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn set(&mut self, action: &str, keys: &str) {
         if doc(action).is_some() {
-            self.0.insert(action.to_string(), keys.to_string());
+            self.0
+                .insert(action.to_string(), Override::Valid(keys.to_string()));
         }
     }
 
@@ -1032,14 +1072,14 @@ pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
 pub fn install(cx: &mut App, overrides: &Overrides) {
     let mut replaced = std::collections::BTreeSet::new();
     let mut user = Vec::new();
-    for (action, keys) in &overrides.0 {
+    for (action, o) in &overrides.0 {
         let ctx = doc(action).and_then(|d| d.context);
-        match binding(action, keys, ctx) {
+        match binding(action, o.keys(), ctx) {
             Some(b) => {
                 replaced.insert(action.as_str());
                 user.push(b);
             }
-            None => eprintln!("utopia: ignoring keybinding {keys} -> {action}"),
+            None => eprintln!("utopia: ignoring keybinding {} -> {action}", o.keys()),
         }
     }
     let mut bindings: Vec<KeyBinding> = CATALOG
@@ -1147,7 +1187,7 @@ mod tests {
         let mut o = Overrides::default();
         o.set("GoToday", "cmd-alt-t");
         o.set("Nope", "cmd-j"); // not in the catalog: ignored
-        assert_eq!(o.0.len(), 1);
+        assert_eq!(o.len(), 1);
         let (back, warnings) = Overrides::from_json(&o.to_json());
         assert_eq!(back, o);
         assert!(warnings.is_empty());

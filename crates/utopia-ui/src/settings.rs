@@ -337,7 +337,7 @@ impl SettingsView {
     }
 
     pub fn reset_all(&mut self, cx: &mut Context<Self>) {
-        if self.overrides.0.is_empty() {
+        if self.overrides.is_empty() {
             self.status = Some("Nothing to reset: these are the defaults.".into());
             cx.notify();
             return;
@@ -952,7 +952,7 @@ impl SettingsView {
         let th = theme(cx).clone();
         let density = appearance::density(cx);
         let conflicts = self.overrides.conflicts();
-        let changed = self.overrides.0.len();
+        let changed = self.overrides.len();
         let groups = self.visible_groups();
         let shown: usize = groups.iter().map(|(_, rows)| rows.len()).sum();
 

@@ -40,7 +40,7 @@ fn rebinding_is_applied_and_saved(cx: &mut TestAppContext) {
             "gpui canonical order"
         );
         // Untouched actions are not written down, so later default changes still reach you.
-        assert_eq!(v.overrides().0.len(), 1);
+        assert_eq!(v.overrides().len(), 1);
     });
     let saved = keymap_json(dir.path()).expect("keymap.json written");
     assert!(
@@ -77,7 +77,7 @@ fn escape_cancels_capture(cx: &mut TestAppContext) {
 
     view.update(cx, |v, _| {
         assert!(v.capturing().is_none());
-        assert!(v.overrides().0.is_empty(), "nothing was rebound");
+        assert!(v.overrides().is_empty(), "nothing was rebound");
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
     assert!(keymap_json(dir.path()).is_none(), "nothing to save");
@@ -163,7 +163,7 @@ fn reset_restores_the_default(cx: &mut TestAppContext) {
 
     view.update(cx, |v, cx| v.reset_one(today, cx));
     view.update(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
     assert_eq!(keymap_json(dir.path()).unwrap().trim(), "[]");
@@ -495,7 +495,7 @@ fn the_key_chip_records_and_resets(cx: &mut TestAppContext) {
     cx.simulate_click(reset.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     view.read_with(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert_eq!(v.overrides().keys_for(today), platform_keys("cmd-shift-t"));
     });
 }
@@ -719,7 +719,7 @@ fn a_broken_keymap_is_reported_not_fatal(cx: &mut TestAppContext) {
         cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
     cx.run_until_parked();
     view.update(cx, |v, _| {
-        assert!(v.overrides().0.is_empty());
+        assert!(v.overrides().is_empty());
         assert!(
             v.status().is_some(),
             "the user is told the file was unreadable"
