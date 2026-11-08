@@ -1294,7 +1294,7 @@ impl BlockEditor {
     }
 
     fn insert_above(&mut self, _: &InsertAbove, window: &mut Window, cx: &mut Context<Self>) {
-        if self.ac.is_open() {
+        if self.ac.captures_keys() {
             return self.accept(true, None, window, cx);
         }
         self.emit_after_commit(EditorEvent::InsertAbove, cx);
@@ -1621,7 +1621,10 @@ impl BlockEditor {
     }
 
     fn escape(&mut self, _: &Escape, _: &mut Window, cx: &mut Context<Self>) {
-        if self.ac.is_open() {
+        // Only a menu with suggestions is dismissed. One that found nothing to offer
+        // (`/xyz`, `#zzz`) never drew, so Escape must leave the block the first time
+        // instead of silently closing something invisible (FR-2.17).
+        if self.ac.captures_keys() {
             self.dismiss_trigger();
             cx.notify();
             return;

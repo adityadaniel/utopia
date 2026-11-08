@@ -6217,3 +6217,41 @@ fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
         "the menu was about the text the plugin replaced"
     );
 }
+
+/// FR-2.17: `/zzz` matches no command, so the menu draws nothing — and must not exist as a
+/// state either: Escape leaves the block the first time it is pressed (machine issue 1).
+#[gpui::test]
+fn fr_2_17_escape_leaves_a_menu_with_nothing_to_show(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("/zzz");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "/zzz");
+    assert!(
+        editor.read_with(cx, |e, _| e.target().is_none()),
+        "one Escape leaves a block whose menu drew nothing"
+    );
+}
+
+/// FR-2.17: Cmd+Enter starts a block above; whether it does must not depend on a menu with
+/// no suggestions counting as "open" (machine issue 1).
+#[gpui::test]
+fn fr_2_17_cmd_enter_is_not_swallowed_by_an_empty_menu(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("/zzz");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(rows_str(&rows(&app, &page, cx)), [("", 0), ("/zzz", 0)]);
+    app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        assert!(
+            app.store.find_page("zzz").unwrap().is_none(),
+            "no page is created from a slash query the menu never offered"
+        );
+    });
+}
