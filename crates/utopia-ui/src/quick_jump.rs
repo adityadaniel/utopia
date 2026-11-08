@@ -600,7 +600,7 @@ impl JumpPalette {
     /// gpui would dispatch them to nobody, so the palette marks them unavailable instead of
     /// offering a command that silently does nothing.
     fn command_ready(&self, d: &ActionDoc, cx: &App) -> bool {
-        d.context.is_none() || self.editor.read(cx).target.is_some()
+        d.context.is_none() || self.editor.read(cx).target().is_some()
     }
 
     /// Results by page, for the scope tests and the preview (SR-2, SR-3).

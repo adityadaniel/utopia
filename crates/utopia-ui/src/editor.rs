@@ -236,22 +236,77 @@ impl Deferred {
     }
 }
 
-pub struct BlockEditor {
-    app: Entity<AppState>,
-    field: TextField,
-    focus: FocusHandle,
-    pub target: Option<EditTarget>,
-    pub ac: Option<Autocomplete>,
-    ac_dismissed: Option<usize>,
+/// One editing session (§6.2, `docs/state-machines/block-editor-session.md`): the block
+/// that owns the caret together with everything that may only exist while it does. One
+/// value, so `target`, its CRDT anchor, the idle commit and the input method's queued
+/// request are created and dropped together and cannot disagree about whether a block is
+/// open.
+///
+/// The variants are not boxed: the session was already stored inline as five separate
+/// fields, so the enum costs an editor entity nothing extra per edit.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
+pub enum EditorSession {
+    Idle,
+    Editing(Editing),
+}
+
+#[derive(Debug)]
+pub struct Editing {
+    target: EditTarget,
     /// The caret anchored in the text CRDT, so remote edits don't move it (§6.5).
     anchor: Option<utopia_store::DocCursor>,
-    idle: Option<Task<()>>,
-    edits: u64,
+    /// The idle commit an edit armed (AC-3.2). Replacing it cancels the old one.
+    pending: Option<Task<()>>,
     /// What a host asked for while the input method was composing (§13.5).
     deferred: Option<Deferred>,
     /// A store change arrived while the input method owned the buffer (§13.5):
     /// `sync_from_store` could not look, so it looks once the composition ends.
     pending_sync: bool,
+}
+
+impl Editing {
+    fn new(target: EditTarget) -> Self {
+        Self {
+            target,
+            anchor: None,
+            pending: None,
+            deferred: None,
+            pending_sync: false,
+        }
+    }
+}
+
+impl EditorSession {
+    fn target(&self) -> Option<&EditTarget> {
+        match self {
+            Self::Idle => None,
+            Self::Editing(e) => Some(&e.target),
+        }
+    }
+
+    fn target_mut(&mut self) -> Option<&mut EditTarget> {
+        match self {
+            Self::Idle => None,
+            Self::Editing(e) => Some(&mut e.target),
+        }
+    }
+
+    fn editing_mut(&mut self) -> Option<&mut Editing> {
+        match self {
+            Self::Idle => None,
+            Self::Editing(e) => Some(e),
+        }
+    }
+}
+
+pub struct BlockEditor {
+    app: Entity<AppState>,
+    field: TextField,
+    focus: FocusHandle,
+    session: EditorSession,
+    pub ac: Option<Autocomplete>,
+    ac_dismissed: Option<usize>,
     _sub: Subscription,
     _page_sub: Subscription,
 }
@@ -289,7 +344,7 @@ impl BlockEditor {
         // editing the same block, now on the page that owns the day, so the next keystroke
         // does not go to a shard that no longer exists.
         let page_sub = cx.subscribe(&app, |this, _, e: &PageReplaced, cx| {
-            let Some(target) = &mut this.target else {
+            let Some(target) = this.session.target_mut() else {
                 return;
             };
             if target.page != e.from {
@@ -303,22 +358,22 @@ impl BlockEditor {
             app,
             field: TextField::new(true),
             focus: cx.focus_handle(),
-            target: None,
+            session: EditorSession::Idle,
             ac: None,
             ac_dismissed: None,
-            anchor: None,
-            idle: None,
-            edits: 0,
-            deferred: None,
-            pending_sync: false,
             _sub: sub,
             _page_sub: page_sub,
         }
     }
 
+    /// The block owning the caret, if any. The host reads this to focus the editor for an
+    /// editor-bound command (QJ-5) and the views to draw its row as an editor (PG-1).
+    pub fn target(&self) -> Option<&EditTarget> {
+        self.session.target()
+    }
+
     pub fn is_editing(&self, host: EntityId, page: &PageId, block: &BlockId) -> bool {
-        self.target
-            .as_ref()
+        self.target()
             .is_some_and(|t| t.host == host && t.page == *page && t.block == *block)
     }
 
@@ -354,7 +409,7 @@ impl BlockEditor {
             });
             return;
         }
-        if self.target.as_ref() != Some(&target) {
+        if self.target() != Some(&target) {
             self.commit(cx);
             let text = self.app.update(cx, |app, _| {
                 app.store
@@ -362,9 +417,19 @@ impl BlockEditor {
                     .ok()
                     .and_then(|st| st.block(&target.block).map(|b| b.text.clone()))
             });
-            let Some(text) = text else { return };
+            let Some(text) = text else {
+                // The block went away between the click and the load: there is nothing to
+                // edit, and keeping the previous target would leave the editor on a block
+                // the host has already left.
+                self.session = EditorSession::Idle;
+                self.ac = None;
+                self.ac_dismissed = None;
+                cx.emit(EditorEvent::Blurred);
+                cx.notify();
+                return;
+            };
             self.field.set_text(&text, caret.unwrap_or(text.len()));
-            self.target = Some(target);
+            self.session = EditorSession::Editing(Editing::new(target));
             self.ac = None;
             self.ac_dismissed = None;
         } else if let Some(c) = caret {
@@ -387,8 +452,12 @@ impl BlockEditor {
             self.accept_composition(cx);
         }
         self.commit(cx);
-        let was_editing = self.target.take().is_some();
+        let was_editing = !matches!(self.session, EditorSession::Idle);
+        // Dropping the session drops the idle commit and the caret anchor with it: neither
+        // may outlive the block they belong to (machine issues 2 and 4).
+        self.session = EditorSession::Idle;
         self.ac = None;
+        self.ac_dismissed = None;
         if was_editing {
             cx.emit(EditorEvent::Blurred);
         }
@@ -396,17 +465,22 @@ impl BlockEditor {
     }
 
     fn sync_from_store(&mut self, cx: &mut Context<Self>) {
-        let Some(t) = self.target.clone() else { return };
+        let Some(t) = self.target().cloned() else {
+            return;
+        };
         if self.field.composing() {
             // §13.5: the buffer is the input method's. Neither rewriting it under the
             // composition nor dropping the change is acceptable, so look again later.
-            self.pending_sync = true;
+            if let Some(e) = self.session.editing_mut() {
+                e.pending_sync = true;
+            }
             return;
         }
         match self.stored_text(&t, cx) {
             Some(text) if text != self.field.text => {
                 // Changed underneath us (undo, rewrite, sync): keep the caret in range.
-                let anchored = self.anchor.clone().and_then(|a| {
+                let anchored = self.session.editing_mut().and_then(|e| e.anchor.clone());
+                let anchored = anchored.and_then(|a| {
                     self.app
                         .update(cx, |app, _| app.store.resolve_caret(&t.page, &a))
                 });
@@ -434,21 +508,24 @@ impl BlockEditor {
 
     /// Stop editing: the block went away (undo of its creation, deletion, merge).
     fn detach(&mut self, cx: &mut Context<Self>) {
-        self.target = None;
+        self.session = EditorSession::Idle;
         self.ac = None;
+        self.ac_dismissed = None;
         cx.emit(EditorEvent::Blurred);
         cx.notify();
     }
 
     fn anchor_caret(&mut self, cx: &mut Context<Self>) {
-        let Some(t) = self.target.clone() else {
-            self.anchor = None;
+        let Some(t) = self.target().cloned() else {
             return;
         };
         let caret = self.field.cursor();
-        self.anchor = self.app.update(cx, |app, _| {
+        let anchor = self.app.update(cx, |app, _| {
             app.store.caret_cursor(&t.page, &t.block, caret)
         });
+        if let Some(e) = self.session.editing_mut() {
+            e.anchor = anchor;
+        }
     }
 
     /// Run a plugin command on the block being edited and apply what it returns.
@@ -459,7 +536,9 @@ impl BlockEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(t) = self.target.clone() else { return };
+        let Some(t) = self.target().cloned() else {
+            return;
+        };
         let input = serde_json::json!({
             "page": t.page.as_str(),
             "block": t.block.as_str(),
@@ -485,10 +564,11 @@ impl BlockEditor {
         };
         let out = run.outcome.as_ref().ok();
         let replace = out.and_then(|o| o.replace.clone());
+        let mut rewrote = false;
         if let Some(text) = replace {
             let len = text.len();
             self.field.set_text(&text, len);
-            self.after_edit(window, cx);
+            rewrote = true;
         } else if run.changed.contains(&t.page) {
             // The plugin edited this page through the API: show the stored text.
             let stored = self.app.update(cx, |app, _| {
@@ -500,7 +580,17 @@ impl BlockEditor {
             if let Some(s) = stored.filter(|s| *s != self.field.text) {
                 let len = s.len();
                 self.field.set_text(&s, len);
+                rewrote = true;
             }
+        }
+        if rewrote || run.changed.contains(&t.page) {
+            // A plugin replaced the buffer under the editor: persist what it asked for,
+            // move the CRDT caret with the new text and re-read the trigger. The anchor
+            // and the autocomplete menu were derived from the text that is gone (machine
+            // issue 3), and `settle` is the one path that makes a rewritten buffer
+            // consistent again (§13.5).
+            let persisted = self.settle(cx);
+            self.after_composition(window, cx, persisted);
         }
         let insert = out.and_then(|o| o.insert.clone());
         if let Some(text) = insert {
@@ -511,7 +601,7 @@ impl BlockEditor {
 
     /// Type `text` at the caret (replacing any selection). `false` when not editing.
     pub fn insert_text(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        if self.target.is_none() || self.field.composing() {
+        if self.target().is_none() || self.field.composing() {
             return false;
         }
         let sel = self.field.sel.clone();
@@ -557,7 +647,7 @@ impl BlockEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.target.is_none() || self.field.composing() || range != self.field.sel {
+        if self.target().is_none() || self.field.composing() || range != self.field.sel {
             return false;
         }
         if range.is_empty() {
@@ -604,14 +694,18 @@ impl BlockEditor {
     /// Persist what the buffer holds and look at the store again (§13.5), once the
     /// composition is over whichever way it ended. `true` when the stored text changed.
     fn settle(&mut self, cx: &mut Context<Self>) -> bool {
-        if std::mem::take(&mut self.pending_sync) {
+        let pending_sync = self
+            .session
+            .editing_mut()
+            .is_some_and(|e| std::mem::take(&mut e.pending_sync));
+        if pending_sync {
             // A store change landed while the input method owned the buffer. A block that
             // merely changed keeps what the user just committed: the persist below is
             // newer (block text is last-writer-wins). A block that went away first takes
             // the composed text with it, into the tombstone, and then the edit ends.
             let gone = self
-                .target
-                .clone()
+                .target()
+                .cloned()
                 .is_some_and(|t| self.stored_text(&t, cx).is_none());
             if gone {
                 // Keep what the input method typed (rule 5): the block is tombstoned but
@@ -634,32 +728,55 @@ impl BlockEditor {
     /// caret on a row the host has left.
     fn accept_composition(&mut self, cx: &mut Context<Self>) {
         self.field.end_composition();
-        self.deferred = None;
+        if let Some(e) = self.session.editing_mut() {
+            e.deferred = None;
+        }
         self.settle(cx);
     }
 
-    /// The editor's handle lost focus (§13.5). The input method can no longer reach this
-    /// field, so a live composition must be closed here; without it a composition whose
-    /// owner moved focus without calling `end` would never end.
+    /// The editor's handle lost focus (§13.5, AC-3.2): the keyboard is on another element
+    /// — a palette, a search box, another pane, another application — nobody called `end`,
+    /// so this is the blur the module doc has always promised. The input method can no
+    /// longer reach this field, so a live composition is closed here, and the block is
+    /// committed at once. Waiting for the idle timer is not enough: it leaves a link the
+    /// caret is still inside alone (`typing_link`), so an abandoned `[[tomorrow]]` stayed
+    /// unexpanded until some host happened to call `end` (machine issue 1).
+    ///
+    /// The session stays open. A palette that took the keyboard can dispatch an editor
+    /// command back to this block (QJ-5, `quick_jump_runs_editor_commands`), so ending the
+    /// edit here would break a documented shortcut; the host's `end` — Escape, navigation,
+    /// opening a page — is what ends an edit. Nothing runs meanwhile: the commit dropped
+    /// the idle timer, and a session that survives a blur has no caret to maintain.
     pub fn focus_lost(&mut self, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }
+        self.commit_block(true, cx);
+        // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
+        // above may also have rewritten the text it was offering completions for (an
+        // expanded relative date), so accepting from it later would edit the wrong range.
+        self.ac = None;
+        self.ac_dismissed = None;
     }
 
     /// Queue a host request that must wait for the input method (§13.5). The latest request
     /// wins — the user's last click or command is the one they meant — except that the idle
     /// commit never displaces anything.
     fn defer(&mut self, next: Deferred) {
-        if next.is_idle() && self.deferred.is_some() {
+        let Some(e) = self.session.editing_mut() else {
+            // Nothing is open, so there is nothing to finish or to begin.
+            return;
+        };
+        if next.is_idle() && e.deferred.is_some() {
             return;
         }
-        self.deferred = Some(next);
+        e.deferred = Some(next);
     }
 
     /// The input method let go of the buffer (§13.5): do what a host asked for meanwhile.
     fn after_composition(&mut self, window: &mut Window, cx: &mut Context<Self>, persisted: bool) {
-        match self.deferred.take() {
+        let next = self.session.editing_mut().and_then(|e| e.deferred.take());
+        match next {
             None => {}
             // The composition's own edit re-armed the idle commit, so let that run 300 ms
             // from now as it would without a composition, instead of committing (NFC,
@@ -677,7 +794,7 @@ impl BlockEditor {
     /// Write the buffer to the store; `true` when the block's text changed (which is also
     /// when the idle commit is re-armed).
     fn persist(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(t) = self.target.clone() else {
+        let Some(t) = self.target().cloned() else {
             return false;
         };
         let text = self.field.text.clone();
@@ -693,17 +810,15 @@ impl BlockEditor {
             changed
         });
         if changed {
-            self.edits += 1;
-            let seen = self.edits;
-            self.idle = Some(cx.spawn(async move |this, cx| loop {
+            // Replacing `pending` cancels the previous task, so one idle task encodes "a
+            // commit is armed" on its own: there is no edit generation to keep in step
+            // with it (machine issue 5).
+            let task = cx.spawn(async move |this, cx| loop {
                 cx.background_executor()
                     .timer(Duration::from_millis(300))
                     .await;
                 // `Ok(false)`: still inside a link being typed, so look again later.
                 let done = this.update(cx, |this, cx| {
-                    if this.edits != seen {
-                        return true;
-                    }
                     if this.typing_link() {
                         return false;
                     }
@@ -713,7 +828,10 @@ impl BlockEditor {
                 if !matches!(done, Ok(false)) {
                     break;
                 }
-            }));
+            });
+            if let Some(e) = self.session.editing_mut() {
+                e.pending = Some(task);
+            }
         }
         changed
     }
@@ -746,8 +864,12 @@ impl BlockEditor {
             self.defer(Deferred::Commit { finished });
             return;
         }
-        let Some(t) = self.target.clone() else { return };
-        self.idle = None;
+        let Some(t) = self.target().cloned() else {
+            return;
+        };
+        if let Some(e) = self.session.editing_mut() {
+            e.pending = None;
+        }
         self.expand_relative_dates(&t, finished, cx);
         let before = self.field.text.clone();
         let caret = self.field.cursor();
@@ -769,6 +891,9 @@ impl BlockEditor {
                 (caret as isize + shift.min(0)).max(0) as usize
             };
             self.field.set_text(&after, c);
+            // The commit may rewrite the text under the caret; the anchor has to move with
+            // it, or a remote edit lands the caret where the old text put it.
+            self.anchor_caret(cx);
             cx.notify();
         }
     }
@@ -809,6 +934,11 @@ impl BlockEditor {
         });
         if let Some((text, caret)) = expanded {
             self.field.set_text(&text, caret);
+            // The rewrite moved the caret with it (the day's title is longer than the
+            // phrase it replaced, and a link the caret was in now ends past it), so the
+            // CRDT anchor must move too or the next store change resolves the caret back
+            // into the expanded link.
+            self.anchor_caret(cx);
             cx.notify();
         }
     }
@@ -823,7 +953,7 @@ impl BlockEditor {
         if self.ac_dismissed == Some(start) {
             return;
         }
-        let own = self.target.as_ref().map(|t| t.block.clone());
+        let own = self.target().map(|t| t.block.clone());
         let items = self.app.update(cx, |app, _| -> Vec<AcItem> {
             match kind {
                 AcKind::Slash => {
@@ -958,7 +1088,9 @@ impl BlockEditor {
     }
 
     fn run_slash(&mut self, cmd: SlashCmd, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.target.clone() else { return };
+        let Some(t) = self.target().cloned() else {
+            return;
+        };
         match cmd {
             SlashCmd::Kind(kind) => self.set_kind(&t, kind, false, cx),
             SlashCmd::Today => {
@@ -1035,7 +1167,9 @@ impl BlockEditor {
 
     /// Alt+Enter: bullet → to-do → done → bullet.
     fn toggle_todo(&mut self, _: &ToggleTodo, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(t) = self.target.clone() else { return };
+        let Some(t) = self.target().cloned() else {
+            return;
+        };
         let current = self.app.update(cx, |app, _| {
             app.store
                 .page_state(&t.page)
@@ -1360,7 +1494,7 @@ impl BlockEditor {
             ));
             return true;
         }
-        let Some(t) = self.target.clone() else {
+        let Some(t) = self.target().cloned() else {
             return false;
         };
         let md = self.app.update(cx, |app, _| {
@@ -1414,7 +1548,7 @@ impl BlockEditor {
     }
 
     fn copy_block_ref(&mut self, _: &CopyBlockRef, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(t) = &self.target {
+        if let Some(t) = self.target() {
             cx.write_to_clipboard(ClipboardItem::new_string(format!("(({}))", t.block)));
         }
     }

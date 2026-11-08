@@ -1363,8 +1363,7 @@ impl PageView {
     fn editing_block(&self, host: gpui::EntityId, cx: &gpui::App) -> Option<BlockId> {
         self.editor
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .filter(|t| t.host == host)
             .map(|t| t.block.clone())
     }
@@ -1610,7 +1609,7 @@ impl PageView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let target = editor.read(cx).target.clone();
+        let target = editor.read(cx).target().cloned();
         if let EditorEvent::Restore(caret) = event {
             self.restore(caret, window, cx);
             return;
@@ -1802,7 +1801,7 @@ impl PageView {
     fn restore(&mut self, caret: &Caret, window: &mut Window, cx: &mut Context<Self>) {
         // The view that hosted the edit restores the caret; with no edit in progress the
         // main pane does.
-        let mine = match &self.editor.read(cx).target {
+        let mine = match self.editor.read(cx).target() {
             Some(t) => t.host == cx.entity_id(),
             None => !self.compact,
         };
@@ -1829,7 +1828,7 @@ impl PageView {
     fn apply_plan(&mut self, page: &PageId, plan: Plan, cx: &mut Context<Self>) -> Option<Focus> {
         let caret_before = {
             let e = self.editor.read(cx);
-            e.target.as_ref().map(|t| Caret {
+            e.target().map(|t| Caret {
                 page: t.page.clone(),
                 block: t.block.clone(),
                 offset: e.cursor(),

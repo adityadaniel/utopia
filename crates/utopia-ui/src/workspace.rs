@@ -258,7 +258,7 @@ impl Workspace {
                 |this, editor, e: &EditorEvent, window, cx| {
                     // Escape, or the edited block disappearing, must not strand focus on an
                     // element that is no longer rendered (global shortcuts would stop working).
-                    if matches!(e, EditorEvent::Blurred) && editor.read(cx).target.is_none() {
+                    if matches!(e, EditorEvent::Blurred) && editor.read(cx).target().is_none() {
                         window.focus(&this.focus);
                     }
                 },
@@ -933,7 +933,7 @@ impl Workspace {
                     // block editor, and gpui dispatches through the focused element's
                     // ancestors only, so the workspace would never reach it.
                     (QuickJumpEvent::RunCommand(name), _) => {
-                        if this.editor.read(cx).target.is_some() {
+                        if this.editor.read(cx).target().is_some() {
                             let handle = this.editor.read(cx).focus_handle(cx);
                             window.focus(&handle);
                         } else {
@@ -965,7 +965,7 @@ impl Workspace {
                     }
                     _ => {}
                 }
-                if this.editor.read(cx).target.is_none() {
+                if this.editor.read(cx).target().is_none() {
                     window.focus(&this.focus);
                 }
                 cx.notify();
@@ -1388,8 +1388,7 @@ impl Workspace {
         let owned = self
             .editor
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .is_some_and(|t| t.host == host);
         if owned {
             self.editor.update(cx, |e, cx| e.end(cx));
