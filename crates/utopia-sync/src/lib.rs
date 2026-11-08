@@ -269,6 +269,7 @@ pub struct SyncReport {
 }
 
 impl SyncReport {
+    /// Fold one pass of a round into the whole, keeping one entry per failed page.
     fn absorb(&mut self, other: SyncReport) {
         self.pushed += other.pushed;
         self.duplicates += other.duplicates;
@@ -345,6 +346,24 @@ impl SyncStatus {
     }
 }
 
+/// A compaction snapshot queued for upload (§12.3 step 5), bound to the relay that asked
+/// for it.
+///
+/// The snapshot is this device's whole page, so it may only truncate a log whose head this
+/// device actually covered. Uploading it to another relay — or to the same graph id on
+/// another server — would delete that relay's entries up to `covers_seq`, which this
+/// snapshot may not contain (AGENTS.md rule 5). [`exchange`] therefore drops a snapshot
+/// whose space is not the destination's; a destination that still wants compaction asks for
+/// it on its own manifest and gets a fresh snapshot on a later round.
+#[derive(Debug, Clone)]
+pub struct QueuedSnapshot {
+    pub page: PageId,
+    pub covers_seq: u64,
+    /// The cursor space whose head `covers_seq` was measured in.
+    pub space: CursorSpace,
+    pub payload: Vec<u8>,
+}
+
 /// Everything a round needs from the store, gathered on the store's thread.
 #[derive(Debug, Clone, Default)]
 pub struct Outgoing {
@@ -354,7 +373,7 @@ pub struct Outgoing {
     pub cursors: BTreeMap<PageId, Cursor>,
     /// The last manifest this client fully applied, in the space that issued it.
     pub rev: Option<ManifestRev>,
-    pub snapshots: Vec<(PageId, u64, Vec<u8>)>,
+    pub snapshots: Vec<QueuedSnapshot>,
     /// Attachments to upload: `(sha256, bytes)`.
     pub blob_puts: Vec<(String, Vec<u8>)>,
     /// Attachments referenced here but missing locally.
@@ -461,8 +480,16 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
             }
         }
     }
-    for (page, covers, payload) in out.snapshots {
-        match t.put_snapshot(&page, covers, payload) {
+    for snap in out.snapshots {
+        if snap.space != space {
+            // The destination changed since this snapshot was measured (another relay, or
+            // the same graph id on another server): sending it would truncate a log this
+            // device never read, to a head it may not have (rule 5). Drop it; the
+            // destination that wants compaction re-queues one.
+            continue;
+        }
+        let page = snap.page;
+        match t.put_snapshot(&page, snap.covers_seq, snap.payload) {
             Ok(()) => inc.snapshots_sent += 1,
             Err(e) => {
                 let f = Failure::page(&page, &e);
@@ -561,7 +588,7 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
 /// The store half of the client (§12.3 steps 3–5), independent of any transport.
 pub struct SyncEngine {
     client_id: String,
-    pending_snapshots: Vec<(PageId, u64, Vec<u8>)>,
+    pending_snapshots: Vec<QueuedSnapshot>,
 }
 
 impl SyncEngine {
@@ -762,12 +789,19 @@ impl SyncEngine {
             // nothing about what this client pulled, and a snapshot over unseen updates
             // would delete them from the relay (§12.6, rule 5).
             let covered = match (&local, &inc.cursor_space) {
-                (Some(c), Some(space)) => c.covers(space, head),
-                _ => false,
+                (Some(c), Some(space)) if c.covers(space, head) => Some(space),
+                _ => None,
             };
-            if covered && store.page_exists(&page)? {
-                let full = store.export_since(&page, &Frontier::default())?;
-                self.pending_snapshots.push((page, head, full));
+            if let Some(space) = covered {
+                if store.page_exists(&page)? {
+                    let full = store.export_since(&page, &Frontier::default())?;
+                    self.pending_snapshots.push(QueuedSnapshot {
+                        page,
+                        covers_seq: head,
+                        space: space.clone(),
+                        payload: full,
+                    });
+                }
             }
         }
         Ok(report)
@@ -784,37 +818,116 @@ impl SyncEngine {
         store: &mut Store,
         t: &mut T,
     ) -> Result<SyncReport> {
-        let mut report = SyncReport::default();
-        for _ in 0..6 {
-            let out = self.prepare(store)?;
-            let had_work = !out.pushes.is_empty() || !out.snapshots.is_empty();
-            let inc = exchange(t, out)?;
-            let failed = !inc.failed.is_empty();
-            let pass = self.apply(store, inc)?;
-            let quiet = pass.imported.is_empty()
-                && !had_work
-                && self.pending_snapshots.is_empty()
-                && pass.blobs_up == 0
-                && pass.blobs_down == 0;
-            let stopped = failed || !pass.failed.is_empty();
-            report.absorb(pass);
-            // Retrying a page that just failed inside the same round only re-spends the
-            // same bandwidth; the next round owns it.
-            if quiet || stopped {
-                break;
-            }
-        }
-        if let Some(f) = report.failed.first() {
-            let moved = report.pushed + report.duplicates > 0
-                || !report.imported.is_empty()
-                || report.snapshots > 0
-                || report.blobs_up + report.blobs_down > 0;
-            if !moved {
-                return Err(f.to_error());
-            }
-        }
-        Ok(report)
+        sync_round(self, t, |engine, step| match step {
+            StoreStep::Prepare => engine.prepare(store).map(StoreDone::Prepared),
+            StoreStep::Apply(inc) => engine.apply(store, *inc).map(StoreDone::Applied),
+            StoreStep::Queued => store
+                .outbox_count()
+                .map(|n| StoreDone::Queued(n > 0))
+                .map_err(SyncError::from),
+        })
     }
+}
+
+/// One store-side step of a round: the calls that need the store, so a caller that keeps
+/// its store behind a lock can take that lock for each and release it for the network
+/// between them (§12.3 steps 3–5, §14.3).
+#[derive(Debug)]
+pub enum StoreStep {
+    /// Gather pushes, cursors, queued snapshots and attachment work.
+    Prepare,
+    /// Store what the relay returned: acks, imports, cursors, snapshots to upload.
+    /// Boxed so the step stays one word (it is passed by value once per round, and
+    /// `Prepare` carries nothing).
+    Apply(Box<Incoming>),
+    /// "Is anything still waiting to be sent?" Asked when the round would otherwise stop:
+    /// the store is not locked between the steps, so an edit made on another thread while
+    /// the exchange ran is not in the pass that was just applied.
+    Queued,
+}
+
+/// What the store did with a [`StoreStep`].
+#[derive(Debug)]
+pub enum StoreDone {
+    Prepared(Outgoing),
+    Applied(SyncReport),
+    /// The answer to [`StoreStep::Queued`]: text or structural updates are still unsent.
+    Queued(bool),
+}
+
+/// The [`SyncEngine::sync_once`] loop, with the store reached through `store` instead of
+/// borrowed for the whole round.
+///
+/// The mobile FFI keeps its store behind a mutex it must not hold across the network
+/// (§14.3), so it runs this with a closure that locks per step; [`SyncEngine::sync_once`]
+/// runs it with a closure that just calls the engine. One loop, so the two cannot disagree
+/// about when a round stops.
+///
+pub fn sync_round<T, F>(engine: &mut SyncEngine, t: &mut T, mut store: F) -> Result<SyncReport>
+where
+    T: Transport + ?Sized,
+    F: FnMut(&mut SyncEngine, StoreStep) -> Result<StoreDone>,
+{
+    let mut report = SyncReport::default();
+    for _ in 0..6 {
+        let out = match store(engine, StoreStep::Prepare)? {
+            StoreDone::Prepared(out) => out,
+            // A programmer error, not user data: the closure answered the wrong step.
+            StoreDone::Applied(_) => return Err(wrong_step("apply", "prepare")),
+            StoreDone::Queued(_) => return Err(wrong_step("queued", "prepare")),
+        };
+        let had_work = !out.pushes.is_empty() || !out.snapshots.is_empty();
+        let inc = exchange(t, out)?;
+        let failed = !inc.failed.is_empty();
+        let pass = match store(engine, StoreStep::Apply(Box::new(inc)))? {
+            StoreDone::Applied(pass) => pass,
+            StoreDone::Prepared(_) => return Err(wrong_step("prepare", "apply")),
+            StoreDone::Queued(_) => return Err(wrong_step("queued", "apply")),
+        };
+        let nothing_moved = pass.imported.is_empty()
+            && !had_work
+            && engine.pending_snapshots.is_empty()
+            && pass.blobs_up == 0
+            && pass.blobs_down == 0;
+        let stopped = failed || !pass.failed.is_empty();
+        report.absorb(pass);
+        // Retrying a page that just failed inside the same round only re-spends the
+        // same bandwidth; the next round owns it.
+        if stopped {
+            break;
+        }
+        // `prepare` ran before the exchange and the store is not locked in between, so an
+        // edit made meanwhile is not in the pass above. A round that stopped here would
+        // answer "synced" with that edit still queued (§12.3, §14.3).
+        let quiet = nothing_moved
+            && (match store(engine, StoreStep::Queued)? {
+                StoreDone::Queued(pending) => !pending,
+                StoreDone::Prepared(_) => return Err(wrong_step("prepare", "queued")),
+                StoreDone::Applied(_) => return Err(wrong_step("apply", "queued")),
+            });
+        if quiet {
+            break;
+        }
+    }
+    if let Some(f) = report.failed.first() {
+        let moved = report.pushed + report.duplicates > 0
+            || !report.imported.is_empty()
+            || report.snapshots > 0
+            || report.blobs_up + report.blobs_down > 0;
+        if !moved {
+            return Err(f.to_error());
+        }
+    }
+    Ok(report)
+}
+
+/// The answer to a step that was never asked. A local fault, not a network one, so it is
+/// worded as a store error and never as "offline".
+fn wrong_step(answered: &str, asked: &str) -> SyncError {
+    StoreError::Invalid(format!(
+        "sync round: the store answered `{answered}` to `{asked}`"
+    ))
+    .into()
 }
 
 /// A transport plus an engine: the simple synchronous client used by tests and tools.

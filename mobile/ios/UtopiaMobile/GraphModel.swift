@@ -85,8 +85,12 @@ final class GraphModel: ObservableObject {
     }
 
     /// One sync round with the configured relay, off the main thread.
+    ///
+    /// A tap while a round is running starts nothing (the core would answer `busy`), and
+    /// the round's outcome says *why* it did not finish: a wrong token or another protocol
+    /// version is not "offline" (§12.6).
     func sync(settings: SyncSettings) {
-        guard let graph, !settings.relayURL.isEmpty else { return }
+        guard let graph, !settings.relayURL.isEmpty, !syncing else { return }
         syncing = true
         let token = Keychain.get("utopia-sync")
         let passphrase = Keychain.get("utopia-sync-passphrase")
@@ -99,14 +103,36 @@ final class GraphModel: ObservableObject {
             await MainActor.run {
                 self.syncing = false
                 switch result {
-                case .success(let s):
-                    let failed = s.failed > 0 ? " — \(s.failed) page(s) failed" : ""
-                    self.lastSync = "Synced: \(s.pushed) sent, \(s.importedPages) pages updated\(failed)"
+                case .success(let outcome):
+                    self.lastSync = Self.describe(outcome)
                     self.reload()
                 case .failure(let e):
-                    self.lastSync = "Offline: \(e)"
+                    // Only a transport that cannot be built (a bad relay URL) gets here.
+                    self.lastSync = "Sync: \(e)"
                 }
             }
+        }
+    }
+
+    private static func describe(_ outcome: SyncOutcome) -> String {
+        switch outcome {
+        case .synced(let s):
+            return "Synced: \(s.pushed) sent, \(s.importedPages) pages updated"
+        case .partial(let s, let queued):
+            let failed = s.failed > 0 ? " — \(s.failed) page(s) failed" : ""
+            let queue = queued > 0 ? " — \(queued) changes queued" : ""
+            return "Synced: \(s.pushed) sent, \(s.importedPages) pages updated\(failed)\(queue)"
+        case .offline(let queued):
+            return "Offline — \(queued) changes queued"
+        case .localError(let message):
+            return "Sync: local error — \(message)"
+        case .needsAuth:
+            return "Sync: sign-in required"
+        case .unsupported(let version):
+            let which = version > 0 ? "protocol \(version)" : "a newer protocol"
+            return "Sync: relay speaks \(which); update the app"
+        case .busy:
+            return "Sync: already running"
         }
     }
 }

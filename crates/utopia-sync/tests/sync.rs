@@ -1205,3 +1205,124 @@ fn the_offline_status_counts_the_outbox_without_reading_payloads() {
         }
     );
 }
+
+/// §12.6 (rule 5): a queued compaction snapshot belongs to the relay that measured the head
+/// it covers. Retaining a [`utopia_sync::SyncEngine`] across calls (the mobile FFI keeps one
+/// for the graph, docs/state-machines/ffi-mobile-sync.md) must not upload it to a different
+/// destination, whose log it would truncate past updates this device never imported.
+#[test]
+fn ac_12_6_a_snapshot_measured_on_another_relay_is_not_uploaded() {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::{
+        exchange, CursorKind, CursorSpace, Outgoing, PushRequest, QueuedSnapshot, Transport,
+        UpdateIn,
+    };
+
+    let relay = Relay::new();
+    let page = PageId("elsewhere".into());
+    // The destination already holds history from another device.
+    let mut other = RelayTransport::new(relay.clone(), "g1");
+    for i in 0..5u64 {
+        other
+            .push(
+                &page,
+                PushRequest {
+                    updates: vec![UpdateIn {
+                        id: format!("other:{i}"),
+                        client_seq: i as i64,
+                        frontier: String::new(),
+                        payload: vec![i as u8, 1, 2],
+                    }],
+                },
+            )
+            .unwrap();
+    }
+    let head = relay.manifest("g1").pages[0].head_seq;
+    let here = other.cursor_space();
+    let elsewhere = CursorSpace::new("relay:not-this-one#g1", CursorKind::Seq);
+    let queued = |space: CursorSpace| Outgoing {
+        snapshots: vec![QueuedSnapshot {
+            page: page.clone(),
+            covers_seq: head,
+            space,
+            payload: vec![9, 9, 9],
+        }],
+        ..Default::default()
+    };
+    let counting = || Counting {
+        inner: RelayTransport::new(relay.clone(), "g1"),
+        puts: Default::default(),
+        fail_pulls: true,
+    };
+
+    // Measured on another relay: dropped, and this relay's entries survive.
+    let mut t = counting();
+    let inc = exchange(&mut t, queued(elsewhere)).unwrap();
+    assert_eq!(inc.snapshots_sent, 0);
+    assert_eq!(
+        t.puts.load(Ordering::SeqCst),
+        0,
+        "another relay's snapshot was uploaded"
+    );
+    assert_eq!(
+        relay.log_len("g1", page.as_str()),
+        5,
+        "the destination's log was truncated by another relay's snapshot"
+    );
+
+    // Measured here: the same snapshot is legitimate and goes out.
+    let mut t = counting();
+    let inc = exchange(&mut t, queued(here)).unwrap();
+    assert_eq!(inc.snapshots_sent, 1);
+    assert_eq!(t.puts.load(Ordering::SeqCst), 1);
+}
+
+/// §12.3: the store is not locked while a round is on the wire, so an update can be queued
+/// after `prepare` gathered nothing. The round must make another pass instead of reporting
+/// a clean sync that left it behind (docs/state-machines/ffi-mobile-sync.md).
+#[test]
+fn ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire() {
+    use utopia_sync::{sync_round, StoreDone, StoreStep, SyncEngine};
+
+    let relay = Relay::new();
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Round").unwrap();
+    // Send the page creation first, so the round under test starts with an empty outbox.
+    SyncClient::new(RelayTransport::new(relay.clone(), "g1"), &store)
+        .unwrap()
+        .sync_once(&mut store)
+        .unwrap();
+    assert_eq!(store.outbox_count().unwrap(), 0);
+    let head_before = relay.manifest("g1").pages[0].head_seq;
+
+    let mut engine = SyncEngine::new(&store).unwrap();
+    let mut transport = RelayTransport::new(relay.clone(), "g1");
+    let mut captured = false;
+    let report = sync_round(&mut engine, &mut transport, |engine, step| match step {
+        StoreStep::Prepare => engine.prepare(&mut store).map(StoreDone::Prepared),
+        StoreStep::Apply(inc) => {
+            let pass = engine.apply(&mut store, *inc)?;
+            if !captured {
+                // A capture lands between the round's two store steps.
+                captured = true;
+                write(&mut store, &page, "typed during the round");
+            }
+            Ok(StoreDone::Applied(pass))
+        }
+        StoreStep::Queued => store
+            .outbox_count()
+            .map(|n| StoreDone::Queued(n > 0))
+            .map_err(Into::into),
+    })
+    .unwrap();
+    assert!(
+        report.pushed >= 1,
+        "the edit made during the exchange was left unsent: {report:?}"
+    );
+    assert_eq!(store.outbox_count().unwrap(), 0, "everything was sent");
+    assert!(
+        relay.manifest("g1").pages[0].head_seq > head_before,
+        "the capture reached the relay"
+    );
+}
