@@ -339,6 +339,91 @@ struct ControlChoice {
     selected: bool,
 }
 
+/// What a handler invalidated, so the next pass recomputes it
+/// (`docs/state-machines/page-view-rebuild-cycle.md`). A reason set instead of one `bool`:
+/// every invalidation says what it is about, and `rebuild` clears all of it in one place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Invalidation {
+    /// `items` describe an older store state.
+    rows: bool,
+    /// `refs` was fetched for another page, zoom or index version.
+    refs: bool,
+    /// The unlinked count is for another page or index version.
+    unlinked: bool,
+    /// One of the appearance mirrors (`ref_children_limit`, `attribute_blocks`) changed.
+    prefs: bool,
+}
+
+impl Invalidation {
+    fn rows() -> Self {
+        Self {
+            rows: true,
+            ..Self::default()
+        }
+    }
+
+    fn refs() -> Self {
+        Self {
+            refs: true,
+            ..Self::default()
+        }
+    }
+
+    fn unlinked() -> Self {
+        Self {
+            unlinked: true,
+            ..Self::default()
+        }
+    }
+
+    fn any(self) -> bool {
+        self.rows || self.refs || self.unlinked || self.prefs
+    }
+}
+
+impl std::ops::BitOr for Invalidation {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self {
+            rows: self.rows || other.rows,
+            refs: self.refs || other.refs,
+            unlinked: self.unlinked || other.unlinked,
+            prefs: self.prefs || other.prefs,
+        }
+    }
+}
+
+/// The rebuild cycle's state: what is stale, and whether the rows are current. `pending`
+/// being empty is the one definition of "clean" — the old boolean plus 20+ write sites, with
+/// only `rebuild` clearing it, is what let a handler's rebuild and a deferred event disagree
+/// about whether the items were stale.
+#[derive(Default)]
+struct RebuildCycle {
+    pending: Invalidation,
+}
+
+impl RebuildCycle {
+    fn new() -> Self {
+        // A view is born without rows and must build them before its first paint.
+        Self {
+            pending: Invalidation::rows(),
+        }
+    }
+
+    fn invalidate(&mut self, why: Invalidation) {
+        self.pending = self.pending | why;
+    }
+
+    fn dirty(&self) -> bool {
+        self.pending.any()
+    }
+
+    fn built(&mut self) {
+        self.pending = Invalidation::default();
+    }
+}
+
 #[derive(Clone)]
 struct DraggedBlock {
     page: PageId,
@@ -424,7 +509,14 @@ pub struct PageView {
     /// How attribute blocks are drawn (PG-1), mirrored from `settings.json` so a change
     /// made in Settings rebuilds this page's rows.
     attribute_blocks: crate::appearance::AttributeBlocks,
-    dirty: bool,
+    cycle: RebuildCycle,
+    /// How many times the rows were rebuilt, and how many of those passes ran inside a
+    /// frame (rule 10). Debug builds only, so the rebuild-cycle tests can prove a change
+    /// is answered once and outside `render`.
+    #[cfg(debug_assertions)]
+    rebuilds: usize,
+    #[cfg(debug_assertions)]
+    frame_rebuilds: usize,
     _subs: Vec<Subscription>,
 }
 
@@ -510,7 +602,7 @@ impl PageView {
                         .as_ref()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
                 if e.structural || e.pages.is_empty() || shown || this.has_embeds() {
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
             }),
@@ -520,12 +612,13 @@ impl PageView {
                 if this.page.as_ref() == Some(&e.from) {
                     this.page = Some(e.to.clone());
                     this.refs_key = None;
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
             }),
             cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
-                this.dirty = true;
+                this.cycle
+                    .invalidate(Invalidation::refs() | Invalidation::unlinked());
                 // LR-5: the unlinked count is keyed by the index version, so it is refreshed
                 // here rather than in `render` (rule 10: no database work in a frame).
                 this.refresh_unlinked(cx);
@@ -549,7 +642,8 @@ impl PageView {
                 if let LineInputEvent::Changed(t) = e {
                     this.query.text = (!t.trim().is_empty()).then(|| t.clone());
                     this.refs_key = None;
-                    this.dirty = true;
+                    this.cycle
+                        .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
                 }
             }),
@@ -594,9 +688,25 @@ impl PageView {
             page_menu: false,
             hovered_row: None,
             attribute_blocks: crate::appearance::attribute_blocks(cx),
-            dirty: true,
+            cycle: RebuildCycle::new(),
+            #[cfg(debug_assertions)]
+            rebuilds: 0,
+            #[cfg(debug_assertions)]
+            frame_rebuilds: 0,
             _subs: subs,
         }
+    }
+
+    /// How many rebuild passes this view has run (debug builds only).
+    #[cfg(debug_assertions)]
+    pub fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// How many of those passes ran inside `render` (debug builds only, rule 10).
+    #[cfg(debug_assertions)]
+    pub fn frame_rebuilds(&self) -> usize {
+        self.frame_rebuilds
     }
 
     fn has_embeds(&self) -> bool {
@@ -724,7 +834,8 @@ impl PageView {
         self.refs_key = None;
         // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
         self.refresh_unlinked(cx);
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::refs() | Invalidation::unlinked());
         self.rebuild(cx);
         self.list.reset(self.items.len());
         cx.notify();
@@ -803,9 +914,9 @@ impl PageView {
         });
         if !reachable {
             self.zoom = None;
-            self.dirty = true;
+            self.cycle.invalidate(Invalidation::rows());
         } else if unfolded {
-            self.dirty = true;
+            self.cycle.invalidate(Invalidation::rows());
         }
         self.focus_block(block, None, window, cx);
     }
@@ -975,9 +1086,9 @@ impl PageView {
         let preference = crate::appearance::attribute_blocks(cx);
         if self.attribute_blocks != preference {
             self.attribute_blocks = preference;
-            self.dirty = true;
+            self.cycle.invalidate(Invalidation::rows());
         }
-        if self.dirty {
+        if self.cycle.dirty() {
             self.rebuild(cx);
         }
     }
@@ -1014,7 +1125,21 @@ impl PageView {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.dirty = false;
+        #[cfg(debug_assertions)]
+        {
+            self.rebuilds += 1;
+            if self.in_render {
+                self.frame_rebuilds += 1;
+            }
+        }
+        self.rebuild_rows(cx);
+        // Every path through `rebuild_rows` ends with the list spliced, including the
+        // early returns for a missing page or header: clear the whole reason set here, in
+        // one place, so no caller can leave a reason behind.
+        self.cycle.built();
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         self.ref_children_limit = crate::appearance::ref_children(cx);
         if self.journal.is_none() {
             // Only the feed pins a day heading (DN-3).
@@ -1188,7 +1313,7 @@ impl PageView {
             app.report(r).unwrap_or_default()
         });
         self.unlinked = Some((version, found));
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1387,7 +1512,7 @@ impl PageView {
             });
         }
         self.attribute_blocks = blocks;
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1396,7 +1521,7 @@ impl PageView {
         let Some(j) = &mut self.journal else { return };
         let Some(next) = j.feed.request() else { return };
         j.feed = next;
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1892,7 +2017,7 @@ impl PageView {
             app.report(r);
             app.changed(Vec::new(), false, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1914,7 +2039,7 @@ impl PageView {
             }
             app.changed(Vec::new(), false, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -2162,7 +2287,7 @@ impl PageView {
                 sidebar: false,
             }),
             _ => {
-                self.dirty = true;
+                self.cycle.invalidate(Invalidation::rows());
                 cx.notify();
             }
         }
@@ -2207,7 +2332,7 @@ impl PageView {
             app.report(r);
             app.changed(Vec::new(), true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3008,7 +3133,7 @@ impl PageView {
                             app.changed(vec![page.clone()], true, cx);
                         });
                     }
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
                 LineInputEvent::Cancel => {
@@ -3033,7 +3158,7 @@ impl PageView {
             app.report(r);
             app.changed(vec![page.clone()], true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3048,7 +3173,8 @@ impl PageView {
             app.changed(vec![m.page.clone(), page.clone()], true, cx);
         });
         self.unlinked = None;
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
     }
 
@@ -3066,7 +3192,8 @@ impl PageView {
             app.changed(vec![page.clone()], true, cx);
         });
         self.unlinked = None;
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
     }
 
@@ -3079,7 +3206,7 @@ impl PageView {
             app.report(res);
             app.changed(vec![page.clone()], true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3119,7 +3246,8 @@ impl PageView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.query.also.retain(|p| *p != id);
                         this.refs_key = None;
-                        this.dirty = true;
+                        this.cycle
+                            .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
                     })),
             );
@@ -3156,7 +3284,8 @@ impl PageView {
                         this.query.also.push(id.clone());
                         this.filter_titles.insert(id.clone(), t.clone());
                         this.refs_key = None;
-                        this.dirty = true;
+                        this.cycle
+                            .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
                     })),
             );
@@ -3360,7 +3489,8 @@ impl PageView {
                     }
                     this.controls_menu = None;
                     this.refs_key = None;
-                    this.dirty = true;
+                    this.cycle
+                        .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
                 }))
         });
@@ -3865,7 +3995,7 @@ impl PageView {
                 }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.unlinked_open = !this.unlinked_open;
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }))
                 .into_any_element(),
