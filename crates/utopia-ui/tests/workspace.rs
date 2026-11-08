@@ -3883,9 +3883,9 @@ fn hidden_graph_panel_does_no_work(cx: &mut TestAppContext) {
             .unwrap()
     });
     app.update(cx, |app, cx| {
-        let r = app
-            .store
-            .set_block_text(&today, &block, "[[Alpha]] [[Beta]] [[Gamma]]", None, None);
+        let r =
+            app.store
+                .set_block_text(&today, &block, "[[Alpha]] [[Beta]] [[Gamma]]", None, None);
         app.report(r);
         let r = app.store.commit_block(&today, &block);
         app.report(r);
@@ -3910,7 +3910,10 @@ fn hidden_graph_panel_does_no_work(cx: &mut TestAppContext) {
     // Reopening the sidebar refreshes it once, from the index and the page now open.
     cx.simulate_keystrokes("cmd-shift-\\");
     cx.run_until_parked();
-    assert!(cx.debug_bounds("right-sidebar").is_some(), "sidebar reopened");
+    assert!(
+        cx.debug_bounds("right-sidebar").is_some(),
+        "sidebar reopened"
+    );
     let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel stays");
     assert_eq!(panel.update(cx, |g, _| g.node_count()), 4);
     assert_eq!(panel.update(cx, |g, _| g.origin()), Some(alpha));
