@@ -17,6 +17,60 @@ use utopia_doc::PageDoc;
 use crate::project::{display_title, resolve_page_key};
 use crate::{DraftDay, EditOpts, Result, Store, StoreError};
 
+/// The page lifecycle as one value (§6.5, AC-1.5; docs/state-machines/page-lifecycle-trash.md).
+///
+/// The CRDT side is the only source of truth: `PageMeta.deleted_at` says whether the page is
+/// tombstoned and `merged_into` says why (a rename onto an existing title, rule 8). The local
+/// `trash` row and the `tombstone` memory are bookkeeping derived from it, never a second
+/// opinion about the state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PageFate {
+    /// In the index: its title or date is live.
+    Live,
+    /// Tombstoned with no merge pointer (AC-1.5). Listed in the trash while restorable.
+    Trashed { at: i64 },
+    /// Tombstoned with a pointer to the page its blocks moved into (rule 8). Never restored:
+    /// the content lives in the survivor.
+    Merged { into: PageId, at: i64 },
+    /// Hard-deleted by Empty Trash: no shard and no page row, only a local `tombstone` row.
+    /// The id is never issued again (rule 4).
+    Purged { at: i64 },
+}
+
+impl PageFate {
+    /// The fate of a page that still has its shard. A page with a shard is never `Purged`.
+    pub fn of(state: &PageState) -> Self {
+        match (state.meta.deleted_at, state.meta.merged_into.clone()) {
+            (None, _) => PageFate::Live,
+            (Some(at), Some(into)) => PageFate::Merged { into, at },
+            (Some(at), None) => PageFate::Trashed { at },
+        }
+    }
+
+    pub fn is_live(&self) -> bool {
+        matches!(self, PageFate::Live)
+    }
+
+    /// When the page was tombstoned; `None` while it is live.
+    pub fn tombstoned_at(&self) -> Option<i64> {
+        match self {
+            PageFate::Live => None,
+            PageFate::Trashed { at } | PageFate::Merged { at, .. } | PageFate::Purged { at } => {
+                Some(*at)
+            }
+        }
+    }
+
+    /// The local `trash` row this fate owns: `Some(at)` only for `Trashed`. A merged page's
+    /// content is not in the trash, and a live page has no row at all.
+    pub fn trashed_at(&self) -> Option<i64> {
+        match self {
+            PageFate::Trashed { at } => Some(*at),
+            _ => None,
+        }
+    }
+}
+
 impl Store {
     fn live_daily(&self, date: NaiveDate) -> Result<Option<PageId>> {
         Ok(self
@@ -595,7 +649,7 @@ impl Store {
     /// Delete a page to the trash (AC-1.5). Undoable; restorable for 30 days.
     pub fn delete_page(&mut self, page: &PageId) -> Result<()> {
         let st = self.page_state(page)?.clone();
-        if st.meta.deleted_at.is_some() {
+        if !PageFate::of(&st).is_live() {
             return Err(DomainError::NoOp.into());
         }
         let title = display_title(&st, &self.date_format);
@@ -617,13 +671,21 @@ impl Store {
         Ok(())
     }
 
-    /// Restore a trashed page. If its title or date is taken by a live page meanwhile, it
-    /// merges into that page instead of creating a duplicate. Returns the surviving page.
+    /// Restore a trashed page (AC-1.5). If its title or date is taken by a live page
+    /// meanwhile, it merges into that page instead of creating a duplicate. Returns the
+    /// surviving page: the page itself, or the one it merged into.
     pub fn restore_page(&mut self, page: &PageId) -> Result<PageId> {
         self.sync_index()?;
         let meta = self.page_state(page)?.meta.clone();
-        if meta.deleted_at.is_none() {
-            return Ok(page.clone());
+        match PageFate::of(self.page_state(page)?) {
+            PageFate::Live => return Ok(page.clone()),
+            // The blocks already live in the survivor (rule 8). Restoring a merged page means
+            // going there, never resurrecting a tile with nothing under it.
+            PageFate::Merged { into, .. } => return Ok(into),
+            // A purged page has no shard, so the read above already failed; keeping the arm
+            // makes the four states exhaustive here.
+            PageFate::Purged { .. } => return Err(StoreError::NotFound(format!("page {page}"))),
+            PageFate::Trashed { .. } => {}
         }
         let existing = match (meta.kind, meta.daily_date) {
             (PageKind::Daily, Some(d)) => self.live_daily(d)?,
@@ -652,7 +714,9 @@ impl Store {
         Ok(survivor)
     }
 
-    /// Trashed pages that are still tombstoned: `(id, title, deleted_at)`.
+    /// Trashed pages that are still tombstoned: `(id, title, deleted_at)`. A row exists only
+    /// for the `Trashed` fate, so this list is the trash and nothing else (the join keeps a
+    /// row that outlived its tombstone out of the UI).
     pub fn list_trash(&self) -> Result<Vec<(PageId, String, i64)>> {
         self.read_barrier()?;
         let mut stmt = self.conn.prepare(
@@ -784,7 +848,7 @@ impl Store {
     /// the same survivor. Applies commands in memory; returns the other pages touched.
     pub(crate) fn dedupe_collisions(&mut self, page: &PageId) -> Result<Vec<PageId>> {
         let st = self.page_state(page)?.clone();
-        if st.meta.deleted_at.is_some() {
+        if !PageFate::of(&st).is_live() {
             return Ok(Vec::new());
         }
         let other: Option<PageId> = match (st.meta.kind, st.meta.daily_date) {
@@ -829,7 +893,7 @@ impl Store {
         let mut changed = false;
         for _ in 0..8 {
             let st = self.page_state(&current)?.clone();
-            let (Some(_), Some(into)) = (st.meta.deleted_at, st.meta.merged_into.clone()) else {
+            let PageFate::Merged { into, .. } = PageFate::of(&st) else {
                 break;
             };
             let has_orphans = st.blocks.values().any(|b| b.moved_to.is_none());
@@ -916,6 +980,34 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `docs/state-machines/page-lifecycle-trash.md`: restore on a merged page is now an
+    /// explicit no-op that points at the survivor. It used to clear both tombstone fields
+    /// and leave a live page whose every block had `moved_to` the survivor: a page with
+    /// nothing to draw. Rule 5 keeps its tiles; it does not resurrect them.
+    #[test]
+    fn ac_4_6_restoring_a_merged_page_returns_the_survivor() {
+        let mut s = Store::open_in_memory().unwrap();
+        let from = s.create_page("From").unwrap();
+        let into = s.create_page("Into").unwrap();
+        s.merge_pages(&from, &into).unwrap();
+        assert!(
+            matches!(
+                PageFate::of(s.page_state(&from).unwrap()),
+                PageFate::Merged { .. }
+            ),
+            "a rename onto an existing title leaves a merge tombstone"
+        );
+
+        assert_eq!(s.restore_page(&from).unwrap(), into);
+        assert!(
+            matches!(
+                PageFate::of(s.page_state(&from).unwrap()),
+                PageFate::Merged { .. }
+            ),
+            "restore must not resurrect a merged page (rule 8)"
+        );
+    }
 
     /// `docs/state-machines/draft-daily-page.md` issue 4: a shard built for a page whose
     /// metadata never applied stayed in `docs`, so `id_taken` reported the title's

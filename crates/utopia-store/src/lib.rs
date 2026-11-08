@@ -41,6 +41,7 @@ pub use crypt::{encryption_available, is_encrypted, set_encryption};
 pub use doctor::DoctorReport;
 pub use extras::{ImportReport, Mention, TEMPLATE_PREFIX};
 pub use pagegraph::{GraphNode, GraphOptions, PageGraph};
+pub use pages::PageFate;
 pub use project::{display_title, resolve_page_key};
 pub use query::*;
 pub use utopia_doc::DocCursor;
