@@ -1282,6 +1282,50 @@ fn fr_3_9_leaving_a_zoom_to_reveal_a_block_counts_unlinked_mentions(cx: &mut Tes
         .expect("the whole page is back, with its unlinked count");
 }
 
+/// FR-2.7: zooming changes what the header means — the title is the block's text and
+/// `start_rename` offers the calendar there instead of a rename. A page's rename input
+/// must therefore close with the zoom, as it does when the page changes; it used to stay
+/// open over a header it no longer described.
+#[gpui::test]
+fn fr_2_7_zooming_within_a_page_closes_the_rename_input(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, block) = app.update(cx, |app, _| {
+        let p = app.store.create_page("Alpha").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "body", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        (p, b)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let title = cx.debug_bounds("page-title").expect("the page title");
+    cx.simulate_click(title.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_view().read(cx).is_renaming()),
+        "clicking the title starts the rename"
+    );
+
+    // The same transition a bullet click or Cmd+Alt+Down makes.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), Some(block), None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_zoom(cx)).is_some(),
+        "the page is zoomed into the block"
+    );
+    assert!(
+        !ws.update(cx, |w, cx| w.main_view().read(cx).is_renaming()),
+        "the rename input closed with the zoom"
+    );
+}
+
 /// RS-3: a pinned row's title comes from the shard, so renaming the page reaches the
 /// Pinned tab without toggling another pin or restarting.
 #[gpui::test]
