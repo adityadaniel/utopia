@@ -641,19 +641,17 @@ impl PageView {
                         .journal
                         .as_ref()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
-                if e.structural
+                let relevant = e.structural
                     || e.pages.is_empty()
                     || shown
-                    || this.interest == Interest::AllPages
-                {
-                    if this.cycle.store_changed(e.version, Invalidation::rows()) {
-                        if this.interest == Interest::AllPages {
-                            // A query block or an open transclusion reads other pages:
-                            // answer in this handler, never in a frame (rule 10).
-                            this.rebuild(cx);
-                        }
-                        cx.notify();
+                    || this.interest == Interest::AllPages;
+                if relevant && this.cycle.store_changed(e.version, Invalidation::rows()) {
+                    if this.interest == Interest::AllPages {
+                        // A query block or an open transclusion reads other pages: answer
+                        // in this handler, never in a frame (rule 10).
+                        this.rebuild(cx);
                     }
+                    cx.notify();
                 }
             }),
             // A promoted draft merged into the day's page (FR-1.2): this view may be
