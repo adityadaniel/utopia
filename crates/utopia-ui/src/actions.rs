@@ -9,7 +9,7 @@
 
 use gpui::{actions, App, KeyBinding};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 actions!(
@@ -1068,14 +1068,15 @@ impl Overrides {
         self.0.remove(action);
     }
 
-    /// Actions that would answer to the same keys in the same context. Two actions in
-    /// different contexts (the editor vs. the whole window) do not conflict.
+    /// Actions that would answer to the same keys in the same place. The test is where a
+    /// binding is live, not how its context string is spelled, so a binding in the editor and
+    /// one in the editor-or-line-input are compared (keymap machine doc, issue 3).
     pub fn conflicts(&self) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
         let mut out = Vec::new();
         for (i, a) in CATALOG.iter().enumerate() {
             for b in CATALOG.iter().skip(i + 1) {
-                if a.context == b.context
-                    && canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                if canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                    && scopes_touch(a.context, b.context)
                 {
                     out.push((a, b));
                 }
@@ -1083,6 +1084,53 @@ impl Overrides {
         }
         out
     }
+}
+
+/// Whether two context predicates can answer to a chord in the same place.
+///
+/// A predicate is read as the places it names: its disjunctive normal form over identifiers.
+/// Two bindings fight when they name *the same* place, so `BlockEditor` and
+/// `BlockEditor || LineInput` clash in the editor, and `None` (the whole window) is every
+/// place. A clause with extra identifiers is a narrower layer of a place rather than a second
+/// one: `BlockEditor && autocomplete` is the editor with the completion menu open, which is
+/// how Tab accepts a suggestion while the menu is up and indents otherwise — reporting that
+/// against `Indent` would put a permanent warning on two default rows.
+fn scopes_touch(a: Option<&str>, b: Option<&str>) -> bool {
+    let (Some(a), Some(b)) = (a, b) else {
+        return true;
+    };
+    match (clauses(a), clauses(b)) {
+        (Some(a), Some(b)) => a.iter().any(|x| b.contains(x)),
+        // A predicate this code does not model: compare the strings, as before.
+        _ => a == b,
+    }
+}
+
+/// The places a context string names: each clause is the set of identifiers it requires.
+/// `None` for a construct that is not a plain conjunction/disjunction of identifiers (`!`,
+/// `==`, `>`): the catalog uses none, but `keymap.json` must never panic a release.
+fn clauses(context: &str) -> Option<Vec<BTreeSet<String>>> {
+    fn walk(p: &gpui::KeyBindingContextPredicate) -> Option<Vec<BTreeSet<String>>> {
+        use gpui::KeyBindingContextPredicate as P;
+        match p {
+            P::Identifier(name) => Some(vec![BTreeSet::from([name.to_string()])]),
+            P::And(left, right) => {
+                let (left, right) = (walk(left)?, walk(right)?);
+                Some(
+                    left.iter()
+                        .flat_map(|a| right.iter().map(move |b| a.union(b).cloned().collect()))
+                        .collect(),
+                )
+            }
+            P::Or(left, right) => {
+                let mut out = walk(left)?;
+                out.extend(walk(right)?);
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+    walk(&gpui::KeyBindingContextPredicate::parse(context).ok()?)
 }
 
 /// The keys the app has bound for an action right now, in `keymap.json` spelling.
@@ -1302,6 +1350,43 @@ mod tests {
         assert!(
             saved.contains("cmd-alt-t"),
             "the usable one is kept: {saved}"
+        );
+    }
+
+    /// Keymap machine doc, issue 3: clashes were compared by the literal context string, so a
+    /// binding in the editor and one in the editor-or-line-input looked unrelated. They answer
+    /// to the same chord in the editor, so it is said out loud (§9.1, ST-3).
+    #[test]
+    fn a_clash_across_two_overlapping_contexts_is_reported() {
+        let mut o = Overrides::default();
+        o.set("Bold", "cmd-c"); // Copy's default, context "BlockEditor || LineInput"
+        let c = o.conflicts();
+        let names: Vec<(&str, &str)> = c.iter().map(|(a, b)| (a.action, b.action)).collect();
+        assert!(
+            names
+                .iter()
+                .any(|(a, b)| { (*a == "Bold" && *b == "Copy") || (*a == "Copy" && *b == "Bold") }),
+            "Bold is live wherever Copy is, in the editor: {names:?}"
+        );
+    }
+
+    /// The scope rule reads contexts as the set of places a binding is live in, so a narrower
+    /// layer of the same place (`BlockEditor && autocomplete`) is not a clash — that is how
+    /// Tab accepts a suggestion while the menu is open and indents the rest of the time.
+    #[test]
+    fn a_narrower_context_is_a_layer_not_a_clash() {
+        assert!(
+            !scopes_touch(EDITOR, COMPLETING),
+            "the menu's Tab is a narrower editor, not a second place"
+        );
+        assert!(scopes_touch(EDITOR, TEXT), "both are live in the editor");
+        assert!(
+            scopes_touch(None, EDITOR),
+            "a window-wide key is live in the editor too"
+        );
+        assert!(
+            !scopes_touch(EDITOR, Some("LineInput")),
+            "the editor and a line input are different places"
         );
     }
 

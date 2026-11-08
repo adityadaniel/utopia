@@ -886,6 +886,39 @@ fn a_failed_save_is_reported_after_the_rebind(cx: &mut TestAppContext) {
     );
 }
 
+/// Keymap machine doc, issue 3: rebinding Bold (editor only) onto Cmd+C, which Copy answers
+/// to in the editor as well, is a clash with the action it fights (ST-3, §9.1).
+#[gpui::test]
+fn a_clash_across_contexts_is_reported(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let bold = doc("Bold").unwrap();
+    view.update_in(cx, |v, window, cx| v.start_capture(bold, window, cx));
+    cx.simulate_keystrokes("cmd-c");
+    cx.run_until_parked();
+
+    view.read_with(cx, |v, _| {
+        let status = v.status().unwrap_or_default();
+        assert!(
+            status.contains("Copy"),
+            "Copy is dead in the editor now: {status}"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-clash-Bold").is_some(),
+        "the row carries the clash line"
+    );
+}
+
 mod appearance {
     use chrono::NaiveDate;
     use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};
