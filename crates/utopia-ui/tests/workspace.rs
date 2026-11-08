@@ -3628,6 +3628,162 @@ fn dropped_files_become_attachments(cx: &mut TestAppContext) {
     assert!(app.update(cx, |a, _| a.store.has_blob(&hash)));
 }
 
+/// A two-page PDF opened in the workspace's PDF viewer, at `window_size`.
+#[cfg(target_os = "macos")]
+fn pdf_viewer(
+    cx: &mut TestAppContext,
+    window_size: gpui::Size<gpui::Pixels>,
+) -> (
+    tempfile::TempDir,
+    Entity<AppState>,
+    Entity<Workspace>,
+    Entity<utopia_ui::pdf_view::PdfView>,
+    &mut VisualTestContext,
+) {
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(dir.path().join("g.utopia")).unwrap();
+    store.set_today(Some(today()));
+    let pdf = utopia_ui::pdf::sample_pdf(&[
+        &["Leverage points matter", "a second line"],
+        &["Page two text"],
+    ]);
+    let att = store.add_blob("paper.pdf", &pdf).unwrap();
+    let page = store.create_page("Reading").unwrap();
+    let host = store.ensure_first_block(&page).unwrap();
+    store
+        .set_block_text(
+            &page,
+            &host,
+            &utopia_core::attach::markup(&att.name, &att.hash, &att.mime),
+            None,
+            None,
+        )
+        .unwrap();
+    store.commit_block(&page, &host).unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let app2 = app.clone();
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app2, window, cx));
+    cx.simulate_resize(window_size);
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx);
+        w.open_pdf(
+            att.hash.clone(),
+            att.name.clone(),
+            None,
+            Some(host.clone()),
+            window,
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    let view = ws.update(cx, |w, _| w.pdf_view()).expect("viewer open");
+    (dir, app, ws, view, cx)
+}
+
+/// P2 "PDF highlights": a release that no page claims — the gutter, the header, or
+/// outside the window — ends the drag. Otherwise the rectangle keeps being drawn and the
+/// next release can finish a drag nobody is making.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn p2_pdf_highlight_release_off_page_cancels_the_drag(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, MouseMoveEvent};
+    let (_dir, _app, _ws, view, cx) = pdf_viewer(cx, size(px(1280.), px(900.)));
+    let b = view
+        .update(cx, |v, _| v.page_bounds(0))
+        .expect("page drawn");
+    let at = |x: f32, y: f32| {
+        point(
+            b.origin.x + b.size.width * x,
+            b.origin.y + b.size.height * y,
+        )
+    };
+    let drag_to = |cx: &mut VisualTestContext, position: gpui::Point<gpui::Pixels>| {
+        cx.simulate_mouse_down(at(0.05, 0.07), MouseButton::Left, Modifiers::default());
+        cx.simulate_event(MouseMoveEvent {
+            position,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: Modifiers::default(),
+        });
+    };
+    // Release in the gutter beside the page.
+    drag_to(cx, at(0.9, 0.105));
+    assert!(view.update(cx, |v, _| v.dragging()), "the drag is live");
+    cx.simulate_mouse_up(
+        point(b.origin.x - px(40.), at(0.5, 0.5).y),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert!(
+        !view.update(cx, |v, _| v.dragging()),
+        "an off-page release ends the drag"
+    );
+    assert!(
+        view.update(cx, |v, _| v.highlights().is_empty()),
+        "and writes nothing"
+    );
+    // Released outside the window there is no hovered element to tell; the drag is over
+    // when a move arrives with no button held.
+    drag_to(cx, at(0.9, 0.105));
+    cx.simulate_mouse_up(
+        point(px(-50.), px(-50.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    cx.simulate_event(MouseMoveEvent {
+        position: at(0.5, 0.5),
+        pressed_button: None,
+        modifiers: Modifiers::default(),
+    });
+    assert!(
+        !view.update(cx, |v, _| v.dragging()),
+        "a move with no button held ends a drag whose release was missed"
+    );
+    assert!(view.update(cx, |v, _| v.highlights().is_empty()));
+}
+
+/// P2 "PDF highlights": a drag that ends on another page is cancelled, not finished
+/// against the page it started from, where clamping turns it into a highlight that runs
+/// to the page edge.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn p2_pdf_highlight_release_on_another_page_writes_nothing(cx: &mut TestAppContext) {
+    use gpui::{Bounds, Modifiers, MouseButton, MouseMoveEvent};
+    // Tall enough for both pages to be laid out.
+    let (_dir, _app, _ws, view, cx) = pdf_viewer(cx, size(px(1280.), px(2200.)));
+    let p0 = view
+        .update(cx, |v, _| v.page_bounds(0))
+        .expect("page 0 drawn");
+    let p1 = view
+        .update(cx, |v, _| v.page_bounds(1))
+        .expect("page 1 drawn");
+    assert!(p1.origin.y > p0.origin.y, "page 1 below page 0");
+    let at = |b: Bounds<gpui::Pixels>, x: f32, y: f32| {
+        point(
+            b.origin.x + b.size.width * x,
+            b.origin.y + b.size.height * y,
+        )
+    };
+    cx.simulate_mouse_down(at(p0, 0.05, 0.07), MouseButton::Left, Modifiers::default());
+    cx.simulate_event(MouseMoveEvent {
+        position: at(p1, 0.5, 0.3),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    cx.simulate_mouse_up(at(p1, 0.5, 0.3), MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(!view.update(cx, |v, _| v.dragging()));
+    assert!(
+        view.update(cx, |v, _| v.highlights().is_empty()),
+        "no highlight clamped onto the page the drag started from"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[gpui::test]
 fn pdf_viewer_drag_creates_highlight_block(cx: &mut TestAppContext) {
