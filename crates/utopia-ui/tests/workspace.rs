@@ -2987,6 +2987,43 @@ fn leaving_a_page_drops_its_open_transclusions(cx: &mut TestAppContext) {
     );
 }
 
+/// AGENTS.md "Keep that when touching the list": the row being edited carries the
+/// editor's focus handle so it keeps receiving keystrokes out of view. That registration
+/// must end with the target — `end` used to clear the target and leave the handle on the
+/// row until some later rebuild happened to re-splice it (rebuild-cycle issue 4).
+#[gpui::test]
+fn ending_an_edit_drops_the_rows_focus_registration(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, block) = app.update(cx, |app, _| {
+        let page = app.store.create_page("Rows").unwrap();
+        let block = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &block, "first", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &block).unwrap();
+        (page, block)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, Some(block), false, window, cx)
+    });
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert_eq!(
+        view.read_with(cx, |v, _| v.focused_rows()),
+        1,
+        "the row being edited carries the editor's handle"
+    );
+
+    // Only the editor ends here: no page-view handler runs, so the `Blurred` event is the
+    // one thing that can re-splice the rows before the next frame.
+    ws.update(cx, |w, cx| w.editor().update(cx, |e, cx| e.end(cx)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.focused_rows()),
+        0,
+        "the target and the row's focus handle moved together"
+    );
+}
+
 /// Rule 9 / PG-1: both appearance mirrors are resynced in one place. Only
 /// `rebuild_if_dirty` used to notice an `attribute_blocks` change, so a rebuild triggered
 /// by something else (an index update, the observer itself) built rows with the old

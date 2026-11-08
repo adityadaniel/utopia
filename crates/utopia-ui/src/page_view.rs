@@ -545,6 +545,10 @@ pub struct PageView {
     /// What store changes this view's rows depend on, recomputed from the rows it just
     /// built: a query block or an open transclusion makes every page's change relevant.
     interest: Interest,
+    /// How many rows currently carry the editor's focus handle. When an edit ends the
+    /// handle must leave the row with the target, or the list keeps force-rendering a row
+    /// that is drawn as text (issue 4).
+    focused_rows: usize,
     cycle: RebuildCycle,
     /// How many times the rows were rebuilt, and how many of those passes ran inside a
     /// frame (rule 10). Debug builds only, so the rebuild-cycle tests can prove a change
@@ -738,6 +742,7 @@ impl PageView {
             hovered_row: None,
             attribute_blocks: crate::appearance::attribute_blocks(cx),
             interest: Interest::ThisPage,
+            focused_rows: 0,
             cycle: RebuildCycle::new(),
             #[cfg(debug_assertions)]
             rebuilds: 0,
@@ -757,6 +762,12 @@ impl PageView {
     #[cfg(debug_assertions)]
     pub fn frame_rebuilds(&self) -> usize {
         self.frame_rebuilds
+    }
+
+    /// How many rows currently carry the editor's focus handle (debug builds only).
+    #[cfg(debug_assertions)]
+    pub fn focused_rows(&self) -> usize {
+        self.focused_rows
     }
 
     /// Whether this view's rows depend on every page's changes (debug builds only): a
@@ -1204,6 +1215,7 @@ impl PageView {
                 _ => None,
             })
             .collect();
+        self.focused_rows = handles.iter().filter(|h| h.is_some()).count();
         self.list.splice_focusable(0..old_len, handles);
         if top.item_ix > 0 || top.offset_in_item > px(0.) {
             self.list.scroll_to(top);
@@ -1827,6 +1839,20 @@ impl PageView {
         let target = editor.read(cx).target().cloned();
         if let EditorEvent::Restore(caret) = event {
             self.restore(caret, window, cx);
+            return;
+        }
+        if matches!(event, EditorEvent::Blurred) {
+            // The editor dropped its target (Escape, navigation, a reference followed, the
+            // block went away). The list still holds the focus handle it registered on the
+            // old row, so it would keep force-rendering a row now drawn as text; re-splice
+            // from the editor's current target instead of waiting for the next rebuild
+            // (issue 4). An event from another host's edit has nothing to re-splice.
+            let host = cx.entity_id();
+            let editing_here = editor.read(cx).target().is_some_and(|t| t.host == host);
+            if self.focused_rows > 0 || editing_here {
+                self.splice_items(self.items.len(), cx);
+                cx.notify();
+            }
             return;
         }
         let Some(t) = target else { return };
