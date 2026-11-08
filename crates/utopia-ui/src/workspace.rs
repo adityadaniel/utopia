@@ -181,6 +181,10 @@ pub struct Workspace {
     jump: Option<(Entity<JumpPalette>, JumpMode)>,
     /// The local graph in the right sidebar, beside the page that stays editable (GR-5).
     graph_panel: Option<Entity<GraphView>>,
+    /// The main pane's page when the sidebar was hidden, so a panel kept across the hide
+    /// can tell whether the page moved while it was away and only then follow it. `Some(None)`
+    /// is a hide with no page open; `None` means no hide to catch up from.
+    hidden_main_page: Option<Option<PageId>>,
     sidebar: SidebarData,
     sidebar_seen: Option<u64>,
     inspector: InspectorData,
@@ -337,6 +341,7 @@ impl Workspace {
             pinned_version: None,
             jump: None,
             graph_panel: None,
+            hidden_main_page: None,
             sidebar: SidebarData::default(),
             sidebar_seen: None,
             inspector: InspectorData::default(),
@@ -1416,19 +1421,24 @@ impl Workspace {
     }
 
     /// Show the sidebar (RS-4). A graph panel kept from last time did no work while the
-    /// sidebar was hidden (it was not drawn), so it is brought up to date here instead:
-    /// the origin may have moved to another page and the index may have changed under it
-    /// (workspace-main-pane-content.md, issue 3). `set_origin` reloads on a new origin and
-    /// `refresh` re-reads the index, keeping the pan and zoom the user set.
+    /// sidebar was hidden (it was not drawn), so it catches up here instead: it follows the
+    /// main pane only if the page actually moved while it was away, and it re-reads the
+    /// index. A panel opened around a sidebar or split page's graph keeps that origin, and
+    /// its pan and zoom, when the sidebar is merely hidden and shown again — that is not
+    /// navigation (workspace-main-pane-content.md, issue 3).
     fn show_right(&mut self, cx: &mut Context<Self>) {
+        let was_hidden_with = self.hidden_main_page.take();
         if self.right_open {
             return;
         }
         self.right_open = true;
         if let Some(panel) = self.graph_panel.clone() {
             let origin = self.main.read(cx).page();
+            let moved = was_hidden_with.is_some_and(|page| page != origin);
             panel.update(cx, |graph, cx| {
-                graph.set_origin(origin, cx);
+                if moved {
+                    graph.set_origin(origin, cx);
+                }
                 graph.refresh(cx);
             });
         }
@@ -1466,6 +1476,7 @@ impl Workspace {
         if focused {
             window.focus(&self.focus);
         }
+        self.hidden_main_page = Some(self.main.read(cx).page());
         self.right_open = false;
         cx.notify();
     }

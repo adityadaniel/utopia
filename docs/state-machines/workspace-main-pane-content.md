@@ -20,8 +20,11 @@ transitions and diagram below still describe the shape on `main` before this cha
 - **Issue 3 (hidden graph panel kept working): handled, not removed.** The panel is still
   kept while the sidebar is hidden (reopening brings it back, like the stacked panes), but
   its main-page and `IndexUpdated` observers return early when `right_open` is false, and
-  `show_right` re-reads the origin and the index once when the sidebar returns. Proven by
-  `hidden_graph_panel_does_no_work`.
+  `show_right` re-reads the index once when the sidebar returns. It re-reads the origin only
+  if the main page actually moved while the sidebar was away, so a panel opened around a
+  sidebar page's graph keeps its origin, pan and zoom across a hide/show (GR-5). Proven by
+  `hidden_graph_panel_does_no_work` and
+  `reopening_the_sidebar_keeps_the_graph_panels_origin`.
 
 The sidebar `graph_panel` stays orthogonal to `MainContent` (it sits beside the page).
 Nothing else listed here was left unhandled.
