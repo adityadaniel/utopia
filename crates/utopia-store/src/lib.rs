@@ -35,7 +35,7 @@ use utopia_core::undo::{Caret, UndoGroup, UndoStack, UndoStep};
 use utopia_core::{BlockId, Command, DateFormat, DocDelta, DomainError, PageId, PageState};
 use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
-pub use attach::{sha256_hex, Attachment, PdfHighlight, MAX_BLOB_BYTES};
+pub use attach::{sha256_hex, Attachment, BlobState, PdfHighlight, MAX_BLOB_BYTES};
 pub use blockquery::{QueryHit, QueryResult};
 pub use crypt::{encryption_available, is_encrypted, set_encryption};
 pub use doctor::DoctorReport;

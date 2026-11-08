@@ -159,6 +159,20 @@ fn v6_migration_backfills_attributes() {
     );
 }
 
+/// The `attachment` table as v7 and v8 had it, so a migration test can rewind a finished
+/// file to the shape those versions really wrote (rule 14: migrations are tested against
+/// the old schema, not against today's).
+const V8_ATTACHMENT: &str = "
+CREATE TABLE attachment (
+  hash       TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  mime       TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  uploaded   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX attachment_upload ON attachment(uploaded) WHERE uploaded = 0;";
+
 /// v8 (docs/state-machines/page-lifecycle-trash.md issue 3): an older graph keeps opening
 /// and gains the tombstone memory, so a title trashed before the upgrade is not issued the
 /// same uuidv5 again after Empty Trash. The same migration drops a trash row that outlived
@@ -176,11 +190,14 @@ fn v8_migration_remembers_tombstones_and_repairs_the_trash() {
         s.sync_index().unwrap();
         (gone, live)
     };
-    // Simulate a v7 file: no tombstone memory, and a trash row for a live page.
+    // Simulate a v7 file: no tombstone memory, the v7 attachment table, and a trash row for
+    // a live page.
     {
         let c = rusqlite::Connection::open(&path).unwrap();
         c.execute_batch(&format!(
             "DROP TABLE tombstone;
+             DROP TABLE attachment;
+             {V8_ATTACHMENT}
              INSERT OR REPLACE INTO trash(id, kind, payload, deleted_at)
                VALUES ('{live}', 'page', X'7b7d', 1);
              PRAGMA user_version = 7;"
@@ -219,6 +236,55 @@ fn v8_migration_remembers_tombstones_and_repairs_the_trash() {
         s.create_page("Gone").unwrap(),
         gone,
         "a purged id is not issued again (rule 4)"
+    );
+}
+
+/// v9 (docs/state-machines/attachment-blob-state.md): the upload flag becomes an explicit
+/// `state` column. A v8 file keeps opening (§14.4) and nothing is uploaded twice or
+/// forgotten by the upgrade: `uploaded = 1` is still the queue's complement.
+#[test]
+fn v9_migration_backfills_the_attachment_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let (sent, pending) = {
+        let mut s = Store::open(&path).unwrap();
+        let sent = s.add_blob("sent.pdf", b"%PDF-1.4 sent").unwrap();
+        let pending = s.add_blob("pending.pdf", b"%PDF-1.4 pending").unwrap();
+        s.mark_blobs_uploaded(std::slice::from_ref(&sent.hash))
+            .unwrap();
+        (sent, pending)
+    };
+    // Simulate a v8 file: the v7 attachment table with its `uploaded` flag.
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "DROP TABLE attachment;
+             {V8_ATTACHMENT}
+             INSERT INTO attachment(hash, name, mime, size, created_at, uploaded)
+               VALUES ('{sent}', 'sent.pdf', 'application/pdf', 14, 1, 1);
+             INSERT INTO attachment(hash, name, mime, size, created_at, uploaded)
+               VALUES ('{pending}', 'pending.pdf', 'application/pdf', 17, 2, 0);
+             PRAGMA user_version = 8;",
+            sent = sent.hash,
+            pending = pending.hash
+        ))
+        .unwrap();
+    }
+
+    let s = Store::open(&path).unwrap();
+    assert_eq!(
+        s.attachment_state(&sent.hash).unwrap(),
+        Some(utopia_store::BlobState::Uploaded),
+        "a sent blob is not queued again"
+    );
+    assert_eq!(
+        s.attachment_state(&pending.hash).unwrap(),
+        Some(utopia_store::BlobState::Pending)
+    );
+    let queue = s.blobs_to_upload(10).unwrap();
+    assert_eq!(
+        queue.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![pending.hash.as_str()]
     );
 }
 

@@ -8,7 +8,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 const V1: &str = r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -206,6 +206,35 @@ DELETE FROM trash WHERE NOT EXISTS (
   SELECT 1 FROM page p WHERE p.id = trash.id AND p.deleted_at IS NOT NULL);
 "#;
 
+/// v9: the attachment row's upload flag becomes an explicit state
+/// (docs/state-machines/attachment-blob-state.md). Two columns, one fact: `lost_at` is set
+/// exactly when `state = 'lost'`, and the table CHECK makes the other combination
+/// unrepresentable, so "pending but file gone" cannot be silently skipped any more.
+/// `uploaded = 1` rows become `uploaded`; the rest start pending.
+///
+/// The table is rebuilt (not `ALTER TABLE`ed) because SQLite cannot add a table-level CHECK
+/// and v7/v8 files keep opening either way (§14.4). It has no foreign keys to fix up.
+const V9: &str = r#"
+CREATE TABLE attachment_v9 (
+  hash       TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  mime       TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  state      TEXT NOT NULL CHECK (state IN ('pending','uploaded','lost')),
+  lost_at    INTEGER,
+  CHECK ((state = 'lost') = (lost_at IS NOT NULL))
+);
+INSERT INTO attachment_v9(hash, name, mime, size, created_at, state, lost_at)
+  SELECT hash, name, mime, size, created_at,
+         CASE WHEN uploaded <> 0 THEN 'uploaded' ELSE 'pending' END, NULL
+  FROM attachment;
+DROP TABLE attachment;
+ALTER TABLE attachment_v9 RENAME TO attachment;
+CREATE INDEX attachment_pending ON attachment(created_at, hash)
+  WHERE state <> 'uploaded';
+"#;
+
 /// Attribute row values for a block's text, if it is an attribute block.
 pub(crate) fn attr_row(text: &str) -> Option<(String, String, String, String)> {
     use utopia_core::{inline, title::normalize_title};
@@ -303,6 +332,14 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if version < 8 {
         let tx = conn.transaction()?;
         tx.execute_batch(V8)?;
+        // The version this block builds, not the newest one: a file that stops here must
+        // not claim a schema it does not have yet.
+        tx.execute_batch("PRAGMA user_version = 8")?;
+        tx.commit()?;
+    }
+    if version < 9 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V9)?;
         tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         tx.commit()?;
     }
