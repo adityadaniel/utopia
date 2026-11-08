@@ -24,9 +24,22 @@ issues below are fixed:
    `ac_12_6_a_refusal_is_not_offline` and `a_refusal_is_not_offline`.
 4. **Fixed** — the queued compaction snapshots live in the engine, and the engine lives on the
    graph, so the next `sync` call uploads them instead of losing them. Test:
-   `a_queued_snapshot_rides_the_next_round`. Left as before: the queue is only flushed by a
-   sync call, so quitting the app loses it — harmless, because the manifest asks for the same
-   snapshot again on the next round.
+   `a_queued_snapshot_rides_the_next_round`. A snapshot is bound to the relay that measured
+   the head it covers (`QueuedSnapshot::space`): `exchange` drops one whose space is not the
+   destination's, so retaining the engine across a relay-url or graph-id change cannot
+   truncate another relay's log past updates this device never imported (rule 5). Tests:
+   `a_snapshot_queued_for_one_relay_is_not_uploaded_to_another` and
+   `ac_12_6_a_snapshot_measured_on_another_relay_is_not_uploaded`. Left as before: the queue
+   is only flushed by a sync call, so quitting the app loses it — harmless, because the
+   manifest asks for the same snapshot again on the next round.
+5. **Fixed** (consequence of 1, found in review) — with the store unlocked during the
+   exchange, a capture can be queued after `prepare` gathered nothing and before the round
+   stops, so the round could answer `Synced` with the capture never sent. `sync_round` now
+   asks the store for queued updates (`StoreStep::Queued`) before it calls a round quiet, and
+   pushes them in the same round. Tests:
+   `an_edit_made_during_the_exchange_is_pushed_before_the_round_reports_synced` and
+   `ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire`. Attachments are still
+   bounded per round and retried by the next `prepare`; the mobile surface has none (§14.3).
 
 Left unhandled, deliberately: the round is still synchronous from Swift's side
 (`Task.detached` keeps it off the main actor) and is not cancellable — a cancelled Swift task
@@ -49,6 +62,7 @@ and running a sync round. `crates/utopia-ffi/src/lib.rs`, with the Swift side in
 | Locked vs open | not a state: `Graph::open` either succeeds or returns `FfiError::Locked` (`ffi/lib.rs:21, :248`) | – |
 | Swift mirror | `GraphModel.swift:9-15, :92-131` `graph: Graph?`, `syncing: Bool`, `lastSync: String` | the shell's `syncing` only decides whether the button is enabled |
 | Round answer | `ffi/lib.rs:105` `SyncOutcome` (from `SyncStatus`) | one variant per thing the shell shows |
+| Snapshot queue | `sync/lib.rs` `QueuedSnapshot` (`SyncEngine::pending_snapshots`) | tagged with the space that measured its head; only uploaded there |
 | Setup errors | a transport that cannot be built → `FfiError::Sync { msg }` (`ffi/lib.rs:48`) | a round's own failures are the outcome, not an error |
 
 ## States
@@ -62,8 +76,9 @@ held only while `prepare`/`apply` run).
   `client_id`, so opening needs no later engine build).
 - `sync(url, token, passphrase)` (`ffi/lib.rs:392`): build the transport (no store), then
   `take_engine`: `Idle → Running`, or `Busy` when already `Running`. The round runs
-  `prepare` (lock) → `exchange` (no lock) → `apply` (lock), up to six times, then
-  `put_engine`: `Running → Idle` on every path, success or failure.
+  `prepare` (lock) → `exchange` (no lock) → `apply` (lock), up to six times; a pass only
+  ends the round when it moved nothing *and* the store has nothing left to send
+  (`Queued`), then `put_engine`: `Running → Idle` on every path, success or failure.
 - Every other FFI call takes only the store lock, so it waits for one store step and never
   for the network.
 
