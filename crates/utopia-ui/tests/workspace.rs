@@ -5737,6 +5737,47 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     );
 }
 
+/// AC-3.2, §6.5: a commit that rewrites the text under the caret (`[[tomorrow]]` → the
+/// day's title) moves the caret with it, so the CRDT anchor has to move too. Otherwise the
+/// next store update resolves the caret back to where the old link was, inside the new one.
+#[gpui::test]
+fn ac_3_2_a_commit_reanchors_the_caret_it_moved(cx: &mut TestAppContext) {
+    use gpui::Focusable as _;
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("f [[tomorrow");
+    cx.run_until_parked();
+    // Blur commits with `finished = true`: the link expands and the caret goes past it.
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    ws.update_in(cx, |w, window, cx| {
+        let handle = w.focus_handle(cx);
+        window.focus(&handle);
+    });
+    cx.run_until_parked();
+    let want = "f [[November 3rd, 2026]]";
+    let (shown, caret) = text_and_caret(&ws, cx);
+    assert_eq!((shown.as_str(), caret), (want, want.len()));
+    // A store-side edit appends at the end (a sync, another view, an undo): the anchored
+    // caret is still where the commit left it, at the end of the block.
+    let text = format!("{want}!");
+    app.update(cx, |app, cx| {
+        let block = app.store.page_state(&page).unwrap().live_roots()[0].clone();
+        let r = app.store.set_block_text(&page, &block, &text, None, None);
+        app.report(r);
+        app.changed(vec![page.clone()], true, cx);
+    });
+    cx.run_until_parked();
+    let (shown, caret) = text_and_caret(&ws, cx);
+    assert_eq!(shown, text);
+    assert!(
+        caret >= want.len(),
+        "the caret stays where the commit put it, at the end of the block, not back \
+         inside the expanded link (caret {caret} of {})",
+        text.len()
+    );
+}
+
 /// Accepting the suggestion (Tab or Enter) inserts the day's title directly.
 #[gpui::test]
 fn auto_closed_relative_date_accepts_with_tab(cx: &mut TestAppContext) {

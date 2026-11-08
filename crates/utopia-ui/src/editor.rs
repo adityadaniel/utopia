@@ -934,6 +934,11 @@ impl BlockEditor {
         });
         if let Some((text, caret)) = expanded {
             self.field.set_text(&text, caret);
+            // The rewrite moved the caret with it (the day's title is longer than the
+            // phrase it replaced, and a link the caret was in now ends past it), so the
+            // CRDT anchor must move too or the next store change resolves the caret back
+            // into the expanded link.
+            self.anchor_caret(cx);
             cx.notify();
         }
     }
