@@ -1218,6 +1218,159 @@ fn outline_reaches_headings_that_are_folded_away(cx: &mut TestAppContext) {
     );
 }
 
+/// FR-3.9 (LR-5): a reveal that leaves the zoom is a navigation like `open`, so the page's
+/// unlinked count is fetched before the next frame. `reveal_block` used to clear the zoom
+/// without running the navigation reset, so the header drew too late to know the count and
+/// the section stayed blank until an unrelated index update arrived.
+#[gpui::test]
+fn fr_3_9_leaving_a_zoom_to_reveal_a_block_counts_unlinked_mentions(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, in_zoom, outside) = app.update(cx, |app, _| {
+        let page = app.store.create_page("Mindfulness").unwrap();
+        let a = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &a, "Meeting", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &a).unwrap();
+        let plan = utopia_core::outline::append_block(app.store.page_state(&page).unwrap(), None);
+        let b = app
+            .store
+            .execute_plan(&page, plan, None)
+            .unwrap()
+            .unwrap()
+            .block;
+        app.store
+            .set_block_text(&page, &b, "Risks", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &b).unwrap();
+        // A plain mention of the page's title on another page (FR-3.9).
+        let src = app.store.create_page("Reading").unwrap();
+        let s = app.store.ensure_first_block(&src).unwrap();
+        app.store
+            .set_block_text(&src, &s, "practising mindfulness daily", None, None)
+            .unwrap();
+        app.store.commit_block(&src, &s).unwrap();
+        app.store.sync_index().unwrap();
+        (page, a, b)
+    });
+    // Opened zoomed, so the unlinked section was never on screen and never counted.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), Some(in_zoom), None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("unlinked-count-1").is_none(),
+        "a zoomed block has no Unlinked References section"
+    );
+    let scans = app.read_with(cx, |app, _| app.store.unlinked_scans());
+
+    // The Outline tab would do this: reveal a heading outside the zoom.
+    ws.update_in(cx, |w, window, cx| {
+        let view = w.main_view();
+        view.update(cx, |view, cx| view.reveal_block(&outside, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_zoom(cx)).is_none(),
+        "revealing a block outside the zoom leaves it"
+    );
+    assert!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()) > scans,
+        "the count is fetched by the navigation handler, not by a frame"
+    );
+    cx.debug_bounds("unlinked-count-1")
+        .expect("the whole page is back, with its unlinked count");
+}
+
+/// FR-2.7: zooming changes what the header means — the title is the block's text and
+/// `start_rename` offers the calendar there instead of a rename. A page's rename input
+/// must therefore close with the zoom, as it does when the page changes; it used to stay
+/// open over a header it no longer described.
+#[gpui::test]
+fn fr_2_7_zooming_within_a_page_closes_the_rename_input(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, block) = app.update(cx, |app, _| {
+        let p = app.store.create_page("Alpha").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "body", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        (p, b)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let title = cx.debug_bounds("page-title").expect("the page title");
+    cx.simulate_click(title.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_view().read(cx).is_renaming()),
+        "clicking the title starts the rename"
+    );
+
+    // The same transition a bullet click or Cmd+Alt+Down makes.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), Some(block), None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_zoom(cx)).is_some(),
+        "the page is zoomed into the block"
+    );
+    assert!(
+        !ws.update(cx, |w, cx| w.main_view().read(cx).is_renaming()),
+        "the rename input closed with the zoom"
+    );
+}
+
+/// FR-1.4: clicking a title that cannot be renamed opens the date calendar. That calendar
+/// belongs to the header that opened it, so leaving the zoom (the breadcrumb back to the
+/// page) closes it; it used to stay open over the ordinary page header.
+#[gpui::test]
+fn fr_1_4_leaving_a_zoom_closes_the_date_calendar(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, block) = app.update(cx, |app, _| {
+        let p = app.store.create_page("Day Planner").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "plan", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        (p, b)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), Some(block), None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let title = cx
+        .debug_bounds("page-title")
+        .expect("the zoomed header's title");
+    cx.simulate_click(title.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_view().read(cx).calendar_is_open()),
+        "a zoomed title opens the date calendar instead of a rename"
+    );
+
+    // The breadcrumb's page link, and any other navigation out of the zoom.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.main_zoom(cx)).is_none(),
+        "the view left the zoom"
+    );
+    assert!(
+        !ws.update(cx, |w, cx| w.main_view().read(cx).calendar_is_open()),
+        "the calendar closed with the zoom"
+    );
+}
+
 /// RS-3: a pinned row's title comes from the shard, so renaming the page reaches the
 /// Pinned tab without toggling another pin or restarting.
 #[gpui::test]

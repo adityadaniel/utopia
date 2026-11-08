@@ -307,6 +307,71 @@ struct Journal {
     refs_version: u64,
 }
 
+/// What this view is showing (`docs/state-machines/page-view-mode.md`). One type instead
+/// of `page` + `zoom` + `journal`, because the three were a state machine in disguise:
+/// a feed always has today's page and never a zoom, and a zoom always has a page. Those
+/// combinations are now unrepresentable rather than merely implied.
+#[derive(Debug, Clone)]
+enum Mode {
+    /// Nothing opened yet: a view that was constructed but never `open`ed.
+    Empty,
+    /// A whole page (FR-2.14).
+    Page { page: PageId },
+    /// One block of a page, with breadcrumbs back to the page (FR-2.7).
+    Zoomed { page: PageId, root: BlockId },
+    /// The Daily Notes feed (FR-1.2). `today` is the page the caret starts in.
+    Journal { today: PageId, journal: Journal },
+}
+
+impl Mode {
+    /// The page on screen, in every mode but [`Mode::Empty`].
+    fn page(&self) -> Option<&PageId> {
+        match self {
+            Mode::Empty => None,
+            Mode::Page { page } | Mode::Zoomed { page, .. } => Some(page),
+            Mode::Journal { today, .. } => Some(today),
+        }
+    }
+
+    /// The zoom root, in [`Mode::Zoomed`] only.
+    fn zoom(&self) -> Option<&BlockId> {
+        match self {
+            Mode::Zoomed { root, .. } => Some(root),
+            _ => None,
+        }
+    }
+
+    /// The feed, in [`Mode::Journal`] only.
+    fn journal(&self) -> Option<&Journal> {
+        match self {
+            Mode::Journal { journal, .. } => Some(journal),
+            _ => None,
+        }
+    }
+
+    fn journal_mut(&mut self) -> Option<&mut Journal> {
+        match self {
+            Mode::Journal { journal, .. } => Some(journal),
+            _ => None,
+        }
+    }
+
+    fn is_journal(&self) -> bool {
+        matches!(self, Mode::Journal { .. })
+    }
+
+    /// Point the view at `to` instead of `from`: a promoted draft day was merged into the
+    /// page that owns the date (FR-1.2).
+    fn retarget(&mut self, from: &PageId, to: &PageId) {
+        match self {
+            Mode::Page { page } if page == from => *page = to.clone(),
+            Mode::Zoomed { page, .. } if page == from => *page = to.clone(),
+            Mode::Journal { today, .. } if today == from => *today = to.clone(),
+            _ => {}
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct Header {
     title: String,
@@ -484,8 +549,9 @@ impl Render for DragPreview {
 pub struct PageView {
     app: Entity<AppState>,
     editor: Entity<BlockEditor>,
-    pub page: Option<PageId>,
-    pub zoom: Option<BlockId>,
+    /// What is on screen. The only place `page`, `zoom` and the feed are decided, so no
+    /// two of them can disagree (`docs/state-machines/page-view-mode.md`).
+    mode: Mode,
     pub compact: bool,
     /// Whether this pane draws its own ✕ in the page header (split panes do, sidebar cards
     /// carry the close in their card header, RS-5).
@@ -530,8 +596,6 @@ pub struct PageView {
     unlinked: Option<(u64, Vec<Mention>)>,
     alias_input: Option<Entity<LineInput>>,
     calendar_month: NaiveDate,
-    /// Set while showing the Daily Notes feed; `page` is then today's page.
-    journal: Option<Journal>,
     /// The feed's day headings, in item order, for the sticky header (DN-3).
     day_headings: Vec<DayHeading>,
     /// The page header's "···" menu is open (ALL-3).
@@ -636,10 +700,9 @@ impl PageView {
         let filter = cx.new(|cx| LineInput::new("Filter references…", cx));
         let subs = vec![
             cx.subscribe(&app, |this, _, e: &Changed, cx| {
-                let shown = this.page.as_ref().is_some_and(|p| e.pages.contains(p))
+                let shown = this.page().is_some_and(|p| e.pages.contains(&p))
                     || this
-                        .journal
-                        .as_ref()
+                        .journal()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
                 let relevant = e.structural
                     || e.pages.is_empty()
@@ -657,8 +720,8 @@ impl PageView {
             // A promoted draft merged into the day's page (FR-1.2): this view may be
             // showing the discarded id, so follow the page that owns the day.
             cx.subscribe(&app, |this, _, e: &PageReplaced, cx| {
-                if this.page.as_ref() == Some(&e.from) {
-                    this.page = Some(e.to.clone());
+                if this.page().as_ref() == Some(&e.from) {
+                    this.mode.retarget(&e.from, &e.to);
                     this.refs_key = None;
                     // Transclusions belong to the page that was replaced.
                     this.open_embeds.clear();
@@ -703,8 +766,7 @@ impl PageView {
         Self {
             app,
             editor,
-            page: None,
-            zoom: None,
+            mode: Mode::Empty,
             compact,
             close,
             items: Vec::new(),
@@ -734,7 +796,6 @@ impl PageView {
             unlinked: None,
             alias_input: None,
             calendar_month: today,
-            journal: None,
             day_headings: Vec::new(),
             page_menu: false,
             hovered_row: None,
@@ -789,10 +850,43 @@ impl PageView {
         }
     }
 
+    /// The page the view is showing, if any (`None` before the first `open`).
+    pub fn page(&self) -> Option<PageId> {
+        self.mode.page().cloned()
+    }
+
+    /// The block the view is zoomed into, if any.
+    pub fn zoom(&self) -> Option<BlockId> {
+        self.mode.zoom().cloned()
+    }
+
+    /// The feed, while the view shows it.
+    fn journal(&self) -> Option<&Journal> {
+        self.mode.journal()
+    }
+
+    /// Whether the page title is being renamed (debug builds only): `start_rename` draws an
+    /// input in place of the title, which is the only sign of it in a frame.
+    #[cfg(debug_assertions)]
+    pub fn is_renaming(&self) -> bool {
+        self.rename.is_some()
+    }
+
+    /// Whether the header's date calendar is open (debug builds only).
+    #[cfg(debug_assertions)]
+    pub fn calendar_is_open(&self) -> bool {
+        self.show_calendar
+    }
+
     /// Show `page` (optionally zoomed into a block).
     pub fn open(&mut self, page: PageId, zoom: Option<BlockId>, cx: &mut Context<Self>) {
-        self.journal = None;
-        self.show(page, zoom, cx);
+        self.set_mode(
+            match zoom {
+                Some(root) => Mode::Zoomed { page, root },
+                None => Mode::Page { page },
+            },
+            cx,
+        );
     }
 
     /// The Daily Notes feed (Roam's default view): `today` first, then every older journal
@@ -804,14 +898,18 @@ impl PageView {
         let shown_through = today_date
             .checked_sub_days(chrono::Days::new((JOURNAL_BATCH - 1) as u64))
             .unwrap_or(today_date);
-        self.journal = Some(Journal {
-            feed: Feed::Idle { shown_through },
-            pages: Vec::new(),
-            refs: HashMap::new(),
-            refs_version: 0,
-        });
-        self.page = None;
-        self.show(today, None, cx);
+        self.set_mode(
+            Mode::Journal {
+                today,
+                journal: Journal {
+                    feed: Feed::Idle { shown_through },
+                    pages: Vec::new(),
+                    refs: HashMap::new(),
+                    refs_version: 0,
+                },
+            },
+            cx,
+        );
     }
 
     /// How many reference-children reads this view has made (debug builds only).
@@ -827,22 +925,19 @@ impl PageView {
     }
 
     pub fn is_journal(&self) -> bool {
-        self.journal.is_some()
+        self.mode.is_journal()
     }
 
     /// Days in the Daily Notes feed that own a page, newest first (empty outside the
     /// feed). Blank calendar days are loaded but have no page; use
     /// [`Self::journal_shown_through`] for how far back the window reaches.
     pub fn journal_days(&self) -> Vec<PageId> {
-        self.journal
-            .as_ref()
-            .map(|j| j.pages.clone())
-            .unwrap_or_default()
+        self.journal().map(|j| j.pages.clone()).unwrap_or_default()
     }
 
     /// The oldest calendar day the feed has loaded (FR-1.2), `None` outside the feed.
     pub fn journal_shown_through(&self) -> Option<NaiveDate> {
-        self.journal.as_ref().map(|j| j.feed.shown_through())
+        self.journal().map(|j| j.feed.shown_through())
     }
 
     /// The day heading pinned to the top of the feed at the current scroll offset
@@ -850,7 +945,7 @@ impl PageView {
     /// is itself exactly at the top. A binary search over the loaded days, so `render`
     /// does no more work than the offset it already reads (rule 10).
     fn sticky_heading(&self) -> Option<&DayHeading> {
-        self.journal.as_ref()?;
+        self.journal()?;
         let top = self.list.logical_scroll_top();
         let ix = self
             .day_headings
@@ -877,34 +972,28 @@ impl PageView {
             .count()
     }
 
-    fn show(&mut self, page: PageId, zoom: Option<BlockId>, cx: &mut Context<Self>) {
-        let changed_page = self.page.as_ref() != Some(&page);
-        self.page = Some(page.clone());
-        self.zoom = zoom;
-        if changed_page {
-            self.query = RefQuery::default();
-            self.filter_titles.clear();
+    /// Put the view in `next`: the one place that changes what is on screen. Everything
+    /// keyed on the page or the zoom is reset here, so a mode change cannot leave a popup,
+    /// a reference cache or an unlinked count behind for the view it replaced
+    /// (`docs/state-machines/page-view-mode.md`).
+    fn set_mode(&mut self, next: Mode, cx: &mut Context<Self>) {
+        let prev = std::mem::replace(&mut self.mode, next);
+        // Every opening of the feed counts as a page change: it starts a fresh window of
+        // days and builds them from the default query, so the view it replaces must not
+        // lend it its expansion state. Any other change is a page change when the page
+        // differs; zooming within one page keeps that page's state.
+        let page_changed = prev.page() != self.mode.page() || self.mode.is_journal();
+        let zoom_changed = prev.zoom() != self.mode.zoom();
+        if page_changed {
+            self.reset_page_ui(cx);
+        }
+        if page_changed || zoom_changed {
+            // A rename input or the date calendar belongs to the view that opened it, not
+            // to the one that replaced it (issues 2 and 3).
             self.rename = None;
             self.show_calendar = false;
-            self.unlinked = None;
-            self.alias_input = None;
-            self.filter.update(cx, |f, cx| f.set_text("", cx));
-            let saved = self
-                .app
-                .read(cx)
-                .store
-                .local_get(&format!("refs_expanded:{page}"))
-                .ok()
-                .flatten()
-                .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
-                .unwrap_or_default();
-            self.expanded_groups = saved.into_iter().map(PageId).collect();
-            self.expanded_children.clear();
-            // An opened transclusion was a row of the page being left; keeping it would
-            // make every later change on any page rebuild this one (issue 2).
-            self.open_embeds.clear();
-            self.interest = Interest::ThisPage;
         }
+        // Menus are transient by definition: any navigation closes them.
         self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
@@ -917,9 +1006,38 @@ impl PageView {
         cx.notify();
     }
 
+    /// The state that belongs to one page: its reference filter, expansion, alias input
+    /// and unlinked mentions. Zooming within the page keeps it, because it is still that
+    /// page's (issue 2's counterpart).
+    fn reset_page_ui(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.page() else {
+            return;
+        };
+        self.query = RefQuery::default();
+        self.filter_titles.clear();
+        self.unlinked = None;
+        self.alias_input = None;
+        self.filter.update(cx, |f, cx| f.set_text("", cx));
+        let saved = self
+            .app
+            .read(cx)
+            .store
+            .local_get(&format!("refs_expanded:{page}"))
+            .ok()
+            .flatten()
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default();
+        self.expanded_groups = saved.into_iter().map(PageId).collect();
+        self.expanded_children.clear();
+        // An opened transclusion was a row of the page being left; keeping it would make
+        // every later change on any page rebuild this one (rebuild-cycle issue 2).
+        self.open_embeds.clear();
+        self.interest = Interest::ThisPage;
+    }
+
     /// Start editing the first block (creating one on an empty page, §9.3).
     pub fn focus_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         // `r.page == page`: in the Daily Notes feed the next rows belong to older days.
@@ -930,7 +1048,7 @@ impl PageView {
         let block = match first {
             Some(b) => b,
             None => {
-                let zoom = self.zoom.clone();
+                let zoom = self.zoom();
                 let created = self.app.update(cx, |app, cx| {
                     let r = match &zoom {
                         Some(z) => {
@@ -966,10 +1084,10 @@ impl PageView {
     /// (RS-3), including ones folded away or outside the zoom, so a click there must reach
     /// them — `focus_block` only sees the rows currently built.
     pub fn reveal_block(&mut self, block: &BlockId, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
-        let zoom = self.zoom.clone();
+        let zoom = self.zoom();
         let mut unfolded = false;
         let reachable = self.app.update(cx, |app, _| {
             let Ok(st) = app.store.page_state(&page) else {
@@ -989,8 +1107,10 @@ impl PageView {
             inside
         });
         if !reachable {
-            self.zoom = None;
-            self.cycle.invalidate(Invalidation::rows());
+            // Leaving the zoom is a navigation like `open`: run the same reset, so the
+            // unlinked count, the reference cache and the popups do not stay those of the
+            // zoomed view (machine issue 1).
+            self.set_mode(Mode::Page { page }, cx);
         } else if unfolded {
             self.cycle.invalidate(Invalidation::rows());
         }
@@ -1016,9 +1136,9 @@ impl PageView {
                 // PG-1: a compact attribute row — or a block hidden under one — has no Row
                 // until it is the editor's target. Find the page that holds it so `edit` can
                 // open the attribute's path around it (search results, backlinks, undo).
-                let pages: Vec<PageId> = match &self.journal {
+                let pages: Vec<PageId> = match self.journal() {
                     Some(j) => j.pages.clone(),
-                    None => self.page.iter().cloned().collect(),
+                    None => self.page().into_iter().collect(),
                 };
                 pages.into_iter().find(|p| {
                     self.app.update(cx, |app, _| {
@@ -1062,7 +1182,7 @@ impl PageView {
             // path around the editor. A block this view cannot draw at all — the zoom root,
             // which the header shows instead, or one that is not on this page — still ends
             // the edit, so focus is never stranded on an element nothing renders.
-            let zoom_root = self.zoom.as_ref() == Some(&block);
+            let zoom_root = self.zoom().as_ref() == Some(&block);
             let live_here = self.app.update(cx, |app, _| {
                 app.store
                     .page_state(&page)
@@ -1246,24 +1366,29 @@ impl PageView {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        if self.journal.is_none() {
+        if !self.is_journal() {
             // Only the feed pins a day heading (DN-3).
             self.day_headings.clear();
         }
-        let Some(page) = self.page.clone() else {
-            // A feed always has a page (`open_journal` → `show`), and its state is kept
-            // as it is: clearing it here would drop a batch that is already in flight.
-            debug_assert!(self.journal.is_none(), "a feed without a page");
-            self.replace_items(Vec::new(), cx);
-            return;
+        // The mode decides what to build; the feed case cannot be reached without the page
+        // its days hang off, because `Mode::Journal` carries it.
+        let (page, zoom, feed) = match &self.mode {
+            Mode::Empty => {
+                self.replace_items(Vec::new(), cx);
+                return;
+            }
+            Mode::Page { page } => (page.clone(), None, None),
+            Mode::Zoomed { page, root } => (page.clone(), Some(root.clone()), None),
+            Mode::Journal { today, journal } => {
+                (today.clone(), None, Some(journal.feed.want_through()))
+            }
         };
-        if let Some(feed) = self.journal.as_ref().map(|j| j.feed.clone()) {
-            self.rebuild_journal(page, feed.want_through(), cx);
+        if let Some(want_through) = feed {
+            self.rebuild_journal(page, want_through, cx);
             return;
         }
-        let zoom = self.zoom.clone();
         let open_embeds = self.open_embeds.clone();
-        let compact_attributes = self.zoom.is_none() && self.attributes_are_compact();
+        let compact_attributes = zoom.is_none() && self.attributes_are_compact();
         let editing = self.editing_block(cx.entity_id(), cx);
         let refs_version = self.app.read(cx).refs_version;
         let need_refs = self.refs_key != Some((page.clone(), zoom.clone(), refs_version));
@@ -1369,7 +1494,7 @@ impl PageView {
             items.push(r);
         }
         self.push_refs(&page, &mut items, cx);
-        if self.zoom.is_none() {
+        if zoom.is_none() {
             // Unlinked References (FR-3.9, LR-5): the header always carries the count. It is
             // read from the cache `refresh_unlinked` fills when the index reports a durable
             // change or the page opens; the FTS scan behind it is database work and must not
@@ -1402,11 +1527,11 @@ impl PageView {
     /// answer is cached per index version, so a frame (or a rebuild for any other reason)
     /// costs nothing.
     fn refresh_unlinked(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
-        if self.zoom.is_some() || self.journal.is_some() {
-            // The section is not on screen; `show` refreshes it when it is again.
+        if !matches!(self.mode, Mode::Page { .. }) {
+            // The section is only on a whole page; `set_mode` refreshes it when it is again.
             return;
         }
         let version = self.app.read(cx).refs_version;
@@ -1428,7 +1553,7 @@ impl PageView {
         let compact_attributes = self.attributes_are_compact();
         let editing = self.editing_block(cx.entity_id(), cx);
         let refs_version = self.app.read(cx).refs_version;
-        let mut refs_cache = match &mut self.journal {
+        let mut refs_cache = match self.mode.journal_mut() {
             Some(j) if j.refs_version == refs_version => std::mem::take(&mut j.refs),
             _ => HashMap::new(),
         };
@@ -1570,7 +1695,7 @@ impl PageView {
         // A rebuild resolves the window it just loaded into a terminal or open state.
         // A read error stays `Idle`, so the next rebuild tries again instead of the feed
         // claiming there are no earlier notes.
-        let next_feed = match (self.journal.as_ref(), oldest) {
+        let next_feed = match (self.journal(), oldest) {
             (Some(j), Some(oldest)) => j.feed.clone().settle(shown_through, oldest),
             (Some(_), None) | (None, _) => Feed::Idle { shown_through },
         };
@@ -1580,7 +1705,7 @@ impl PageView {
             Item::JournalExhausted
         });
         self.day_headings = headings;
-        if let Some(j) = &mut self.journal {
+        if let Some(j) = self.mode.journal_mut() {
             j.pages = ids;
             j.refs = refs_cache;
             j.refs_version = refs_version;
@@ -1623,7 +1748,9 @@ impl PageView {
 
     /// Load the next batch of older days into the feed (once per batch).
     fn load_older_days(&mut self, cx: &mut Context<Self>) {
-        let Some(j) = &mut self.journal else { return };
+        let Some(j) = self.mode.journal_mut() else {
+            return;
+        };
         let Some(next) = j.feed.request() else { return };
         j.feed = next;
         self.cycle.invalidate(Invalidation::rows());
@@ -1656,7 +1783,7 @@ impl PageView {
 
     fn push_refs(&mut self, page: &PageId, items: &mut Vec<Item>, cx: &mut Context<Self>) {
         let shown = self.refs.shown();
-        let title = if self.zoom.is_some() {
+        let title = if self.zoom().is_some() {
             "Referenced by"
         } else {
             "Linked References"
@@ -1665,7 +1792,7 @@ impl PageView {
             title: title.into(),
             count: shown,
         });
-        if self.zoom.is_none() {
+        if self.zoom().is_none() {
             items.push(Item::RefsControls);
         }
         if self.refs.groups.is_empty() {
@@ -1887,7 +2014,7 @@ impl PageView {
             }
             EditorEvent::Outdent => {
                 let caret = editor.read(cx).cursor();
-                let zoom = self.zoom.clone();
+                let zoom = self.zoom();
                 // Never outdent out of the zoomed subtree.
                 let at_zoom_root = self.app.update(cx, |app, _| {
                     app.store
@@ -1901,8 +2028,8 @@ impl PageView {
                 }
             }
             EditorEvent::MergeBackward => {
-                let zoom = if t.page == *self.page.as_ref().unwrap_or(&t.page) {
-                    self.zoom.clone()
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
                 } else {
                     None
                 };
@@ -1910,7 +2037,7 @@ impl PageView {
                 // PG-1 hides the children of a compact attribute row, so Backspace must merge
                 // into the previous row the user can *see*, not into a hidden descendant
                 // (FR-2.5). Visibility here is the renderer's, not the store's alone.
-                let compact = self.zoom.is_none() && self.attributes_are_compact();
+                let compact = self.zoom().is_none() && self.attributes_are_compact();
                 let editing = t.block.clone();
                 let now = self.app.read(cx).store.now();
                 self.run_plan(
@@ -1978,7 +2105,7 @@ impl PageView {
             EditorEvent::ToggleCollapseAll => self.toggle_collapse_all(&t.page, cx),
             EditorEvent::ZoomIn => {
                 self.editor.update(cx, |e, cx| e.end(cx));
-                if Some(&t.page) == self.page.as_ref() {
+                if self.page().as_ref() == Some(&t.page) {
                     self.open(t.page.clone(), Some(t.block.clone()), cx);
                     self.focus_first(window, cx);
                 } else {
@@ -2163,10 +2290,10 @@ impl PageView {
     }
 
     fn zoom_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
-        let Some(z) = self.zoom.clone() else { return };
+        let Some(z) = self.zoom() else { return };
         let parent = self.app.update(cx, |app, _| {
             app.store
                 .page_state(&page)
@@ -2338,7 +2465,7 @@ impl PageView {
 
     fn set_expanded(&mut self, group: PageId, cx: &mut Context<Self>) {
         self.expanded_groups.insert(group);
-        if let Some(page) = &self.page {
+        if let Some(page) = self.page() {
             let list: Vec<&str> = self.expanded_groups.iter().map(|p| p.as_str()).collect();
             let json = serde_json::to_string(&list).unwrap_or_default();
             let _ = self
@@ -2352,7 +2479,7 @@ impl PageView {
     }
 
     fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.header.kind == PageKind::Daily || self.zoom.is_some() {
+        if self.header.kind == PageKind::Daily || self.zoom().is_some() {
             self.show_calendar = !self.show_calendar;
             if let Some(d) = self.header.date {
                 self.calendar_month = d;
@@ -2389,7 +2516,7 @@ impl PageView {
 
     fn finish_rename(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.rename = None;
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         let survivor = self.app.update(cx, |app, cx| {
@@ -2437,7 +2564,7 @@ impl PageView {
     }
 
     fn page_action(&mut self, action: &str, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         self.editor.update(cx, |e, cx| e.end(cx));
@@ -2674,7 +2801,7 @@ impl PageView {
                 )
                 .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
                     this.editor.update(cx, |ed, cx| ed.end(cx));
-                    if e.modifiers().shift || Some(&page) != this.page.as_ref() {
+                    if e.modifiers().shift || Some(&page) != this.page().as_ref() {
                         cx.emit(PageViewEvent::Open {
                             page: page.clone(),
                             zoom: Some(block.clone()),
@@ -2858,7 +2985,7 @@ impl PageView {
             .debug_selector(|| "page-menu-graph".into())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.page_menu = false;
-                if let Some(page) = this.page.clone() {
+                if let Some(page) = this.page() {
                     this.editor.update(cx, |e, cx| e.end(cx));
                     cx.emit(PageViewEvent::OpenGraph { page });
                 }
@@ -2890,7 +3017,7 @@ impl PageView {
                         this.page_action("rewrite", cx);
                     }))
             });
-        let pin = self.page.clone().map(|page| {
+        let pin = self.page().map(|page| {
             let pinned = crate::appearance::is_pinned(cx, &page);
             quiet_control(
                 "page-menu-pin",
@@ -3010,7 +3137,7 @@ impl PageView {
                     .hover(|s| s.text_color(th.accent))
                     .child(h.title.clone())
                     .on_click(cx.listener(|this, _, _, cx| {
-                        if let Some(p) = this.page.clone() {
+                        if let Some(p) = this.page() {
                             this.editor.update(cx, |e, cx| e.end(cx));
                             this.open(p, None, cx);
                         }
@@ -3032,7 +3159,7 @@ impl PageView {
                             label
                         })
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(p) = this.page.clone() {
+                            if let Some(p) = this.page() {
                                 this.editor.update(cx, |e, cx| e.end(cx));
                                 this.open(p, Some(id.clone()), cx);
                             }
@@ -3041,7 +3168,7 @@ impl PageView {
             }
             col = col.child(crumbs);
         }
-        let title_text = if self.zoom.is_some() {
+        let title_text = if self.zoom().is_some() {
             h.zoom_path
                 .last()
                 .map(|(_, t)| t.clone())
@@ -3076,7 +3203,7 @@ impl PageView {
         col = col.child(title_el);
         // PG-2: the page's own controls in one row under the title: alias chips, "+ alias",
         // and the "···" menu kept at the far right of the column.
-        if self.zoom.is_none() && !h.deleted {
+        if self.zoom().is_none() && !h.deleted {
             let mut left = div()
                 .flex()
                 .flex_wrap()
@@ -3169,7 +3296,7 @@ impl PageView {
                     )),
             );
         }
-        if self.zoom.is_none() && !h.attributes.is_empty() {
+        if self.zoom().is_none() && !h.attributes.is_empty() {
             // Page metadata header (P1, W7): the page's `Key:: value` blocks at a glance.
             // PG-1 keeps it, and adds the toggle that decides whether the blocks are drawn
             // in full under it or folded to one muted row each.
@@ -3243,7 +3370,7 @@ impl PageView {
                 LineInputEvent::Submit { .. } => {
                     let text = input.read(cx).text().to_string();
                     this.alias_input = None;
-                    if let Some(page) = this.page.clone() {
+                    if let Some(page) = this.page() {
                         this.app.update(cx, |app, cx| {
                             let r = app.store.add_alias(&page, &text);
                             if let Err(e) = &r {
@@ -3269,7 +3396,7 @@ impl PageView {
     }
 
     fn remove_alias(&mut self, alias: &str, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         self.app.update(cx, |app, cx| {
@@ -3283,7 +3410,7 @@ impl PageView {
 
     /// "Link" on an unlinked mention (FR-3.11).
     fn promote(&mut self, m: &Mention, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         self.app.update(cx, |app, cx| {
@@ -3299,7 +3426,7 @@ impl PageView {
 
     /// "Link all" in the Unlinked References header (LR-5): one undo step for every mention.
     fn promote_all(&mut self, cx: &mut Context<Self>) {
-        let Some(page) = self.page.clone() else {
+        let Some(page) = self.page() else {
             return;
         };
         if self.unlinked.as_ref().is_none_or(|(_, m)| m.is_empty()) {
@@ -4810,6 +4937,50 @@ mod tests {
             },
             "a graph with no daily page at all is exhausted too"
         );
+    }
+
+    /// FR-1.2: the mode pairs the page with the zoom and the feed, so "a feed without a
+    /// page" (the transient `open_journal` used to pass through) and "a zoom without a
+    /// page" cannot be held at all (page-view-mode issue 5). `rebuild_rows` matches on the
+    /// mode, so it cannot reach a branch where the page it needs is missing.
+    #[test]
+    fn a_mode_always_names_the_page_it_draws() {
+        let page = PageId("page".into());
+        let root = BlockId("block".into());
+        let today = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let journal = Journal {
+            feed: Feed::Exhausted {
+                shown_through: today,
+            },
+            pages: Vec::new(),
+            refs: HashMap::new(),
+            refs_version: 0,
+        };
+
+        assert_eq!(Mode::Empty.page(), None);
+        assert_eq!(Mode::Empty.zoom(), None);
+        assert!(Mode::Empty.journal().is_none());
+
+        let plain = Mode::Page { page: page.clone() };
+        assert_eq!(plain.page(), Some(&page));
+        assert_eq!(plain.zoom(), None, "a whole page is not zoomed");
+        assert!(plain.journal().is_none());
+
+        let zoomed = Mode::Zoomed {
+            page: page.clone(),
+            root: root.clone(),
+        };
+        assert_eq!(zoomed.page(), Some(&page));
+        assert_eq!(zoomed.zoom(), Some(&root));
+        assert!(zoomed.journal().is_none());
+
+        let feed = Mode::Journal {
+            today: page.clone(),
+            journal,
+        };
+        assert_eq!(feed.page(), Some(&page), "the feed always shows today");
+        assert_eq!(feed.zoom(), None, "the feed is never zoomed");
+        assert!(feed.journal().is_some() && feed.is_journal());
     }
 
     /// PG-5: a fenced code block's first line is its language, shown as the card's label.
