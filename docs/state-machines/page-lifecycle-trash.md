@@ -31,6 +31,10 @@ Fixed on `fix/page-lifecycle-trash` (schema v8). Line numbers below are from the
   draft can never be in the trash at all — a draft has no `page` row, and only a listed
   trashed page is purged. The stale-cursor worry disappears with issue 3: the id is never
   reissued, so a `cursor:<id>` left behind can never apply to a different page.
+  What Empty Trash still does not do: a relay that keeps the page's log hands it back on the
+  next pull, so a purged page can return as an *invisible* tombstone (a shard, no trash row,
+  so `list_trash` does not offer it for purging again). Hard delete is local (rule 5); this
+  is the sync engine's behaviour and is unchanged here.
 - **Found while doing it, not in the list: restore on a `Merged` page.** It used to clear
   both tombstone fields and return a live page whose every block had `moved_to` the survivor
   — a page with nothing to draw. Restore now returns the survivor and leaves the merge
