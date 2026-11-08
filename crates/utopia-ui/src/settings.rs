@@ -21,8 +21,8 @@
 //! Cmd+Q would quit the app mid-edit.
 
 use gpui::{
-    div, img, prelude::*, px, AnyWindowHandle, App, Context, Div, Entity, FocusHandle, Focusable,
-    FontWeight, Keystroke, ScrollHandle, SharedString, Subscription, Window,
+    div, img, prelude::*, px, App, Context, Div, Entity, FocusHandle, Focusable, FontWeight,
+    Keystroke, ScrollHandle, SharedString, Subscription, Window,
 };
 use std::path::PathBuf;
 
@@ -128,16 +128,64 @@ impl Tab {
     }
 }
 
+/// Whether the window is recording a binding (§9.1, `settings-key-capture.md`).
+///
+/// The action waiting for a keystroke and the interceptor that records it are one value:
+/// they used to be two `Option`s that always moved together, so a capture with no
+/// interceptor (or the reverse) was representable. The window a capture belongs to is not
+/// kept here — the interceptor's closure carries the handle it was installed for, and both
+/// the focus and the activation observers are registered on this view's own window, so a
+/// second copy would be state nothing reads.
+#[derive(Default)]
+enum Capture {
+    /// Keystrokes are the window's own.
+    #[default]
+    Idle,
+    /// The next keystroke in this window is recorded for `action`. Replacing the value with
+    /// `Idle` drops the subscription and so stops intercepting.
+    Listening {
+        action: &'static ActionDoc,
+        _interceptor: Subscription,
+    },
+}
+
+impl Capture {
+    /// The action waiting for a keystroke, if one is.
+    fn action(&self) -> Option<&'static ActionDoc> {
+        match self {
+            Capture::Idle => None,
+            Capture::Listening { action, .. } => Some(action),
+        }
+    }
+}
+
+/// What a recorded keystroke is, as opposed to the raw keys (§9.1).
+///
+/// Naming the two outcomes keeps the cancel path visible: without it, "this keystroke is
+/// not a binding" is a condition buried in the middle of `captured`.
+enum Captured {
+    /// The user backed out; nothing is written.
+    Cancel,
+    /// A combination to bind, if the catalog accepts it.
+    Chord(Keystroke),
+}
+
+impl From<Keystroke> for Captured {
+    fn from(ks: Keystroke) -> Self {
+        if ks.key == "escape" && !has_modifier(&ks) {
+            Captured::Cancel
+        } else {
+            Captured::Chord(ks)
+        }
+    }
+}
+
 pub struct SettingsView {
     config_dir: PathBuf,
     overrides: Overrides,
     tab: Tab,
-    /// The action currently waiting for a keystroke, if any.
-    capturing: Option<&'static ActionDoc>,
-    /// Dropped to stop intercepting keystrokes.
-    capture: Option<Subscription>,
-    /// Only accept captured keys that arrive in this window.
-    window: Option<AnyWindowHandle>,
+    /// What the window is doing with keystrokes.
+    capture: Capture,
     status: Option<SharedString>,
     /// The last write of `keymap.json` failed. The keys are live for this session but disk
     /// still holds the old ones, so the next launch would silently undo them: a state of its
@@ -209,9 +257,7 @@ impl SettingsView {
             config_dir,
             overrides,
             tab,
-            capturing: None,
-            capture: None,
-            window: None,
+            capture: Capture::Idle,
             // A malformed keymap.json or settings.json is worth saying out loud: what is in
             // force is not what the user wrote (rule 11: degrade, never panic).
             status: warnings.first().map(|w| SharedString::from(w.clone())),
@@ -238,9 +284,9 @@ impl SettingsView {
         cx.notify();
     }
 
+    /// Stop recording, if a recording is in progress.
     fn cancel_capture(&mut self) {
-        self.capturing = None;
-        self.capture = None;
+        self.capture = Capture::Idle;
     }
 
     /// Start listening for the next keystroke and bind it to `d`.
@@ -250,12 +296,10 @@ impl SettingsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.capturing = Some(d);
         self.status = None;
         let handle = window.window_handle();
-        self.window = Some(handle);
         let me = cx.entity().downgrade();
-        self.capture = Some(cx.intercept_keystrokes(move |ev, window, cx| {
+        let interceptor = cx.intercept_keystrokes(move |ev, window, cx| {
             // Another window's typing is none of our business.
             if window.window_handle() != handle {
                 return;
@@ -264,23 +308,33 @@ impl SettingsView {
             cx.stop_propagation();
             let ks = ev.keystroke.clone();
             let _ = me.update(cx, |this, cx| this.captured(ks, cx));
-        }));
+        });
+        self.capture = Capture::Listening {
+            action: d,
+            _interceptor: interceptor,
+        };
         cx.notify();
     }
 
     /// A keystroke arrived while capturing.
     fn captured(&mut self, ks: Keystroke, cx: &mut Context<Self>) {
-        let Some(d) = self.capturing else { return };
+        let Some(d) = self.capture.action() else {
+            return;
+        };
         if is_modifier_only(&ks) {
             return; // still waiting for a real key
         }
+        // One keystroke ends the recording, whichever way it is read: a capture that stayed
+        // open after a cancel would swallow the window's own keys.
         self.cancel_capture();
-        if ks.key == "escape" && !has_modifier(&ks) {
-            self.status = Some("Left unchanged.".into());
-            cx.notify();
-            return;
-        }
-        let keys = ks.unparse();
+        let keys = match Captured::from(ks) {
+            Captured::Cancel => {
+                self.status = Some("Left unchanged.".into());
+                cx.notify();
+                return;
+            }
+            Captured::Chord(ks) => ks.unparse(),
+        };
         // Round-trip through the catalog's own validation: whatever gpui hands us has to be
         // something `binding` will accept later, or the override would silently do nothing.
         if crate::actions::binding(d.action, &keys, d.context).is_none() {
@@ -370,7 +424,7 @@ impl SettingsView {
 
     /// Whether a keystroke is being recorded right now.
     pub fn capturing(&self) -> Option<&'static ActionDoc> {
-        self.capturing
+        self.capture.action()
     }
 
     pub fn status(&self) -> Option<&str> {
@@ -1049,7 +1103,7 @@ impl SettingsView {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<Div> {
         let th = theme(cx).clone();
-        let capturing = self.capturing.map(|c| c.action) == Some(d.action);
+        let capturing = self.capture.action().map(|c| c.action) == Some(d.action);
         let keys = self.overrides.keys_for(d);
         let changed = self.overrides.is_changed(d.action);
         // An entry gpui cannot bind is shown as the user wrote it, with the reason, instead of
@@ -1107,7 +1161,7 @@ impl SettingsView {
                 pretty_keys(&keys)
             })
             .on_click(cx.listener(move |this, _, window, cx| {
-                if this.capturing.map(|c| c.action) == Some(d.action) {
+                if this.capture.action().map(|c| c.action) == Some(d.action) {
                     this.cancel_capture();
                     this.status = Some("Left unchanged.".into());
                     cx.notify();
