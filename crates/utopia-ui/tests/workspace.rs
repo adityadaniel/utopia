@@ -3555,10 +3555,10 @@ fn graph_view_lays_out_and_opens_pages(cx: &mut TestAppContext) {
     assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
 }
 
-/// §13.4 main pane: the graph is a place you go, not an overlay the page hides under.
-/// Opening a page in the main column — the sidebar's page rows, the recent days, a pinned
-/// page, Quick jump, a date shortcut — closes the graph, or the page "opens" invisibly and
-/// the graph keeps focus (workspace-main-pane-content.md, issue 1).
+/// §9.2 main window: the main column shows one page. Opening a page there — the sidebar's
+/// page rows, the recent days, a pinned page, Quick jump, a date shortcut — closes the
+/// full-screen graph, or the page "opens" invisibly and the graph keeps focus
+/// (workspace-main-pane-content.md, issue 1).
 #[gpui::test]
 fn opening_a_page_closes_the_graph(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
@@ -4152,7 +4152,7 @@ fn pdf_viewer(
     (dir, app, ws, view, cx)
 }
 
-/// §13.4 main pane: the graph replaces what the main column was showing instead of being
+/// §9.2 main window: the graph replaces what the main column was showing instead of being
 /// painted over a PDF that stays alive underneath and silently reappears when the graph
 /// closes (workspace-main-pane-content.md, issue 2).
 #[cfg(target_os = "macos")]
