@@ -4080,6 +4080,32 @@ fn pdf_viewer(
     (dir, app, ws, view, cx)
 }
 
+/// §13.4 main pane: the graph replaces what the main column was showing instead of being
+/// painted over a PDF that stays alive underneath and silently reappears when the graph
+/// closes (workspace-main-pane-content.md, issue 2).
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn graph_over_a_pdf_does_not_bring_it_back(cx: &mut TestAppContext) {
+    let (_dir, _app, ws, _view, cx) = pdf_viewer(cx, size(px(1280.), px(900.)));
+    cx.simulate_keystrokes("cmd-shift-g");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_some(),
+        "the graph is up"
+    );
+    assert!(
+        ws.update(cx, |w, _| w.pdf_view()).is_none(),
+        "the graph replaced the PDF; it is not hidden behind it"
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
+    assert!(
+        ws.update(cx, |w, _| w.pdf_view()).is_none(),
+        "closing the graph returns to the page, not to a PDF from under it"
+    );
+}
+
 /// P2 "PDF highlights": a release that no page claims — the gutter, the header, or
 /// outside the window — ends the drag. Otherwise the rectangle keeps being drawn and the
 /// next release can finish a drag nobody is making.
