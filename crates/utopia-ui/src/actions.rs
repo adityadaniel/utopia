@@ -797,14 +797,24 @@ macro_rules! binding_for {
     };
 }
 
+/// Why `keys` cannot become a binding, if they cannot: the one validation [`binding`] applies,
+/// shared with [`Override::parse`] so the editor can say what is wrong instead of only that
+/// something is (rule 11).
+fn keys_problem(keys: &str) -> Option<String> {
+    let chords: Vec<&str> = keys.split_whitespace().collect();
+    if chords.is_empty() {
+        return Some("it lists no keys".to_string());
+    }
+    chords
+        .iter()
+        .find(|k| gpui::Keystroke::parse(k).is_err())
+        .map(|k| format!("“{k}” is not a keystroke"))
+}
+
 /// Build a binding from an action name; `None` for unknown names or invalid keys.
 pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBinding> {
     // Validate keystrokes first: KeyBinding::new panics on invalid input.
-    if keys.split_whitespace().count() == 0
-        || keys
-            .split_whitespace()
-            .any(|k| gpui::Keystroke::parse(k).is_err())
-    {
+    if keys_problem(keys).is_some() {
         return None;
     }
     let keys = keys.to_string();
@@ -918,13 +928,38 @@ pub fn read_entries(json: &str) -> (Vec<KeymapEntry>, Vec<String>) {
 pub enum Override {
     /// Keys gpui can bind.
     Valid(String),
+    /// Keys the user wrote that gpui cannot bind. Carried verbatim so the editor can show
+    /// what they typed and say why, while the default stays in force (rule 11).
+    Invalid { raw: String, why: String },
 }
 
 impl Override {
-    /// The keys this override binds.
-    pub fn keys(&self) -> &str {
+    /// Read one entry of `keymap.json`. The verdict is computed here, once, so no reader has
+    /// to decide for itself whether the keys are usable.
+    fn parse(raw: &str) -> Self {
+        match keys_problem(raw) {
+            Some(why) => Override::Invalid {
+                raw: raw.to_string(),
+                why,
+            },
+            None => Override::Valid(raw.to_string()),
+        }
+    }
+
+    /// The keys this override binds, if it binds any: the default is in force otherwise.
+    pub fn keys(&self) -> Option<&str> {
+        match self {
+            Override::Valid(keys) => Some(keys),
+            Override::Invalid { .. } => None,
+        }
+    }
+
+    /// What to write back to `keymap.json`: the unusable text is not thrown away, so saving
+    /// some other binding does not silently destroy what the user wrote.
+    fn written(&self) -> &str {
         match self {
             Override::Valid(keys) => keys,
+            Override::Invalid { raw, .. } => raw,
         }
     }
 }
@@ -943,10 +978,18 @@ impl Overrides {
         let (entries, mut warnings) = read_entries(json);
         let mut map = BTreeMap::new();
         for e in entries {
-            if doc(&e.action).is_some() {
-                map.insert(e.action, Override::Valid(e.key));
-            } else {
-                warnings.push(format!("keymap.json: unknown action {}", e.action));
+            match doc(&e.action) {
+                Some(_) => {
+                    let o = Override::parse(&e.key);
+                    if let Override::Invalid { why, .. } = &o {
+                        warnings.push(format!(
+                            "keymap.json: {} keeps its default: {why}",
+                            e.action
+                        ));
+                    }
+                    map.insert(e.action, o);
+                }
+                None => warnings.push(format!("keymap.json: unknown action {}", e.action)),
             }
         }
         (Self(map), warnings)
@@ -968,7 +1011,7 @@ impl Overrides {
             .filter_map(|(action, o)| {
                 let d = doc(action)?;
                 Some(KeymapEntry {
-                    key: o.keys().to_string(),
+                    key: o.written().to_string(),
                     action: action.clone(),
                     context: d.context.map(str::to_string),
                 })
@@ -982,11 +1025,14 @@ impl Overrides {
         std::fs::write(config_dir.join("keymap.json"), self.to_json())
     }
 
-    /// The keys in force for an action: the override if there is one, else the default.
+    /// The keys in force for an action: the override if it binds any, else the default. An
+    /// entry gpui cannot bind is not in force, so every reader reports the default — the
+    /// three copies used to disagree here (keymap machine doc, issue 1).
     pub fn keys_for(&self, d: &ActionDoc) -> String {
         self.0
             .get(d.action)
-            .map(|o| o.keys().to_string())
+            .and_then(|o| o.keys())
+            .map(str::to_string)
             .unwrap_or_else(|| platform_keys(d.keys))
     }
 
@@ -1013,8 +1059,7 @@ impl Overrides {
 
     pub fn set(&mut self, action: &str, keys: &str) {
         if doc(action).is_some() {
-            self.0
-                .insert(action.to_string(), Override::Valid(keys.to_string()));
+            self.0.insert(action.to_string(), Override::parse(keys));
         }
     }
 
@@ -1074,12 +1119,17 @@ pub fn install(cx: &mut App, overrides: &Overrides) {
     let mut user = Vec::new();
     for (action, o) in &overrides.0 {
         let ctx = doc(action).and_then(|d| d.context);
-        match binding(action, o.keys(), ctx) {
+        let Some(keys) = o.keys() else {
+            // Still reported: the editor shows what was written and why it is not in force.
+            eprintln!("utopia: ignoring keybinding -> {action}");
+            continue;
+        };
+        match binding(action, keys, ctx) {
             Some(b) => {
                 replaced.insert(action.as_str());
                 user.push(b);
             }
-            None => eprintln!("utopia: ignoring keybinding {} -> {action}", o.keys()),
+            None => eprintln!("utopia: ignoring keybinding {keys} -> {action}"),
         }
     }
     let mut bindings: Vec<KeyBinding> = CATALOG
@@ -1220,6 +1270,39 @@ mod tests {
         assert_eq!(c.len(), 1);
         let names = [c[0].0.action, c[0].1.action];
         assert!(names.contains(&"GoToday") && names.contains(&"GoYesterday"));
+    }
+
+    /// Keymap machine doc, issue 1: a `keymap.json` entry whose keys gpui cannot parse used
+    /// to be what the editor showed while gpui kept the default. It is carried as invalid:
+    /// the default is what every reader reports, and the text the user wrote survives a save
+    /// of some other binding (§9.1, rule 11).
+    #[test]
+    fn unusable_keys_are_invalid_and_stay_out_of_force() {
+        let (o, warnings) = Overrides::from_json(
+            r#"[{"key":"nonsense-key","action":"GoToday"},
+                {"key":"cmd-alt-t","action":"GoYesterday"}]"#,
+        );
+        assert_eq!(
+            warnings.len(),
+            1,
+            "the unusable entry is reported: {warnings:?}"
+        );
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t"),
+            "the default is in force, so every reader must show it"
+        );
+        assert!(
+            o.is_changed("GoToday"),
+            "the row still holds the keys the user wrote"
+        );
+        assert!(matches!(o.entry("GoToday"), Some(Override::Invalid { .. })));
+        let saved = o.to_json();
+        assert!(saved.contains("nonsense-key"), "not thrown away: {saved}");
+        assert!(
+            saved.contains("cmd-alt-t"),
+            "the usable one is kept: {saved}"
+        );
     }
 
     #[test]

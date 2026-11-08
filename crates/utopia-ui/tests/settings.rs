@@ -776,14 +776,16 @@ fn rebinding_replaces_the_default_keys(cx: &mut TestAppContext) {
 
 /// Review fix: an override whose keys cannot be used (empty, or not a keystroke) is
 /// ignored with a warning, and the action keeps its default rather than ending up with
-/// no binding at all (rule 11: degrade, don't break).
+/// no binding at all (rule 11: degrade, don't break). Since the keymap overrides fix, the
+/// warning names the action: an entry that cannot be bound is a state the editor shows.
 #[gpui::test]
 fn an_unusable_override_keeps_the_default(cx: &mut TestAppContext) {
     use utopia_ui::actions::{install, GoToday};
     for bad in ["", "   ", "nonsense-key"] {
         let (o, warnings) =
             Overrides::from_json(&format!(r#"[{{"key":"{bad}","action":"GoToday"}}]"#));
-        assert!(warnings.is_empty(), "a known action is read as before");
+        assert_eq!(warnings.len(), 1, "the unusable entry is reported: {bad:?}");
+        assert!(warnings[0].contains("GoToday"), "{}", warnings[0]);
         cx.update(|cx| {
             cx.clear_key_bindings();
             install(cx, &o);
@@ -803,6 +805,41 @@ fn an_unusable_override_keeps_the_default(cx: &mut TestAppContext) {
         });
         assert_eq!(keys, [platform_keys("cmd-shift-t")], "override {bad:?}");
     }
+}
+
+/// Keymap machine doc, issue 1: a `keymap.json` entry whose keys gpui cannot parse used to
+/// be shown as the row's binding while the app kept the default. The row must show what the
+/// user wrote *and* say that the default is what works (§9.1, ST-3, rule 11).
+#[gpui::test]
+fn an_unusable_entry_is_marked_and_the_default_is_in_force(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("keymap.json"),
+        r#"[{"key":"nonsense-key","action":"GoToday"}]"#,
+    )
+    .unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.overrides().keys_for(today),
+            platform_keys("cmd-shift-t"),
+            "the default is what gpui uses, so it is what the row shows as in force"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-invalid-GoToday").is_some(),
+        "the row says the written keys cannot be used"
+    );
 }
 
 mod appearance {

@@ -27,8 +27,8 @@ use gpui::{
 use std::path::PathBuf;
 
 use crate::actions::{
-    by_category, canonical_keys, doc, pretty_keys, reinstall, ActionDoc, Category, Overrides,
-    CATALOG,
+    by_category, canonical_keys, doc, pretty_keys, reinstall, ActionDoc, Category, Override,
+    Overrides, CATALOG,
 };
 use crate::appearance::{self, AttributeBlocks, Density, UiFont};
 use crate::help::{shot_image, TOPICS};
@@ -1028,6 +1028,12 @@ impl SettingsView {
         let capturing = self.capturing.map(|c| c.action) == Some(d.action);
         let keys = self.overrides.keys_for(d);
         let changed = self.overrides.is_changed(d.action);
+        // An entry gpui cannot bind is shown as the user wrote it, with the reason, instead of
+        // pretending it is the binding (keymap machine doc, issue 1).
+        let invalid = match self.overrides.entry(d.action) {
+            Some(Override::Invalid { raw, why }) => Some((raw.clone(), why.clone())),
+            _ => None,
+        };
         let flashed = self.flash == Some(d.action);
         // ST-3: whoever else answers to these keys in the same place, said under the row
         // itself rather than in a banner at the top of the window.
@@ -1053,14 +1059,26 @@ impl SettingsView {
             .py_1()
             .rounded_md()
             .border_1()
-            .border_color(if capturing { th.accent } else { th.line })
+            .border_color(if capturing || invalid.is_some() {
+                th.accent
+            } else {
+                th.line
+            })
             .bg(if capturing { th.banner_bg } else { th.chip_bg })
-            .text_color(if capturing { th.accent } else { th.text })
+            .text_color(if invalid.is_some() {
+                th.warning
+            } else if capturing {
+                th.accent
+            } else {
+                th.text
+            })
             .text_size(px(crate::theme::CAPTION_SIZE))
             .cursor_pointer()
             .hover(|x| x.border_color(th.accent))
             .child(if capturing {
                 "Press keys…".to_string()
+            } else if let Some((raw, _)) = &invalid {
+                raw.clone()
             } else {
                 pretty_keys(&keys)
             })
@@ -1131,6 +1149,20 @@ impl SettingsView {
                     ),
             );
 
+        if let Some((_, why)) = &invalid {
+            row = row.child(
+                div()
+                    .debug_selector(move || format!("settings-invalid-{}", d.action))
+                    .flex_wrap()
+                    .pt_1()
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(format!(
+                        "Not a shortcut: {why}. {} is in force.",
+                        pretty_keys(&keys)
+                    )),
+            );
+        }
         if !others.is_empty() {
             let mut line = div()
                 .debug_selector(move || format!("settings-clash-{}", d.action))
