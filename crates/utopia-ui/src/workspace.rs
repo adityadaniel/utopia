@@ -139,10 +139,24 @@ impl Render for SidebarTooltip {
     }
 }
 
+/// What the main column shows (P2): one thing at a time. Before this the full-screen graph
+/// and the PDF viewer were two `Option`s, so `(Some, Some)` was representable and the graph
+/// painted over a live PDF that silently reappeared when the graph closed
+/// (`docs/state-machines/workspace-main-pane-content.md`). The page is always underneath
+/// (`main`), so leaving an overlay is just going back to it. The sidebar's `graph_panel`
+/// sits beside the page rather than replacing it, so it is not part of this state (GR-5).
+enum MainContent {
+    Page,
+    Graph(Entity<GraphView>),
+    Pdf(Entity<PdfView>),
+}
+
 pub struct Workspace {
     app: Entity<AppState>,
     editor: Entity<BlockEditor>,
     main: Entity<PageView>,
+    /// What the main column shows in place of `main` (P2).
+    content: MainContent,
     panes: Vec<SidePane>,
     splits: Vec<Entity<PageView>>,
     right_open: bool,
@@ -165,12 +179,8 @@ pub struct Workspace {
     /// merge) re-resolves them even though the id list is unchanged.
     pinned_version: Option<u64>,
     jump: Option<(Entity<JumpPalette>, JumpMode)>,
-    /// The graph view, shown in place of the main page while open (P2).
-    graph: Option<Entity<GraphView>>,
     /// The local graph in the right sidebar, beside the page that stays editable (GR-5).
     graph_panel: Option<Entity<GraphView>>,
-    /// The PDF viewer, shown in place of the main page while open (P2).
-    pdf: Option<Entity<PdfView>>,
     sidebar: SidebarData,
     sidebar_seen: Option<u64>,
     inspector: InspectorData,
@@ -311,6 +321,7 @@ impl Workspace {
             app,
             editor,
             main,
+            content: MainContent::Page,
             panes: Vec::new(),
             splits: Vec::new(),
             right_open: false,
@@ -325,9 +336,7 @@ impl Workspace {
             pinned_ids: Vec::new(),
             pinned_version: None,
             jump: None,
-            graph: None,
             graph_panel: None,
-            pdf: None,
             sidebar: SidebarData::default(),
             sidebar_seen: None,
             inspector: InspectorData::default(),
@@ -781,7 +790,6 @@ impl Workspace {
                 cx.notify();
             }
             PageViewEvent::OpenGraph { page } => {
-                self.graph = None;
                 self.open_graph(Some(page.clone()), window, cx);
             }
             PageViewEvent::OpenSplit { page } => self.open_split(page.clone(), window, cx),
@@ -848,7 +856,10 @@ impl Workspace {
             self.panes.insert(0, pane);
             self.right_open = true;
         } else {
-            self.pdf = None;
+            // A page opened in the main column replaces whatever it was showing: a PDF is
+            // closed and a full-screen graph gives way, or the page opens behind it
+            // (workspace-main-pane-content.md, issues 1 and 2).
+            self.content = MainContent::Page;
             self.main
                 .update(cx, |m, cx| m.open(page.clone(), zoom.clone(), cx));
             let _ = self
@@ -982,7 +993,8 @@ impl Workspace {
 
     /// Cmd+Shift+G: show or hide the full-screen graph (P2).
     pub fn show_graph(&mut self, _: &ShowGraph, window: &mut Window, cx: &mut Context<Self>) {
-        if self.graph.take().is_some() {
+        if matches!(self.content, MainContent::Graph(_)) {
+            self.content = MainContent::Page;
             window.focus(&self.focus);
             cx.notify();
             return;
@@ -1005,7 +1017,7 @@ impl Workspace {
         self.subs
             .push(cx.subscribe_in(&view, window, Self::on_graph_event));
         window.focus(&view.focus_handle(cx));
-        self.graph = Some(view);
+        self.content = MainContent::Graph(view);
         cx.notify();
     }
 
@@ -1024,7 +1036,6 @@ impl Workspace {
             return;
         };
         self.editor.update(cx, |e, cx| e.end(cx));
-        self.graph = None;
         let view = cx.new(|cx| GraphView::new(self.app.clone(), Some(origin), true, cx));
         self.subs
             .push(cx.subscribe_in(&view, window, Self::on_graph_event));
@@ -1042,6 +1053,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         let from_panel = self.graph_panel.as_ref() == Some(view);
+        // Only the graph that is actually on screen may change what is on screen: a stale
+        // view's event must not dismiss a PDF or a newer graph (issue 2).
+        let showing = matches!(&self.content, MainContent::Graph(g) if g == view);
         // AGENTS.md focus invariant: a removed element gets no keystrokes. If this graph
         // owned focus, hand it back; otherwise leave an editor's focus untouched.
         let had_focus = view.read(cx).focus_handle(cx).is_focused(window);
@@ -1052,7 +1066,7 @@ impl Workspace {
                 split,
             } => {
                 if !from_panel {
-                    self.graph = None;
+                    self.content = MainContent::Page;
                 }
                 if *split {
                     self.open_split(page.clone(), window, cx);
@@ -1065,7 +1079,9 @@ impl Workspace {
             }
             GraphEvent::OpenPanel => {
                 let origin = view.read(cx).origin();
-                self.graph = None;
+                if showing {
+                    self.content = MainContent::Page;
+                }
                 self.open_graph_panel(origin, window, cx);
             }
             GraphEvent::Expand => {
@@ -1073,7 +1089,9 @@ impl Workspace {
                 self.open_graph_full(window, cx);
             }
             GraphEvent::Close => {
-                self.graph = None;
+                if showing {
+                    self.content = MainContent::Page;
+                }
                 self.graph_panel = None;
                 if had_focus {
                     window.focus(&self.focus);
@@ -1094,14 +1112,17 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.editor.update(cx, |e, cx| e.end(cx));
-        self.graph = None;
         let view = cx.new(|cx| PdfView::new(self.app.clone(), hash, name, page, host, cx));
         self.subs.push(
-            cx.subscribe_in(&view, window, |this, _, e: &PdfEvent, window, cx| {
+            cx.subscribe_in(&view, window, |this, pdf, e: &PdfEvent, window, cx| {
                 match e {
                     PdfEvent::Close => {
-                        this.pdf = None;
-                        window.focus(&this.focus);
+                        // Only the viewer on screen owns the main column; one that was
+                        // replaced must not take focus back (issue 2).
+                        if matches!(&this.content, MainContent::Pdf(v) if v == pdf) {
+                            this.content = MainContent::Page;
+                            window.focus(&this.focus);
+                        }
                     }
                     // The PDF stays open; the highlight's block opens beside it.
                     PdfEvent::OpenBlock { page, block } => {
@@ -1112,12 +1133,15 @@ impl Workspace {
             }),
         );
         window.focus(&view.focus_handle(cx));
-        self.pdf = Some(view);
+        self.content = MainContent::Pdf(view);
         cx.notify();
     }
 
     pub fn pdf_view(&self) -> Option<Entity<PdfView>> {
-        self.pdf.clone()
+        match &self.content {
+            MainContent::Pdf(pdf) => Some(pdf.clone()),
+            MainContent::Page | MainContent::Graph(_) => None,
+        }
     }
 
     /// Files dropped on the window become attachments: at the caret when editing, else a
@@ -1175,7 +1199,10 @@ impl Workspace {
     }
 
     pub fn graph_view(&self) -> Option<Entity<GraphView>> {
-        self.graph.clone()
+        match &self.content {
+            MainContent::Graph(graph) => Some(graph.clone()),
+            MainContent::Page | MainContent::Pdf(_) => None,
+        }
     }
 
     /// The local graph panel in the right sidebar (GR-5).
@@ -1290,8 +1317,7 @@ impl Workspace {
         });
         let Some(page) = page else { return };
         self.editor.update(cx, |e, cx| e.end(cx));
-        self.graph = None;
-        self.pdf = None;
+        self.content = MainContent::Page;
         self.main
             .update(cx, |m, cx| m.open_journal(page.clone(), cx));
         let _ = self
@@ -2757,10 +2783,10 @@ impl Render for Workspace {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .map(|d| match (&self.graph, &self.pdf) {
-                        (Some(g), _) => d.child(g.clone()),
-                        (None, Some(p)) => d.child(p.clone()),
-                        (None, None) => d.child(self.main.clone()),
+                    .map(|d| match &self.content {
+                        MainContent::Graph(graph) => d.child(graph.clone()),
+                        MainContent::Pdf(pdf) => d.child(pdf.clone()),
+                        MainContent::Page => d.child(self.main.clone()),
                     }),
             );
         for (i, sp) in self.splits.iter().enumerate() {
