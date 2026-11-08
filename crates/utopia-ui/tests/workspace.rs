@@ -5847,3 +5847,83 @@ fn template_backed_day_is_not_written_by_a_click(cx: &mut TestAppContext) {
         ["Intention for today", "filled in later"]
     );
 }
+
+/// §4.2 P2 (WASM plugin sandbox), rule 13: a plugin's host writes commit inside the call,
+/// so a run that then traps must still tell the views which pages moved. The trap itself is
+/// still reported; only the stale views were the bug (plugin run lifecycle issue 1).
+#[gpui::test]
+fn p2_a_failed_plugin_run_announces_the_pages_it_wrote(cx: &mut TestAppContext) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("a");
+    cx.run_until_parked();
+
+    // A plugin that captures through the API and then traps.
+    let req = r#"{"op":"capture","text":"captured then trapped"}"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("plugin.wat"),
+        format!(
+            r#"(module
+  (import "utopia" "call" (func $call (param i32 i32) (result i64)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{data}")
+  (func (export "utopia_alloc") (param i32) (result i32) (i32.const 8192))
+  (func (export "utopia_run") (param i32) (param i32) (result i64)
+    (drop (call $call (i32.const 0) (i32.const {len})))
+    (unreachable)))"#,
+            data = req.replace('"', "\\\""),
+            len = req.len()
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("plugin.json"),
+        serde_json::json!({
+            "name": "trapper",
+            "commands": [{"id": "go", "title": "Go"}],
+            "permissions": ["write"],
+            "module": "plugin.wat",
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let plugin = Rc::new(utopia_plugin::Plugin::load(dir.path()).unwrap());
+    app.update(cx, |app, _| app.plugins.push(plugin));
+
+    let seen: Rc<RefCell<Vec<PageId>>> = Rc::default();
+    let sink = seen.clone();
+    let _sub = cx.cx.update(|cx| {
+        cx.subscribe(&app, move |_, e: &utopia_ui::app_state::Changed, _| {
+            sink.borrow_mut().extend(e.pages.clone())
+        })
+    });
+    ws.update_in(cx, |w, window, cx| {
+        let editor = w.editor();
+        editor.update(cx, |editor, cx| editor.run_plugin(0, "go", window, cx));
+    });
+    cx.run_until_parked();
+
+    assert!(
+        app.read_with(cx, |app, _| app.last_error.is_some()),
+        "the trap is still reported to the user"
+    );
+    app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        assert!(
+            !app.store
+                .search_blocks("captured then trapped", 5)
+                .unwrap()
+                .is_empty(),
+            "the write itself committed inside the call"
+        );
+    });
+    assert!(
+        seen.borrow().contains(&page),
+        "the page the plugin wrote is announced, not only the failure: {:?}",
+        seen.borrow()
+    );
+}

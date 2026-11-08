@@ -70,15 +70,16 @@ fn writes_through_the_api_and_answers_the_editor() {
     );
     let p = Plugin::load(dir.path()).unwrap();
     let mut s = store();
-    let r = p.run(&mut s, "go", json!({"text": "x"})).unwrap();
-    assert_eq!(r.insert.as_deref(), Some("done ✓"));
+    let r = p.run(&mut s, "go", json!({"text": "x"}));
+    let out = r.outcome.expect("the run finished");
+    assert_eq!(out.insert.as_deref(), Some("done ✓"));
     assert_eq!(r.logs, vec!["hello log"]);
     assert_eq!(r.changed.len(), 1, "the capture touched today's page");
     let plugin_page = s.find_page("Plugin").unwrap().unwrap();
     assert_eq!(s.backlink_count(&plugin_page).unwrap(), 1);
     assert!(r.fuel_used > 0);
     assert!(matches!(
-        p.run(&mut s, "nope", json!({})),
+        p.run(&mut s, "nope", json!({})).outcome,
         Err(PluginError::Run(_))
     ));
 }
@@ -94,8 +95,8 @@ fn permissions_gate_operations() {
     );
     let p = Plugin::load(dir.path()).unwrap();
     let mut s = store();
-    let r = p.run(&mut s, "go", json!({})).unwrap();
-    let err = r.raw["error"].as_str().unwrap();
+    let r = p.run(&mut s, "go", json!({}));
+    let err = r.output().unwrap().raw["error"].as_str().unwrap();
     assert!(err.contains("permission denied"), "{err}");
     assert!(s.search_blocks("sneaky", 5).unwrap().is_empty());
     // Reads are allowed with "read".
@@ -113,9 +114,14 @@ fn permissions_gate_operations() {
     );
     let r = Plugin::load(dir.path())
         .unwrap()
-        .run(&mut s, "go", json!({}))
-        .unwrap();
-    assert_eq!(r.raw["ok"]["blocks"].as_array().unwrap().len(), 1);
+        .run(&mut s, "go", json!({}));
+    assert_eq!(
+        r.output().unwrap().raw["ok"]["blocks"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
     // No permissions at all: nothing.
     let dir = plugin(
         &[],
@@ -124,9 +130,8 @@ fn permissions_gate_operations() {
     );
     let r = Plugin::load(dir.path())
         .unwrap()
-        .run(&mut s, "go", json!({}))
-        .unwrap();
-    assert!(r.raw["error"]
+        .run(&mut s, "go", json!({}));
+    assert!(r.output().unwrap().raw["error"]
         .as_str()
         .unwrap()
         .contains("permission denied"));
@@ -140,6 +145,7 @@ fn runaway_plugins_are_stopped() {
     let e = Plugin::load(dir.path())
         .unwrap()
         .run(&mut s, "go", json!({}))
+        .outcome
         .unwrap_err();
     assert!(e.to_string().to_lowercase().contains("fuel"), "{e}");
     // Memory beyond the cap is refused (memory.grow returns -1), so this traps.
@@ -151,6 +157,7 @@ fn runaway_plugins_are_stopped() {
     let e = Plugin::load(dir.path())
         .unwrap()
         .run(&mut s, "go", json!({}))
+        .outcome
         .unwrap_err();
     assert!(matches!(e, PluginError::Run(_)), "{e}");
     // Output pointing outside memory is an error, not a crash.
@@ -158,6 +165,7 @@ fn runaway_plugins_are_stopped() {
     assert!(Plugin::load(dir.path())
         .unwrap()
         .run(&mut s, "go", json!({}))
+        .outcome
         .is_err());
 }
 
@@ -200,6 +208,7 @@ fn manifests_are_checked() {
     assert!(Plugin::load(bad.path())
         .unwrap()
         .run(&mut s, "go", json!({}))
+        .outcome
         .is_err());
     // `load_all` reports each plugin directory, broken ones included.
     let root = tempfile::tempdir().unwrap();
@@ -230,17 +239,68 @@ fn example_word_count_plugin() {
         ("one", 1),
         (&"word ".repeat(1234), 1234),
     ] {
-        let r = p
-            .run(
-                &mut s,
-                "count",
-                json!({"text": text, "page": "p", "block": "b"}),
-            )
-            .unwrap();
+        let r = p.run(
+            &mut s,
+            "count",
+            json!({"text": text, "page": "p", "block": "b"}),
+        );
         assert_eq!(
-            r.message.as_deref(),
+            r.output().unwrap().message.as_deref(),
             Some(format!("{n} words").as_str()),
             "{text:?}"
+        );
+    }
+}
+
+/// §4.2 P2 (WASM plugin sandbox), rule 13: a host write commits inside the call, so every
+/// way a run can end — a trap, fuel exhaustion, output too large, output not JSON — must
+/// still report the pages it wrote and the log lines it printed. Before the run result
+/// carried host state, `changed` and `logs` were dropped on all of them, so the store had
+/// moved and no view was told (plugin run lifecycle issue 1).
+#[test]
+fn a_run_that_fails_still_reports_the_pages_it_wrote() {
+    let req = r#"{"op":"capture","text":"committed then trapped"}"#;
+    let log = "before the failure";
+    let cases = [
+        // Trap.
+        "(unreachable)".to_string(),
+        // Return something that is not JSON.
+        packed(4096, "not json").to_string(),
+        // Claim an output larger than the message cap.
+        format!("(i64.const {})", (1u64 << 32) | ((4 << 20) as u64 + 1)),
+        // Burn the whole fuel budget.
+        "(loop $l (br $l)) (i64.const 0)".to_string(),
+    ];
+    for tail in cases {
+        let dir = plugin(
+            &["write"],
+            &[(0, req), (2048, log), (4096, "not json")],
+            &format!(
+                "(call $log (i32.const 2048) (i32.const {}))
+                 (drop (call $call (i32.const 0) (i32.const {})))
+                 {tail}",
+                log.len(),
+                req.len()
+            ),
+        );
+        let p = Plugin::load(dir.path()).unwrap();
+        let mut s = store();
+        let r = p.run(&mut s, "go", json!({}));
+        assert!(
+            r.outcome.is_err(),
+            "the run failed, as the module made it: {tail}"
+        );
+        assert_eq!(
+            r.changed.len(),
+            1,
+            "the capture it committed is reported back: {tail}"
+        );
+        assert_eq!(r.logs, vec![log], "and so is what it logged: {tail}");
+        assert!(
+            !s.search_blocks("committed then trapped", 5)
+                .unwrap()
+                .is_empty(),
+            "the write really landed: {tail}"
         );
     }
 }

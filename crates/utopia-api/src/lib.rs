@@ -115,12 +115,33 @@ fn default_limit() -> usize {
     20
 }
 
+/// What an operation does to the graph. The plugin permission check reads this one
+/// classification and [`handle`] is the only implementation, so a new op cannot run with
+/// read permission by being forgotten in a second list
+/// (`docs/state-machines/plugin-run-lifecycle.md`, issue 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    /// Reads only; [`handle`] commits nothing.
+    Read,
+    /// Commits through the store and names the pages it touched in [`Outcome::changed`].
+    Write,
+}
+
 impl Op {
-    pub fn writes(&self) -> bool {
-        matches!(
-            self,
-            Op::AppendBlock { .. } | Op::UpdateBlock { .. } | Op::Capture { .. }
-        )
+    /// Exhaustive on purpose: adding an [`Op`] variant does not compile until it is
+    /// classified here, and `ops_classify_reads_and_writes_consistently` checks the
+    /// classification against what [`handle`] actually does.
+    pub const fn kind(&self) -> OpKind {
+        match self {
+            Op::ListPages { .. }
+            | Op::GetPage { .. }
+            | Op::Backlinks { .. }
+            | Op::GetBlock { .. }
+            | Op::Journal { .. }
+            | Op::Search { .. }
+            | Op::Query { .. } => OpKind::Read,
+            Op::AppendBlock { .. } | Op::UpdateBlock { .. } | Op::Capture { .. } => OpKind::Write,
+        }
     }
 }
 
@@ -246,7 +267,8 @@ fn parse_date(store: &Store, s: &str) -> Result<NaiveDate, ApiError> {
         .ok_or_else(|| ApiError::new(400, format!("not a date: {s:?}")))
 }
 
-/// Run one operation against the store. Writes commit before returning.
+/// Run one operation against the store. Writes commit before returning and name the pages
+/// they touched in [`Outcome::changed`]; [`Op::kind`] says which ops those are.
 pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
     match op {
         Op::ListPages { daily } => {
@@ -931,6 +953,70 @@ mod tests {
         assert_eq!(slot.get(), CallState::Expired);
         assert!(!slot.claim(), "an expired call is terminal");
         assert!(!slot.expire(), "expiring twice changes nothing");
+    }
+
+    /// Plugin run lifecycle, issue 2: the permission a plugin needs comes from
+    /// `Op::kind`, so the classification must say what `handle` does. Every op is built
+    /// from its JSON form (what a plugin sends) and run against a small graph; a write
+    /// must name the page it touched, a read must touch none.
+    #[test]
+    fn ops_classify_reads_and_writes_consistently() {
+        let (_dir, mut store) = store();
+        let page = store.create_page("Test Page").unwrap();
+        let block = store.ensure_first_block(&page).unwrap();
+        store
+            .set_block_text(&page, &block, "one", None, None)
+            .unwrap();
+        store.commit_block(&page, &block).unwrap();
+        store
+            .open_daily(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap())
+            .unwrap();
+        store.sync_index().unwrap();
+        let op =
+            |v: Value| -> Op { serde_json::from_value(v).expect("an op as a plugin sends it") };
+        let cases: Vec<(Op, OpKind)> = vec![
+            (op(json!({"op": "list_pages"})), OpKind::Read),
+            (
+                op(json!({"op": "get_page", "title": "Test Page"})),
+                OpKind::Read,
+            ),
+            (
+                op(json!({"op": "backlinks", "title": "Test Page"})),
+                OpKind::Read,
+            ),
+            (
+                op(json!({"op": "get_block", "id": block.as_str()})),
+                OpKind::Read,
+            ),
+            (op(json!({"op": "journal", "date": "today"})), OpKind::Read),
+            (op(json!({"op": "search", "q": "one"})), OpKind::Read),
+            (op(json!({"op": "query", "query": "\"one\""})), OpKind::Read),
+            (
+                op(json!({"op": "append_block", "title": "Test Page", "text": "two"})),
+                OpKind::Write,
+            ),
+            (
+                op(json!({"op": "update_block", "id": block.as_str(), "text": "one edited"})),
+                OpKind::Write,
+            ),
+            (
+                op(json!({"op": "capture", "text": "captured"})),
+                OpKind::Write,
+            ),
+        ];
+        for (op, want) in cases {
+            let name = format!("{op:?}");
+            assert_eq!(
+                op.kind(),
+                want,
+                "{name}: classified against what handle does"
+            );
+            let out = handle(&mut store, op).expect(&name);
+            match want {
+                OpKind::Write => assert!(!out.changed.is_empty(), "{name}: a write names its page"),
+                OpKind::Read => assert!(out.changed.is_empty(), "{name}: a read changes nothing"),
+            }
+        }
     }
 
     #[test]

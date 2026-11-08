@@ -467,27 +467,29 @@ impl BlockEditor {
         });
         let result = self.app.update(cx, |app, cx| {
             let plugin = app.plugins.get(index).cloned()?;
-            let r = plugin.run(&mut app.store, command, input);
-            match &r {
-                Ok(out) => {
-                    if !out.changed.is_empty() {
-                        app.changed(out.changed.clone(), true, cx);
-                    }
-                    app.notice = out.message.clone();
-                }
+            let run = plugin.run(&mut app.store, command, input);
+            // Host writes commit inside the call, so they are reported whether or not the
+            // run then failed (rule 13; plugin run lifecycle issue 1).
+            if !run.changed.is_empty() {
+                app.changed(run.changed.clone(), true, cx);
+            }
+            match &run.outcome {
+                Ok(out) => app.notice = out.message.clone(),
                 Err(e) => app.last_error = Some(format!("{}: {e}", plugin.manifest.name)),
             }
-            r.ok()
+            Some(run)
         });
-        let Some(out) = result else {
+        let Some(run) = result else {
             cx.notify();
             return;
         };
-        if let Some(text) = out.replace {
+        let out = run.outcome.as_ref().ok();
+        let replace = out.and_then(|o| o.replace.clone());
+        if let Some(text) = replace {
             let len = text.len();
             self.field.set_text(&text, len);
             self.after_edit(window, cx);
-        } else if out.changed.contains(&t.page) {
+        } else if run.changed.contains(&t.page) {
             // The plugin edited this page through the API: show the stored text.
             let stored = self.app.update(cx, |app, _| {
                 app.store
@@ -500,7 +502,8 @@ impl BlockEditor {
                 self.field.set_text(&s, len);
             }
         }
-        if let Some(text) = out.insert {
+        let insert = out.and_then(|o| o.insert.clone());
+        if let Some(text) = insert {
             self.insert_text(&text, window, cx);
         }
         cx.notify();

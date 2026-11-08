@@ -103,12 +103,43 @@ pub struct RunOutput {
     pub insert: Option<String>,
     pub replace: Option<String>,
     pub message: Option<String>,
-    /// Pages the plugin's writes touched.
-    pub changed: Vec<PageId>,
-    pub logs: Vec<String>,
-    pub fuel_used: u64,
     /// The plugin's whole JSON output.
     pub raw: Value,
+}
+
+/// One run's result, whether it succeeded or not.
+///
+/// Host state travels with the outcome: a plugin can commit writes through the API and
+/// then trap, run out of fuel, or return something unusable, so the pages it touched and
+/// the lines it logged must reach the caller on both paths (`docs/state-machines/`
+/// `plugin-run-lifecycle.md`, issue 1; rule 13 makes the write and its notice one thing).
+#[derive(Debug)]
+pub struct RunResult {
+    /// The plugin's answer, or why it stopped.
+    pub outcome: Result<RunOutput, PluginError>,
+    /// Pages its host writes committed, in the order the writes ran.
+    pub changed: Vec<PageId>,
+    /// Lines the plugin logged, up to the first point that failed.
+    pub logs: Vec<String>,
+    /// Instructions consumed.
+    pub fuel_used: u64,
+}
+
+impl RunResult {
+    /// A run that never reached the module, so nothing changed and nothing was logged.
+    fn not_started(e: PluginError) -> Self {
+        Self {
+            outcome: Err(e),
+            changed: Vec::new(),
+            logs: Vec::new(),
+            fuel_used: 0,
+        }
+    }
+
+    /// The plugin's answer, if it finished within its limits.
+    pub fn output(&self) -> Option<&RunOutput> {
+        self.outcome.as_ref().ok()
+    }
 }
 
 pub struct Plugin {
@@ -186,13 +217,17 @@ fn host_request(host: &mut Host, request: &[u8]) -> Value {
         Ok(op) => op,
         Err(e) => return json!({ "error": format!("bad request: {e}") }),
     };
-    let allowed = if op.writes() {
-        host.manifest.can_write()
-    } else {
-        host.manifest.can_read()
+    let kind = op.kind();
+    let allowed = match kind {
+        utopia_api::OpKind::Write => host.manifest.can_write(),
+        utopia_api::OpKind::Read => host.manifest.can_read(),
     };
     if !allowed {
-        let need = if op.writes() { "write" } else { "read" };
+        let need = if kind == utopia_api::OpKind::Write {
+            "write"
+        } else {
+            "read"
+        };
         return json!({ "error": format!("permission denied: the plugin did not ask for {need:?}") });
     }
     // SAFETY: `store` is the `&mut Store` borrowed by `Plugin::run` for the whole run;
@@ -247,9 +282,12 @@ impl Plugin {
     }
 
     /// Run a command. `input` is merged into `{"command": …}`.
-    pub fn run(&self, store: &mut Store, command: &str, input: Value) -> Result<RunOutput> {
+    ///
+    /// The result carries the host state of the run on both paths, so a module that
+    /// writes and then fails still names the pages it changed (see [`RunResult`]).
+    pub fn run(&self, store: &mut Store, command: &str, input: Value) -> RunResult {
         if !self.manifest.commands.iter().any(|c| c.id == command) {
-            return Err(PluginError::Run(format!("no command {command:?}")));
+            return RunResult::not_started(PluginError::Run(format!("no command {command:?}")));
         }
         let host = Host {
             store: store as *mut Store,
@@ -264,40 +302,40 @@ impl Plugin {
         };
         let mut wstore = wasmi::Store::new(&self.engine, host);
         wstore.limiter(|h| &mut h.limits);
-        wstore
-            .set_fuel(FUEL_PER_RUN)
-            .map_err(|e| PluginError::Run(e.to_string()))?;
+        if let Err(e) = wstore.set_fuel(FUEL_PER_RUN) {
+            return RunResult::not_started(PluginError::Run(e.to_string()));
+        }
         let mut linker = Linker::<Host>::new(&self.engine);
+        if let Err(e) = link(&mut linker) {
+            return RunResult::not_started(e);
+        }
+        // From here on the module can run (a start function can call the host too), so
+        // both the success and the failure path report what it did.
+        let outcome = self.execute(&mut linker, &mut wstore, command, input);
+        let fuel_used = fuel_used(wstore.get_fuel().ok());
+        let host = wstore.into_data();
+        RunResult {
+            outcome,
+            changed: host.changed,
+            logs: host.logs,
+            fuel_used,
+        }
+    }
+
+    /// Instantiate the module, hand it the input and unpack its answer. Every failure from
+    /// here on is reported next to the host state, because the module may already have
+    /// committed writes through `call`.
+    fn execute(
+        &self,
+        linker: &mut Linker<Host>,
+        wstore: &mut wasmi::Store<Host>,
+        command: &str,
+        input: Value,
+    ) -> Result<RunOutput> {
         let run_err = |e: wasmi::Error| PluginError::Run(e.to_string());
-        linker
-            .func_wrap(
-                "utopia",
-                "call",
-                |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<i64, wasmi::Error> {
-                    let req = read_mem(&caller, ptr, len)?;
-                    let resp = host_request(caller.data_mut(), &req);
-                    let bytes = serde_json::to_vec(&resp).expect("json");
-                    write_back(&mut caller, &bytes)
-                },
-            )
-            .map_err(|e| PluginError::Module(e.to_string()))?;
-        linker
-            .func_wrap(
-                "utopia",
-                "log",
-                |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
-                    let line = read_mem(&caller, ptr, len)?;
-                    let logs = &mut caller.data_mut().logs;
-                    if logs.len() < 1_000 {
-                        logs.push(String::from_utf8_lossy(&line).into_owned());
-                    }
-                    Ok(())
-                },
-            )
-            .map_err(|e| PluginError::Module(e.to_string()))?;
         let instance = linker
-            .instantiate(&mut wstore, &self.module)
-            .and_then(|pre| pre.start(&mut wstore))
+            .instantiate(&mut *wstore, &self.module)
+            .and_then(|pre| pre.start(&mut *wstore))
             .map_err(run_err)?;
         let mut payload = json!({ "command": command });
         if let (Some(obj), Value::Object(extra)) = (payload.as_object_mut(), input) {
@@ -305,36 +343,34 @@ impl Plugin {
         }
         let input = serde_json::to_vec(&payload).expect("json");
         let alloc = instance
-            .get_typed_func::<i32, i32>(&wstore, "utopia_alloc")
+            .get_typed_func::<i32, i32>(&*wstore, "utopia_alloc")
             .map_err(|_| PluginError::Module("missing export utopia_alloc".into()))?;
         let run = instance
-            .get_typed_func::<(i32, i32), i64>(&wstore, "utopia_run")
+            .get_typed_func::<(i32, i32), i64>(&*wstore, "utopia_run")
             .map_err(|_| PluginError::Module("missing export utopia_run".into()))?;
         let memory = instance
-            .get_memory(&wstore, "memory")
+            .get_memory(&*wstore, "memory")
             .ok_or_else(|| PluginError::Module("missing export memory".into()))?;
         let ptr = alloc
-            .call(&mut wstore, input.len() as i32)
+            .call(&mut *wstore, input.len() as i32)
             .map_err(run_err)? as u32 as usize;
         memory
-            .data_mut(&mut wstore)
+            .data_mut(&mut *wstore)
             .get_mut(ptr..ptr + input.len())
             .ok_or_else(|| PluginError::Run("utopia_alloc returned memory out of bounds".into()))?
             .copy_from_slice(&input);
         let packed = run
-            .call(&mut wstore, (ptr as i32, input.len() as i32))
+            .call(&mut *wstore, (ptr as i32, input.len() as i32))
             .map_err(run_err)?;
         let (optr, olen) = unpack(packed);
         if olen > MAX_MESSAGE {
             return Err(PluginError::Run("output too large".into()));
         }
         let out_bytes = memory
-            .data(&wstore)
+            .data(&*wstore)
             .get(optr..optr + olen)
             .ok_or_else(|| PluginError::Run("output out of bounds".into()))?
             .to_vec();
-        let fuel_used = FUEL_PER_RUN - wstore.get_fuel().unwrap_or(0);
-        let host = wstore.into_data();
         let out: Value = if out_bytes.is_empty() {
             json!({})
         } else {
@@ -342,17 +378,51 @@ impl Plugin {
                 .map_err(|e| PluginError::Run(format!("output is not JSON: {e}")))?
         };
         let text = |k: &str| out.get(k).and_then(Value::as_str).map(str::to_string);
-        let (insert, replace, message) = (text("insert"), text("replace"), text("message"));
         Ok(RunOutput {
-            insert,
-            replace,
-            message,
-            changed: host.changed,
-            logs: host.logs,
-            fuel_used,
+            insert: text("insert"),
+            replace: text("replace"),
+            message: text("message"),
             raw: out,
         })
     }
+}
+
+/// Instructions a run consumed. `Store::get_fuel` cannot fail while metering is on
+/// (`Config::consume_fuel`), but if it ever did, the honest answer is "unknown" (0), not
+/// the whole budget: that reads as "this plugin ran out of fuel" (issue 3).
+fn fuel_used(left: Option<u64>) -> u64 {
+    left.map_or(0, |left| FUEL_PER_RUN - left)
+}
+
+/// The two host imports a plugin may use (`call`, `log`).
+fn link(linker: &mut Linker<Host>) -> Result<()> {
+    linker
+        .func_wrap(
+            "utopia",
+            "call",
+            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<i64, wasmi::Error> {
+                let req = read_mem(&caller, ptr, len)?;
+                let resp = host_request(caller.data_mut(), &req);
+                let bytes = serde_json::to_vec(&resp).expect("json");
+                write_back(&mut caller, &bytes)
+            },
+        )
+        .map_err(|e| PluginError::Module(e.to_string()))?;
+    linker
+        .func_wrap(
+            "utopia",
+            "log",
+            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> Result<(), wasmi::Error> {
+                let line = read_mem(&caller, ptr, len)?;
+                let logs = &mut caller.data_mut().logs;
+                if logs.len() < 1_000 {
+                    logs.push(String::from_utf8_lossy(&line).into_owned());
+                }
+                Ok(())
+            },
+        )
+        .map_err(|e| PluginError::Module(e.to_string()))?;
+    Ok(())
 }
 
 /// Every plugin directory under `root` (`<config>/plugins`), loaded or with its error.
@@ -369,4 +439,18 @@ pub fn load_all(root: &Path) -> Vec<(PathBuf, Result<Plugin>)> {
     dirs.into_iter()
         .map(|d| (d.clone(), Plugin::load(&d)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 3: an unreadable fuel counter reported the whole budget as spent. Nothing is
+    /// known about the run, so report nothing.
+    #[test]
+    fn unknown_fuel_is_not_a_whole_budget() {
+        assert_eq!(fuel_used(None), 0, "unknown is not \"all of it\"");
+        assert_eq!(fuel_used(Some(FUEL_PER_RUN)), 0);
+        assert_eq!(fuel_used(Some(FUEL_PER_RUN - 1_234)), 1_234);
+    }
 }
