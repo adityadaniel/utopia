@@ -171,7 +171,7 @@ impl SettingsView {
         // Already logged at startup; repeated here so the user sees it.
         warnings.extend(appearance::Prefs::load(&config_dir).1);
         let search = cx.new(|cx| LineInput::new("name, description or key", cx));
-        let subs = vec![
+        let mut subs = vec![
             // Escape clears the field and hands the keyboard back to the window, so the
             // key list's own shortcuts keep working.
             cx.subscribe_in(
@@ -194,6 +194,13 @@ impl SettingsView {
                 },
             ),
         ];
+        // The theme is a global that each window keeps in step with its own appearance.
+        // Without an observer of its own, Settings froze on the last theme when the main
+        // window closed first (issue 6).
+        subs.push(cx.observe_window_appearance(window, |_, window, cx| {
+            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.notify();
+        }));
         Self {
             config_dir,
             overrides,
