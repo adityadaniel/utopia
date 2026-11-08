@@ -3747,6 +3747,43 @@ fn p2_pdf_highlight_release_off_page_cancels_the_drag(cx: &mut TestAppContext) {
     assert!(view.update(cx, |v, _| v.highlights().is_empty()));
 }
 
+/// P2 "PDF highlights": a drag that ends on another page is cancelled, not finished
+/// against the page it started from, where clamping turns it into a highlight that runs
+/// to the page edge.
+#[cfg(target_os = "macos")]
+#[gpui::test]
+fn p2_pdf_highlight_release_on_another_page_writes_nothing(cx: &mut TestAppContext) {
+    use gpui::{Bounds, Modifiers, MouseButton, MouseMoveEvent};
+    // Tall enough for both pages to be laid out.
+    let (_dir, _app, _ws, view, cx) = pdf_viewer(cx, size(px(1280.), px(2200.)));
+    let p0 = view
+        .update(cx, |v, _| v.page_bounds(0))
+        .expect("page 0 drawn");
+    let p1 = view
+        .update(cx, |v, _| v.page_bounds(1))
+        .expect("page 1 drawn");
+    assert!(p1.origin.y > p0.origin.y, "page 1 below page 0");
+    let at = |b: Bounds<gpui::Pixels>, x: f32, y: f32| {
+        point(
+            b.origin.x + b.size.width * x,
+            b.origin.y + b.size.height * y,
+        )
+    };
+    cx.simulate_mouse_down(at(p0, 0.05, 0.07), MouseButton::Left, Modifiers::default());
+    cx.simulate_event(MouseMoveEvent {
+        position: at(p1, 0.5, 0.3),
+        pressed_button: Some(MouseButton::Left),
+        modifiers: Modifiers::default(),
+    });
+    cx.simulate_mouse_up(at(p1, 0.5, 0.3), MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(!view.update(cx, |v, _| v.dragging()));
+    assert!(
+        view.update(cx, |v, _| v.highlights().is_empty()),
+        "no highlight clamped onto the page the drag started from"
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[gpui::test]
 fn pdf_viewer_drag_creates_highlight_block(cx: &mut TestAppContext) {

@@ -266,10 +266,17 @@ impl PdfView {
         Some((x.clamp(0., 1.), y.clamp(0., 1.)))
     }
 
-    fn finish_drag(&mut self, at: Point<Pixels>, cx: &mut Context<Self>) {
+    /// Finish a drag released on `page`. A release on any other page cancels it: the
+    /// coordinates belong to a different page, and clamping them against the page the drag
+    /// started on would write a highlight that runs to its edge.
+    fn finish_drag(&mut self, page: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
         let Gesture::Drag(drag) = std::mem::take(&mut self.gesture) else {
             return;
         };
+        if drag.page != page {
+            cx.notify();
+            return;
+        }
         let (Some(a), Some(b)) = (self.rel(drag.page, drag.start), self.rel(drag.page, at)) else {
             return;
         };
@@ -392,7 +399,9 @@ impl PdfView {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, e: &MouseUpEvent, _, cx| this.finish_drag(e.position, cx)),
+                cx.listener(move |this, e: &MouseUpEvent, _, cx| {
+                    this.finish_drag(i, e.position, cx)
+                }),
             );
         let yellow = th.pdf_highlight;
         for (k, hl) in self
