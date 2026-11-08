@@ -398,6 +398,67 @@ fn attachments_are_content_addressed_files() {
     assert!(s.add_blob("big.bin", &big).is_err());
 }
 
+/// docs/state-machines/attachment-blob-state.md issue 1 (§11.6, §10.3): a row whose file is
+/// gone must not pin the upload queue. `blobs_to_upload` applied `LIMIT` in SQL, before
+/// checking that the file exists, and silently skipped dead rows, so the oldest dead rows
+/// made every newer attachment wait forever.
+#[test]
+fn a_missing_file_does_not_pin_the_upload_queue() {
+    let (mut s, dir) = store();
+    let lost = s.add_blob("gone.pdf", b"%PDF-1.4 gone").unwrap();
+    let live = s.add_blob("here.pdf", b"%PDF-1.4 here").unwrap();
+    // The dead row is the oldest, so the SQL `LIMIT` selected it on every round.
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 1 WHERE hash = ?1",
+            [&lost.hash],
+        )
+        .unwrap();
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 2 WHERE hash = ?1",
+            [&live.hash],
+        )
+        .unwrap();
+    std::fs::remove_file(s.blob_path(&lost.hash).unwrap()).unwrap();
+
+    let upload = s.blobs_to_upload(1).unwrap();
+    assert_eq!(
+        upload.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![live.hash.as_str()],
+        "the blob this device still has uploads even though the oldest row is dead"
+    );
+    assert_eq!(upload[0].1, b"%PDF-1.4 here");
+    assert!(
+        matches!(
+            s.attachment_state(&lost.hash).unwrap(),
+            Some(utopia_store::BlobState::Lost { .. })
+        ),
+        "the dead row is noticed, not silently skipped"
+    );
+    s.mark_blobs_uploaded(std::slice::from_ref(&live.hash))
+        .unwrap();
+    assert!(
+        s.blobs_to_upload(10).unwrap().is_empty(),
+        "the dead row is never selected again"
+    );
+    // The bytes coming back (a restored `.blobs` directory) revives the row on the next
+    // round instead of leaving it lost forever.
+    std::fs::write(
+        dir.path().join("g.blobs").join(&lost.hash),
+        b"%PDF-1.4 gone",
+    )
+    .unwrap();
+    assert_eq!(
+        s.blobs_to_upload(10).unwrap(),
+        vec![(lost.hash.clone(), b"%PDF-1.4 gone".to_vec())]
+    );
+    assert_eq!(
+        s.attachment_state(&lost.hash).unwrap(),
+        Some(utopia_store::BlobState::Pending)
+    );
+}
+
 #[test]
 fn markdown_export_carries_attachments() {
     let (mut s, dir) = store();

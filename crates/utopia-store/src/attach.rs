@@ -286,25 +286,75 @@ impl Store {
             .collect())
     }
 
-    /// Local blobs not yet uploaded, oldest first.
+    /// Local blobs not yet uploaded, oldest first (§11.6).
+    ///
+    /// The queue is the rows whose bytes this device still has. A row whose file is gone is
+    /// marked [`BlobState::Lost`] and skipped *before* the limit applies: the previous
+    /// version put `LIMIT` in the SQL and only then looked for the file, so a few dead rows
+    /// at the head of the queue starved every newer attachment forever
+    /// (docs/state-machines/attachment-blob-state.md issue 1). A lost row whose bytes come
+    /// back is revived here, because the file is the truth about whether it can be sent.
     pub fn blobs_to_upload(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let hashes: Vec<String> = {
+        // Rows and states only, so a long queue costs one indexed read and no payloads.
+        let queue: Vec<(String, String)> = {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT hash FROM attachment WHERE state = 'pending'
-                 ORDER BY created_at, hash LIMIT ?1",
+                "SELECT hash, state FROM attachment WHERE state <> 'uploaded'
+                 ORDER BY created_at, hash",
             )?;
             let rows = stmt
-                .query_map([limit as i64], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
-        let mut out = Vec::new();
-        for h in hashes {
-            if let Some(b) = self.blob(&h)? {
-                out.push((h, b));
+        let mut ready = Vec::new();
+        for (hash, state) in queue {
+            if !self.has_blob(&hash) {
+                self.mark_blob_lost(&hash)?;
+                continue;
+            }
+            if matches!(BlobState::from_row(&state, None), BlobState::Lost { .. }) {
+                self.revive_blob(&hash)?;
+            }
+            if ready.len() < limit {
+                ready.push(hash);
+            }
+        }
+        let mut out = Vec::with_capacity(ready.len());
+        for hash in ready {
+            match self.blob(&hash)? {
+                Some(bytes) => out.push((hash, bytes)),
+                // Deleted between the check above and the read: notice it and leave it for
+                // the next round instead of failing the sync round.
+                None => self.mark_blob_lost(&hash)?,
             }
         }
         Ok(out)
+    }
+
+    /// Notice, once, that a queued row has no bytes. Not fatal: the file may come back
+    /// (a `.blobs` directory restored, the same content attached again).
+    fn mark_blob_lost(&self, hash: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE attachment SET state = 'lost', lost_at = ?2
+             WHERE hash = ?1 AND state = 'pending'",
+            params![hash, self.now()],
+        )?;
+        if changed > 0 {
+            eprintln!(
+                "utopia-store: attachment {hash} has no file; not uploading it until the bytes are back"
+            );
+        }
+        Ok(())
+    }
+
+    /// The bytes are back for a row that had lost them.
+    fn revive_blob(&self, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachment SET state = 'pending', lost_at = NULL
+             WHERE hash = ?1 AND state = 'lost'",
+            [hash],
+        )?;
+        Ok(())
     }
 
     pub fn mark_blobs_uploaded(&self, hashes: &[String]) -> Result<()> {
