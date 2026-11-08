@@ -16,6 +16,18 @@ use utopia_core::{DateFormat, DocDelta, PageId, PageState};
 use crate::project::{Projector, ResolutionWork};
 use crate::{schema, Result, StoreError};
 
+/// A change to the local `trash` table that must land in the same transaction as the shard
+/// change it belongs to (docs/state-machines/page-lifecycle-trash.md issues 1 and 2).
+///
+/// The row is local bookkeeping, not a projection: a page tombstoned by another device gets
+/// no row here, because only a page this device deleted is in this device's trash.
+pub(crate) enum TrashOp {
+    /// The page is trashed: the row that lists it (and lets it be restored, AC-1.5).
+    Put { title: String, at: i64 },
+    /// The page is live or merged: it owns no row.
+    Clear,
+}
+
 /// One page's share of a commit.
 pub(crate) struct PageJob {
     pub page: PageId,
@@ -27,6 +39,8 @@ pub(crate) struct PageJob {
     pub update: Option<Vec<u8>>,
     /// Payload queued for sync.
     pub outbox: Option<Vec<u8>>,
+    /// The local trash row for this page, when this device owns one for it.
+    pub trash: Option<TrashOp>,
 }
 
 pub(crate) struct Job {
@@ -66,6 +80,28 @@ pub(crate) fn write_job(conn: &mut Connection, job: &Job) -> Result<HashSet<Page
             projector.project_blocks(&p.state, p.delta.as_ref(), *flip, &mut work)?;
         }
         for p in order {
+            // The local trash row is written here, inside the tombstone's transaction, so the
+            // two can never disagree: no undo, failed write or merge may leave a live page
+            // with a row, or a tombstoned page with none (AC-1.5).
+            match &p.trash {
+                Some(TrashOp::Put { title, at }) => {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO trash(id, kind, payload, deleted_at)
+                         VALUES (?1, 'page', ?2, ?3)",
+                        params![
+                            p.page.as_str(),
+                            serde_json::json!({ "title": title })
+                                .to_string()
+                                .into_bytes(),
+                            at
+                        ],
+                    )?;
+                }
+                Some(TrashOp::Clear) => {
+                    tx.execute("DELETE FROM trash WHERE id=?1", [p.page.as_str()])?;
+                }
+                None => {}
+            }
             if let Some((snap, frontier)) = &p.snapshot {
                 tx.execute(
                     "INSERT INTO page_doc(page_id, snapshot, frontier, bytes) VALUES (?1, ?2, ?3, ?4)

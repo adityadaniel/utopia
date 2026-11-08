@@ -76,6 +76,30 @@ fn assert_doctor(s: &mut Store) {
     assert!(r.is_ok(), "doctor: {:#?}", r.problems);
 }
 
+/// The local trash row for `page`, read straight from the graph. `list_trash` hides a stale
+/// row on purpose (it joins the page row), which is how the hidden state below stayed
+/// un-modelled (docs/state-machines/page-lifecycle-trash.md).
+fn trash_rows(s: &Store, page: &PageId) -> i64 {
+    s.conn()
+        .query_row(
+            "SELECT count(*) FROM trash WHERE id=?1",
+            [page.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+/// The tombstone column of the projected `page` row: what the index believes.
+fn deleted_at(s: &Store, page: &PageId) -> Option<i64> {
+    s.conn()
+        .query_row(
+            "SELECT deleted_at FROM page WHERE id=?1",
+            [page.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
 #[test]
 fn ac_1_1_lazy_daily_and_relaunch() {
     let dir = tempfile::tempdir().unwrap();
@@ -481,6 +505,116 @@ fn ac_1_5_deleted_daily_is_recreated_and_recoverable() {
     assert_eq!(survivor, new);
     let texts: Vec<String> = live_texts(&mut s, &new).into_iter().map(|t| t.0).collect();
     assert!(texts.contains(&"kept".to_string()));
+    assert_doctor(&mut s);
+}
+
+/// Issue 1: the trash row was written outside the undo group, so Cmd+Z brought the page
+/// back and left the row behind: a live page the trash still owned a row for. The row must
+/// follow the tombstone it belongs to (docs/state-machines/page-lifecycle-trash.md).
+#[test]
+fn ac_1_5_undo_of_delete_clears_the_trash_row() {
+    let mut s = store();
+    let (page, block) = s.open_daily(date(2026, 11, 2)).unwrap();
+    s.set_block_text(&page, &block, "kept", None, None).unwrap();
+    s.delete_page(&page).unwrap();
+    assert_eq!(s.list_trash().unwrap().len(), 1);
+    assert_eq!(trash_rows(&s, &page), 1);
+
+    assert!(s.can_undo(), "delete is one undo step");
+    s.undo().unwrap();
+    s.sync_index().unwrap();
+
+    assert_eq!(deleted_at(&s, &page), None, "undo brings the page back");
+    assert_eq!(
+        trash_rows(&s, &page),
+        0,
+        "a live page has no trash row (the row is the tombstone's)"
+    );
+    assert!(s.list_trash().unwrap().is_empty());
+    assert_doctor(&mut s);
+}
+
+/// Issue 2: the tombstone went through the writer and the trash row was autocommitted on
+/// the read connection, so a failed write could tombstone a page that no trash row would
+/// ever list or restore. The two must land in one transaction or not at all.
+#[test]
+fn ac_1_5_the_trash_row_lands_with_the_tombstone() {
+    // An in-memory graph writes on the caller's thread, so a failed commit is reported by
+    // the call that caused it.
+    let mut s = Store::open_in_memory().unwrap();
+    let page = s.create_page("Doomed").unwrap();
+    write(&mut s, &page, "gone soon");
+    // Any failure of the local bookkeeping, e.g. a disk error on the trash table.
+    s.conn()
+        .execute_batch("ALTER TABLE trash RENAME TO trash_off")
+        .unwrap();
+    assert!(
+        s.delete_page(&page).is_err(),
+        "a delete that cannot write its trash row must fail as a whole"
+    );
+    assert_eq!(
+        deleted_at(&s, &page),
+        None,
+        "nothing was committed: the page is still live"
+    );
+
+    s.conn()
+        .execute_batch("ALTER TABLE trash_off RENAME TO trash")
+        .unwrap();
+    // The repair rewrites the whole shard and still reports the failure once.
+    assert!(s.sync_index().is_err());
+    s.sync_index().unwrap();
+    assert_eq!(
+        deleted_at(&s, &page).is_some(),
+        trash_rows(&s, &page) == 1,
+        "the retry writes the tombstone and its row together"
+    );
+    assert_eq!(s.list_trash().unwrap().len(), 1);
+    assert_doctor(&mut s);
+}
+
+/// Issue 3: Empty Trash deletes the page row and the shard, which used to be the only
+/// record that the id had been tombstoned. The next `create_page` then reissued the same
+/// uuidv5 (rule 4) and a peer that still held the tombstoned shard merged the new page's
+/// ops into it, bringing `deleted_at` back.
+#[test]
+fn ac_1_5_empty_trash_never_reissues_a_purged_id() {
+    let mut s = store();
+    let id = s.create_page("Foo").unwrap();
+    write(&mut s, &id, "gone soon");
+    let shard = s.export_since(&id, &Frontier::default()).unwrap();
+    s.delete_page(&id).unwrap();
+    assert_eq!(s.empty_trash(None).unwrap(), 1);
+    assert!(
+        s.page_row(&id).unwrap().is_none(),
+        "Empty Trash is a hard delete (rule 5)"
+    );
+
+    let again = s.create_page("Foo").unwrap();
+    assert_ne!(again, id, "a purged id is never issued again (rule 4)");
+
+    // A peer that still holds the tombstoned shard must not adopt the new page.
+    s.import_batch(&[(id.clone(), shard)]).unwrap();
+    assert_eq!(
+        s.find_page("Foo").unwrap(),
+        Some(again.clone()),
+        "the re-created page stays live under its own id"
+    );
+    assert_eq!(
+        trash_rows(&s, &id),
+        0,
+        "a tombstone from another device is not in this device's trash"
+    );
+
+    // The memory is local bookkeeping, not a projection: a rebuild keeps it.
+    s.rebuild_index().unwrap();
+    s.delete_page(&again).unwrap();
+    s.empty_trash(None).unwrap();
+    assert_ne!(
+        s.create_page("Foo").unwrap(),
+        again,
+        "a rebuild does not forget a purged id"
+    );
     assert_doctor(&mut s);
 }
 

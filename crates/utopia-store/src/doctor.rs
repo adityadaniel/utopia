@@ -136,7 +136,7 @@ impl Store {
             |x| x.get::<_, i64>(0),
         )? as usize;
         r.refs = c.query_row("SELECT count(*) FROM ref", [], |x| x.get::<_, i64>(0))? as usize;
-        let checks: [(&str, &str); 7] = [
+        let checks: [(&str, &str); 8] = [
             ("1: block in a different page than its parent",
              "SELECT c.id FROM block c JOIN block p ON p.id=c.parent_id WHERE c.page_id<>p.page_id"),
             ("2: depth is not parent depth + 1",
@@ -159,6 +159,11 @@ impl Store {
             ("9: live block in a tombstoned page",
              "SELECT b.id FROM block b JOIN page p ON p.id=b.page_id
               WHERE p.deleted_at IS NOT NULL AND b.deleted_at IS NULL"),
+            // Local bookkeeping, not a projection (docs/state-machines/page-lifecycle-trash.md):
+            // the trash row exists only for a trashed page.
+            ("local: trash row for a page that is not trashed",
+             "SELECT t.id FROM trash t LEFT JOIN page p ON p.id=t.id
+              WHERE p.id IS NULL OR p.deleted_at IS NULL"),
         ];
         for (name, sql) in checks {
             for id in strings(c, sql)? {

@@ -14,7 +14,7 @@ use utopia_core::title::{clean_title, normalize_title};
 use utopia_core::{BlockId, BlockKind, Command, DomainError, PageId, PageKind, PageState};
 use utopia_doc::PageDoc;
 
-use crate::project::{display_title, resolve_page_key};
+use crate::project::resolve_page_key;
 use crate::{DraftDay, EditOpts, Result, Store, StoreError};
 
 /// The page lifecycle as one value (§6.5, AC-1.5; docs/state-machines/page-lifecycle-trash.md).
@@ -646,14 +646,18 @@ impl Store {
         Ok(())
     }
 
-    /// Delete a page to the trash (AC-1.5). Undoable; restorable for 30 days.
+    /// Delete a page to the trash (AC-1.5). Undoable; restorable for 30 days. The trash row
+    /// is part of the commit, not a second write: the writer puts it beside the tombstone
+    /// (docs/state-machines/page-lifecycle-trash.md issues 1 and 2).
     pub fn delete_page(&mut self, page: &PageId) -> Result<()> {
         let st = self.page_state(page)?.clone();
         if !PageFate::of(&st).is_live() {
             return Err(DomainError::NoOp.into());
         }
-        let title = display_title(&st, &self.date_format);
         let now = self.now();
+        // This device owns the page's trash row from here on, including across a failed
+        // commit: the repair rewrites the shard and the writer puts the row beside it.
+        self.own_trash.insert(page.clone());
         self.seal_undo();
         self.execute(
             page,
@@ -664,10 +668,6 @@ impl Store {
             EditOpts::default(),
         )?;
         self.seal_undo();
-        self.conn.execute(
-            "INSERT OR REPLACE INTO trash(id, kind, payload, deleted_at) VALUES (?1, 'page', ?2, ?3)",
-            params![page.as_str(), serde_json::json!({ "title": title }).to_string().into_bytes(), now],
-        )?;
         Ok(())
     }
 
@@ -678,7 +678,13 @@ impl Store {
         self.sync_index()?;
         let meta = self.page_state(page)?.meta.clone();
         match PageFate::of(self.page_state(page)?) {
-            PageFate::Live => return Ok(page.clone()),
+            PageFate::Live => {
+                // A row that outlived its tombstone (a graph written before the row rode the
+                // tombstone): queue the shard so the writer drops it. No behaviour change for
+                // a page that never had one.
+                self.clear_stale_trash_row(page)?;
+                return Ok(page.clone());
+            }
             // The blocks already live in the survivor (rule 8). Restoring a merged page means
             // going there, never resurrecting a tile with nothing under it.
             PageFate::Merged { into, .. } => return Ok(into),
@@ -697,6 +703,8 @@ impl Store {
                 other
             }
             _ => {
+                // Clearing both fields is a normal commit: the writer drops the trash row in
+                // the same transaction.
                 self.execute(
                     page,
                     vec![Command::SetPageMeta(PageMetaPatch {
@@ -709,9 +717,18 @@ impl Store {
                 page.clone()
             }
         };
-        self.conn
-            .execute("DELETE FROM trash WHERE id=?1", [page.as_str()])?;
         Ok(survivor)
+    }
+
+    /// Rewrite `page` even though its shard did not change, so the writer can drop a trash
+    /// row that no longer belongs to its fate. Only a page this device put in the trash has a
+    /// row at all, so this is a no-op for every other page.
+    fn clear_stale_trash_row(&mut self, page: &PageId) -> Result<()> {
+        if !self.own_trash.contains(page) {
+            return Ok(());
+        }
+        self.push_pending(page, None, false);
+        self.flush()
     }
 
     /// Trashed pages that are still tombstoned: `(id, title, deleted_at)`. A row exists only
@@ -752,6 +769,8 @@ impl Store {
         tx.commit()?;
         for id in &ids {
             self.docs.remove(id);
+            // The page is gone: it can own no trash row again (its id is never reissued).
+            self.own_trash.remove(id);
         }
         Ok(ids.len())
     }

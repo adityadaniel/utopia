@@ -47,7 +47,7 @@ pub use query::*;
 pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
-use writer::{Job, PageJob, Persister};
+use writer::{Job, PageJob, Persister, TrashOp};
 
 /// Fold `page_update` rows into the snapshot after this many updates.
 const COMPACT_AFTER: i64 = 128;
@@ -167,6 +167,11 @@ pub struct Store {
     /// (FR-1.2). The ids were never durable, so this is a session alias for views and the
     /// editor that still hold one.
     promotions: HashMap<PageId, PageId>,
+    /// Pages this device has put in the trash: it owns the local `trash` row for them, so
+    /// every job for the page keeps that row in step with its tombstone. A page another
+    /// device tombstoned is not in here and gets no row (docs/state-machines/
+    /// page-lifecycle-trash.md). Seeded from the table at open, so a restart keeps it.
+    own_trash: HashSet<PageId>,
     /// Replacements not yet announced to the views ([`Store::take_replacements`]): a stale
     /// draft retired for the day's page (FR-1.2) can be shown by a view the caller did not
     /// name.
@@ -228,6 +233,13 @@ impl Store {
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows.into_iter().map(BlockId).collect()
         };
+        let own_trash = {
+            let mut stmt = conn.prepare("SELECT id FROM trash")?;
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            rows.into_iter().map(PageId).collect()
+        };
         // A fresh CRDT peer per session: copies of the file on two machines can never
         // reuse a peer id (Loro requires unique peers per writer).
         let peer = (ulid::Ulid::new().0 as u64) & ((1 << 53) - 1);
@@ -245,6 +257,7 @@ impl Store {
             pending: Vec::new(),
             drafts: HashMap::new(),
             promotions: HashMap::new(),
+            own_trash,
             replacements: Vec::new(),
             debounced: false,
             mem_blobs: HashMap::new(),
@@ -340,6 +353,8 @@ impl Store {
         let prepared = {
             let docs = &mut self.docs;
             let drafts = &mut self.drafts;
+            let own_trash = &self.own_trash;
+            let fmt = &self.date_format;
             let mut prepared = Vec::with_capacity(pending.len());
             let mut failed = None;
             for (page, delta, enqueue) in &pending {
@@ -386,6 +401,7 @@ impl Store {
                 } else {
                     None
                 };
+                let state = entry.doc.state().clone();
                 prepared.push(PreparedPage {
                     page: page.clone(),
                     frontier,
@@ -394,7 +410,8 @@ impl Store {
                     enqueue: *enqueue,
                     job: PageJob {
                         page: page.clone(),
-                        state: entry.doc.state().clone(),
+                        trash: own_trash.contains(page).then(|| trash_op(&state, fmt)),
+                        state,
                         delta: delta.clone(),
                         snapshot,
                         update: log_update,
@@ -1332,6 +1349,19 @@ fn push_delta(touched: &mut Vec<(PageId, Option<DocDelta>)>, page: &PageId, delt
         Some((_, Some(d))) => d.merge(delta),
         Some((_, d)) => *d = Some(delta),
         None => touched.push((page.clone(), Some(delta))),
+    }
+}
+
+/// The local trash row a job for this page must carry, when this device owns one for it: the
+/// row follows the shard's fate (§6.5), so a live or merged page loses it and a trashed page
+/// (re)creates it in the same transaction as its tombstone.
+fn trash_op(st: &PageState, fmt: &DateFormat) -> TrashOp {
+    match PageFate::of(st) {
+        PageFate::Trashed { at } => TrashOp::Put {
+            title: display_title(st, fmt),
+            at,
+        },
+        _ => TrashOp::Clear,
     }
 }
 
