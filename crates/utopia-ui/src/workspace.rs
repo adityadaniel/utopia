@@ -865,8 +865,8 @@ impl Workspace {
             self.show_right(cx);
         } else {
             // A page opened in the main column replaces whatever it was showing: a PDF is
-            // closed and a full-screen graph gives way, or the page opens behind it
-            // (workspace-main-pane-content.md, issues 1 and 2).
+            // closed and a full-screen graph gives way, so the page is never opened
+            // invisibly behind the graph (workspace-main-pane-content.md, issues 1 and 2).
             self.content = MainContent::Page;
             self.main
                 .update(cx, |m, cx| m.open(page.clone(), zoom.clone(), cx));
@@ -1073,7 +1073,7 @@ impl Workspace {
                 sidebar,
                 split,
             } => {
-                if !from_panel {
+                if !from_panel && showing {
                     self.content = MainContent::Page;
                 }
                 if *split {
