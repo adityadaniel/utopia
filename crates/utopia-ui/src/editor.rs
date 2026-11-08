@@ -998,6 +998,12 @@ impl BlockEditor {
     }
 
     fn refresh_autocomplete(&mut self, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            // §13.5: the buffer is provisional, so a menu over it would name text the store
+            // has never seen. Nothing may open one mid-composition; the end of the
+            // composition (`settle`) is where the trigger is read again.
+            return;
+        }
         let cursor = self.field.cursor();
         let Some((kind, start, query)) = detect_trigger(&self.field.text, cursor) else {
             self.ac = Autocomplete::Closed;
@@ -1681,6 +1687,13 @@ impl BlockEditor {
     }
 
     fn mouse_down(&mut self, e: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            // §13.5: the buffer and the caret belong to the input method. Moving the caret
+            // and re-reading the trigger here would open a menu over provisional glyphs
+            // the store has never seen; a click is not an edit, so there is nothing to
+            // settle either.
+            return;
+        }
         let ix = self.field.index_at(e.position);
         if e.click_count >= 2 {
             let r = utopia_core::text::word_range_at(&self.field.text, ix);

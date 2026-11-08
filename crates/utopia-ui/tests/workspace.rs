@@ -6277,6 +6277,7 @@ fn fr_2_17_accept_replaces_the_query_the_menu_was_opened_for(cx: &mut TestAppCon
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "Met [[Alpha]]");
 }
+
 /// FR-2.17: a menu describes the buffer it was opened on. When the buffer is replaced
 /// wholesale under it (an undo, a remote edit, a plugin through the store), its frozen
 /// `start..caret` range names text that is gone; accepting from it would insert a
@@ -6315,4 +6316,28 @@ fn fr_2_17_a_menu_does_not_outlive_the_text_it_was_opened_for(cx: &mut TestAppCo
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(rows_str(&rows(&app, &page, cx)), [("ab日", 0), ("", 0)]);
+}
+
+/// §13.5: the buffer belongs to the input method while it composes, so a click must not
+/// open a menu over provisional glyphs (machine issue 3).
+#[gpui::test]
+fn ac_13_5_mouse_down_does_not_open_a_menu_mid_composition(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (app, ws, cx) = setup(cx);
+    today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Ana Lovelace").unwrap();
+    });
+    let editor = ws.update(cx, |w, _| w.editor());
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "[[An", None, window, cx)
+    });
+    cx.run_until_parked();
+    let bounds = cx.debug_bounds("block-editor").expect("editor bounds");
+    cx.simulate_mouse_down(bounds.center(), MouseButton::Left, Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        !editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the menu belongs to committed text, not to the input method's glyphs"
+    );
 }
