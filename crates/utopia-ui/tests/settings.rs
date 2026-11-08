@@ -842,6 +842,50 @@ fn an_unusable_entry_is_marked_and_the_default_is_in_force(cx: &mut TestAppConte
     );
 }
 
+/// Keymap machine doc, issue 2: a write that fails was overwritten by the rebind's own status
+/// line, so the next launch silently went back to the old file. The failure is now a state of
+/// its own and stays on screen next to the message (§9.1).
+#[gpui::test]
+fn a_failed_save_is_reported_after_the_rebind(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // A directory where the file should go: `Overrides::save` fails every time.
+    std::fs::create_dir(dir.path().join("keymap.json")).unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.update_in(cx, |v, window, cx| v.start_capture(today, window, cx));
+    cx.simulate_keystrokes("cmd-alt-t");
+    cx.run_until_parked();
+
+    view.read_with(cx, |v, _| {
+        assert_eq!(
+            v.overrides().keys_for(today),
+            "alt-cmd-t",
+            "the keys are live for this session"
+        );
+        assert!(
+            v.status().unwrap_or_default().contains("Today is now"),
+            "the rebind is still reported"
+        );
+        assert!(
+            v.unsaved().is_some_and(|e| e.contains("Could not save")),
+            "the failed write is a state of its own"
+        );
+    });
+    assert!(
+        cx.debug_bounds("settings-unsaved").is_some(),
+        "and so is the fact that it is not on disk"
+    );
+}
+
 mod appearance {
     use chrono::NaiveDate;
     use gpui::{AppContext as _, Modifiers, TestAppContext, VisualTestContext};

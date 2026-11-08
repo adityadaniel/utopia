@@ -140,6 +140,11 @@ pub struct SettingsView {
     /// Only accept captured keys that arrive in this window.
     window: Option<AnyWindowHandle>,
     status: Option<SharedString>,
+    /// The last write of `keymap.json` failed. The keys are live for this session but disk
+    /// still holds the old ones, so the next launch would silently undo them: a state of its
+    /// own, drawn next to the status line, not a status message the next action overwrites
+    /// (keymap machine doc, issue 2).
+    save_error: Option<SharedString>,
     topic: usize,
     /// The filter at the top of the key list (ST-4), by name, description or key.
     search: Entity<LineInput>,
@@ -211,6 +216,7 @@ impl SettingsView {
             // A malformed keymap.json or settings.json is worth saying out loud: what is in
             // force is not what the user wrote (rule 11: degrade, never panic).
             status: warnings.first().map(|w| SharedString::from(w.clone())),
+            save_error: None,
             topic: 0,
             search,
             query: String::new(),
@@ -348,13 +354,17 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Put the bindings live and write them down. A failed write is reported, not fatal:
-    /// the bindings still work for this session.
+    /// Put the bindings live and write them down. The two outcomes are kept apart: a failed
+    /// write leaves the keys working but the file behind, so it is remembered as such rather
+    /// than reported as a status the next rebind overwrites.
     fn apply(&mut self, cx: &mut Context<Self>) {
         reinstall(cx, &self.overrides);
-        if let Err(e) = self.overrides.save(&self.config_dir) {
-            self.status = Some(format!("Could not save keymap.json: {e}").into());
-        }
+        self.save_error = match self.overrides.save(&self.config_dir) {
+            Ok(()) => None,
+            Err(e) => Some(
+                format!("Could not save keymap.json: {e}. These keys work until you quit.").into(),
+            ),
+        };
     }
 
     pub fn overrides(&self) -> &Overrides {
@@ -368,6 +378,11 @@ impl SettingsView {
 
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref().map(|v| &**v)
+    }
+
+    /// Why the last write failed, while disk still disagrees with the keys in force.
+    pub fn unsaved(&self) -> Option<&str> {
+        self.save_error.as_deref().map(|v| &**v)
     }
 
     pub fn tab(&self) -> Tab {
@@ -721,6 +736,18 @@ impl Render for SettingsView {
                     .text_size(px(crate::theme::CAPTION_SIZE))
                     .text_color(th.muted)
                     .child(s)
+            }))
+            .children(self.save_error.clone().map(|e| {
+                div()
+                    .debug_selector(|| "settings-unsaved".into())
+                    .px_6()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(th.line)
+                    .bg(th.banner_bg)
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(e)
             }))
     }
 }
