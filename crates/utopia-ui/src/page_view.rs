@@ -339,6 +339,124 @@ struct ControlChoice {
     selected: bool,
 }
 
+/// What a handler invalidated, so the next pass recomputes it
+/// (`docs/state-machines/page-view-rebuild-cycle.md`). A reason set instead of one `bool`:
+/// every invalidation says what it is about, and `rebuild` clears all of it in one place.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Invalidation {
+    /// `items` describe an older store state.
+    rows: bool,
+    /// `refs` was fetched for another page, zoom or index version.
+    refs: bool,
+    /// The unlinked count is for another page or index version.
+    unlinked: bool,
+    /// One of the appearance mirrors (`ref_children_limit`, `attribute_blocks`) changed.
+    prefs: bool,
+}
+
+impl Invalidation {
+    fn rows() -> Self {
+        Self {
+            rows: true,
+            ..Self::default()
+        }
+    }
+
+    fn refs() -> Self {
+        Self {
+            refs: true,
+            ..Self::default()
+        }
+    }
+
+    fn unlinked() -> Self {
+        Self {
+            unlinked: true,
+            ..Self::default()
+        }
+    }
+
+    fn prefs() -> Self {
+        Self {
+            prefs: true,
+            ..Self::default()
+        }
+    }
+
+    fn any(self) -> bool {
+        self.rows || self.refs || self.unlinked || self.prefs
+    }
+}
+
+impl std::ops::BitOr for Invalidation {
+    type Output = Self;
+
+    fn bitor(self, other: Self) -> Self {
+        Self {
+            rows: self.rows || other.rows,
+            refs: self.refs || other.refs,
+            unlinked: self.unlinked || other.unlinked,
+            prefs: self.prefs || other.prefs,
+        }
+    }
+}
+
+/// The rebuild cycle's state: what is stale, and which store version the rows were built
+/// from. `pending` being empty is the one definition of "clean" — the old boolean plus 20+
+/// write sites, with only `rebuild` clearing it, is what let a handler's rebuild and a
+/// deferred event disagree about whether the items were stale. `store` is what tells the
+/// handler's own deferred `Changed` apart from a newer change.
+#[derive(Default)]
+struct RebuildCycle {
+    pending: Invalidation,
+    /// `AppState::version` the rows were built from.
+    store: u64,
+}
+
+impl RebuildCycle {
+    fn new() -> Self {
+        // A view is born without rows and must build them before its first paint.
+        Self {
+            pending: Invalidation::rows(),
+            store: 0,
+        }
+    }
+
+    fn invalidate(&mut self, why: Invalidation) {
+        self.pending = self.pending | why;
+    }
+
+    fn dirty(&self) -> bool {
+        self.pending.any()
+    }
+
+    /// Mark the change an `AppState::Changed` reports. Returns `false` when the rows were
+    /// already built from that store state — the handler that emitted the event rebuilt
+    /// before gpui delivered it. A stale `true` here costs a second pass over the same
+    /// data on every insert, split, template and plan (machine issue 1).
+    fn store_changed(&mut self, version: u64, why: Invalidation) -> bool {
+        if version <= self.store {
+            return false;
+        }
+        self.invalidate(why);
+        true
+    }
+
+    fn built(&mut self, store: u64) {
+        self.pending = Invalidation::default();
+        self.store = store;
+    }
+}
+
+/// What store changes this view's rows depend on (rebuild-cycle issue 2). A query block
+/// reads every page through the index, and an open transclusion renders another page's
+/// blocks; everything else only needs `Changed` for the page (or feed day) it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interest {
+    ThisPage,
+    AllPages,
+}
+
 #[derive(Clone)]
 struct DraggedBlock {
     page: PageId,
@@ -424,7 +542,21 @@ pub struct PageView {
     /// How attribute blocks are drawn (PG-1), mirrored from `settings.json` so a change
     /// made in Settings rebuilds this page's rows.
     attribute_blocks: crate::appearance::AttributeBlocks,
-    dirty: bool,
+    /// What store changes this view's rows depend on, recomputed from the rows it just
+    /// built: a query block or an open transclusion makes every page's change relevant.
+    interest: Interest,
+    /// How many rows currently carry the editor's focus handle. When an edit ends the
+    /// handle must leave the row with the target, or the list keeps force-rendering a row
+    /// that is drawn as text (issue 4).
+    focused_rows: usize,
+    cycle: RebuildCycle,
+    /// How many times the rows were rebuilt, and how many of those passes ran inside a
+    /// frame (rule 10). Debug builds only, so the rebuild-cycle tests can prove a change
+    /// is answered once and outside `render`.
+    #[cfg(debug_assertions)]
+    rebuilds: usize,
+    #[cfg(debug_assertions)]
+    frame_rebuilds: usize,
     _subs: Vec<Subscription>,
 }
 
@@ -509,8 +641,16 @@ impl PageView {
                         .journal
                         .as_ref()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
-                if e.structural || e.pages.is_empty() || shown || this.has_embeds() {
-                    this.dirty = true;
+                let relevant = e.structural
+                    || e.pages.is_empty()
+                    || shown
+                    || this.interest == Interest::AllPages;
+                if relevant && this.cycle.store_changed(e.version, Invalidation::rows()) {
+                    if this.interest == Interest::AllPages {
+                        // A query block or an open transclusion reads other pages: answer
+                        // in this handler, never in a frame (rule 10).
+                        this.rebuild(cx);
+                    }
                     cx.notify();
                 }
             }),
@@ -520,12 +660,16 @@ impl PageView {
                 if this.page.as_ref() == Some(&e.from) {
                     this.page = Some(e.to.clone());
                     this.refs_key = None;
-                    this.dirty = true;
+                    // Transclusions belong to the page that was replaced.
+                    this.open_embeds.clear();
+                    this.interest = Interest::ThisPage;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
             }),
             cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
-                this.dirty = true;
+                this.cycle
+                    .invalidate(Invalidation::refs() | Invalidation::unlinked());
                 // LR-5: the unlinked count is keyed by the index version, so it is refreshed
                 // here rather than in `render` (rule 10: no database work in a frame).
                 this.refresh_unlinked(cx);
@@ -534,12 +678,12 @@ impl PageView {
                 this.rebuild(cx);
                 cx.notify();
             }),
-            // LR-4: "Children shown in references" is a setting (rule 9). Its change
-            // invalidates the children cache, so rebuild here, outside the frame.
+            // LR-4: "Children shown in references" is a setting (rule 9), and PG-1's
+            // "attribute blocks" is another this view mirrors. Both are resynced in one
+            // place, so any rebuild builds with the preference in force (issue 3).
             cx.observe_global::<crate::appearance::Appearance>(|this, cx| {
-                let limit = crate::appearance::ref_children(cx);
-                if limit != this.ref_children_limit {
-                    this.ref_children_limit = limit;
+                this.sync_preferences(cx);
+                if this.cycle.dirty() {
                     this.rebuild(cx);
                     cx.notify();
                 }
@@ -549,7 +693,8 @@ impl PageView {
                 if let LineInputEvent::Changed(t) = e {
                     this.query.text = (!t.trim().is_empty()).then(|| t.clone());
                     this.refs_key = None;
-                    this.dirty = true;
+                    this.cycle
+                        .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
                 }
             }),
@@ -594,17 +739,54 @@ impl PageView {
             page_menu: false,
             hovered_row: None,
             attribute_blocks: crate::appearance::attribute_blocks(cx),
-            dirty: true,
+            interest: Interest::ThisPage,
+            focused_rows: 0,
+            cycle: RebuildCycle::new(),
+            #[cfg(debug_assertions)]
+            rebuilds: 0,
+            #[cfg(debug_assertions)]
+            frame_rebuilds: 0,
             _subs: subs,
         }
     }
 
-    fn has_embeds(&self) -> bool {
-        !self.open_embeds.is_empty()
-            || self
-                .items
-                .iter()
-                .any(|i| matches!(i, Item::QueryHeader { .. }))
+    /// How many rebuild passes this view has run (debug builds only).
+    #[cfg(debug_assertions)]
+    pub fn rebuilds(&self) -> usize {
+        self.rebuilds
+    }
+
+    /// How many of those passes ran inside `render` (debug builds only, rule 10).
+    #[cfg(debug_assertions)]
+    pub fn frame_rebuilds(&self) -> usize {
+        self.frame_rebuilds
+    }
+
+    /// How many rows currently carry the editor's focus handle (debug builds only).
+    #[cfg(debug_assertions)]
+    pub fn focused_rows(&self) -> usize {
+        self.focused_rows
+    }
+
+    /// Whether this view's rows depend on every page's changes (debug builds only): a
+    /// query block or an open transclusion is present.
+    #[cfg(debug_assertions)]
+    pub fn interested_in_all_pages(&self) -> bool {
+        self.interest == Interest::AllPages
+    }
+
+    /// The interest the rows just built imply: a query header or an open transclusion
+    /// means another page's change can change this view.
+    fn interest_after_build(&self) -> Interest {
+        let query = self
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::QueryHeader { .. }));
+        if query || !self.open_embeds.is_empty() {
+            Interest::AllPages
+        } else {
+            Interest::ThisPage
+        }
     }
 
     /// Show `page` (optionally zoomed into a block).
@@ -718,13 +900,18 @@ impl PageView {
                 .unwrap_or_default();
             self.expanded_groups = saved.into_iter().map(PageId).collect();
             self.expanded_children.clear();
+            // An opened transclusion was a row of the page being left; keeping it would
+            // make every later change on any page rebuild this one (issue 2).
+            self.open_embeds.clear();
+            self.interest = Interest::ThisPage;
         }
         self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
         // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
         self.refresh_unlinked(cx);
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::refs() | Invalidation::unlinked());
         self.rebuild(cx);
         self.list.reset(self.items.len());
         cx.notify();
@@ -803,9 +990,9 @@ impl PageView {
         });
         if !reachable {
             self.zoom = None;
-            self.dirty = true;
+            self.cycle.invalidate(Invalidation::rows());
         } else if unfolded {
-            self.dirty = true;
+            self.cycle.invalidate(Invalidation::rows());
         }
         self.focus_block(block, None, window, cx);
     }
@@ -857,7 +1044,12 @@ impl PageView {
         cx: &mut Context<Self>,
     ) {
         // DN-3: the row may be drawn under the pinned day heading. Asked of the frame the
-        // user is looking at, before the rebuild below re-measures every row.
+        // user is looking at, before the rebuild below re-measures every row — and asked
+        // about this *block*, then applied to the same block's index below, so a rebuild
+        // that shifts rows cannot hand the offset to a different row (the concern in
+        // `page-view-rebuild-cycle.md` issue 7). After a splice the list has no measured
+        // rows left, so the post-rebuild frame could not be measured anyway; scrolling
+        // this block below the heading is at worst one heading's worth of motion.
         let line = crate::appearance::density(cx).line_height();
         let under_heading = self
             .row_index(&block)
@@ -971,13 +1163,32 @@ impl PageView {
             .position(|i| matches!(i, Item::Row(r) if r.block == *block))
     }
 
-    fn rebuild_if_dirty(&mut self, cx: &mut Context<Self>) {
-        let preference = crate::appearance::attribute_blocks(cx);
-        if self.attribute_blocks != preference {
-            self.attribute_blocks = preference;
-            self.dirty = true;
+    /// Re-read the two appearance preferences this view mirrors. The one place both are
+    /// resynced: `rebuild` calls it too, so an index-triggered pass cannot build rows with
+    /// the old setting and leave the next frame's `rebuild_if_dirty` to correct it (issue
+    /// 3: only `rebuild_if_dirty` used to notice `attribute_blocks`).
+    fn sync_preferences(&mut self, cx: &mut Context<Self>) {
+        let children = crate::appearance::ref_children(cx);
+        let attributes = crate::appearance::attribute_blocks(cx);
+        let mut why = Invalidation::default();
+        if self.ref_children_limit != children {
+            self.ref_children_limit = children;
+            // The children cache is keyed on the limit and heals on its own; the rows that
+            // show those children are what is stale.
+            why = why | Invalidation::prefs() | Invalidation::rows();
         }
-        if self.dirty {
+        if self.attribute_blocks != attributes {
+            self.attribute_blocks = attributes;
+            why = why | Invalidation::prefs() | Invalidation::rows();
+        }
+        if why.any() {
+            self.cycle.invalidate(why);
+        }
+    }
+
+    fn rebuild_if_dirty(&mut self, cx: &mut Context<Self>) {
+        self.sync_preferences(cx);
+        if self.cycle.dirty() {
             self.rebuild(cx);
         }
     }
@@ -1007,6 +1218,7 @@ impl PageView {
                 _ => None,
             })
             .collect();
+        self.focused_rows = handles.iter().filter(|h| h.is_some()).count();
         self.list.splice_focusable(0..old_len, handles);
         if top.item_ix > 0 || top.offset_in_item > px(0.) {
             self.list.scroll_to(top);
@@ -1014,8 +1226,26 @@ impl PageView {
     }
 
     fn rebuild(&mut self, cx: &mut Context<Self>) {
-        self.dirty = false;
-        self.ref_children_limit = crate::appearance::ref_children(cx);
+        #[cfg(debug_assertions)]
+        {
+            self.rebuilds += 1;
+            if self.in_render {
+                self.frame_rebuilds += 1;
+            }
+        }
+        // Captured before the reads: a change made during this pass belongs to the next
+        // one, even if it is this view's own (nothing here writes).
+        self.sync_preferences(cx);
+        let store = self.app.read(cx).version;
+        self.rebuild_rows(cx);
+        self.interest = self.interest_after_build();
+        // Every path through `rebuild_rows` ends with the list spliced, including the
+        // early returns for a missing page or header: clear the whole reason set here, in
+        // one place, so no caller can leave a reason behind.
+        self.cycle.built(store);
+    }
+
+    fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
         if self.journal.is_none() {
             // Only the feed pins a day heading (DN-3).
             self.day_headings.clear();
@@ -1188,7 +1418,7 @@ impl PageView {
             app.report(r).unwrap_or_default()
         });
         self.unlinked = Some((version, found));
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1387,7 +1617,7 @@ impl PageView {
             });
         }
         self.attribute_blocks = blocks;
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1396,7 +1626,7 @@ impl PageView {
         let Some(j) = &mut self.journal else { return };
         let Some(next) = j.feed.request() else { return };
         j.feed = next;
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1612,6 +1842,20 @@ impl PageView {
         let target = editor.read(cx).target().cloned();
         if let EditorEvent::Restore(caret) = event {
             self.restore(caret, window, cx);
+            return;
+        }
+        if matches!(event, EditorEvent::Blurred) {
+            // The editor dropped its target (Escape, navigation, a reference followed, the
+            // block went away). The list still holds the focus handle it registered on the
+            // old row, so it would keep force-rendering a row now drawn as text; re-splice
+            // from the editor's current target instead of waiting for the next rebuild
+            // (issue 4). An event from another host's edit has nothing to re-splice.
+            let host = cx.entity_id();
+            let editing_here = editor.read(cx).target().is_some_and(|t| t.host == host);
+            if self.focused_rows > 0 || editing_here {
+                self.splice_items(self.items.len(), cx);
+                cx.notify();
+            }
             return;
         }
         let Some(t) = target else { return };
@@ -1892,7 +2136,7 @@ impl PageView {
             app.report(r);
             app.changed(Vec::new(), false, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -1914,7 +2158,7 @@ impl PageView {
             }
             app.changed(Vec::new(), false, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -2162,7 +2406,7 @@ impl PageView {
                 sidebar: false,
             }),
             _ => {
-                self.dirty = true;
+                self.cycle.invalidate(Invalidation::rows());
                 cx.notify();
             }
         }
@@ -2207,7 +2451,7 @@ impl PageView {
             app.report(r);
             app.changed(Vec::new(), true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3008,7 +3252,7 @@ impl PageView {
                             app.changed(vec![page.clone()], true, cx);
                         });
                     }
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
                 LineInputEvent::Cancel => {
@@ -3033,7 +3277,7 @@ impl PageView {
             app.report(r);
             app.changed(vec![page.clone()], true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3048,7 +3292,8 @@ impl PageView {
             app.changed(vec![m.page.clone(), page.clone()], true, cx);
         });
         self.unlinked = None;
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
     }
 
@@ -3066,7 +3311,8 @@ impl PageView {
             app.changed(vec![page.clone()], true, cx);
         });
         self.unlinked = None;
-        self.dirty = true;
+        self.cycle
+            .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
     }
 
@@ -3079,7 +3325,7 @@ impl PageView {
             app.report(res);
             app.changed(vec![page.clone()], true, cx);
         });
-        self.dirty = true;
+        self.cycle.invalidate(Invalidation::rows());
         cx.notify();
     }
 
@@ -3119,7 +3365,8 @@ impl PageView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.query.also.retain(|p| *p != id);
                         this.refs_key = None;
-                        this.dirty = true;
+                        this.cycle
+                            .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
                     })),
             );
@@ -3156,7 +3403,8 @@ impl PageView {
                         this.query.also.push(id.clone());
                         this.filter_titles.insert(id.clone(), t.clone());
                         this.refs_key = None;
-                        this.dirty = true;
+                        this.cycle
+                            .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
                     })),
             );
@@ -3360,7 +3608,8 @@ impl PageView {
                     }
                     this.controls_menu = None;
                     this.refs_key = None;
-                    this.dirty = true;
+                    this.cycle
+                        .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
                 }))
         });
@@ -3381,7 +3630,24 @@ impl PageView {
             .children(rows)
     }
 
+    /// Build one list item. The list calls this lazily while it lays out a frame, after
+    /// `render` has returned, so the frame-read counters have to be armed here too
+    /// (issue 6); `in_render` is restored because a handler that makes the list render an
+    /// item must not have its own reads counted as frame reads.
     fn render_item(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let was = self.in_render;
+        self.in_render = true;
+        let item = self.render_item_inner(ix, window, cx);
+        self.in_render = was;
+        item
+    }
+
+    fn render_item_inner(
         &mut self,
         ix: usize,
         _window: &mut Window,
@@ -3865,7 +4131,7 @@ impl PageView {
                 }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.unlinked_open = !this.unlinked_open;
-                    this.dirty = true;
+                    this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }))
                 .into_any_element(),

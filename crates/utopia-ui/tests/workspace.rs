@@ -2853,6 +2853,224 @@ fn index_updates_prefetch_reference_children(cx: &mut TestAppContext) {
     );
 }
 
+/// §13.3: a handler that writes and rebuilds itself must not be dirtied again by the
+/// `Changed` it emitted. gpui queues `emit` and delivers it after the update, so the old
+/// `dirty` flag was cleared by the handler's rebuild and set again by its own event; the
+/// next frame rebuilt the same rows a second time (rebuild-cycle issue 1).
+#[gpui::test]
+fn a_handler_rebuild_is_not_repeated_by_its_own_change(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    // End the feed's own edit: otherwise starting the next one commits it first, and that
+    // commit's structural change (and its index flush) would rebuild for a real reason.
+    ws.update(cx, |w, cx| w.editor().update(cx, |e, cx| e.end(cx)));
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // Clicking an empty day starts writing a draft, which reports a change with nothing
+    // to flush (FR-1.2) and rebuilds the rows in the click handler. No index update
+    // follows, so any second pass is the deferred `Changed` alone.
+    let empty = cx
+        .debug_bounds("day-empty")
+        .expect("a blank day offers a row to start writing");
+    cx.simulate_click(empty.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    let (after, frames_after) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after > before,
+        "the click handler rebuilds the rows it wrote"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "one write is one rebuild: the deferred Changed was for the state the handler built"
+    );
+    assert_eq!(
+        frames_after, frames_before,
+        "the second pass would have run inside render (rule 10)"
+    );
+}
+
+/// Rule 10: a query block reads every page, so a change on any page must answer it — in
+/// the change handler, not in the next frame. The old `has_embeds` marked the rows dirty
+/// and `render` ran the query (rebuild-cycle issue 2).
+#[gpui::test]
+fn a_query_block_answers_other_pages_changes_outside_the_frame(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    cx.simulate_input("Read [[Dune]] #book");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("{{query: {and: [[Dune]] #book}}}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert!(
+        view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "a query block makes every page's change relevant"
+    );
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // A change this view does not show: the query's answer can still change.
+    app.update(cx, |app, cx| {
+        app.changed(vec![PageId("elsewhere".into())], false, cx)
+    });
+    cx.run_until_parked();
+
+    let (after, frames_after) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after > before,
+        "the view rebuilt for a change it is interested in"
+    );
+    assert_eq!(
+        frames_after, frames_before,
+        "the query ran in the handler, not inside render (rule 10)"
+    );
+}
+
+/// A transclusion of another page is an interest in that page only while its row is open.
+/// Leaving the page must drop it, or every later change anywhere rebuilt this view
+/// (rebuild-cycle issue 2: `open_embeds` was not in the per-page reset list).
+#[gpui::test]
+fn leaving_a_page_drops_its_open_transclusions(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (target, home, other) = app.update(cx, |app, _| {
+        let target = app.store.create_page("Target").unwrap();
+        let t = app.store.ensure_first_block(&target).unwrap();
+        app.store
+            .set_block_text(&target, &t, "a thought", None, None)
+            .unwrap();
+        app.store.commit_block(&target, &t).unwrap();
+        let home = app.store.create_page("Home").unwrap();
+        let b = app.store.ensure_first_block(&home).unwrap();
+        app.store
+            .set_block_text(&home, &b, &format!("(({t}))"), None, None)
+            .unwrap();
+        app.store.commit_block(&home, &b).unwrap();
+        app.store.sync_index().unwrap();
+        let other = app.store.create_page("Other").unwrap();
+        (target, home, other)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(home, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let content = cx
+        .debug_bounds("content-1")
+        .expect("the reference row is drawn");
+    // The chip starts at the text's left edge; the container is as wide as the row.
+    cx.simulate_click(
+        point(content.origin.x + px(8.), content.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert!(
+        view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "the opened transclusion reads the target page"
+    );
+
+    ws.update_in(cx, |w, window, cx| {
+        w.open(other, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        !view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "the transclusion belonged to the page that was left"
+    );
+    let before = view.read_with(cx, |v, _| v.rebuilds());
+    app.update(cx, |app, cx| app.changed(vec![target.clone()], false, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.rebuilds()),
+        before,
+        "a change to the old transclusion's page no longer rebuilds this view"
+    );
+}
+
+/// AGENTS.md "Keep that when touching the list": the row being edited carries the
+/// editor's focus handle so it keeps receiving keystrokes out of view. That registration
+/// must end with the target — `end` used to clear the target and leave the handle on the
+/// row until some later rebuild happened to re-splice it (rebuild-cycle issue 4).
+#[gpui::test]
+fn ending_an_edit_drops_the_rows_focus_registration(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (page, block) = app.update(cx, |app, _| {
+        let page = app.store.create_page("Rows").unwrap();
+        let block = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &block, "first", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &block).unwrap();
+        (page, block)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, Some(block), false, window, cx)
+    });
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert_eq!(
+        view.read_with(cx, |v, _| v.focused_rows()),
+        1,
+        "the row being edited carries the editor's handle"
+    );
+
+    // Only the editor ends here: no page-view handler runs, so the `Blurred` event is the
+    // one thing that can re-splice the rows before the next frame.
+    ws.update(cx, |w, cx| w.editor().update(cx, |e, cx| e.end(cx)));
+    assert_eq!(
+        view.read_with(cx, |v, _| v.focused_rows()),
+        0,
+        "the target and the row's focus handle moved together"
+    );
+}
+
+/// Rule 9 / PG-1: both appearance mirrors are resynced in one place. Only
+/// `rebuild_if_dirty` used to notice an `attribute_blocks` change, so a rebuild triggered
+/// by something else (an index update, the observer itself) built rows with the old
+/// setting and the next frame corrected them (rebuild-cycle issue 3).
+#[gpui::test]
+fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
+    use utopia_ui::appearance::{self, AttributeBlocks};
+    let (app, ws, cx) = setup(cx);
+    let page = app.update(cx, |app, _| {
+        let page = app.store.create_page("Project").unwrap();
+        let b = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &b, "owner:: Ada", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &b).unwrap();
+        page
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // Settings → Appearance → "As blocks", applied to this open page.
+    cx.update(|_, cx| {
+        appearance::set_attribute_blocks(cx, AttributeBlocks::Blocks).unwrap();
+    });
+
+    let (after_set, frames_after_set) =
+        view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after_set > before,
+        "the appearance observer rebuilds the rows it mirrors"
+    );
+    assert_eq!(
+        frames_after_set, frames_before,
+        "in the observer, not in the frame that redraws the window"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.frame_rebuilds()),
+        frames_before,
+        "and a later frame does not have to correct the rows"
+    );
+}
+
 #[gpui::test]
 fn full_search_and_quick_capture(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);

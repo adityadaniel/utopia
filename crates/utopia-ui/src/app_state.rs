@@ -24,6 +24,10 @@ pub struct Changed {
     pub pages: Vec<PageId>,
     /// Tree shape, page identity or references changed (not just a keystroke).
     pub structural: bool,
+    /// `AppState::version` after this change. A view that wrote and then rebuilt in the
+    /// same handler compares this with the version it built from, so its own `Changed`
+    /// (delivered after the update; gpui queues `emit`) does not dirty it again.
+    pub version: u64,
 }
 
 /// The index (backlinks, page list, search) now reflects every flushed change.
@@ -127,7 +131,11 @@ impl AppState {
             cx.emit(PageReplaced { from, to });
         }
         self.version += 1;
-        cx.emit(Changed { pages, structural });
+        cx.emit(Changed {
+            pages,
+            structural,
+            version: self.version,
+        });
         if structural {
             self.flush_now(cx);
         } else {
