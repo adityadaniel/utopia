@@ -834,7 +834,10 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
         // terminating it): the store is still reachable through `Running` (issue 2). On
         // the normal path it finds nothing left to flush.
         cx.on_app_quit(|cx| {
-            if let Some(app) = cx.try_global::<Running>().map(|running| running.app.clone()) {
+            if let Some(app) = cx
+                .try_global::<Running>()
+                .map(|running| running.app.clone())
+            {
                 app.update(cx, |app, _| app.flush_for_quit());
             }
             async {}
@@ -865,10 +868,8 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
         }
         cx.on_window_closed(|cx| {
             // §9.1: a closed Settings window leaves no handle behind (issue 5).
-            let settings = std::mem::replace(
-                cx.global_mut::<SettingsWindow>(),
-                SettingsWindow::Closed,
-            );
+            let settings =
+                std::mem::replace(cx.global_mut::<SettingsWindow>(), SettingsWindow::Closed);
             let settings = settings.forget_if_closed(cx);
             cx.set_global(settings);
             // AC-1.1: the last window closing is a quit path like any other (issue 2).
@@ -977,7 +978,10 @@ mod tests {
             RunMode::from_parts(None, false),
             Ok(RunMode::Interactive)
         ));
-        assert!(matches!(RunMode::from_parts(None, true), Ok(RunMode::Probe)));
+        assert!(matches!(
+            RunMode::from_parts(None, true),
+            Ok(RunMode::Probe)
+        ));
         let scripted = RunMode::from_parts(Some("wait 10"), true).unwrap();
         assert_eq!(scripted, RunMode::Scripted(shot::parse("wait 10").unwrap()));
     }
@@ -1064,7 +1068,8 @@ mod tests {
             .unwrap();
         // The window is gone, so this runs in the app context the observer gets.
         cx.cx.update(|cx| {
-            let state = std::mem::replace(cx.global_mut::<SettingsWindow>(), SettingsWindow::Closed);
+            let state =
+                std::mem::replace(cx.global_mut::<SettingsWindow>(), SettingsWindow::Closed);
             let state = state.forget_if_closed(cx);
             cx.set_global(state);
         });
