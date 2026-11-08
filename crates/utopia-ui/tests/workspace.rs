@@ -3555,6 +3555,36 @@ fn graph_view_lays_out_and_opens_pages(cx: &mut TestAppContext) {
     assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
 }
 
+/// §13.4 main pane: the graph is a place you go, not an overlay the page hides under.
+/// Opening a page in the main column — the sidebar's page rows, the recent days, a pinned
+/// page, Quick jump, a date shortcut — closes the graph, or the page "opens" invisibly and
+/// the graph keeps focus (workspace-main-pane-content.md, issue 1).
+#[gpui::test]
+fn opening_a_page_closes_the_graph(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let alpha = app.update(cx, |a, _| {
+        let p = a.store.create_page("Alpha").unwrap();
+        a.store.ensure_first_block(&p).unwrap();
+        p
+    });
+    cx.simulate_keystrokes("escape cmd-shift-g");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_some(),
+        "the graph is up"
+    );
+    // Every one of those paths calls `Workspace::open` for the main pane.
+    ws.update_in(cx, |w, window, cx| {
+        w.open(alpha.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.graph_view()).is_none(),
+        "the graph gives way to the page it was hiding"
+    );
+    assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(alpha));
+}
+
 /// GR-1: pages grow with their link count, from 6 px to 18 px across.
 #[gpui::test]
 fn graph_sizes_nodes_by_links(cx: &mut TestAppContext) {
