@@ -1,5 +1,31 @@
 # Workspace main pane: page vs graph view vs PDF viewer
 
+## Status (fix/workspace-main-pane-content)
+
+`MainContent { Page, Graph(Entity<GraphView>), Pdf(Entity<PdfView>) }` now owns what the
+main column shows, and `render` matches on it, so "one thing at a time" is a state rather
+than a precedence between two `Option`s. The tables and line numbers below describe the
+machine on `main` before this change.
+
+- **Issue 1 (a page opened while the graph was up was invisible): fixed.** `open(..)` now
+  sets the main column back to `Page`, so the graph closes instead of hiding the page.
+  Proven by `opening_a_page_closes_the_graph`.
+- **Issue 2 (graph over PDF): unrepresentable.** `open_graph` replaces a `Pdf` with `Graph`,
+  and `GraphEvent::Close` / `show_graph` return to `Page` — a PDF is never kept alive
+  underneath. `GraphEvent` and `PdfEvent` from a view that is no longer on screen no longer
+  change the main column. Proven by `graph_over_a_pdf_does_not_bring_it_back`. Visible
+  change in that combination only: closing a graph that was opened over a PDF shows the
+  page, not the PDF; the PDF is reopened from its block. Restoring it would have meant
+  keeping hidden state.
+- **Issue 3 (hidden graph panel kept working): handled, not removed.** The panel is still
+  kept while the sidebar is hidden (reopening brings it back, like the stacked panes), but
+  its main-page and `IndexUpdated` observers return early when `right_open` is false, and
+  `show_right` re-reads the origin and the index once when the sidebar returns. Proven by
+  `hidden_graph_panel_does_no_work`.
+
+The sidebar `graph_panel` stays orthogonal to `MainContent` (it sits beside the page).
+Nothing else listed here was left unhandled.
+
 ## What it controls
 
 What the main column shows (`crates/utopia-ui/src/workspace.rs:2720-2724`): a full-screen
