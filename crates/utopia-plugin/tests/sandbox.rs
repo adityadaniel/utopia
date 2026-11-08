@@ -267,7 +267,7 @@ fn a_run_that_fails_still_reports_the_pages_it_wrote() {
         // Return something that is not JSON.
         packed(4096, "not json").to_string(),
         // Claim an output larger than the message cap.
-        format!("(i64.const {})", (1u64 << 32) | (4 << 20) as u64 + 1),
+        format!("(i64.const {})", (1u64 << 32) | ((4 << 20) as u64 + 1)),
         // Burn the whole fuel budget.
         "(loop $l (br $l)) (i64.const 0)".to_string(),
     ];
