@@ -978,10 +978,11 @@ impl PageView {
     /// (`docs/state-machines/page-view-mode.md`).
     fn set_mode(&mut self, next: Mode, cx: &mut Context<Self>) {
         let prev = std::mem::replace(&mut self.mode, next);
-        // Entering or leaving the feed counts as a page change: the feed builds its rows
-        // from the default query and keeps its own expansion state.
-        let page_changed =
-            prev.page() != self.mode.page() || prev.is_journal() != self.mode.is_journal();
+        // Every opening of the feed counts as a page change: it starts a fresh window of
+        // days and builds them from the default query, so the view it replaces must not
+        // lend it its expansion state. Any other change is a page change when the page
+        // differs; zooming within one page keeps that page's state.
+        let page_changed = prev.page() != self.mode.page() || self.mode.is_journal();
         let zoom_changed = prev.zoom() != self.mode.zoom();
         if page_changed {
             self.reset_page_ui(cx);
