@@ -8,11 +8,12 @@ The three flags are now one type: `PageView` holds `mode: Mode` (`page_view.rs:3
 it, so a feed always names today's page and a zoom always names its page; a feed with no page
 is unrepresentable (issue 5, pinned by the unit test `a_mode_always_names_the_page_it_draws`).
 Every transition goes through `set_mode` (`:979`), which replaces `show`: it resets the
-per-page UI when the page changes (entering or leaving the feed counts as a page change),
-closes the rename input and the date calendar whenever the page or the zoom changes, always
-closes the menus, drops `refs_key`, refreshes the unlinked count and rebuilds once.
+per-page UI when the page changes (every opening of the feed counts as a page change; zooming
+within one page keeps that page's state), closes the rename input and the date calendar
+whenever the page or the zoom changes, always closes the menus, drops `refs_key`, refreshes
+the unlinked count and rebuilds once.
 
-- **Issue 1 — fixed.** `reveal_block` (`:1085`) ends with `set_mode(Mode::Page { .. })` instead
+- **Issue 1 — fixed.** `reveal_block` (`:1086`) ends with `set_mode(Mode::Page { .. })` instead
   of writing `zoom = None`; the unlinked count, `refs_key` and the popups are those of a whole
   page again. Test: `fr_3_9_leaving_a_zoom_to_reveal_a_block_counts_unlinked_mentions`
   (`crates/utopia-ui/tests/workspace.rs`).
