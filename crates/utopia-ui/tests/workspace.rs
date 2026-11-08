@@ -5700,6 +5700,36 @@ fn auto_closed_relative_date_expands_on_moving_away(cx: &mut TestAppContext) {
     assert_tomorrow_linked(&app, cx);
 }
 
+/// AC-3.2: a block is committed on blur too, not only on Enter, Escape or the 300 ms
+/// idle. The idle commit leaves a link the caret is still inside alone (`typing_link`), so
+/// a block abandoned by a click elsewhere kept `[[tomorrow]]` unexpanded until some host
+/// called `end` (machine issue 1).
+#[gpui::test]
+fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
+    use gpui::Focusable as _;
+    let (app, ws, cx) = setup(cx);
+    cx.simulate_input("f [[tomorrow");
+    // Only the menu is dismissed: the auto-paired link is still where the caret is.
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        day_texts(&app, today(), cx),
+        ["f [[tomorrow]]"],
+        "auto-paired, with the caret inside the link"
+    );
+    // The keyboard goes to the workspace; no host calls `end` (a click into the search box
+    // or another pane does the same).
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    ws.update_in(cx, |w, window, cx| {
+        let handle = w.focus_handle(cx);
+        window.focus(&handle);
+    });
+    cx.run_until_parked();
+    assert_eq!(day_texts(&app, today(), cx), ["f [[November 3rd, 2026]]"]);
+    assert_tomorrow_linked(&app, cx);
+}
+
 /// Accepting the suggestion (Tab or Enter) inserts the day's title directly.
 #[gpui::test]
 fn auto_closed_relative_date_accepts_with_tab(cx: &mut TestAppContext) {

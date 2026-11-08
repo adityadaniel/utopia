@@ -723,13 +723,24 @@ impl BlockEditor {
         self.settle(cx);
     }
 
-    /// The editor's handle lost focus (§13.5). The input method can no longer reach this
-    /// field, so a live composition must be closed here; without it a composition whose
-    /// owner moved focus without calling `end` would never end.
+    /// The editor's handle lost focus (§13.5, AC-3.2): the keyboard is on another element
+    /// — a palette, a search box, another pane, another application — nobody called `end`,
+    /// so this is the blur the module doc has always promised. The input method can no
+    /// longer reach this field, so a live composition is closed here, and the block is
+    /// committed at once. Waiting for the idle timer is not enough: it leaves a link the
+    /// caret is still inside alone (`typing_link`), so an abandoned `[[tomorrow]]` stayed
+    /// unexpanded until some host happened to call `end` (machine issue 1).
+    ///
+    /// The session stays open. A palette that took the keyboard can dispatch an editor
+    /// command back to this block (QJ-5, `quick_jump_runs_editor_commands`), so ending the
+    /// edit here would break a documented shortcut; the host's `end` — Escape, navigation,
+    /// opening a page — is what ends an edit. Nothing runs meanwhile: the commit dropped
+    /// the idle timer, and a session that survives a blur has no caret to maintain.
     pub fn focus_lost(&mut self, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }
+        self.commit_block(true, cx);
     }
 
     /// Queue a host request that must wait for the input method (§13.5). The latest request
