@@ -1276,3 +1276,53 @@ fn ac_12_6_a_snapshot_measured_on_another_relay_is_not_uploaded() {
     assert_eq!(inc.snapshots_sent, 1);
     assert_eq!(t.puts.load(Ordering::SeqCst), 1);
 }
+
+/// §12.3: the store is not locked while a round is on the wire, so an update can be queued
+/// after `prepare` gathered nothing. The round must make another pass instead of reporting
+/// a clean sync that left it behind (docs/state-machines/ffi-mobile-sync.md).
+#[test]
+fn ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire() {
+    use utopia_sync::{sync_round, StoreDone, StoreStep, SyncEngine};
+
+    let relay = Relay::new();
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Round").unwrap();
+    // Send the page creation first, so the round under test starts with an empty outbox.
+    SyncClient::new(RelayTransport::new(relay.clone(), "g1"), &store)
+        .unwrap()
+        .sync_once(&mut store)
+        .unwrap();
+    assert_eq!(store.outbox_count().unwrap(), 0);
+    let head_before = relay.manifest("g1").pages[0].head_seq;
+
+    let mut engine = SyncEngine::new(&store).unwrap();
+    let mut transport = RelayTransport::new(relay.clone(), "g1");
+    let mut captured = false;
+    let report = sync_round(&mut engine, &mut transport, |engine, step| match step {
+        StoreStep::Prepare => engine.prepare(&mut store).map(StoreDone::Prepared),
+        StoreStep::Apply(inc) => {
+            let pass = engine.apply(&mut store, *inc)?;
+            if !captured {
+                // A capture lands between the round's two store steps.
+                captured = true;
+                write(&mut store, &page, "typed during the round");
+            }
+            Ok(StoreDone::Applied(pass))
+        }
+        StoreStep::Queued => store
+            .outbox_count()
+            .map(|n| StoreDone::Queued(n > 0))
+            .map_err(Into::into),
+    })
+    .unwrap();
+    assert!(
+        report.pushed >= 1,
+        "the edit made during the exchange was left unsent: {report:?}"
+    );
+    assert_eq!(store.outbox_count().unwrap(), 0, "everything was sent");
+    assert!(
+        relay.manifest("g1").pages[0].head_seq > head_before,
+        "the capture reached the relay"
+    );
+}

@@ -206,6 +206,10 @@ impl Graph {
             match step {
                 StoreStep::Prepare => engine.prepare(&mut store).map(StoreDone::Prepared),
                 StoreStep::Apply(inc) => engine.apply(&mut store, *inc).map(StoreDone::Applied),
+                StoreStep::Queued => store
+                    .outbox_count()
+                    .map(|n| StoreDone::Queued(n > 0))
+                    .map_err(SyncError::from),
             }
         });
         // The engine goes home whatever the round did: the next call starts from it and
@@ -937,6 +941,60 @@ mod tests {
             uploaded.lock().expect("not poisoned").as_slice(),
             &[] as &[u64],
             "a snapshot covering the first relay's head was uploaded to the second"
+        );
+    }
+
+    /// The store is not locked while the exchange runs, so a capture can land after
+    /// `prepare` gathered nothing. A round that stopped there would answer `Synced` with
+    /// the capture still queued; it must make another pass instead.
+    #[test]
+    fn an_edit_made_during_the_exchange_is_pushed_before_the_round_reports_synced() {
+        let g = Graph::in_memory().unwrap();
+        g.set_today(Some("2026-11-02".into())).unwrap();
+        let day = g.today().unwrap();
+        // Opening today's page queued its first write; send it so the round under test
+        // really starts with nothing to push.
+        g.sync_via(Box::new(Scripted::quiet())).unwrap();
+        assert_eq!(
+            g.guard().expect("not poisoned").outbox_count().unwrap(),
+            0,
+            "the round under test starts with an empty outbox"
+        );
+        let captured = Arc::new(AtomicBool::new(false));
+        let pushed = Arc::new(AtomicU32::new(0));
+        let mut t = Scripted::quiet();
+        t.on_manifest = Box::new({
+            let g = g.clone();
+            let day = day.id.clone();
+            let captured = captured.clone();
+            move || {
+                if !captured.swap(true, Ordering::SeqCst) {
+                    // A capture lands while the manifest request is on the wire.
+                    g.append_block(day.clone(), "typed during the round".into())
+                        .expect("the store is free during the exchange");
+                }
+                Ok(Some(empty_manifest()))
+            }
+        });
+        t.on_push = Box::new({
+            let pushed = pushed.clone();
+            move |_page, req| {
+                pushed.fetch_add(req.updates.len() as u32, Ordering::SeqCst);
+                Ok(PushResponse {
+                    accepted: req.updates.len(),
+                    head_seq: 1,
+                    duplicate: 0,
+                })
+            }
+        });
+        let outcome = g.sync_via(Box::new(t)).unwrap();
+        assert!(
+            matches!(&outcome, SyncOutcome::Synced { summary } if summary.pushed >= 1),
+            "the capture made during the exchange was left unsent behind {outcome:?}"
+        );
+        assert!(
+            pushed.load(Ordering::SeqCst) >= 1,
+            "the round pushed nothing"
         );
     }
 }

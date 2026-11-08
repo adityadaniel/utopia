@@ -821,13 +821,17 @@ impl SyncEngine {
         sync_round(self, t, |engine, step| match step {
             StoreStep::Prepare => engine.prepare(store).map(StoreDone::Prepared),
             StoreStep::Apply(inc) => engine.apply(store, *inc).map(StoreDone::Applied),
+            StoreStep::Queued => store
+                .outbox_count()
+                .map(|n| StoreDone::Queued(n > 0))
+                .map_err(SyncError::from),
         })
     }
 }
 
-/// One store-side step of a round: the two calls that need the store, so a caller that
-/// keeps its store behind a lock can take that lock for each and release it for the
-/// network between them (§12.3 steps 3–5, §14.3).
+/// One store-side step of a round: the calls that need the store, so a caller that keeps
+/// its store behind a lock can take that lock for each and release it for the network
+/// between them (§12.3 steps 3–5, §14.3).
 #[derive(Debug)]
 pub enum StoreStep {
     /// Gather pushes, cursors, queued snapshots and attachment work.
@@ -836,6 +840,10 @@ pub enum StoreStep {
     /// Boxed so the step stays one word (it is passed by value once per round, and
     /// `Prepare` carries nothing).
     Apply(Box<Incoming>),
+    /// "Is anything still waiting to be sent?" Asked when the round would otherwise stop:
+    /// the store is not locked between the steps, so an edit made on another thread while
+    /// the exchange ran is not in the pass that was just applied.
+    Queued,
 }
 
 /// What the store did with a [`StoreStep`].
@@ -843,6 +851,8 @@ pub enum StoreStep {
 pub enum StoreDone {
     Prepared(Outgoing),
     Applied(SyncReport),
+    /// The answer to [`StoreStep::Queued`]: text or structural updates are still unsent.
+    Queued(bool),
 }
 
 /// The [`SyncEngine::sync_once`] loop, with the store reached through `store` instead of
@@ -864,6 +874,7 @@ where
             StoreDone::Prepared(out) => out,
             // A programmer error, not user data: the closure answered the wrong step.
             StoreDone::Applied(_) => return Err(wrong_step("apply", "prepare")),
+            StoreDone::Queued(_) => return Err(wrong_step("queued", "prepare")),
         };
         let had_work = !out.pushes.is_empty() || !out.snapshots.is_empty();
         let inc = exchange(t, out)?;
@@ -871,8 +882,9 @@ where
         let pass = match store(engine, StoreStep::Apply(Box::new(inc)))? {
             StoreDone::Applied(pass) => pass,
             StoreDone::Prepared(_) => return Err(wrong_step("prepare", "apply")),
+            StoreDone::Queued(_) => return Err(wrong_step("queued", "apply")),
         };
-        let quiet = pass.imported.is_empty()
+        let nothing_moved = pass.imported.is_empty()
             && !had_work
             && engine.pending_snapshots.is_empty()
             && pass.blobs_up == 0
@@ -881,7 +893,19 @@ where
         report.absorb(pass);
         // Retrying a page that just failed inside the same round only re-spends the
         // same bandwidth; the next round owns it.
-        if quiet || stopped {
+        if stopped {
+            break;
+        }
+        // `prepare` ran before the exchange and the store is not locked in between, so an
+        // edit made meanwhile is not in the pass above. A round that stopped here would
+        // answer "synced" with that edit still queued (§12.3, §14.3).
+        let quiet = nothing_moved
+            && (match store(engine, StoreStep::Queued)? {
+                StoreDone::Queued(pending) => !pending,
+                StoreDone::Prepared(_) => return Err(wrong_step("prepare", "queued")),
+                StoreDone::Applied(_) => return Err(wrong_step("apply", "queued")),
+            });
+        if quiet {
             break;
         }
     }
