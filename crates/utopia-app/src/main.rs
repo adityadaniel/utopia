@@ -6,7 +6,7 @@ mod hotkey;
 mod paths;
 mod shot;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -51,7 +51,7 @@ struct ScriptHooks(gpui::WeakEntity<Root>);
 impl ScriptHooks {
     fn workspace(&self, cx: &App) -> Option<Entity<Workspace>> {
         match &self.0.upgrade()?.read(cx).state {
-            RootState::Ready(ws) => Some(ws.clone()),
+            RootState::Ready(ready) => Some(ready.ws.clone()),
             _ => None,
         }
     }
@@ -175,25 +175,78 @@ enum RootState {
         error: Option<String>,
         _sub: Subscription,
     },
-    Ready(Entity<Workspace>),
+    Ready(Ready),
+    /// The graph could not be opened; there is no retry UI (§9.3).
     Failed(String),
+}
+
+/// Everything that exists only while a graph is open: the workspace and the side tasks
+/// serving it (issue 3). Dropping `Ready` stops them, so no side task can outlive its
+/// graph.
+struct Ready {
+    ws: Entity<Workspace>,
+    /// The global quick-capture hotkey (FR-2.19), polled every 150 ms; registered only in
+    /// [`RunMode::Interactive`].
+    _hotkey: Option<gpui::Task<()>>,
+    /// LAN discovery (§12.7.4), only when the sync transport is `lan`.
+    _discovery: Option<gpui::Task<()>>,
+    /// The relay this process hosts for LAN direct (§12.7.4), only with `UTOPIA_LAN_SERVE`.
+    _lan: Option<utopia_syncd::lan::LanRelay>,
+    /// `utopia://` links and the automation API (P2); always running while a graph is open.
+    _inbox: gpui::Task<()>,
+}
+
+/// How this process runs: a person at the window, a `UTOPIA_SHOT_SCRIPT`, or the startup
+/// probe (§15.1). Read from the environment once and carried by [`Root`], so the script,
+/// the hotkey and the probe all decide from one value (issue 1).
+#[derive(Clone, Debug, PartialEq)]
+enum RunMode {
+    Interactive,
+    Scripted(Vec<shot::Step>),
+    Probe,
+}
+
+impl RunMode {
+    fn from_env() -> Self {
+        let script = std::env::var("UTOPIA_SHOT_SCRIPT").ok();
+        Self::from_parts(
+            script.as_deref(),
+            std::env::var_os("UTOPIA_PROBE").is_some(),
+        )
+    }
+
+    fn from_parts(script: Option<&str>, probe: bool) -> Self {
+        if let Some(source) = script {
+            return match shot::parse(source) {
+                Ok(steps) => RunMode::Scripted(steps),
+                Err(e) => {
+                    eprintln!("utopia: UTOPIA_SHOT_SCRIPT: {e}");
+                    RunMode::Interactive
+                }
+            };
+        }
+        if probe {
+            RunMode::Probe
+        } else {
+            RunMode::Interactive
+        }
+    }
 }
 
 /// Top-level view: onboarding when there is no graph yet (§9.3), else the workspace.
 struct Root {
     state: RootState,
     config: PathBuf,
+    /// Decided once, before the window opens (see [`RunMode`]).
+    mode: RunMode,
     _appearance: Subscription,
-    _hotkey: Option<gpui::Task<()>>,
-    _discovery: Option<gpui::Task<()>>,
-    _lan: Option<utopia_syncd::lan::LanRelay>,
-    _inbox: Option<gpui::Task<()>>,
 }
 
 impl Root {
     fn new(
         graph: Option<PathBuf>,
         config: PathBuf,
+        mode: RunMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -201,34 +254,42 @@ impl Root {
             cx.set_global(Theme::for_appearance(window.appearance()));
             cx.notify();
         });
-        let mut root = Self {
-            state: RootState::Failed(String::new()),
-            config,
-            _appearance: appearance,
-            _hotkey: None,
-            _discovery: None,
-            _lan: None,
-            _inbox: None,
-        };
-        match graph {
-            Some(p) => root.open_graph(p, window, cx),
-            None => root.onboard(window, cx),
-        }
-        if let Ok(script) = std::env::var("UTOPIA_SHOT_SCRIPT") {
-            match shot::parse(&script) {
-                Ok(steps) => {
-                    let handle = window.window_handle();
-                    let hooks = Box::new(ScriptHooks(cx.entity().downgrade()));
-                    cx.spawn(async move |_, cx| shot::run(steps, handle, hooks, cx).await)
-                        .detach();
-                }
-                Err(e) => eprintln!("utopia: UTOPIA_SHOT_SCRIPT: {e}"),
+        // The first state is decided before the root exists, so the placeholder
+        // `Failed("")` that could never be shown is gone (issue 4).
+        let state = match graph {
+            Some(path) => {
+                let key = utopia_store::is_encrypted(&path)
+                    .then(|| paths::db_passphrase(&path))
+                    .flatten();
+                Self::load_graph(path, key, &config, &mode, window, cx)
             }
-        }
+            None => Self::onboarding(window, cx),
+        };
+        let mut root = Self {
+            state,
+            config,
+            mode,
+            _appearance: appearance,
+        };
+        root.start_script(window, cx);
         root
     }
 
-    fn onboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// Spawn the shot script parsed at startup. The mode is the only thing that decides
+    /// whether a script runs and whether a hotkey is registered, so a script that failed
+    /// to parse can no longer leave a window with neither (issue 1).
+    fn start_script(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let RunMode::Scripted(steps) = &self.mode else {
+            return;
+        };
+        let steps = steps.clone();
+        let handle = window.window_handle();
+        let hooks = Box::new(ScriptHooks(cx.entity().downgrade()));
+        cx.spawn(async move |_, cx| shot::run(steps, handle, hooks, cx).await)
+            .detach();
+    }
+
+    fn onboarding(window: &mut Window, cx: &mut Context<Root>) -> RootState {
         let input = cx.new(|cx| LineInput::new("Name your graph", cx));
         let sub = cx.subscribe_in(
             &input,
@@ -249,11 +310,11 @@ impl Root {
             },
         );
         input.update(cx, |i, _| i.focus(window));
-        self.state = RootState::Onboarding {
+        RootState::Onboarding {
             input,
             error: None,
             _sub: sub,
-        };
+        }
     }
 
     fn open_graph(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -264,13 +325,12 @@ impl Root {
     }
 
     /// Ask for the passphrase of an encrypted graph.
-    fn lock(
-        &mut self,
+    fn locked(
         path: PathBuf,
         error: Option<String>,
         window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+        cx: &mut Context<Root>,
+    ) -> RootState {
         let input = cx.new(|cx| {
             let mut i = LineInput::new("Passphrase", cx);
             i.set_masked(true, cx);
@@ -288,15 +348,15 @@ impl Root {
             },
         );
         input.update(cx, |i, _| i.focus(window));
-        self.state = RootState::Locked {
+        RootState::Locked {
             path,
             input,
             error,
             _sub: sub,
-        };
-        cx.notify();
+        }
     }
 
+    /// The transition into a graph: onboarding's name submitted, or a passphrase tried.
     fn open_graph_with(
         &mut self,
         path: PathBuf,
@@ -304,13 +364,27 @@ impl Root {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.state = Self::load_graph(path, key, &self.config, &self.mode, window, cx);
+        cx.notify();
+    }
+
+    /// Open `path` and everything [`Ready`] owns, returning the state to show. One function
+    /// builds the Ready state, so there is no path that half-enters it (issue 3).
+    fn load_graph(
+        path: PathBuf,
+        key: Option<String>,
+        config: &Path,
+        mode: &RunMode,
+        window: &mut Window,
+        cx: &mut Context<Root>,
+    ) -> RootState {
         match Store::open_with_key(&path, key.as_deref()) {
             Err(utopia_store::StoreError::Encrypted) => {
                 let error = key.map(|_| "That passphrase does not open this graph.".to_string());
-                self.lock(path, error, window, cx);
+                Self::locked(path, error, window, cx)
             }
             Ok(store) => {
-                paths::remember_graph(&self.config, &path);
+                paths::remember_graph(config, &path);
                 // Settings → Sync can name the graph even when sync is off; the transport
                 // is filled in below when one is configured.
                 cx.set_global(utopia_ui::sync_runner::SyncFacts {
@@ -318,7 +392,7 @@ impl Root {
                     graph: Some(paths::graph_id(&path)),
                     encrypted: false,
                 });
-                let plugins = self.config.join("plugins");
+                let plugins = config.join("plugins");
                 let app = cx.new(|_| {
                     let mut a = AppState::new(store);
                     a.load_plugins(&plugins);
@@ -326,32 +400,42 @@ impl Root {
                 });
                 let ws = cx.new(|cx| Workspace::new(app.clone(), window, cx));
                 ws.update(cx, |w, cx| w.open_launch_page(window, cx));
-                if std::env::var_os("UTOPIA_SHOT_SCRIPT").is_some() {
-                    // A scripted run (started in `Root::new`) registers no global hotkey.
-                } else if std::env::var_os("UTOPIA_PROBE").is_some() {
-                    run_probe(ws.clone(), window);
-                } else {
-                    // FR-2.19: the system-wide hotkey brings the app forward into capture.
-                    let registered = hotkey::register();
-                    if !registered {
-                        eprintln!("utopia: global quick-capture hotkey unavailable; Cmd+Shift+Space works in-app");
+                // The mode decides every startup side task; nothing re-reads the
+                // environment here (issue 1).
+                let hotkey = match mode {
+                    // A scripted run drives the window and quits at its last step.
+                    RunMode::Scripted(_) => None,
+                    RunMode::Probe => {
+                        run_probe(ws.clone(), window);
+                        None
                     }
-                    let ws2 = ws.clone();
-                    self._hotkey = Some(cx.spawn_in(window, async move |_, cx| loop {
-                        cx.background_executor()
-                            .timer(Duration::from_millis(150))
-                            .await;
-                        if hotkey::take_fired() {
-                            let r = cx.update(|window, cx| {
-                                cx.activate(true);
-                                ws2.update(cx, |w, cx| w.quick_capture(&QuickCapture, window, cx));
-                            });
-                            if r.is_err() {
-                                break;
-                            }
+                    RunMode::Interactive => {
+                        // FR-2.19: the system-wide hotkey brings the app forward into capture.
+                        let registered = hotkey::register();
+                        if !registered {
+                            eprintln!("utopia: global quick-capture hotkey unavailable; Cmd+Shift+Space works in-app");
                         }
-                    }));
-                }
+                        let ws2 = ws.clone();
+                        Some(cx.spawn_in(window, async move |_, cx| loop {
+                            cx.background_executor()
+                                .timer(Duration::from_millis(150))
+                                .await;
+                            if hotkey::take_fired() {
+                                let r = cx.update(|window, cx| {
+                                    cx.activate(true);
+                                    ws2.update(cx, |w, cx| {
+                                        w.quick_capture(&QuickCapture, window, cx)
+                                    });
+                                });
+                                if r.is_err() {
+                                    break;
+                                }
+                            }
+                        }))
+                    }
+                };
+                let mut discovery = None;
+                let mut lan = None;
                 // LAN direct (§12.7.4): host the relay for this graph and sync through it.
                 if let Ok(bind) = std::env::var("UTOPIA_LAN_SERVE") {
                     let graph = paths::graph_id(&path);
@@ -369,7 +453,7 @@ impl Root {
                                 passphrase: std::env::var("UTOPIA_SYNC_PASSPHRASE").ok(),
                             };
                             ws.update(cx, |w, cx| w.start_sync(cfg, cx));
-                            self._lan = Some(relay);
+                            lan = Some(relay);
                         }
                         Err(e) => eprintln!("utopia: LAN relay failed: {e}"),
                     }
@@ -380,7 +464,7 @@ impl Root {
                     if lan {
                         // Discover on a background thread; startup never waits on the network.
                         let ws2 = ws.clone();
-                        self._discovery = Some(cx.spawn_in(window, async move |_, cx| {
+                        discovery = Some(cx.spawn_in(window, async move |_, cx| {
                             let graph = cfg.graph.clone();
                             let found = cx
                                 .background_executor()
@@ -418,7 +502,7 @@ impl Root {
                         };
                         match utopia_api::serve(&addr, utopia_api::new_token()) {
                             Ok(server) => {
-                                let file = self.config.join("api.json");
+                                let file = config.join("api.json");
                                 if let Err(e) = server.write_discovery(&file) {
                                     eprintln!("utopia: could not write {}: {e}", file.display());
                                 }
@@ -434,7 +518,7 @@ impl Root {
                     None => None,
                 };
                 let (ws2, app2) = (ws.clone(), app.clone());
-                self._inbox = Some(cx.spawn_in(window, async move |_, cx| loop {
+                let inbox = cx.spawn_in(window, async move |_, cx| loop {
                     cx.background_executor()
                         .timer(Duration::from_millis(30))
                         .await;
@@ -458,14 +542,17 @@ impl Root {
                     if r.is_err() {
                         break;
                     }
-                }));
-                self.state = RootState::Ready(ws);
+                });
+                RootState::Ready(Ready {
+                    ws,
+                    _hotkey: hotkey,
+                    _discovery: discovery,
+                    _lan: lan,
+                    _inbox: inbox,
+                })
             }
-            Err(e) => {
-                self.state = RootState::Failed(format!("Could not open {}: {e}", path.display()))
-            }
+            Err(e) => RootState::Failed(format!("Could not open {}: {e}", path.display())),
         }
-        cx.notify();
     }
 }
 
@@ -481,7 +568,7 @@ impl Render for Root {
             .line_height(px(density.line_height()))
             .font_family(utopia_ui::appearance::font_family(cx));
         match &self.state {
-            RootState::Ready(ws) => shell.child(ws.clone()),
+            RootState::Ready(ready) => shell.child(ready.ws.clone()),
             RootState::Onboarding { input, error, .. } => {
                 shell.flex().justify_center().items_center().child(
                     div()
@@ -666,6 +753,7 @@ fn menus() -> Vec<Menu> {
 }
 
 fn run_app(graph: Option<PathBuf>) {
+    let mode = RunMode::from_env();
     let config = paths::config_dir();
     let keymap = std::fs::read_to_string(config.join("keymap.json")).ok();
     let application = Application::new();
@@ -694,7 +782,7 @@ fn run_app(graph: Option<PathBuf>) {
         };
         let opened = cx.open_window(options, move |window, cx| {
             cx.set_global(Theme::for_appearance(window.appearance()));
-            cx.new(|cx| Root::new(graph, config, window, cx))
+            cx.new(|cx| Root::new(graph, config, mode, window, cx))
         });
         if let Err(e) = opened {
             eprintln!("utopia: could not open a window: {e}");
