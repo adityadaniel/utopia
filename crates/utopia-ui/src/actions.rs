@@ -931,12 +931,22 @@ pub enum Override {
     /// Keys the user wrote that gpui cannot bind. Carried verbatim so the editor can show
     /// what they typed and say why, while the default stays in force (rule 11).
     Invalid { raw: String, why: String },
+    /// The catalog default, written down. Not an override: [`Overrides`] drops it when it
+    /// reads or sets an entry, so a hand-edited file cannot make a row look changed while it
+    /// binds exactly what the app already binds (keymap machine doc, issue 4).
+    SameAsDefault,
 }
 
 impl Override {
     /// Read one entry of `keymap.json`. The verdict is computed here, once, so no reader has
-    /// to decide for itself whether the keys are usable.
-    fn parse(raw: &str) -> Self {
+    /// to decide for itself whether the keys are usable or different from the default.
+    fn parse(action: &str, raw: &str) -> Self {
+        let default = doc(action)
+            .map(|d| platform_keys(d.keys))
+            .unwrap_or_default();
+        if canonical_keys(raw) == canonical_keys(&default) {
+            return Override::SameAsDefault;
+        }
         match keys_problem(raw) {
             Some(why) => Override::Invalid {
                 raw: raw.to_string(),
@@ -950,16 +960,18 @@ impl Override {
     pub fn keys(&self) -> Option<&str> {
         match self {
             Override::Valid(keys) => Some(keys),
-            Override::Invalid { .. } => None,
+            Override::Invalid { .. } | Override::SameAsDefault => None,
         }
     }
 
     /// What to write back to `keymap.json`: the unusable text is not thrown away, so saving
-    /// some other binding does not silently destroy what the user wrote.
-    fn written(&self) -> &str {
+    /// some other binding does not silently destroy what the user wrote. Nothing is written
+    /// for an entry that only repeats the default.
+    fn written(&self) -> Option<&str> {
         match self {
-            Override::Valid(keys) => keys,
-            Override::Invalid { raw, .. } => raw,
+            Override::Valid(keys) => Some(keys),
+            Override::Invalid { raw, .. } => Some(raw),
+            Override::SameAsDefault => None,
         }
     }
 }
@@ -980,14 +992,16 @@ impl Overrides {
         for e in entries {
             match doc(&e.action) {
                 Some(_) => {
-                    let o = Override::parse(&e.key);
+                    let o = Override::parse(&e.action, &e.key);
                     if let Override::Invalid { why, .. } = &o {
                         warnings.push(format!(
                             "keymap.json: {} keeps its default: {why}",
                             e.action
                         ));
                     }
-                    map.insert(e.action, o);
+                    if !matches!(o, Override::SameAsDefault) {
+                        map.insert(e.action, o);
+                    }
                 }
                 None => warnings.push(format!("keymap.json: unknown action {}", e.action)),
             }
@@ -1011,7 +1025,7 @@ impl Overrides {
             .filter_map(|(action, o)| {
                 let d = doc(action)?;
                 Some(KeymapEntry {
-                    key: o.written().to_string(),
+                    key: o.written()?.to_string(),
                     action: action.clone(),
                     context: d.context.map(str::to_string),
                 })
@@ -1058,8 +1072,18 @@ impl Overrides {
     }
 
     pub fn set(&mut self, action: &str, keys: &str) {
-        if doc(action).is_some() {
-            self.0.insert(action.to_string(), Override::parse(keys));
+        if doc(action).is_none() {
+            return;
+        }
+        // The default is carried as an absence, so "rebind to the chord it already has" and
+        // "reset it" are one state (keymap machine doc, issue 4).
+        match Override::parse(action, keys) {
+            Override::SameAsDefault => {
+                self.0.remove(action);
+            }
+            o => {
+                self.0.insert(action.to_string(), o);
+            }
         }
     }
 
@@ -1351,6 +1375,28 @@ mod tests {
             saved.contains("cmd-alt-t"),
             "the usable one is kept: {saved}"
         );
+    }
+
+    /// Keymap machine doc, issue 4: an entry that only repeats the catalog default is not an
+    /// override — no changed marker, no identical binding, nothing written back.
+    #[test]
+    fn an_entry_equal_to_the_default_is_not_an_override() {
+        let (o, warnings) = Overrides::from_json(&format!(
+            r#"[{{"key":"{}","action":"GoToday"}}]"#,
+            platform_keys("cmd-shift-t")
+        ));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!o.is_changed("GoToday"));
+        assert_eq!(o.to_json().trim(), "[]", "nothing to write back");
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t")
+        );
+        // And recording the default again drops an existing override.
+        let mut o = Overrides::default();
+        o.set("GoToday", "alt-cmd-t");
+        o.set("GoToday", &platform_keys("cmd-shift-t"));
+        assert!(!o.is_changed("GoToday"));
     }
 
     /// Keymap machine doc, issue 3: clashes were compared by the literal context string, so a

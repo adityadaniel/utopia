@@ -27,8 +27,7 @@ use gpui::{
 use std::path::PathBuf;
 
 use crate::actions::{
-    by_category, canonical_keys, doc, pretty_keys, reinstall, ActionDoc, Category, Override,
-    Overrides, CATALOG,
+    by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
 use crate::appearance::{self, AttributeBlocks, Density, UiFont};
 use crate::help::{shot_image, TOPICS};
@@ -295,12 +294,10 @@ impl SettingsView {
 
     fn rebind(&mut self, d: &'static ActionDoc, keys: String, cx: &mut Context<Self>) {
         let pretty = pretty_keys(&keys);
-        if canonical_keys(&keys) == canonical_keys(&crate::actions::platform_keys(d.keys)) {
-            // Back to the default: drop the override instead of storing a copy of it.
-            self.overrides.reset(d.action);
-        } else {
-            self.overrides.set(d.action, &keys);
-        }
+        // `set` drops an entry that only repeats the catalog default, so rebinding to the
+        // chord an action already has puts it back to default rather than storing a copy
+        // (keymap machine doc, issue 4).
+        self.overrides.set(d.action, &keys);
         self.apply(cx);
         let taken: Vec<&str> = self
             .overrides
