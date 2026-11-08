@@ -27,6 +27,47 @@ pub struct Attachment {
     pub size: u64,
 }
 
+/// Where an attachment row stands in its life (§11.6, rule 12):
+/// `docs/state-machines/attachment-blob-state.md`.
+///
+/// The row and the file are two facts; this is the row's half. A pending row whose bytes
+/// are gone is [`BlobState::Lost`], never silently skipped, so it cannot pin the upload
+/// queue. `Uploaded` is permanent: the bytes are content-addressed, so a relay that has
+/// them never needs them again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlobState {
+    /// Bytes on this device, not yet on a relay: the upload queue.
+    Pending,
+    /// On this device and on a relay. Never leaves this state.
+    Uploaded,
+    /// The row outlived its file (`.blobs` not moved with the graph, a `backup()` copy, a
+    /// deleted file). Not uploadable until the bytes come back. `noticed_at` is when the
+    /// loss was last confirmed, which is what orders the reconciliation rotation.
+    Lost { noticed_at: i64 },
+}
+
+impl BlobState {
+    fn as_str(self) -> &'static str {
+        match self {
+            BlobState::Pending => "pending",
+            BlobState::Uploaded => "uploaded",
+            BlobState::Lost { .. } => "lost",
+        }
+    }
+
+    /// The CHECK constraint keeps the two columns in step; a hand-edited or newer value is
+    /// read as [`Pending`], which can only cost an upload, never a byte (rule 11).
+    fn from_row(state: &str, lost_at: Option<i64>) -> Self {
+        match state {
+            "uploaded" => BlobState::Uploaded,
+            "lost" => BlobState::Lost {
+                noticed_at: lost_at.unwrap_or(0),
+            },
+            _ => BlobState::Pending,
+        }
+    }
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
@@ -108,14 +149,40 @@ impl Store {
         Ok(())
     }
 
-    fn record(&self, a: &Attachment, uploaded: bool) -> Result<()> {
+    /// Record bytes this device now has. `uploaded` is sticky; a restored file revives a
+    /// lost row to pending, because the same bytes under the same hash are the same blob.
+    fn record(&self, a: &Attachment, state: BlobState) -> Result<()> {
         self.conn.execute(
-            "INSERT INTO attachment(hash, name, mime, size, created_at, uploaded)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(hash) DO UPDATE SET uploaded = max(uploaded, excluded.uploaded)",
-            params![a.hash, a.name, a.mime, a.size as i64, self.now(), uploaded],
+            "INSERT INTO attachment(hash, name, mime, size, created_at, state, lost_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL)
+             ON CONFLICT(hash) DO UPDATE SET
+                 state = CASE
+                     WHEN attachment.state = 'uploaded' OR excluded.state = 'uploaded'
+                     THEN 'uploaded' ELSE 'pending' END,
+                 lost_at = NULL",
+            params![
+                a.hash,
+                a.name,
+                a.mime,
+                a.size as i64,
+                self.now(),
+                state.as_str()
+            ],
         )?;
         Ok(())
+    }
+
+    /// The row's state, or `None` when this device never recorded the blob.
+    pub fn attachment_state(&self, hash: &str) -> Result<Option<BlobState>> {
+        let row = self
+            .conn
+            .query_row(
+                "SELECT state, lost_at FROM attachment WHERE hash=?1",
+                [hash],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()?;
+        Ok(row.map(|(state, lost_at)| BlobState::from_row(&state, lost_at)))
     }
 
     /// Store bytes as an attachment and return its identity. Adding the same content
@@ -129,7 +196,10 @@ impl Store {
         }
         let hash = sha256_hex(bytes);
         if let Some(a) = self.attachment(&hash)? {
-            if self.has_blob(&hash) {
+            // Known bytes on disk: nothing to write. A row that had lost its file is
+            // recorded again below, which revives it to pending.
+            let lost = matches!(self.attachment_state(&hash)?, Some(BlobState::Lost { .. }));
+            if self.has_blob(&hash) && !lost {
                 return Ok(a);
             }
         }
@@ -140,7 +210,7 @@ impl Store {
             mime: sniff_mime(name, bytes).to_string(),
             size: bytes.len() as u64,
         };
-        self.record(&a, false)?;
+        self.record(&a, BlobState::Pending)?;
         Ok(a)
     }
 
@@ -181,7 +251,7 @@ impl Store {
                 name,
                 size: bytes.len() as u64,
             },
-            true,
+            BlobState::Uploaded,
         )
     }
 
@@ -217,30 +287,116 @@ impl Store {
             .collect())
     }
 
-    /// Local blobs not yet uploaded, oldest first.
+    /// Local blobs not yet uploaded, oldest first (§11.6).
+    ///
+    /// The queue is the rows whose bytes this device still has. A row whose file is gone is
+    /// marked [`BlobState::Lost`] and skipped *before* the limit applies: the previous
+    /// version put `LIMIT` in the SQL and only then looked for the file, so a few dead rows
+    /// at the head of the queue starved every newer attachment forever
+    /// (docs/state-machines/attachment-blob-state.md issue 1).
+    ///
+    /// This runs in `SyncEngine::prepare` on the UI thread, so the work is bounded per call
+    /// (rule 10): the pending rows are read one at a time and the scan stops as soon as the
+    /// batch is full. A dead row is met once, marked, and then leaves this scan for good, so
+    /// a backlog of dead files costs one pass in total, not one per round. The slots the
+    /// batch leaves unused re-check the lost rows ([`Store::revive_lost`]).
     pub fn blobs_to_upload(&self, limit: usize) -> Result<Vec<(String, Vec<u8>)>> {
-        let hashes: Vec<String> = {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT hash FROM attachment WHERE uploaded = 0 ORDER BY created_at, hash LIMIT ?1",
-            )?;
-            let rows = stmt
-                .query_map([limit as i64], |r| r.get(0))?
-                .collect::<rusqlite::Result<Vec<String>>>()?;
-            rows
-        };
         let mut out = Vec::new();
-        for h in hashes {
-            if let Some(b) = self.blob(&h)? {
-                out.push((h, b));
+        let mut dead = Vec::new();
+        {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT hash FROM attachment WHERE state = 'pending'
+                 ORDER BY created_at, hash",
+            )?;
+            let mut rows = stmt.query([])?;
+            while out.len() < limit {
+                let Some(row) = rows.next()? else { break };
+                let hash: String = row.get(0)?;
+                match self.blob(&hash)? {
+                    Some(bytes) => out.push((hash, bytes)),
+                    None => dead.push(hash),
+                }
             }
+        }
+        // Marked after the cursor closes: changing the rows a SELECT is walking has no
+        // defined order.
+        for hash in dead {
+            self.mark_blob_lost(&hash)?;
+        }
+        if out.len() < limit {
+            self.revive_lost(limit - out.len(), &mut out)?;
         }
         Ok(out)
     }
 
+    /// Spend the upload slots the queue did not fill on the rows whose file was gone: their
+    /// bytes may be back (a restored `.blobs` directory), and a revived row is uploaded in
+    /// the same round it is noticed.
+    ///
+    /// The pass is bounded by `slots` and ordered by `lost_at`, which every still-missing
+    /// row refreshes ([`Store::refresh_lost_at`]): without that, a lost set larger than the
+    /// slots would retry the same head forever and never reach the rest.
+    fn revive_lost(&self, slots: usize, out: &mut Vec<(String, Vec<u8>)>) -> Result<()> {
+        let lost: Vec<String> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT hash FROM attachment WHERE state = 'lost'
+                 ORDER BY lost_at, hash LIMIT ?1",
+            )?;
+            let rows = stmt.query_map([slots as i64], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for hash in lost {
+            match self.blob(&hash)? {
+                Some(bytes) => {
+                    self.revive_blob(&hash)?;
+                    out.push((hash, bytes));
+                }
+                None => self.refresh_lost_at(&hash)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Notice, once, that a queued row has no bytes. Not fatal: the file may come back
+    /// (a `.blobs` directory restored, the same content attached again).
+    fn mark_blob_lost(&self, hash: &str) -> Result<()> {
+        let changed = self.conn.execute(
+            "UPDATE attachment SET state = 'lost', lost_at = ?2
+             WHERE hash = ?1 AND state = 'pending'",
+            params![hash, self.now()],
+        )?;
+        if changed > 0 {
+            eprintln!(
+                "utopia-store: attachment {hash} has no file; not uploading it until the bytes are back"
+            );
+        }
+        Ok(())
+    }
+
+    /// `lost_at` is when the loss was last confirmed: refresh it so a row that is still
+    /// missing goes to the back of the reconciliation rotation.
+    fn refresh_lost_at(&self, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachment SET lost_at = ?2 WHERE hash = ?1 AND state = 'lost'",
+            params![hash, self.now()],
+        )?;
+        Ok(())
+    }
+
+    /// The bytes are back for a row that had lost them.
+    fn revive_blob(&self, hash: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE attachment SET state = 'pending', lost_at = NULL
+             WHERE hash = ?1 AND state = 'lost'",
+            [hash],
+        )?;
+        Ok(())
+    }
+
     pub fn mark_blobs_uploaded(&self, hashes: &[String]) -> Result<()> {
-        let mut stmt = self
-            .conn
-            .prepare_cached("UPDATE attachment SET uploaded = 1 WHERE hash = ?1")?;
+        let mut stmt = self.conn.prepare_cached(
+            "UPDATE attachment SET state = 'uploaded', lost_at = NULL WHERE hash = ?1",
+        )?;
         for h in hashes {
             stmt.execute([h])?;
         }
@@ -362,5 +518,33 @@ impl Store {
         self.set_block_kind(&page, &block, BlockKind::Quote, false)?;
         self.commit_block(&page, &block)?;
         Ok((page, block))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BlobState;
+
+    /// The column is the state (§11.6): every value round-trips, and anything else is read
+    /// as pending rather than panicking or claiming bytes are on a relay (rule 11).
+    #[test]
+    fn attachment_state_reads_every_value_and_tolerates_unknown_ones() {
+        assert_eq!(BlobState::Pending.as_str(), "pending");
+        assert_eq!(BlobState::Uploaded.as_str(), "uploaded");
+        assert_eq!(BlobState::Lost { noticed_at: 7 }.as_str(), "lost");
+        assert_eq!(BlobState::from_row("pending", None), BlobState::Pending);
+        assert_eq!(BlobState::from_row("uploaded", None), BlobState::Uploaded);
+        assert_eq!(
+            BlobState::from_row("lost", Some(7)),
+            BlobState::Lost { noticed_at: 7 }
+        );
+        // The CHECK constraint keeps these in step; a file that slipped through reads as
+        // lost-at-epoch instead of panicking.
+        assert_eq!(
+            BlobState::from_row("lost", None),
+            BlobState::Lost { noticed_at: 0 }
+        );
+        assert_eq!(BlobState::from_row("pending", Some(7)), BlobState::Pending);
+        assert_eq!(BlobState::from_row("bogus", None), BlobState::Pending);
     }
 }

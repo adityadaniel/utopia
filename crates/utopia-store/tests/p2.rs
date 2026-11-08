@@ -29,6 +29,17 @@ fn write(s: &mut Store, page: &PageId, text: &str) -> BlockId {
     write_under(s, page, None, text)
 }
 
+/// When the row was last confirmed missing; the lost-row reconciliation rotates on it.
+fn lost_at(s: &Store, hash: &str) -> i64 {
+    s.conn()
+        .query_row(
+            "SELECT lost_at FROM attachment WHERE hash = ?1",
+            [hash],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
 fn hits(s: &Store, q: &str) -> Vec<String> {
     s.run_query(&parse(q).unwrap(), 100)
         .unwrap()
@@ -159,6 +170,20 @@ fn v6_migration_backfills_attributes() {
     );
 }
 
+/// The `attachment` table as v7 and v8 had it, so a migration test can rewind a finished
+/// file to the shape those versions really wrote (rule 14: migrations are tested against
+/// the old schema, not against today's).
+const V8_ATTACHMENT: &str = "
+CREATE TABLE attachment (
+  hash       TEXT PRIMARY KEY,
+  name       TEXT NOT NULL,
+  mime       TEXT NOT NULL,
+  size       INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  uploaded   INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX attachment_upload ON attachment(uploaded) WHERE uploaded = 0;";
+
 /// v8 (docs/state-machines/page-lifecycle-trash.md issue 3): an older graph keeps opening
 /// and gains the tombstone memory, so a title trashed before the upgrade is not issued the
 /// same uuidv5 again after Empty Trash. The same migration drops a trash row that outlived
@@ -176,11 +201,14 @@ fn v8_migration_remembers_tombstones_and_repairs_the_trash() {
         s.sync_index().unwrap();
         (gone, live)
     };
-    // Simulate a v7 file: no tombstone memory, and a trash row for a live page.
+    // Simulate a v7 file: no tombstone memory, the v7 attachment table, and a trash row for
+    // a live page.
     {
         let c = rusqlite::Connection::open(&path).unwrap();
         c.execute_batch(&format!(
             "DROP TABLE tombstone;
+             DROP TABLE attachment;
+             {V8_ATTACHMENT}
              INSERT OR REPLACE INTO trash(id, kind, payload, deleted_at)
                VALUES ('{live}', 'page', X'7b7d', 1);
              PRAGMA user_version = 7;"
@@ -219,6 +247,55 @@ fn v8_migration_remembers_tombstones_and_repairs_the_trash() {
         s.create_page("Gone").unwrap(),
         gone,
         "a purged id is not issued again (rule 4)"
+    );
+}
+
+/// v9 (docs/state-machines/attachment-blob-state.md): the upload flag becomes an explicit
+/// `state` column. A v8 file keeps opening (§14.4) and nothing is uploaded twice or
+/// forgotten by the upgrade: `uploaded = 1` is still the queue's complement.
+#[test]
+fn v9_migration_backfills_the_attachment_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let (sent, pending) = {
+        let mut s = Store::open(&path).unwrap();
+        let sent = s.add_blob("sent.pdf", b"%PDF-1.4 sent").unwrap();
+        let pending = s.add_blob("pending.pdf", b"%PDF-1.4 pending").unwrap();
+        s.mark_blobs_uploaded(std::slice::from_ref(&sent.hash))
+            .unwrap();
+        (sent, pending)
+    };
+    // Simulate a v8 file: the v7 attachment table with its `uploaded` flag.
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "DROP TABLE attachment;
+             {V8_ATTACHMENT}
+             INSERT INTO attachment(hash, name, mime, size, created_at, uploaded)
+               VALUES ('{sent}', 'sent.pdf', 'application/pdf', 14, 1, 1);
+             INSERT INTO attachment(hash, name, mime, size, created_at, uploaded)
+               VALUES ('{pending}', 'pending.pdf', 'application/pdf', 17, 2, 0);
+             PRAGMA user_version = 8;",
+            sent = sent.hash,
+            pending = pending.hash
+        ))
+        .unwrap();
+    }
+
+    let s = Store::open(&path).unwrap();
+    assert_eq!(
+        s.attachment_state(&sent.hash).unwrap(),
+        Some(utopia_store::BlobState::Uploaded),
+        "a sent blob is not queued again"
+    );
+    assert_eq!(
+        s.attachment_state(&pending.hash).unwrap(),
+        Some(utopia_store::BlobState::Pending)
+    );
+    let queue = s.blobs_to_upload(10).unwrap();
+    assert_eq!(
+        queue.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![pending.hash.as_str()]
     );
 }
 
@@ -330,6 +407,165 @@ fn attachments_are_content_addressed_files() {
     // Size cap.
     let big = vec![0u8; utopia_store::MAX_BLOB_BYTES + 1];
     assert!(s.add_blob("big.bin", &big).is_err());
+}
+
+/// docs/state-machines/attachment-blob-state.md issue 1 (§11.6, §10.3): a row whose file is
+/// gone must not pin the upload queue. `blobs_to_upload` applied `LIMIT` in SQL, before
+/// checking that the file exists, and silently skipped dead rows, so the oldest dead rows
+/// made every newer attachment wait forever.
+#[test]
+fn a_missing_file_does_not_pin_the_upload_queue() {
+    let (mut s, dir) = store();
+    let lost = s.add_blob("gone.pdf", b"%PDF-1.4 gone").unwrap();
+    let live = s.add_blob("here.pdf", b"%PDF-1.4 here").unwrap();
+    // The dead row is the oldest, so the SQL `LIMIT` selected it on every round.
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 1 WHERE hash = ?1",
+            [&lost.hash],
+        )
+        .unwrap();
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 2 WHERE hash = ?1",
+            [&live.hash],
+        )
+        .unwrap();
+    std::fs::remove_file(s.blob_path(&lost.hash).unwrap()).unwrap();
+
+    let upload = s.blobs_to_upload(1).unwrap();
+    assert_eq!(
+        upload.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![live.hash.as_str()],
+        "the blob this device still has uploads even though the oldest row is dead"
+    );
+    assert_eq!(upload[0].1, b"%PDF-1.4 here");
+    assert!(
+        matches!(
+            s.attachment_state(&lost.hash).unwrap(),
+            Some(utopia_store::BlobState::Lost { .. })
+        ),
+        "the dead row is noticed, not silently skipped"
+    );
+    s.mark_blobs_uploaded(std::slice::from_ref(&live.hash))
+        .unwrap();
+    assert!(
+        s.blobs_to_upload(10).unwrap().is_empty(),
+        "the dead row is never selected again"
+    );
+    // The bytes coming back (a restored `.blobs` directory) revives the row on the next
+    // round instead of leaving it lost forever.
+    std::fs::write(
+        dir.path().join("g.blobs").join(&lost.hash),
+        b"%PDF-1.4 gone",
+    )
+    .unwrap();
+    assert_eq!(
+        s.blobs_to_upload(10).unwrap(),
+        vec![(lost.hash.clone(), b"%PDF-1.4 gone".to_vec())]
+    );
+    assert_eq!(
+        s.attachment_state(&lost.hash).unwrap(),
+        Some(utopia_store::BlobState::Pending)
+    );
+}
+
+/// docs/state-machines/attachment-blob-state.md issue 1 and rule 10: filling the upload
+/// batch must stop as soon as it has `limit` blobs. `blobs_to_upload` runs inside
+/// `SyncEngine::prepare` on the UI thread (`Workspace::start_sync`), and the full-queue scan
+/// inspected, and marked, every row behind a batch that was already full.
+#[test]
+fn filling_the_upload_batch_stops_at_the_limit() {
+    let (mut s, _dir) = store();
+    let live = s.add_blob("here.pdf", b"%PDF-1.4 here").unwrap();
+    let behind = s.add_blob("gone.pdf", b"%PDF-1.4 gone").unwrap();
+    // The live blob is the oldest, so it fills the single slot.
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 1 WHERE hash = ?1",
+            [&live.hash],
+        )
+        .unwrap();
+    s.conn()
+        .execute(
+            "UPDATE attachment SET created_at = 2 WHERE hash = ?1",
+            [&behind.hash],
+        )
+        .unwrap();
+    std::fs::remove_file(s.blob_path(&behind.hash).unwrap()).unwrap();
+
+    let upload = s.blobs_to_upload(1).unwrap();
+    assert_eq!(
+        upload.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![live.hash.as_str()]
+    );
+    assert_eq!(
+        s.attachment_state(&behind.hash).unwrap(),
+        Some(utopia_store::BlobState::Pending),
+        "the batch was full, so the row behind it was not looked at yet"
+    );
+}
+
+/// docs/state-machines/attachment-blob-state.md issue 1 and rule 10: lost rows are not
+/// re-checked by the queue scan every round (that was unbounded filesystem work on the UI
+/// thread). They get a bounded reconciliation pass instead, over the batch's spare slots,
+/// oldest check first, refreshing `lost_at` so the pass rotates and every row is reached.
+#[test]
+fn lost_rows_are_rechecked_in_a_bounded_rotation() {
+    let (mut s, dir) = store();
+    let blobs = ["one", "two", "three"].map(|n| s.add_blob(n, n.as_bytes()).unwrap());
+    for b in &blobs {
+        std::fs::remove_file(s.blob_path(&b.hash).unwrap()).unwrap();
+    }
+    // Marking is not the bounded part: a row is met while pending once, marked, and then
+    // leaves that scan for good.
+    assert!(s.blobs_to_upload(3).unwrap().is_empty());
+    let mut order: Vec<String> = blobs.iter().map(|b| b.hash.clone()).collect();
+    order.sort();
+    for (i, h) in order.iter().enumerate() {
+        s.conn()
+            .execute(
+                "UPDATE attachment SET lost_at = ?2 WHERE hash = ?1",
+                rusqlite::params![h, i as i64 + 1],
+            )
+            .unwrap();
+    }
+
+    // A round with two spare upload slots re-checks only the two oldest checks.
+    assert!(s.blobs_to_upload(2).unwrap().is_empty());
+    assert!(
+        lost_at(&s, &order[0]) > 3 && lost_at(&s, &order[1]) > 3,
+        "checked rows move to the back of the rotation"
+    );
+    assert_eq!(lost_at(&s, &order[2]), 3, "its turn has not come yet");
+    assert!(blobs.iter().all(|b| matches!(
+        s.attachment_state(&b.hash).unwrap(),
+        Some(utopia_store::BlobState::Lost { .. })
+    )));
+
+    // The bytes come back for the row whose turn it is: it is revived and uploaded in the
+    // same round, in one of the spare slots.
+    let content = |hash: &str| {
+        blobs
+            .iter()
+            .find(|b| b.hash == hash)
+            .map(|b| b.name.clone())
+            .unwrap()
+    };
+    std::fs::write(
+        dir.path().join("g.blobs").join(&order[2]),
+        content(&order[2]).as_bytes(),
+    )
+    .unwrap();
+    let upload = s.blobs_to_upload(2).unwrap();
+    assert_eq!(
+        upload.iter().map(|(h, _)| h.as_str()).collect::<Vec<_>>(),
+        vec![order[2].as_str()]
+    );
+    assert_eq!(
+        s.attachment_state(&order[2]).unwrap(),
+        Some(utopia_store::BlobState::Pending)
+    );
 }
 
 #[test]
