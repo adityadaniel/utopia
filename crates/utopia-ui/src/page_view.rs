@@ -1044,7 +1044,12 @@ impl PageView {
         cx: &mut Context<Self>,
     ) {
         // DN-3: the row may be drawn under the pinned day heading. Asked of the frame the
-        // user is looking at, before the rebuild below re-measures every row.
+        // user is looking at, before the rebuild below re-measures every row — and asked
+        // about this *block*, then applied to the same block's index below, so a rebuild
+        // that shifts rows cannot hand the offset to a different row (the concern in
+        // `page-view-rebuild-cycle.md` issue 7). After a splice the list has no measured
+        // rows left, so the post-rebuild frame could not be measured anyway; scrolling
+        // this block below the heading is at worst one heading's worth of motion.
         let line = crate::appearance::density(cx).line_height();
         let under_heading = self
             .row_index(&block)

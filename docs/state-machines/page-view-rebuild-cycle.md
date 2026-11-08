@@ -1,5 +1,65 @@
 # Page view rebuild cycle: dirty flag, version keys, caches, editor row focus
 
+## Status (branch `fix/page-view-rebuild-cycle`)
+
+What is explicit now (`crates/utopia-ui/src/page_view.rs`):
+
+- `PageView.cycle: RebuildCycle` replaces `dirty: bool`. It holds an `Invalidation` reason
+  set (`rows`, `refs`, `unlinked`, `prefs`) and the `AppState::version` the rows were built
+  from. Every old `dirty = true` site names what it invalidated; `rebuild()` clears the
+  whole set in one place, after every early-return path. A separate monotone
+  `gen`/`built_gen` pair as sketched below is not needed: `pending` empty *is* "built", and
+  the store version is what tells a handler's own deferred `Changed` apart from a newer one.
+- `PageView.interest: Interest::{ThisPage, AllPages}` replaces `has_embeds()`. It is
+  recomputed from the rows after every build and reset to `ThisPage` when the page changes.
+- `PageView.focused_rows` records how many list rows carry the editor's focus handle.
+- `AppState::Changed.version` carries the version of the change, so a subscriber can tell
+  whether it already built that state.
+- `sync_preferences` is the one place the two appearance mirrors
+  (`ref_children_limit`, `attribute_blocks`) are resynced; `rebuild` calls it itself.
+- Debug counters `rebuilds` and `frame_rebuilds` (beside the existing reference-children
+  counters) let the acceptance tests assert how many passes ran and that they ran outside
+  `render` (rule 10).
+
+Listed issues:
+
+1. **Fixed.** `Changed` is delivered after the update, so a handler's own rebuild was
+   followed by a second pass in the frame. `RebuildCycle::store_changed` compares
+   `Changed.version` with the version the rows were built from and drops the event when it
+   is already built. Test: `a_handler_rebuild_is_not_repeated_by_its_own_change`.
+2. **Fixed.** `Interest` replaces `has_embeds()`; `open_embeds` is cleared on a page change
+   (and a `PageReplaced` retarget); and when the interest is `AllPages` a relevant change
+   rebuilds in the change handler, so `run_query` never runs inside `render`. Tests:
+   `a_query_block_answers_other_pages_changes_outside_the_frame`,
+   `leaving_a_page_drops_its_open_transclusions`.
+3. **Fixed.** `rebuild` resyncs both appearance mirrors through `sync_preferences`, so an
+   index-triggered or observer-triggered pass builds with the preference in force instead
+   of leaving the next frame to correct it. Test: `an_appearance_change_rebuilds_in_the_observer`.
+4. **Fixed, but latent.** `EditorEvent::Blurred` now re-splices the rows from the editor's
+   current target, so the list stops holding the focus handle of a row that is drawn as
+   text. It is latent because `end()` always commits, and the commit's structural change
+   emits `IndexUpdated`, whose handler already rebuilt in the same effect flush; the fix
+   removes the reliance on that coincidence (and on the workspace's re-focus). Test:
+   `ending_an_edit_drops_the_rows_focus_registration` (passes before the fix for the reason
+   above; it asserts the invariant, not the removed extra frame).
+5. **Already fixed before this branch** by the block-editor-session work (fix 10):
+   `BlockEditor::begin` sets `EditorSession::Idle`, emits `Blurred` and returns when the
+   target block is not in the shard (`editor.rs`), so `target` cannot silently keep the old
+   block. Nothing changed here.
+6. **Fixed structurally.** `render_item` arms `in_render` around the lazy item build (the
+   list calls it after `render` returns) and restores the previous value, so a future
+   instrumented store read in an item is counted as a frame read. No failing-first test:
+   there is no instrumented read on that path today, so the bug was latent.
+7. **Not changed; the doc's reading is wrong.** `under_heading` is a boolean about the
+   *block*: it is read from the block's old index and applied to the same block's index
+   re-read after the rebuild, so no other row can receive the sticky-heading offset. The
+   measurement stays before the rebuild because that is the layout the user clicked in, and
+   a splice leaves the list with no measured rows to re-measure. A rebuild between the two
+   is rare (most callers rebuild in their own handler first) and the conservative scroll is
+   at worst one heading's worth of motion. Clarified in the comment at `edit`.
+
+Everything below is the original analysis; line numbers refer to `main f5da7d1`.
+
 ## What it controls
 
 When `PageView.items` is recomputed from the store, which queries run, whether a frame does
