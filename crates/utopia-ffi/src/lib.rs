@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::NaiveDate;
 use utopia_core::{outline, BlockId, PageId};
 use utopia_store::{RefQuery, Store, StoreError};
-use utopia_sync::{StoreDone, StoreStep, SyncEngine, SyncError, SyncReport, Transport};
+use utopia_sync::{StoreDone, StoreStep, SyncEngine, SyncError, SyncReport, SyncStatus, Transport};
 
 uniffi::setup_scaffolding!();
 
@@ -95,15 +95,32 @@ pub struct SyncSummary {
     pub failed: u32,
 }
 
-/// What one [`Graph::sync`] call did: one variant per answer the shell is given, so a
-/// round's result is never a string the shell has to parse.
+/// What one [`Graph::sync`] call did, in the terms §12.6 asks the shell to show.
+///
+/// One variant per answer the shell has to render, so a wrong token, a relay speaking
+/// another protocol and an unreachable relay cannot collapse into one "Offline"
+/// (`docs/state-machines/ffi-mobile-sync.md`, issue 3). `SyncSummary` is unchanged: it is
+/// still the counts, and the outcome says which counts mean what.
 #[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum SyncOutcome {
-    /// The round ran; `summary` carries the counts the shell shows.
+    /// The relay was reached and every page went through.
     Synced { summary: SyncSummary },
+    /// The relay was reached but at least one page failed; the rest of the round applied
+    /// (§12.6). `queued` counts this device's unsent updates afterwards.
+    Partial { summary: SyncSummary, queued: u32 },
+    /// The relay was not reached: everything is still queued locally (§12.6).
+    Offline { queued: u32 },
+    /// The round failed on this device (the store, a shard, a projection), so the network
+    /// is not blamed for it.
+    LocalError { message: String },
+    /// 401/403: the token is wrong or revoked. Sync halts until it is replaced (§12.6).
+    NeedsAuth,
+    /// The relay speaks a protocol version this client does not; nothing was pushed
+    /// (§12.6). `version` is the relay's; 0 means the client never learned it (it is only
+    /// unknown when the mismatch did not come from the round, which cannot happen today).
+    Unsupported { version: u32 },
     /// A round was already running on this graph, so this call did not start a second one
-    /// (docs/state-machines/ffi-mobile-sync.md, issue 2). The running round's own outcome
-    /// is the one to show.
+    /// (issue 2). The running round's own outcome is the one to show.
     Busy,
 }
 
@@ -190,16 +207,13 @@ impl Graph {
                 StoreStep::Prepare => engine.prepare(&mut store).map(StoreDone::Prepared),
                 StoreStep::Apply(inc) => engine.apply(&mut store, *inc).map(StoreDone::Applied),
             }
-        })
-        .map(|report| SyncOutcome::Synced {
-            summary: summary_of(&report),
-        })
-        .map_err(FfiError::from);
+        });
         // The engine goes home whatever the round did: the next call starts from it and
         // keeps the compaction snapshots this one queued (issue 4).
         let restored = self.put_engine(engine);
+        let outcome = self.with(|store| Ok(outcome_of(&result, store)));
         restored?;
-        result
+        outcome
     }
 }
 
@@ -410,6 +424,38 @@ fn relay_transport(
     })
 }
 
+/// The round's answer for the shell: [`SyncStatus`] (the desktop's one reading of a round,
+/// so mobile and desktop cannot drift) plus the counts the shell shows.
+fn outcome_of(result: &std::result::Result<SyncReport, SyncError>, store: &Store) -> SyncOutcome {
+    // A refusal is read from the error, because only the error knows the relay's protocol
+    // version (§12.6).
+    match result {
+        Err(SyncError::Unauthorized) => return SyncOutcome::NeedsAuth,
+        Err(SyncError::ProtocolVersion(version)) => {
+            return SyncOutcome::Unsupported { version: *version }
+        }
+        _ => {}
+    }
+    // `SyncStatus::from_result` answers `Synced`/`Partial` exactly for an `Ok` report, so a
+    // summary is always there; the fallback keeps this total without a panic (rule 11).
+    let summary = || result.as_ref().map(summary_of).unwrap_or_default();
+    match SyncStatus::from_result(result, store) {
+        SyncStatus::Synced { .. } => SyncOutcome::Synced { summary: summary() },
+        SyncStatus::Partial { queued, .. } => SyncOutcome::Partial {
+            summary: summary(),
+            queued: queued as u32,
+        },
+        SyncStatus::Offline { queued } => SyncOutcome::Offline {
+            queued: queued as u32,
+        },
+        SyncStatus::LocalError { message } => SyncOutcome::LocalError { message },
+        SyncStatus::NeedsAuth => SyncOutcome::NeedsAuth,
+        // Returned above; kept total without a panic (rule 11) and without inventing a
+        // version the client never saw.
+        SyncStatus::Unsupported => SyncOutcome::Unsupported { version: 0 },
+    }
+}
+
 /// The counts the shell shows. One failed page can appear twice in a report (a push and a
 /// pull), so this counts pages, not failures.
 fn summary_of(r: &SyncReport) -> SyncSummary {
@@ -429,6 +475,7 @@ fn summary_of(r: &SyncReport) -> SyncSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
@@ -553,6 +600,17 @@ mod tests {
         }
     }
 
+    fn graph_with_two_days() -> (Arc<Graph>, PageView, PageView) {
+        let g = Graph::in_memory().unwrap();
+        g.set_today(Some("2026-11-02".into())).unwrap();
+        let day = g.today().unwrap();
+        g.append_block(day.id.clone(), "one".into()).unwrap();
+        g.set_today(Some("2026-11-03".into())).unwrap();
+        let next = g.today().unwrap();
+        g.append_block(next.id.clone(), "two".into()).unwrap();
+        (g, day, next)
+    }
+
     /// Issue 1: other FFI calls keep working while a round is on the wire. The store lock
     /// is taken for `prepare`/`apply`, never for the network.
     #[test]
@@ -651,12 +709,14 @@ mod tests {
     #[test]
     fn the_engine_comes_home_after_a_failed_round() {
         let g = Graph::in_memory().unwrap();
-        let failed = g.sync_via(Box::new(Scripted::failing(SyncError::Transport(
-            "offline".into(),
-        ))));
+        let outcome = g
+            .sync_via(Box::new(Scripted::failing(SyncError::Transport(
+                "offline".into(),
+            ))))
+            .unwrap();
         assert!(
-            failed.is_err(),
-            "a round that moved nothing is still an error"
+            matches!(outcome, SyncOutcome::Offline { .. }),
+            "{outcome:?}"
         );
         assert!(
             matches!(
@@ -665,6 +725,68 @@ mod tests {
             ),
             "a failed round must not leave the graph busy"
         );
+    }
+
+    /// Issue 3: the shell can tell a refusal from a bad network, and neither blames the
+    /// other.
+    #[test]
+    fn a_refusal_is_not_offline() {
+        let g = Graph::in_memory().unwrap();
+        let outcome = |error: SyncError| {
+            g.sync_via(Box::new(Scripted::failing(error)))
+                .expect("a round reports its answer, it does not fail the call")
+        };
+        assert_eq!(
+            outcome(SyncError::Unauthorized),
+            SyncOutcome::NeedsAuth,
+            "§12.6: 401 halts sync for a re-auth, it is not Offline"
+        );
+        assert_eq!(
+            outcome(SyncError::ProtocolVersion(9)),
+            SyncOutcome::Unsupported { version: 9 },
+            "§12.6: another protocol version is its own answer"
+        );
+        assert!(
+            matches!(
+                outcome(SyncError::Transport("refused".into())),
+                SyncOutcome::Offline { .. }
+            ),
+            "a transport failure is Offline"
+        );
+        let local = outcome(SyncError::Store(StoreError::Invalid("disk".into())));
+        assert!(
+            matches!(&local, SyncOutcome::LocalError { message } if message.contains("disk")),
+            "{local:?}"
+        );
+    }
+
+    /// §12.6: a relay that took some pages and refused one is not "Offline" and not a clean
+    /// sync either; the shell shows the counts and the warning.
+    #[test]
+    fn a_page_that_fails_while_the_rest_moves_is_partial() {
+        let (g, refused_day, other_day) = graph_with_two_days();
+        let refused = refused_day.id.clone();
+        assert_ne!(refused, other_day.id);
+        let mut t = Scripted::quiet();
+        t.on_push = Box::new(move |page, req| {
+            if page.as_str() == refused {
+                Err(SyncError::Transport("relay refused this page".into()))
+            } else {
+                Ok(PushResponse {
+                    accepted: req.updates.len(),
+                    head_seq: 1,
+                    duplicate: 0,
+                })
+            }
+        });
+        match g.sync_via(Box::new(t)).unwrap() {
+            SyncOutcome::Partial { summary, queued } => {
+                assert_eq!(summary.failed, 1, "one page failed");
+                assert!(summary.pushed > 0, "the other page's push was accepted");
+                assert!(queued >= 1, "the refused page's rows stay queued");
+            }
+            other => panic!("expected Partial, got {other:?}"),
+        }
     }
 
     /// Issue 4: a compaction snapshot queued by one round is uploaded by the next, because
@@ -693,8 +815,7 @@ mod tests {
                 head_seq: 1000,
             })
         });
-        // The refused push fails the round; the snapshot is queued either way.
-        let _ = g.sync_via(Box::new(first));
+        let _ = g.sync_via(Box::new(first)).unwrap();
 
         // Round 2: the tail now looks compacted, so nothing asks for a new snapshot; the
         // only way one is uploaded is if round 1's queue outlived it.
@@ -708,11 +829,48 @@ mod tests {
                 Ok(())
             }
         });
-        let _ = g.sync_via(Box::new(second));
+        let _ = g.sync_via(Box::new(second)).unwrap();
         assert_eq!(
             sent.load(Ordering::SeqCst),
             1,
             "the snapshot queued by the first round must ride the second"
+        );
+    }
+
+    /// The round's answer keeps the desktop's wording (`SyncStatus`) so the two surfaces
+    /// cannot drift: the same report maps to the same counts.
+    #[test]
+    fn the_summary_counts_pages_not_failures() {
+        let page = PageId("p".into());
+        let report = SyncReport {
+            pushed: 2,
+            duplicates: 1,
+            pulled_pages: 3,
+            imported: vec![page.clone()],
+            failed: vec![
+                utopia_sync::Failure {
+                    page: Some(page.clone()),
+                    kind: utopia_sync::FailureKind::Transport("push".into()),
+                },
+                utopia_sync::Failure {
+                    page: Some(page.clone()),
+                    kind: utopia_sync::FailureKind::Transport("pull".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let summary = summary_of(&report);
+        assert_eq!(summary.pushed, 2);
+        assert_eq!(summary.imported_pages, 1);
+        assert_eq!(summary.failed, 1, "one page, two failures");
+        assert_eq!(
+            report
+                .failed
+                .iter()
+                .map(|f| f.page.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            1
         );
     }
 }
