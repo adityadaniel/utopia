@@ -115,9 +115,9 @@ fn default_limit() -> usize {
     20
 }
 
-/// What an operation does to the graph. Both the plugin permission check and the HTTP
-/// server read this one classification, and [`handle`] is the only implementation, so a
-/// new op cannot run with read permission by being forgotten in a second list
+/// What an operation does to the graph. The plugin permission check reads this one
+/// classification and [`handle`] is the only implementation, so a new op cannot run with
+/// read permission by being forgotten in a second list
 /// (`docs/state-machines/plugin-run-lifecycle.md`, issue 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpKind {
