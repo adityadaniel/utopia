@@ -6365,3 +6365,81 @@ fn fr_2_17_a_dismissed_trigger_follows_its_query(cx: &mut TestAppContext) {
         "a different query at the same offset is a fresh menu"
     );
 }
+
+/// FR-2.17, §5.5: a commit normalizes the block text to NFC, which shortens the buffer
+/// under an open menu (`cafe` + U+0301 → `café`). The menu's frozen range has to follow
+/// the rewrite, or accepting a block ref replaces the wrong bytes and leaves `((uid)))`.
+#[gpui::test]
+fn fr_2_17_a_commit_that_normalizes_the_text_moves_the_menu_with_it(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    // A block the `((` menu can offer for "notes".
+    let target = app.update(cx, |app, _| {
+        let p = app.store.create_page("Coffee").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "coffee notes", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        b
+    });
+    cx.simulate_input("cafe");
+    let editor = ws.update(cx, |w, _| w.editor());
+    // The input method commits a combining acute: the buffer holds the decomposed form
+    // until the block is committed.
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(None, "\u{301}", window, cx)
+    });
+    cx.simulate_input(" ((notes");
+    cx.run_until_parked();
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the (( menu is open"
+    );
+    // The idle commit (300 ms) normalizes the text to NFC: one byte shorter, with the
+    // caret and the trigger one byte earlier.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, format!("café (({target}))"));
+}
+
+/// FR-2.17, §10.3.1: the idle commit also expands a relative date elsewhere in the block
+/// (`[[tomorrow]]` → the day's title), shifting the open menu's offsets the same way NFC
+/// normalization does. The menu has to be re-read before Enter takes a suggestion.
+#[gpui::test]
+fn fr_2_17_an_expanded_relative_date_moves_the_open_menu_with_it(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    let target = app.update(cx, |app, _| {
+        let p = app.store.create_page("Coffee").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "coffee notes", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+        b
+    });
+    cx.simulate_input("see [[tomorrow]] and ((notes");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the (( menu is open"
+    );
+    // The idle commit expands the link before the trigger, so the whole block grows.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        format!("see [[November 3rd, 2026]] and (({target}))")
+    );
+}

@@ -952,6 +952,10 @@ impl BlockEditor {
             // The commit may rewrite the text under the caret; the anchor has to move with
             // it, or a remote edit lands the caret where the old text put it.
             self.anchor_caret(cx);
+            // An open menu's frozen range was measured on the text before the rewrite
+            // (NFC normalization shortens `cafe` + U+0301 to `café`), so accepting it now
+            // would replace the wrong bytes and eat the text that follows the query.
+            self.refresh_autocomplete(cx);
             cx.notify();
         }
     }
@@ -997,6 +1001,8 @@ impl BlockEditor {
             // CRDT anchor must move too or the next store change resolves the caret back
             // into the expanded link.
             self.anchor_caret(cx);
+            // A menu that was open described the phrase that was just replaced.
+            self.refresh_autocomplete(cx);
             cx.notify();
         }
     }
