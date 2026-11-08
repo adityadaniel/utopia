@@ -493,6 +493,9 @@ mod tests {
     /// A transport with one closure per step, so a test can put a round in a known state
     /// (on the wire, refused, refused for one page) without a server.
     struct Scripted {
+        /// The cursor space this "relay" speaks; a snapshot is only valid in the one that
+        /// measured it.
+        space: CursorSpace,
         on_manifest: ManifestStep,
         on_push: PushStep,
         on_pull: PullStep,
@@ -503,6 +506,7 @@ mod tests {
         /// A reached, empty relay: no pages to pull, every push accepted.
         fn quiet() -> Self {
             Self {
+                space: CursorSpace::new("relay:scripted#g", CursorKind::Seq),
                 on_manifest: Box::new(|| Ok(Some(empty_manifest()))),
                 on_push: Box::new(|_page, req| {
                     Ok(PushResponse {
@@ -535,6 +539,7 @@ mod tests {
                     .unwrap_or_else(spent)
             };
             Self {
+                space: CursorSpace::new("relay:scripted#g", CursorKind::Seq),
                 on_manifest: Box::new({
                     let err = err.clone();
                     move || Err(step(&err))
@@ -557,7 +562,7 @@ mod tests {
             (self.on_manifest)()
         }
         fn cursor_space(&self) -> CursorSpace {
-            CursorSpace::new("relay:scripted#g", CursorKind::Seq)
+            self.space.clone()
         }
         fn push(&mut self, page: &PageId, req: PushRequest) -> Result<PushResponse> {
             (self.on_push)(page, req)
@@ -871,6 +876,67 @@ mod tests {
                 .collect::<BTreeSet<_>>()
                 .len(),
             1
+        );
+    }
+
+    /// Retaining the engine must not carry a compaction snapshot to another destination:
+    /// the snapshot is only this device's page, and a relay's log is not ours to truncate
+    /// (AGENTS.md rule 5). A snapshot measured on one relay must not be uploaded to a
+    /// graph id or relay url the next call points at.
+    #[test]
+    fn a_snapshot_queued_for_one_relay_is_not_uploaded_to_another() {
+        let g = Graph::in_memory().unwrap();
+        g.set_today(Some("2026-11-02".into())).unwrap();
+        let day = g.today().unwrap();
+        g.append_block(day.id.clone(), "long tail".into()).unwrap();
+        let page = PageId(day.id.clone());
+
+        // Round 1 against the first relay: the tail looks 1000 updates long, so applying
+        // it queues a snapshot, and a refused push stops the round before it goes out.
+        let mut first = Scripted::quiet();
+        first.space = CursorSpace::new("relay:first#g", CursorKind::Seq);
+        first.on_manifest = Box::new({
+            let page = page.clone();
+            move || Ok(Some(manifest_with(&page, 1000, 0)))
+        });
+        first.on_push =
+            Box::new(|_page, _req| Err(SyncError::Transport("refused for the test".into())));
+        first.on_pull = Box::new(|_page, _since| {
+            Ok(PullResponse {
+                snapshot: None,
+                updates: Vec::new(),
+                head_seq: 1000,
+            })
+        });
+        let _ = g.sync_via(Box::new(first));
+
+        // Round 2 goes to another relay that already holds its own history for the page.
+        let uploaded = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let mut second = Scripted::quiet();
+        second.space = CursorSpace::new("relay:second#g", CursorKind::Seq);
+        second.on_manifest = Box::new({
+            let page = page.clone();
+            move || Ok(Some(manifest_with(&page, 5000, 5000)))
+        });
+        second.on_pull = Box::new(|_page, _since| {
+            Ok(PullResponse {
+                snapshot: None,
+                updates: Vec::new(),
+                head_seq: 5000,
+            })
+        });
+        second.on_snapshot = Box::new({
+            let uploaded = uploaded.clone();
+            move |_page, covers| {
+                uploaded.lock().expect("not poisoned").push(covers);
+                Ok(())
+            }
+        });
+        let _ = g.sync_via(Box::new(second));
+        assert_eq!(
+            uploaded.lock().expect("not poisoned").as_slice(),
+            &[] as &[u64],
+            "a snapshot covering the first relay's head was uploaded to the second"
         );
     }
 }

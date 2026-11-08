@@ -1205,3 +1205,74 @@ fn the_offline_status_counts_the_outbox_without_reading_payloads() {
         }
     );
 }
+
+/// §12.6 (rule 5): a queued compaction snapshot belongs to the relay that measured the head
+/// it covers. Retaining a [`utopia_sync::SyncEngine`] across calls (the mobile FFI keeps one
+/// for the graph, docs/state-machines/ffi-mobile-sync.md) must not upload it to a different
+/// destination, whose log it would truncate past updates this device never imported.
+#[test]
+fn ac_12_6_a_snapshot_measured_on_another_relay_is_not_uploaded() {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::{
+        exchange, CursorKind, CursorSpace, Outgoing, PushRequest, QueuedSnapshot, Transport,
+        UpdateIn,
+    };
+
+    let relay = Relay::new();
+    let page = PageId("elsewhere".into());
+    // The destination already holds history from another device.
+    let mut other = RelayTransport::new(relay.clone(), "g1");
+    for i in 0..5u64 {
+        other
+            .push(
+                &page,
+                PushRequest {
+                    updates: vec![UpdateIn {
+                        id: format!("other:{i}"),
+                        client_seq: i as i64,
+                        frontier: String::new(),
+                        payload: vec![i as u8, 1, 2],
+                    }],
+                },
+            )
+            .unwrap();
+    }
+    let head = relay.manifest("g1").pages[0].head_seq;
+    let here = other.cursor_space();
+    let elsewhere = CursorSpace::new("relay:not-this-one#g1", CursorKind::Seq);
+    let queued = |space: CursorSpace| Outgoing {
+        snapshots: vec![QueuedSnapshot {
+            page: page.clone(),
+            covers_seq: head,
+            space,
+            payload: vec![9, 9, 9],
+        }],
+        ..Default::default()
+    };
+    let counting = || Counting {
+        inner: RelayTransport::new(relay.clone(), "g1"),
+        puts: Default::default(),
+        fail_pulls: true,
+    };
+
+    // Measured on another relay: dropped, and this relay's entries survive.
+    let mut t = counting();
+    let inc = exchange(&mut t, queued(elsewhere)).unwrap();
+    assert_eq!(inc.snapshots_sent, 0);
+    assert_eq!(
+        t.puts.load(Ordering::SeqCst),
+        0,
+        "another relay's snapshot was uploaded"
+    );
+    assert_eq!(
+        relay.log_len("g1", page.as_str()),
+        5,
+        "the destination's log was truncated by another relay's snapshot"
+    );
+
+    // Measured here: the same snapshot is legitimate and goes out.
+    let mut t = counting();
+    let inc = exchange(&mut t, queued(here)).unwrap();
+    assert_eq!(inc.snapshots_sent, 1);
+    assert_eq!(t.puts.load(Ordering::SeqCst), 1);
+}

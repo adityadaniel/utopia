@@ -346,6 +346,24 @@ impl SyncStatus {
     }
 }
 
+/// A compaction snapshot queued for upload (§12.3 step 5), bound to the relay that asked
+/// for it.
+///
+/// The snapshot is this device's whole page, so it may only truncate a log whose head this
+/// device actually covered. Uploading it to another relay — or to the same graph id on
+/// another server — would delete that relay's entries up to `covers_seq`, which this
+/// snapshot may not contain (AGENTS.md rule 5). [`exchange`] therefore drops a snapshot
+/// whose space is not the destination's; a destination that still wants compaction asks for
+/// it on its own manifest and gets a fresh snapshot on a later round.
+#[derive(Debug, Clone)]
+pub struct QueuedSnapshot {
+    pub page: PageId,
+    pub covers_seq: u64,
+    /// The cursor space whose head `covers_seq` was measured in.
+    pub space: CursorSpace,
+    pub payload: Vec<u8>,
+}
+
 /// Everything a round needs from the store, gathered on the store's thread.
 #[derive(Debug, Clone, Default)]
 pub struct Outgoing {
@@ -355,7 +373,7 @@ pub struct Outgoing {
     pub cursors: BTreeMap<PageId, Cursor>,
     /// The last manifest this client fully applied, in the space that issued it.
     pub rev: Option<ManifestRev>,
-    pub snapshots: Vec<(PageId, u64, Vec<u8>)>,
+    pub snapshots: Vec<QueuedSnapshot>,
     /// Attachments to upload: `(sha256, bytes)`.
     pub blob_puts: Vec<(String, Vec<u8>)>,
     /// Attachments referenced here but missing locally.
@@ -462,8 +480,16 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
             }
         }
     }
-    for (page, covers, payload) in out.snapshots {
-        match t.put_snapshot(&page, covers, payload) {
+    for snap in out.snapshots {
+        if snap.space != space {
+            // The destination changed since this snapshot was measured (another relay, or
+            // the same graph id on another server): sending it would truncate a log this
+            // device never read, to a head it may not have (rule 5). Drop it; the
+            // destination that wants compaction re-queues one.
+            continue;
+        }
+        let page = snap.page;
+        match t.put_snapshot(&page, snap.covers_seq, snap.payload) {
             Ok(()) => inc.snapshots_sent += 1,
             Err(e) => {
                 let f = Failure::page(&page, &e);
@@ -562,7 +588,7 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
 /// The store half of the client (§12.3 steps 3–5), independent of any transport.
 pub struct SyncEngine {
     client_id: String,
-    pending_snapshots: Vec<(PageId, u64, Vec<u8>)>,
+    pending_snapshots: Vec<QueuedSnapshot>,
 }
 
 impl SyncEngine {
@@ -763,12 +789,19 @@ impl SyncEngine {
             // nothing about what this client pulled, and a snapshot over unseen updates
             // would delete them from the relay (§12.6, rule 5).
             let covered = match (&local, &inc.cursor_space) {
-                (Some(c), Some(space)) => c.covers(space, head),
-                _ => false,
+                (Some(c), Some(space)) if c.covers(space, head) => Some(space),
+                _ => None,
             };
-            if covered && store.page_exists(&page)? {
-                let full = store.export_since(&page, &Frontier::default())?;
-                self.pending_snapshots.push((page, head, full));
+            if let Some(space) = covered {
+                if store.page_exists(&page)? {
+                    let full = store.export_since(&page, &Frontier::default())?;
+                    self.pending_snapshots.push(QueuedSnapshot {
+                        page,
+                        covers_seq: head,
+                        space: space.clone(),
+                        payload: full,
+                    });
+                }
             }
         }
         Ok(report)
