@@ -468,13 +468,13 @@ impl BlockEditor {
         let result = self.app.update(cx, |app, cx| {
             let plugin = app.plugins.get(index).cloned()?;
             let run = plugin.run(&mut app.store, command, input);
+            // Host writes commit inside the call, so they are reported whether or not the
+            // run then failed (rule 13; plugin run lifecycle issue 1).
+            if !run.changed.is_empty() {
+                app.changed(run.changed.clone(), true, cx);
+            }
             match &run.outcome {
-                Ok(out) => {
-                    if !run.changed.is_empty() {
-                        app.changed(run.changed.clone(), true, cx);
-                    }
-                    app.notice = out.message.clone();
-                }
+                Ok(out) => app.notice = out.message.clone(),
                 Err(e) => app.last_error = Some(format!("{}: {e}", plugin.manifest.name)),
             }
             Some(run)
@@ -483,11 +483,9 @@ impl BlockEditor {
             cx.notify();
             return;
         };
-        let Some(out) = run.output().cloned() else {
-            cx.notify();
-            return;
-        };
-        if let Some(text) = out.replace {
+        let out = run.outcome.as_ref().ok();
+        let replace = out.and_then(|o| o.replace.clone());
+        if let Some(text) = replace {
             let len = text.len();
             self.field.set_text(&text, len);
             self.after_edit(window, cx);
@@ -504,7 +502,8 @@ impl BlockEditor {
                 self.field.set_text(&s, len);
             }
         }
-        if let Some(text) = out.insert {
+        let insert = out.and_then(|o| o.insert.clone());
+        if let Some(text) = insert {
             self.insert_text(&text, window, cx);
         }
         cx.notify();
