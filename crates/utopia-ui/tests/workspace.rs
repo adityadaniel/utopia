@@ -3630,15 +3630,15 @@ fn dropped_files_become_attachments(cx: &mut TestAppContext) {
 
 /// A two-page PDF opened in the workspace's PDF viewer, at `window_size`.
 #[cfg(target_os = "macos")]
-fn pdf_viewer<'a>(
-    cx: &'a mut TestAppContext,
+fn pdf_viewer(
+    cx: &mut TestAppContext,
     window_size: gpui::Size<gpui::Pixels>,
 ) -> (
     tempfile::TempDir,
     Entity<AppState>,
     Entity<Workspace>,
     Entity<utopia_ui::pdf_view::PdfView>,
-    &'a mut VisualTestContext,
+    &mut VisualTestContext,
 ) {
     cx.update(|cx| {
         cx.set_global(Theme::light());
