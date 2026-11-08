@@ -808,8 +808,7 @@ fn a_reference_row_in_the_sidebar_opens_its_block(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.block.clone())),
         Some(block),
         "the caret is in the block that made the reference"
@@ -929,8 +928,7 @@ fn the_outline_lists_headings_and_jumps_to_them(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.block.clone())),
         Some(heading),
         "clicking the outline row jumped to the heading"
@@ -1084,7 +1082,7 @@ fn folding_an_edited_card_gives_the_keyboard_back(cx: &mut TestAppContext) {
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).target.is_some()),
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_some()),
         "clicking a block in the card started an edit there"
     );
 
@@ -1092,7 +1090,7 @@ fn folding_an_edited_card_gives_the_keyboard_back(cx: &mut TestAppContext) {
     cx.simulate_click(fold.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).target.is_none()),
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_none()),
         "folding the card ended the edit it hosted"
     );
 
@@ -1186,8 +1184,7 @@ fn outline_reaches_headings_that_are_folded_away(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.block.clone())),
         Some(hidden.clone()),
         "clicking the folded heading put the caret there"
@@ -1210,8 +1207,7 @@ fn outline_reaches_headings_that_are_folded_away(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.block.clone())),
         Some(hidden),
         "clicking a heading outside the zoom left the zoom and focused it"
@@ -3002,8 +2998,7 @@ fn reference_path_parts_open_their_target(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.block.clone())),
         Some(risks),
         "the ancestor part focuses that block"
@@ -4292,8 +4287,7 @@ fn fr_1_2_typing_survives_a_merged_promotion(cx: &mut TestAppContext) {
         ws.update(cx, |w, cx| w
             .editor()
             .read(cx)
-            .target
-            .as_ref()
+            .target()
             .map(|t| t.page.clone())),
         Some(live.clone()),
         "the editor follows the day"
@@ -4379,7 +4373,7 @@ fn fr_1_2_undo_after_a_merged_promotion_keeps_the_editor(cx: &mut TestAppContext
     cx.run_until_parked();
     let target_page = |ws: &Entity<Workspace>, cx: &mut VisualTestContext| {
         ws.update(cx, |w, cx| {
-            w.editor().read(cx).target.as_ref().map(|t| t.page.clone())
+            w.editor().read(cx).target().map(|t| t.page.clone())
         })
     };
     // Undo restores the caret: it must point at the page that owns the day.
@@ -4830,7 +4824,7 @@ fn clicking_a_rendered_link_follows_it(cx: &mut TestAppContext) {
     cx.simulate_click(past, gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(src.clone()));
-    assert!(ws.update(cx, |w, cx| w.editor().read(cx).target.is_some()));
+    assert!(ws.update(cx, |w, cx| w.editor().read(cx).target().is_some()));
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     let on_link = gpui::point(content.left() + gpui::px(6.), content.top() + line / 2.);
@@ -5038,7 +5032,7 @@ fn ac_13_5_host_commit_waits_for_the_ime(cx: &mut TestAppContext) {
     );
     assert_eq!(rows(&app, &page, cx)[0].0, "ab");
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).target.is_some()),
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_some()),
         "still editing, and still composing"
     );
     // The input method commits; now the queued commit runs.
@@ -5165,7 +5159,7 @@ fn ac_13_5_ime_composition_ends_when_its_block_is_deleted(cx: &mut TestAppContex
     });
     cx.run_until_parked();
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).target.is_none()),
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_none()),
         "the edit ends: there is nowhere to put the text"
     );
     app.update(cx, |app, _| {
@@ -5247,7 +5241,7 @@ fn ac_13_5_focus_leaving_commits_the_ime_composition(cx: &mut TestAppContext) {
     cx.simulate_input("ab");
     cx.run_until_parked();
     let editor = ws.update(cx, |w, _| w.editor());
-    let host = editor.read_with(cx, |e, _| e.target.clone().expect("editing").host);
+    let host = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").host);
     let second = add_block(&app, &page, "second", cx);
     editor.update_in(cx, |e, window, cx| {
         e.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
@@ -5301,7 +5295,7 @@ fn ac_13_5_a_later_request_supersedes_a_queued_begin(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let editor = ws.update(cx, |w, _| w.editor());
     let (host, first) = editor.read_with(cx, |e, _| {
-        let t = e.target.clone().expect("editing");
+        let t = e.target().cloned().expect("editing");
         (t.host, t.block)
     });
     let second = add_block(&app, &page, "second", cx);
@@ -5331,7 +5325,7 @@ fn ac_13_5_a_later_request_supersedes_a_queued_begin(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(
-        editor.read_with(cx, |e, _| e.target.as_ref().map(|t| t.block.clone())),
+        editor.read_with(cx, |e, _| e.target().map(|t| t.block.clone())),
         Some(first),
         "the superseded click does not take the editor elsewhere"
     );
@@ -5369,12 +5363,12 @@ fn ac_13_5_focus_out_without_end_keeps_the_composed_text(cx: &mut TestAppContext
     );
     assert_eq!(rows(&app, &page, cx)[0].0, "abにほ");
     assert!(
-        ws.update(cx, |w, cx| w.editor().read(cx).target.is_some()),
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_some()),
         "the edit itself is still open, just without a composition"
     );
     // And the block edits again normally.
     editor.update_in(cx, |e, window, cx| {
-        let target = e.target.clone().expect("still editing");
+        let target = e.target().cloned().expect("still editing");
         e.begin(target, None, None, window, cx)
     });
     cx.run_until_parked();
@@ -5402,7 +5396,7 @@ fn ac_13_5_deleting_a_composing_block_keeps_typing_in_its_neighbour(cx: &mut Tes
     ws.update_in(cx, |_, window, _| window.activate_window());
     cx.run_until_parked();
     let editor = ws.update(cx, |w, _| w.editor());
-    let deleted = editor.read_with(cx, |e, _| e.target.clone().expect("editing").block);
+    let deleted = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
     editor.update_in(cx, |e, window, cx| {
         e.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
     });
@@ -5415,7 +5409,7 @@ fn ac_13_5_deleting_a_composing_block_keeps_typing_in_its_neighbour(cx: &mut Tes
         app.store.page_state(&page).unwrap().live_roots()[0].clone()
     });
     assert_eq!(
-        editor.read_with(cx, |e, _| e.target.as_ref().map(|t| t.block.clone())),
+        editor.read_with(cx, |e, _| e.target().map(|t| t.block.clone())),
         Some(first.clone()),
         "the caret continues in the block the host chose"
     );
@@ -5485,7 +5479,7 @@ fn ac_13_5_begin_on_another_block_waits_for_the_ime(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let editor = ws.update(cx, |w, _| w.editor());
     let (host, first) = editor.read_with(cx, |e, _| {
-        let t = e.target.clone().expect("editing");
+        let t = e.target().cloned().expect("editing");
         (t.host, t.block)
     });
     let second = add_block(&app, &page, "second", cx);
@@ -5508,7 +5502,7 @@ fn ac_13_5_begin_on_another_block_waits_for_the_ime(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(
-        editor.read_with(cx, |e, _| e.target.as_ref().map(|t| t.block.clone())),
+        editor.read_with(cx, |e, _| e.target().map(|t| t.block.clone())),
         Some(first.clone()),
         "the buffer still belongs to the input method"
     );
@@ -5519,7 +5513,7 @@ fn ac_13_5_begin_on_another_block_waits_for_the_ime(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert_eq!(
-        editor.read_with(cx, |e, _| e.target.as_ref().map(|t| t.block.clone())),
+        editor.read_with(cx, |e, _| e.target().map(|t| t.block.clone())),
         Some(second.clone())
     );
     assert_eq!(text_and_caret(&ws, cx).0, "second");
