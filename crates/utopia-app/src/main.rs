@@ -675,9 +675,30 @@ impl Render for Root {
     }
 }
 
-/// The open Settings window, so Cmd+, raises the existing one instead of stacking copies.
-#[derive(Default)]
-struct SettingsWindow(Option<WindowHandle<SettingsView>>);
+/// The one Settings window (§9.1): `Open` only while that window exists, so a closed
+/// window never leaves a stale handle behind (issue 5).
+#[derive(Clone, Copy, Default)]
+enum SettingsWindow {
+    #[default]
+    Closed,
+    Open(WindowHandle<SettingsView>),
+}
+
+impl SettingsWindow {
+    /// Forget a window handle once its window has closed. The app's window-closed observer
+    /// is not told which window went away, so ask the handle. Returns the state to keep.
+    fn forget_if_closed(self, cx: &mut App) -> Self {
+        let live = match &self {
+            SettingsWindow::Open(handle) => handle.update(cx, |_, _, _| ()).is_ok(),
+            SettingsWindow::Closed => true,
+        };
+        if live {
+            self
+        } else {
+            SettingsWindow::Closed
+        }
+    }
+}
 
 impl Global for SettingsWindow {}
 
@@ -691,7 +712,7 @@ fn open_settings(tab: SettingsTab, cx: &mut App) {
 }
 
 fn open_settings_now(tab: SettingsTab, cx: &mut App) {
-    if let Some(handle) = cx.global::<SettingsWindow>().0 {
+    if let SettingsWindow::Open(handle) = *cx.global::<SettingsWindow>() {
         // `update` fails if the user closed the window; fall through and make a new one.
         let raised = handle
             .update(cx, |view, window, cx| {
@@ -702,7 +723,7 @@ fn open_settings_now(tab: SettingsTab, cx: &mut App) {
         if raised {
             return;
         }
-        cx.global_mut::<SettingsWindow>().0 = None;
+        cx.set_global(SettingsWindow::Closed);
     }
     let config = paths::config_dir();
     // Wide enough that the Help column and its screenshots fit without clipping.
@@ -719,7 +740,7 @@ fn open_settings_now(tab: SettingsTab, cx: &mut App) {
     match cx.open_window(options, move |window, cx| {
         cx.new(|cx| SettingsView::new(config, tab, window, cx))
     }) {
-        Ok(handle) => cx.global_mut::<SettingsWindow>().0 = Some(handle),
+        Ok(handle) => cx.set_global(SettingsWindow::Open(handle)),
         Err(e) => eprintln!("utopia: could not open Settings: {e}"),
     }
 }
@@ -843,6 +864,13 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
             return;
         }
         cx.on_window_closed(|cx| {
+            // §9.1: a closed Settings window leaves no handle behind (issue 5).
+            let settings = std::mem::replace(
+                cx.global_mut::<SettingsWindow>(),
+                SettingsWindow::Closed,
+            );
+            let settings = settings.forget_if_closed(cx);
+            cx.set_global(settings);
             // AC-1.1: the last window closing is a quit path like any other (issue 2).
             if cx.windows().is_empty() {
                 quit_app(cx);
@@ -1002,5 +1030,45 @@ mod tests {
             .text
             .clone();
         assert_eq!(text, "hello");
+    }
+
+    /// Issue 5: the Settings window's handle is only there while the window is. It used to
+    /// linger until the next Cmd+, probed it and replaced it, so "open" and "closed" could
+    /// not be told apart.
+    #[gpui::test]
+    fn closing_the_settings_window_forgets_its_handle(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::light());
+            install_keymap(cx, None);
+            cx.set_global(SettingsWindow::Closed);
+        });
+        let (_view, cx) = cx.add_window_view(|window, cx| {
+            SettingsView::new(
+                dir.path().to_path_buf(),
+                SettingsTab::Keybindings,
+                window,
+                cx,
+            )
+        });
+        let handle = cx
+            .windows()
+            .first()
+            .copied()
+            .and_then(|window| window.downcast::<SettingsView>())
+            .expect("the test window's root is the Settings view");
+        cx.update(|_, cx| cx.set_global(SettingsWindow::Open(handle)));
+        // The user closes it (Cmd+W); the app's window-closed observer then runs this.
+        handle
+            .update(cx, |_, window, _| window.remove_window())
+            .unwrap();
+        // The window is gone, so this runs in the app context the observer gets.
+        cx.cx.update(|cx| {
+            let state = std::mem::replace(cx.global_mut::<SettingsWindow>(), SettingsWindow::Closed);
+            let state = state.forget_if_closed(cx);
+            cx.set_global(state);
+        });
+        let closed = cx.read(|cx| matches!(*cx.global::<SettingsWindow>(), SettingsWindow::Closed));
+        assert!(closed, "a closed window leaves no handle behind");
     }
 }
