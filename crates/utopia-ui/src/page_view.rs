@@ -376,6 +376,13 @@ impl Invalidation {
         }
     }
 
+    fn prefs() -> Self {
+        Self {
+            prefs: true,
+            ..Self::default()
+        }
+    }
+
     fn any(self) -> bool {
         self.rows || self.refs || self.unlinked || self.prefs
     }
@@ -669,12 +676,12 @@ impl PageView {
                 this.rebuild(cx);
                 cx.notify();
             }),
-            // LR-4: "Children shown in references" is a setting (rule 9). Its change
-            // invalidates the children cache, so rebuild here, outside the frame.
+            // LR-4: "Children shown in references" is a setting (rule 9), and PG-1's
+            // "attribute blocks" is another this view mirrors. Both are resynced in one
+            // place, so any rebuild builds with the preference in force (issue 3).
             cx.observe_global::<crate::appearance::Appearance>(|this, cx| {
-                let limit = crate::appearance::ref_children(cx);
-                if limit != this.ref_children_limit {
-                    this.ref_children_limit = limit;
+                this.sync_preferences(cx);
+                if this.cycle.dirty() {
                     this.rebuild(cx);
                     cx.notify();
                 }
@@ -1142,12 +1149,31 @@ impl PageView {
             .position(|i| matches!(i, Item::Row(r) if r.block == *block))
     }
 
-    fn rebuild_if_dirty(&mut self, cx: &mut Context<Self>) {
-        let preference = crate::appearance::attribute_blocks(cx);
-        if self.attribute_blocks != preference {
-            self.attribute_blocks = preference;
-            self.cycle.invalidate(Invalidation::rows());
+    /// Re-read the two appearance preferences this view mirrors. The one place both are
+    /// resynced: `rebuild` calls it too, so an index-triggered pass cannot build rows with
+    /// the old setting and leave the next frame's `rebuild_if_dirty` to correct it (issue
+    /// 3: only `rebuild_if_dirty` used to notice `attribute_blocks`).
+    fn sync_preferences(&mut self, cx: &mut Context<Self>) {
+        let children = crate::appearance::ref_children(cx);
+        let attributes = crate::appearance::attribute_blocks(cx);
+        let mut why = Invalidation::default();
+        if self.ref_children_limit != children {
+            self.ref_children_limit = children;
+            // The children cache is keyed on the limit and heals on its own; the rows that
+            // show those children are what is stale.
+            why = why | Invalidation::prefs() | Invalidation::rows();
         }
+        if self.attribute_blocks != attributes {
+            self.attribute_blocks = attributes;
+            why = why | Invalidation::prefs() | Invalidation::rows();
+        }
+        if why.any() {
+            self.cycle.invalidate(why);
+        }
+    }
+
+    fn rebuild_if_dirty(&mut self, cx: &mut Context<Self>) {
+        self.sync_preferences(cx);
         if self.cycle.dirty() {
             self.rebuild(cx);
         }
@@ -1194,6 +1220,7 @@ impl PageView {
         }
         // Captured before the reads: a change made during this pass belongs to the next
         // one, even if it is this view's own (nothing here writes).
+        self.sync_preferences(cx);
         let store = self.app.read(cx).version;
         self.rebuild_rows(cx);
         self.interest = self.interest_after_build();
@@ -1204,7 +1231,6 @@ impl PageView {
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {
-        self.ref_children_limit = crate::appearance::ref_children(cx);
         if self.journal.is_none() {
             // Only the feed pins a day heading (DN-3).
             self.day_headings.clear();

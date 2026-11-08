@@ -2987,6 +2987,53 @@ fn leaving_a_page_drops_its_open_transclusions(cx: &mut TestAppContext) {
     );
 }
 
+/// Rule 9 / PG-1: both appearance mirrors are resynced in one place. Only
+/// `rebuild_if_dirty` used to notice an `attribute_blocks` change, so a rebuild triggered
+/// by something else (an index update, the observer itself) built rows with the old
+/// setting and the next frame corrected them (rebuild-cycle issue 3).
+#[gpui::test]
+fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
+    use utopia_ui::appearance::{self, AttributeBlocks};
+    let (app, ws, cx) = setup(cx);
+    let page = app.update(cx, |app, _| {
+        let page = app.store.create_page("Project").unwrap();
+        let b = app.store.ensure_first_block(&page).unwrap();
+        app.store
+            .set_block_text(&page, &b, "owner:: Ada", None, None)
+            .unwrap();
+        app.store.commit_block(&page, &b).unwrap();
+        page
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // Settings → Appearance → "As blocks", applied to this open page.
+    cx.update(|_, cx| {
+        appearance::set_attribute_blocks(cx, AttributeBlocks::Blocks).unwrap();
+    });
+
+    let (after_set, frames_after_set) =
+        view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after_set > before,
+        "the appearance observer rebuilds the rows it mirrors"
+    );
+    assert_eq!(
+        frames_after_set, frames_before,
+        "in the observer, not in the frame that redraws the window"
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.frame_rebuilds()),
+        frames_before,
+        "and a later frame does not have to correct the rows"
+    );
+}
+
 #[gpui::test]
 fn full_search_and_quick_capture(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
