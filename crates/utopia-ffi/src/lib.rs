@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use chrono::NaiveDate;
 use utopia_core::{outline, BlockId, PageId};
 use utopia_store::{RefQuery, Store, StoreError};
-use utopia_sync::{SyncEngine, SyncError, SyncReport, Transport};
+use utopia_sync::{StoreDone, StoreStep, SyncEngine, SyncError, SyncReport, Transport};
 
 uniffi::setup_scaffolding!();
 
@@ -176,21 +176,25 @@ impl Graph {
     }
 
     /// The round itself, over whatever transport is in force: the HTTP relay for the shell,
-    /// an in-memory one for tests.
+    /// an in-memory one for tests. The store lock is taken for `prepare` and `apply` only;
+    /// the exchange runs outside it (issue 1).
     fn sync_via(&self, mut transport: Box<dyn Transport>) -> Result<SyncOutcome> {
         // One round at a time: a second call while this one is on the wire does nothing
         // rather than queueing a whole round behind it (issue 2).
         let Some(mut engine) = self.take_engine()? else {
             return Ok(SyncOutcome::Busy);
         };
-        let result = self.with(|store| {
-            engine
-                .sync_once(store, transport.as_mut())
-                .map(|report| SyncOutcome::Synced {
-                    summary: summary_of(&report),
-                })
-                .map_err(FfiError::from)
-        });
+        let result = utopia_sync::sync_round(&mut engine, transport.as_mut(), |engine, step| {
+            let mut store = self.guard()?;
+            match step {
+                StoreStep::Prepare => engine.prepare(&mut store).map(StoreDone::Prepared),
+                StoreStep::Apply(inc) => engine.apply(&mut store, *inc).map(StoreDone::Applied),
+            }
+        })
+        .map(|report| SyncOutcome::Synced {
+            summary: summary_of(&report),
+        })
+        .map_err(FfiError::from);
         // The engine goes home whatever the round did: the next call starts from it and
         // keeps the compaction snapshots this one queued (issue 4).
         let restored = self.put_engine(engine);
@@ -425,7 +429,7 @@ fn summary_of(r: &SyncReport) -> SyncSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -547,6 +551,65 @@ mod tests {
             }],
             ..empty_manifest()
         }
+    }
+
+    /// Issue 1: other FFI calls keep working while a round is on the wire. The store lock
+    /// is taken for `prepare`/`apply`, never for the network.
+    #[test]
+    fn a_round_does_not_hold_the_store_lock_on_the_wire() {
+        let g = Graph::in_memory().unwrap();
+        g.set_today(Some("2026-11-02".into())).unwrap();
+        let day = g.today().unwrap();
+        g.append_block(day.id.clone(), "queued".into()).unwrap();
+        let free = Arc::new(AtomicBool::new(true));
+        let probes = Arc::new(AtomicU32::new(0));
+        let probe = |free: &Arc<AtomicBool>, probes: &Arc<AtomicU32>, g: &Arc<Graph>| {
+            probes.fetch_add(1, Ordering::SeqCst);
+            if g.store.try_lock().is_err() {
+                free.store(false, Ordering::SeqCst);
+            }
+        };
+        let page = PageId(day.id.clone());
+        let mut t = Scripted::quiet();
+        t.on_manifest = Box::new({
+            let (free, probes, g) = (free.clone(), probes.clone(), g.clone());
+            move || {
+                probe(&free, &probes, &g);
+                Ok(Some(manifest_with(&page, 0, 0)))
+            }
+        });
+        t.on_push = Box::new({
+            let (free, probes, g) = (free.clone(), probes.clone(), g.clone());
+            move |_page, req| {
+                probe(&free, &probes, &g);
+                Ok(PushResponse {
+                    accepted: req.updates.len(),
+                    head_seq: 1,
+                    duplicate: 0,
+                })
+            }
+        });
+        t.on_pull = Box::new({
+            let (free, probes, g) = (free.clone(), probes.clone(), g.clone());
+            move |_page, _since| {
+                probe(&free, &probes, &g);
+                Ok(PullResponse {
+                    snapshot: None,
+                    updates: Vec::new(),
+                    head_seq: 1,
+                })
+            }
+        });
+        let outcome = g.sync_via(Box::new(t)).unwrap();
+        assert!(matches!(outcome, SyncOutcome::Synced { .. }), "{outcome:?}");
+        assert!(
+            probes.load(Ordering::SeqCst) >= 3,
+            "the round must actually reach the wire"
+        );
+        assert!(
+            free.load(Ordering::SeqCst),
+            "the store lock was held during the exchange, so `today`/`append_block` block"
+        );
     }
 
     /// Issue 2: a second tap cannot queue a second round behind the first.

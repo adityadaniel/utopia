@@ -144,6 +144,29 @@ fn slow_relay(delay: Duration) -> String {
     format!("http://{addr}")
 }
 
+/// §14.3: sync must not freeze the rest of the mobile surface. Reading today's page and
+/// capturing a block keep working while a round is on the wire (docs/state-machines/
+/// ffi-mobile-sync.md, issue 1).
+#[test]
+fn ac_14_3_a_slow_relay_does_not_block_other_calls() {
+    let url = slow_relay(Duration::from_millis(1500));
+    let g = Arc::new(Graph::in_memory().unwrap());
+    let g2 = g.clone();
+    let round = std::thread::spawn(move || g2.sync(url, "g1".into(), None, None));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    let day = g.today().unwrap();
+    g.append_block(day.id, "captured while syncing".into())
+        .unwrap();
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(1),
+        "today() + append_block() waited {waited:?} for a round on the wire"
+    );
+    // The round itself still ends (the relay answered 503).
+    assert!(round.join().unwrap().is_err());
+}
+
 /// §12.6: a second tap while a round is running starts nothing; it answers at once instead
 /// of queueing a second full round behind the first (issue 2).
 #[test]
