@@ -467,19 +467,23 @@ impl BlockEditor {
         });
         let result = self.app.update(cx, |app, cx| {
             let plugin = app.plugins.get(index).cloned()?;
-            let r = plugin.run(&mut app.store, command, input);
-            match &r {
+            let run = plugin.run(&mut app.store, command, input);
+            match &run.outcome {
                 Ok(out) => {
-                    if !out.changed.is_empty() {
-                        app.changed(out.changed.clone(), true, cx);
+                    if !run.changed.is_empty() {
+                        app.changed(run.changed.clone(), true, cx);
                     }
                     app.notice = out.message.clone();
                 }
                 Err(e) => app.last_error = Some(format!("{}: {e}", plugin.manifest.name)),
             }
-            r.ok()
+            Some(run)
         });
-        let Some(out) = result else {
+        let Some(run) = result else {
+            cx.notify();
+            return;
+        };
+        let Some(out) = run.output().cloned() else {
             cx.notify();
             return;
         };
@@ -487,7 +491,7 @@ impl BlockEditor {
             let len = text.len();
             self.field.set_text(&text, len);
             self.after_edit(window, cx);
-        } else if out.changed.contains(&t.page) {
+        } else if run.changed.contains(&t.page) {
             // The plugin edited this page through the API: show the stored text.
             let stored = self.app.update(cx, |app, _| {
                 app.store
