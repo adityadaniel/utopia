@@ -4938,6 +4938,50 @@ mod tests {
         );
     }
 
+    /// FR-1.2: the mode pairs the page with the zoom and the feed, so "a feed without a
+    /// page" (the transient `open_journal` used to pass through) and "a zoom without a
+    /// page" cannot be held at all (page-view-mode issue 5). `rebuild_rows` matches on the
+    /// mode, so it cannot reach a branch where the page it needs is missing.
+    #[test]
+    fn a_mode_always_names_the_page_it_draws() {
+        let page = PageId("page".into());
+        let root = BlockId("block".into());
+        let today = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+        let journal = Journal {
+            feed: Feed::Exhausted {
+                shown_through: today,
+            },
+            pages: Vec::new(),
+            refs: HashMap::new(),
+            refs_version: 0,
+        };
+
+        assert_eq!(Mode::Empty.page(), None);
+        assert_eq!(Mode::Empty.zoom(), None);
+        assert!(Mode::Empty.journal().is_none());
+
+        let plain = Mode::Page { page: page.clone() };
+        assert_eq!(plain.page(), Some(&page));
+        assert_eq!(plain.zoom(), None, "a whole page is not zoomed");
+        assert!(plain.journal().is_none());
+
+        let zoomed = Mode::Zoomed {
+            page: page.clone(),
+            root: root.clone(),
+        };
+        assert_eq!(zoomed.page(), Some(&page));
+        assert_eq!(zoomed.zoom(), Some(&root));
+        assert!(zoomed.journal().is_none());
+
+        let feed = Mode::Journal {
+            today: page.clone(),
+            journal,
+        };
+        assert_eq!(feed.page(), Some(&page), "the feed always shows today");
+        assert_eq!(feed.zoom(), None, "the feed is never zoomed");
+        assert!(feed.journal().is_some() && feed.is_journal());
+    }
+
     /// PG-5: a fenced code block's first line is its language, shown as the card's label.
     /// Anything else stays the first line of code, so a block of real code is never eaten.
     #[test]
