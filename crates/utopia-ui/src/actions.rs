@@ -999,9 +999,13 @@ impl Overrides {
                             e.action
                         ));
                     }
-                    if !matches!(o, Override::SameAsDefault) {
-                        map.insert(e.action, o);
-                    }
+                    // A later entry wins, as it did before entries were validated: one that
+                    // restores the default removes an earlier override instead of being
+                    // skipped next to it — the same rule as [`Overrides::set`].
+                    match o {
+                        Override::SameAsDefault => map.remove(&e.action),
+                        o => map.insert(e.action, o),
+                    };
                 }
                 None => warnings.push(format!("keymap.json: unknown action {}", e.action)),
             }
@@ -1397,6 +1401,29 @@ mod tests {
         o.set("GoToday", "alt-cmd-t");
         o.set("GoToday", &platform_keys("cmd-shift-t"));
         assert!(!o.is_changed("GoToday"));
+    }
+
+    /// A `keymap.json` may list an action more than once; the last entry wins, as it did
+    /// before overrides were validated. A later entry that restores the default must therefore
+    /// remove the earlier override, not be skipped next to it (review of the three-copies
+    /// fix).
+    #[test]
+    fn a_later_default_entry_removes_an_earlier_override() {
+        let (o, warnings) = Overrides::from_json(&format!(
+            r#"[{{"key":"cmd-alt-t","action":"GoToday"}},
+                {{"key":"{}","action":"GoToday"}}]"#,
+            platform_keys("cmd-shift-t")
+        ));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(
+            !o.is_changed("GoToday"),
+            "the last entry restores the default, so nothing is overridden"
+        );
+        assert_eq!(
+            o.keys_for(doc("GoToday").unwrap()),
+            platform_keys("cmd-shift-t")
+        );
+        assert_eq!(o.to_json().trim(), "[]", "and nothing is written back");
     }
 
     /// Keymap machine doc, issue 3: clashes were compared by the literal context string, so a
