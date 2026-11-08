@@ -4,8 +4,8 @@
 
 `MainContent { Page, Graph(Entity<GraphView>), Pdf(Entity<PdfView>) }` now owns what the
 main column shows, and `render` matches on it, so "one thing at a time" is a state rather
-than a precedence between two `Option`s. The tables and line numbers below describe the
-machine on `main` before this change.
+than a precedence between two `Option`s. The state table uses current lines; the events,
+transitions and diagram below still describe the shape on `main` before this change.
 
 - **Issue 1 (a page opened while the graph was up was invisible): fixed.** `open(..)` now
   sets the main column back to `Page`, so the graph closes instead of hiding the page.
@@ -28,28 +28,28 @@ Nothing else listed here was left unhandled.
 
 ## What it controls
 
-What the main column shows (`crates/utopia-ui/src/workspace.rs:2720-2724`): a full-screen
-graph view wins, then a PDF viewer, then the main `PageView`. Also the sidebar graph panel's
-exclusivity with the full-screen graph.
+What the main column shows (now `crates/utopia-ui/src/workspace.rs:2814-2818`): the `MainContent`
+enum names the graph view, the PDF viewer or the main `PageView` — one of them, never two.
+Also the sidebar graph panel's exclusivity with the full-screen graph.
 
 ## Where the state lives
 
 | Piece | Location | Set | Cleared |
 |---|---|---|---|
-| Full-screen graph | `workspace.rs` `graph: Option<Entity<GraphView>>` | `:971` | `:747, :948, :990, :1018, :1031, :1039, :1060, :1254` |
-| PDF viewer | `pdf: Option<Entity<PdfView>>` | `:1078` | `:814, :1066, :1255` |
-| Sidebar graph panel | `graph_panel: Option<..>` | `:995` | `:966, :1035, :1040` |
-| Main page | `main: Entity<PageView>` (always present) | `open :815-816` | – |
-| Render order | `:2720-2724` `match (&self.graph, &self.pdf)` | – | – |
+| Full-screen graph | `workspace.rs` `content: MainContent::Graph(..)` | `:1028` | `:870, :1005, :1077, :1091, :1101, :1328` |
+| PDF viewer | `content: MainContent::Pdf(..)` | `:1144` | `:870, :1028, :1328` |
+| Sidebar graph panel | `graph_panel: Option<..>` | `:1051` | `:1023, :1096, :1103` |
+| Main page | `main: Entity<PageView>` (always present) | `open :866-867` | – |
+| Render order | `:2814-2818` `match &self.content` | – | – |
 
 Subscriptions pile into `subs` (`:592, :801, :866, :968, :992, :1062`) and are never pruned.
 
-## States
+## States (as found on `main`)
 
 `(graph, pdf)` ∈ {(None, None) → page, (Some, None), (None, Some), (Some, Some)}; `graph_panel`
 orthogonal; `main.page` always changes underneath.
 
-## Events and transitions
+## Events and transitions (as found on `main`)
 
 - `open(page, zoom, sidebar=false)` (`:808-816`): `pdf = None`, `main.open(..)`. **Does not
   clear `graph`.**
@@ -58,7 +58,7 @@ orthogonal; `main.page` always changes underneath.
 - `GraphEvent::Open/Close` (`:1017-1040`): clears `graph` and opens the page.
 - `open_pdf` (`:1066-1078`): `pdf = Some`.
 
-## Impossible or unhandled combinations (evidence)
+## Impossible or unhandled combinations (evidence, as found on `main`)
 
 1. **Pages opened while the graph is up are invisible.** `open` clears `pdf` (`:814`) but not
    `graph`; `open_journal` clears both (`:1254-1255`). Any `open(.., sidebar=false)` that does
