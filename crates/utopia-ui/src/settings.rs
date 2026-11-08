@@ -276,6 +276,10 @@ impl SettingsView {
         // Focus on *this* handle is not enough: the field is a descendant, so moving into it
         // is not a focus-out of the window's own handle. A focusable control added to this
         // window later needs its own listener here.
+        //
+        // The two halves are not redundant: gpui only reports focus changes while the window
+        // is active (it blanks the focus path for an inactive one), so leaving the app is
+        // seen by the activation observer and moving between controls by the focus one.
         let search_focus = search.read(cx).focus_handle(cx);
         subs.push(cx.on_focus(&search_focus, window, |this, _, cx| {
             this.capture_left_the_window(cx);
