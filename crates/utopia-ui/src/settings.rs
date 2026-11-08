@@ -190,6 +190,14 @@ pub struct SettingsView {
     tab: Tab,
     /// What the window is doing with keystrokes.
     capture: Capture,
+    /// A file this window read was not what it says: what is in force is not what the user
+    /// wrote (rule 11: degrade, never panic). A condition about the disk, so it has a slot
+    /// of its own rather than sharing the status line with the result of the last action
+    /// (`settings-key-capture.md`, issue 4).
+    warning: Option<SharedString>,
+    /// The result of the last thing the user did in this window: a rebind, a reset, a
+    /// preference change. Transient by nature — one slot is right for these, because only
+    /// the newest one is news.
     status: Option<SharedString>,
     /// The last write of `keymap.json` failed. The keys are live for this session but disk
     /// still holds the old ones, so the next launch would silently undo them: a state of its
@@ -287,7 +295,8 @@ impl SettingsView {
             capture: Capture::Idle,
             // A malformed keymap.json or settings.json is worth saying out loud: what is in
             // force is not what the user wrote (rule 11: degrade, never panic).
-            status: warnings.first().map(|w| SharedString::from(w.clone())),
+            warning: warnings.first().map(|w| SharedString::from(w.clone())),
+            status: None,
             save_error: None,
             topic: 0,
             search,
@@ -467,6 +476,11 @@ impl SettingsView {
 
     pub fn status(&self) -> Option<&str> {
         self.status.as_deref().map(|v| &**v)
+    }
+
+    /// What was wrong with a file this window read, while it is still wrong.
+    pub fn warning(&self) -> Option<&str> {
+        self.warning.as_deref().map(|v| &**v)
     }
 
     /// Why the last write failed, while disk still disagrees with the keys in force.
@@ -809,6 +823,18 @@ impl Render for SettingsView {
                             .child(body),
                     ),
             )
+            .children(self.warning.clone().map(|w| {
+                div()
+                    .debug_selector(|| "settings-warning".into())
+                    .px_6()
+                    .py_2()
+                    .border_t_1()
+                    .border_color(th.line)
+                    .bg(th.banner_bg)
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.warning)
+                    .child(w)
+            }))
             .children(self.status.clone().map(|s| {
                 div()
                     .debug_selector(|| "settings-status".into())
