@@ -28,6 +28,9 @@ raw-window-handle = "0.6"
 
 [dev-dependencies]
 tempfile.workspace = true
+# Drives `Root`/`AppState` through GPUI's test platform (the quit path, the Settings
+# window's handle) without a screen.
+gpui = { workspace = true, features = ["test-support"] }
 
 # The `objc` crate's `msg_send!` expands to `cfg(feature = "cargo-clippy")`, a pattern
 # current rustc flags. The warning is attributed to our call sites (pdf.rs, shot.rs) but

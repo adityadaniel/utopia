@@ -207,7 +207,10 @@ enum RunMode {
 }
 
 impl RunMode {
-    fn from_env() -> Self {
+    /// A `UTOPIA_SHOT_SCRIPT` that does not parse is an error, not a fallback: the run that
+    /// set it is unattended and would otherwise sit at a window nothing drives, with no
+    /// hotkey and no step that quits it (issue 1).
+    fn from_env() -> Result<Self, String> {
         let script = std::env::var("UTOPIA_SHOT_SCRIPT").ok();
         Self::from_parts(
             script.as_deref(),
@@ -215,21 +218,15 @@ impl RunMode {
         )
     }
 
-    fn from_parts(script: Option<&str>, probe: bool) -> Self {
+    fn from_parts(script: Option<&str>, probe: bool) -> Result<Self, String> {
         if let Some(source) = script {
-            return match shot::parse(source) {
-                Ok(steps) => RunMode::Scripted(steps),
-                Err(e) => {
-                    eprintln!("utopia: UTOPIA_SHOT_SCRIPT: {e}");
-                    RunMode::Interactive
-                }
-            };
+            return shot::parse(source).map(RunMode::Scripted);
         }
-        if probe {
+        Ok(if probe {
             RunMode::Probe
         } else {
             RunMode::Interactive
-        }
+        })
     }
 }
 
@@ -752,8 +749,10 @@ fn menus() -> Vec<Menu> {
     ]
 }
 
-fn run_app(graph: Option<PathBuf>) {
-    let mode = RunMode::from_env();
+fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
+    // Decided once, before a window exists: a malformed `UTOPIA_SHOT_SCRIPT` is reported
+    // and the run exits, so a scripted run can never look like a normal launch (issue 1).
+    let mode = RunMode::from_env().map_err(|e| anyhow::anyhow!("UTOPIA_SHOT_SCRIPT: {e}"))?;
     let config = paths::config_dir();
     let keymap = std::fs::read_to_string(config.join("keymap.json")).ok();
     let application = Application::new();
@@ -797,6 +796,7 @@ fn run_app(graph: Option<PathBuf>) {
         .detach();
         cx.activate(true);
     });
+    Ok(())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -854,8 +854,7 @@ fn main() -> anyhow::Result<()> {
                 .expect("url queue")
                 .push(url.to_string());
             let graph = paths::resolve_graph(None, &paths::config_dir(), &paths::graphs_dir());
-            run_app(graph);
-            Ok(())
+            run_app(graph)
         }
         Some("-h" | "--help" | "help") => {
             println!("{}", cli::USAGE);
@@ -868,8 +867,34 @@ fn main() -> anyhow::Result<()> {
                 .and_then(|i| args.get(i + 1))
                 .map(PathBuf::from);
             let graph = paths::resolve_graph(explicit, &paths::config_dir(), &paths::graphs_dir());
-            run_app(graph);
-            Ok(())
+            run_app(graph)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 1: a script that does not parse used to be logged and dropped while the
+    /// hotkey registration was skipped anyway — a normal window that no step drove and
+    /// nothing quit. It is a parse error now, reported before a window exists.
+    #[test]
+    fn a_malformed_shot_script_is_an_error() {
+        let err = RunMode::from_parts(Some("taek 300"), false).expect_err("no step can run");
+        assert!(err.contains("unknown step"), "{err}");
+    }
+
+    /// One value decides the run: a script outranks the probe, which outranks a normal
+    /// launch. `Root` reads this and nothing re-reads the environment.
+    #[test]
+    fn one_mode_is_parsed_for_the_whole_run() {
+        assert!(matches!(
+            RunMode::from_parts(None, false),
+            Ok(RunMode::Interactive)
+        ));
+        assert!(matches!(RunMode::from_parts(None, true), Ok(RunMode::Probe)));
+        let scripted = RunMode::from_parts(Some("wait 10"), true).unwrap();
+        assert_eq!(scripted, RunMode::Scripted(shot::parse("wait 10").unwrap()));
     }
 }
