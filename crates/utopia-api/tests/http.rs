@@ -350,3 +350,48 @@ fn ac_4_1_a_stalled_owner_refuses_calls_instead_of_queueing_them_all() {
         .sum::<usize>();
     assert!(wrote <= queue, "{wrote} writes from a queue of {queue}");
 }
+
+/// AC §4.1: a call the app accepted and then dropped (it stopped before running it) answers
+/// the same 503 as one that never got queued: "nothing was written", so a retry is safe.
+/// Two readings of "graph is closed" under one status was doc issue 3.
+#[test]
+fn ac_4_1_a_call_dropped_before_it_ran_answers_not_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(serve("127.0.0.1:0", "secret-token".into()).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // A shutting-down owner: take the call, never run it.
+        if let Some(call) = s2.recv_timeout(Duration::from_secs(5)) {
+            drop(call);
+        }
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    let resp = ureq::post(&format!("{}/v1/capture", server.url()))
+        .set("Authorization", "Bearer secret-token")
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(5))
+        .send_string(&json!({ "text": "one" }).to_string());
+    match resp {
+        Err(ureq::Error::Status(503, r)) => {
+            let body: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+            assert_eq!(body["error"], "the app is not running; nothing was written");
+        }
+        Ok(r) => panic!("expected 503, got {}", r.status()),
+        Err(e) => panic!("{e}"),
+    }
+    stop.store(true, Ordering::SeqCst);
+    let store = owner.join().unwrap();
+    assert!(
+        store.list_pages(true).unwrap().is_empty(),
+        "the dropped call wrote nothing"
+    );
+}

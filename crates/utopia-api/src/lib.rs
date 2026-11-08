@@ -28,6 +28,16 @@
 //! afterwards and a retry cannot write twice. The queue is bounded ([`Limits::queue`]), so a
 //! stalled owner answers 429 instead of accumulating work; see
 //! `docs/state-machines/api-call-inbox.md`.
+//!
+//! Answers for a call that produced no result, each of which says what happened to the store:
+//!
+//! | Status | Cause | Store |
+//! |---|---|---|
+//! | 429 | the owner's queue is full, so the call was never queued | unchanged; retry later |
+//! | 503 | the app is not running: the queue was gone, or it stopped before running the call | unchanged; retry later |
+//! | 504 | the request gave up waiting: "nothing was written", or "it may be applied" when the owner had already started the call | as the message says |
+//!
+//! An [`ApiError`] status (400, 404, 500) comes from the operation itself.
 
 use std::future::Future as _;
 use std::net::SocketAddr;
@@ -696,9 +706,7 @@ async fn call(ctx: Ctx, headers: HeaderMap, op: Op) -> Response {
             mpsc::TrySendError::Full(_) => {
                 err(429, "the app is busy; nothing was written, try again")
             }
-            mpsc::TrySendError::Disconnected(_) => {
-                err(503, "the app is not running; nothing was written")
-            }
+            mpsc::TrySendError::Disconnected(_) => not_running(),
         };
     }
     // Keep `rx` across the wait (a plain `timeout` would consume it): the answer can land
@@ -720,11 +728,15 @@ fn answer(reply: Result<Result<Value, ApiError>, oneshot::error::RecvError>) -> 
         Ok(Ok(body)) => Json(body).into_response(),
         Ok(Err(e)) => err(e.status, &e.message),
         // The owner dropped the call without running it (shutdown), so nothing changed.
-        Err(_) => err(
-            503,
-            "the app closed before answering the call; nothing was written",
-        ),
+        Err(_) => not_running(),
     }
+}
+
+/// One answer for "the app is not running", whether the queue was gone before the call was
+/// accepted or the app stopped before it ran: both mean nothing touched the store, so a
+/// client has one fact to act on instead of two readings of "graph is closed".
+fn not_running() -> Response {
+    err(503, "the app is not running; nothing was written")
 }
 
 /// The request gave up waiting. [`CallState`] says whether its call can still run, so the
