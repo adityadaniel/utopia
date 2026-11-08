@@ -394,13 +394,16 @@ impl std::ops::BitOr for Invalidation {
     }
 }
 
-/// The rebuild cycle's state: what is stale, and whether the rows are current. `pending`
-/// being empty is the one definition of "clean" — the old boolean plus 20+ write sites, with
-/// only `rebuild` clearing it, is what let a handler's rebuild and a deferred event disagree
-/// about whether the items were stale.
+/// The rebuild cycle's state: what is stale, and which store version the rows were built
+/// from. `pending` being empty is the one definition of "clean" — the old boolean plus 20+
+/// write sites, with only `rebuild` clearing it, is what let a handler's rebuild and a
+/// deferred event disagree about whether the items were stale. `store` is what tells the
+/// handler's own deferred `Changed` apart from a newer change.
 #[derive(Default)]
 struct RebuildCycle {
     pending: Invalidation,
+    /// `AppState::version` the rows were built from.
+    store: u64,
 }
 
 impl RebuildCycle {
@@ -408,6 +411,7 @@ impl RebuildCycle {
         // A view is born without rows and must build them before its first paint.
         Self {
             pending: Invalidation::rows(),
+            store: 0,
         }
     }
 
@@ -419,8 +423,21 @@ impl RebuildCycle {
         self.pending.any()
     }
 
-    fn built(&mut self) {
+    /// Mark the change an `AppState::Changed` reports. Returns `false` when the rows were
+    /// already built from that store state — the handler that emitted the event rebuilt
+    /// before gpui delivered it. A stale `true` here costs a second pass over the same
+    /// data on every insert, split, template and plan (machine issue 1).
+    fn store_changed(&mut self, version: u64, why: Invalidation) -> bool {
+        if version <= self.store {
+            return false;
+        }
+        self.invalidate(why);
+        true
+    }
+
+    fn built(&mut self, store: u64) {
         self.pending = Invalidation::default();
+        self.store = store;
     }
 }
 
@@ -602,8 +619,9 @@ impl PageView {
                         .as_ref()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
                 if e.structural || e.pages.is_empty() || shown || this.has_embeds() {
-                    this.cycle.invalidate(Invalidation::rows());
-                    cx.notify();
+                    if this.cycle.store_changed(e.version, Invalidation::rows()) {
+                        cx.notify();
+                    }
                 }
             }),
             // A promoted draft merged into the day's page (FR-1.2): this view may be
@@ -1132,11 +1150,14 @@ impl PageView {
                 self.frame_rebuilds += 1;
             }
         }
+        // Captured before the reads: a change made during this pass belongs to the next
+        // one, even if it is this view's own (nothing here writes).
+        let store = self.app.read(cx).version;
         self.rebuild_rows(cx);
         // Every path through `rebuild_rows` ends with the list spliced, including the
         // early returns for a missing page or header: clear the whole reason set here, in
         // one place, so no caller can leave a reason behind.
-        self.cycle.built();
+        self.cycle.built(store);
     }
 
     fn rebuild_rows(&mut self, cx: &mut Context<Self>) {

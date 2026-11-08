@@ -2853,6 +2853,45 @@ fn index_updates_prefetch_reference_children(cx: &mut TestAppContext) {
     );
 }
 
+/// §13.3: a handler that writes and rebuilds itself must not be dirtied again by the
+/// `Changed` it emitted. gpui queues `emit` and delivers it after the update, so the old
+/// `dirty` flag was cleared by the handler's rebuild and set again by its own event; the
+/// next frame rebuilt the same rows a second time (rebuild-cycle issue 1).
+#[gpui::test]
+fn a_handler_rebuild_is_not_repeated_by_its_own_change(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    // End the feed's own edit: otherwise starting the next one commits it first, and that
+    // commit's structural change (and its index flush) would rebuild for a real reason.
+    ws.update(cx, |w, cx| w.editor().update(cx, |e, cx| e.end(cx)));
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // Clicking an empty day starts writing a draft, which reports a change with nothing
+    // to flush (FR-1.2) and rebuilds the rows in the click handler. No index update
+    // follows, so any second pass is the deferred `Changed` alone.
+    let empty = cx
+        .debug_bounds("day-empty")
+        .expect("a blank day offers a row to start writing");
+    cx.simulate_click(empty.center(), Modifiers::default());
+    cx.run_until_parked();
+
+    let (after, frames_after) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after > before,
+        "the click handler rebuilds the rows it wrote"
+    );
+    assert_eq!(
+        after - before,
+        1,
+        "one write is one rebuild: the deferred Changed was for the state the handler built"
+    );
+    assert_eq!(
+        frames_after, frames_before,
+        "the second pass would have run inside render (rule 10)"
+    );
+}
+
 #[gpui::test]
 fn full_search_and_quick_capture(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
