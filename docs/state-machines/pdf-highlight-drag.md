@@ -41,7 +41,7 @@ selects an area, a tiny drag is a click. `crates/utopia-ui/src/pdf_view.rs`.
 | Gesture | `pdf_view.rs:73` `gesture: Gesture` | mouse down `:388` → `begin_drag :316` | `finish_drag` `:273` (`take`), `cancel_drag :307` |
 | Drag page | `:41` `Drag::page` | `begin_drag` from the page div that got the down | with the gesture |
 | Kind | `:31` `DragBody::{Text, Area}` | `begin_drag` from the Option key at the down | with the gesture |
-| Preview rects | `:32` `DragBody::Text::preview` | `move_drag :332`, `:398` | with the gesture (every exit drops it) |
+| Preview rects | `:32` `DragBody::Text::preview` | `move_drag :332`, `:353` | with the gesture (every exit drops it) |
 | Page bounds | `:74` `page_bounds` | the page canvas during paint | never (per page, refreshed each frame) |
 
 Read elsewhere: `pdf_view()` in `crates/utopia-app/src/main.rs:112, 122`; `dragging()` and
