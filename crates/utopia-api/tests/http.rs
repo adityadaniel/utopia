@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use chrono::NaiveDate;
 use serde_json::{json, Value};
-use utopia_api::{serve, ApiServer};
+use utopia_api::{serve, serve_with, ApiServer, Limits};
 use utopia_store::Store;
 
 struct Running {
@@ -202,4 +202,196 @@ fn only_authorized_local_non_browser_requests() {
         );
     }
     assert_eq!(utopia_api::new_token().len(), 64);
+}
+
+/// AC §4.1 (local automation API): a request that gets a 504 has been cancelled, so the
+/// retry cannot apply the same capture twice (docs/state-machines/api-call-inbox.md).
+#[test]
+fn ac_4_1_a_timed_out_capture_is_not_written_when_the_owner_gets_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(
+        serve_with(
+            "127.0.0.1:0",
+            "secret-token".into(),
+            Limits {
+                wait: Duration::from_millis(150),
+                ..Limits::default()
+            },
+        )
+        .unwrap(),
+    );
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // Sit on the first call past the client's wait, then drain like the app does.
+        let stalled = s2
+            .recv_timeout(Duration::from_secs(5))
+            .expect("a call arrived");
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(
+            stalled.run(&mut store).is_empty(),
+            "the call whose client timed out must not run"
+        );
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    #[allow(clippy::result_large_err)]
+    let capture = || {
+        ureq::post(&format!("{}/v1/capture", server.url()))
+            .set("Authorization", "Bearer secret-token")
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(5))
+            .send_string(&json!({ "text": "one" }).to_string())
+    };
+    match capture() {
+        Err(ureq::Error::Status(504, r)) => {
+            let body: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("nothing was written"),
+                "a 504 says whether the write happened: {body}"
+            );
+        }
+        Ok(r) => panic!("expected 504, got {}", r.status()),
+        Err(e) => panic!("{e}"),
+    }
+    // The retry is the first call the owner actually runs (once it is awake again).
+    std::thread::sleep(Duration::from_millis(500));
+    ok(capture());
+    stop.store(true, Ordering::SeqCst);
+    let mut store = owner.join().unwrap();
+    let pages = store.list_pages(true).unwrap();
+    assert_eq!(pages.len(), 1, "one page: today");
+    let st = store.page_state(&pages[0].id).unwrap().clone();
+    let texts: Vec<String> = st
+        .live_preorder()
+        .into_iter()
+        .map(|(id, _)| st.block(&id).unwrap().text.clone())
+        .collect();
+    assert_eq!(texts, ["one"], "the timed-out call wrote nothing");
+}
+
+/// AC §4.1 (local automation API): a stalled owner must not let the queue grow without
+/// bound. A call that does not fit is refused with 429, which — unlike one that was queued
+/// and then abandoned — never runs (docs/state-machines/api-call-inbox.md).
+#[test]
+fn ac_4_1_a_stalled_owner_refuses_calls_instead_of_queueing_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(serve("127.0.0.1:0", "secret-token".into()).unwrap());
+    let queue = Limits::default().queue.max(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // Let every request arrive before draining a single call.
+        std::thread::sleep(Duration::from_millis(600));
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    let mut threads = Vec::new();
+    for i in 0..queue + 36 {
+        let url = format!("{}/v1/capture", server.url());
+        threads.push(std::thread::spawn(move || {
+            let body = json!({ "text": format!("n{i}") }).to_string();
+            let req = ureq::post(&url)
+                .set("Authorization", "Bearer secret-token")
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_millis(150));
+            match req.send_string(&body) {
+                Ok(_) | Err(ureq::Error::Status(504, _)) => None, // queued, then gave up
+                Err(ureq::Error::Status(code, r)) => Some((code, r.into_string().unwrap())),
+                Err(ureq::Error::Transport(_)) => None, // gave up before an answer
+            }
+        }));
+    }
+    let mut refused = Vec::new();
+    for t in threads {
+        if let Some(r) = t.join().unwrap() {
+            refused.push(r);
+        }
+    }
+    assert!(
+        !refused.is_empty(),
+        "the queue accepted all {} calls",
+        queue + 36
+    );
+    for (code, body) in &refused {
+        assert_eq!(*code, 429, "{body}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was written"),
+            "{body}"
+        );
+    }
+    stop.store(true, Ordering::SeqCst);
+    let mut store = owner.join().unwrap();
+    let pages = store.list_pages(true).unwrap();
+    let wrote = pages
+        .iter()
+        .map(|p| store.page_state(&p.id).unwrap().live_preorder().len())
+        .sum::<usize>();
+    assert!(wrote <= queue, "{wrote} writes from a queue of {queue}");
+}
+
+/// AC §4.1: a call the app accepted and then dropped (it stopped before running it) answers
+/// the same 503 as one that never got queued: "nothing was written", so a retry is safe.
+/// Two readings of "graph is closed" under one status was doc issue 3.
+#[test]
+fn ac_4_1_a_call_dropped_before_it_ran_answers_not_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(serve("127.0.0.1:0", "secret-token".into()).unwrap());
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // A shutting-down owner: take the call, never run it.
+        if let Some(call) = s2.recv_timeout(Duration::from_secs(5)) {
+            drop(call);
+        }
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    let resp = ureq::post(&format!("{}/v1/capture", server.url()))
+        .set("Authorization", "Bearer secret-token")
+        .set("Content-Type", "application/json")
+        .timeout(Duration::from_secs(5))
+        .send_string(&json!({ "text": "one" }).to_string());
+    match resp {
+        Err(ureq::Error::Status(503, r)) => {
+            let body: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+            assert_eq!(body["error"], "the app is not running; nothing was written");
+        }
+        Ok(r) => panic!("expected 503, got {}", r.status()),
+        Err(e) => panic!("{e}"),
+    }
+    stop.store(true, Ordering::SeqCst);
+    let store = owner.join().unwrap();
+    assert!(
+        store.list_pages(true).unwrap().is_empty(),
+        "the dropped call wrote nothing"
+    );
 }
