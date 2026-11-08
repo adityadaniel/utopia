@@ -541,6 +541,10 @@ impl BlockEditor {
                 let c = anchored.unwrap_or_else(|| self.field.cursor().min(text.len()));
                 self.field.set_text(&text, c);
                 self.anchor_caret(cx);
+                // The buffer was replaced wholesale, so the menu's frozen range and items
+                // describe text that is gone (an undo, a remote edit, a plugin through the
+                // store). Re-derive it from the text that is here now (FR-2.17).
+                self.refresh_autocomplete(cx);
                 cx.notify();
             }
             Some(_) => {}
@@ -1125,7 +1129,16 @@ impl BlockEditor {
                 app.changed(Vec::new(), true, cx);
             });
         }
-        let end = self.field.cursor();
+        // The range the menu was opened for, not the caret now: selecting or clicking
+        // after the menu opened leaves the query the items describe, so replacing
+        // `start..cursor` would leave the tail of it behind (FR-2.17).
+        let end = menu.caret;
+        if self.field.text.get(menu.start..end).is_none() {
+            // Belt and braces: a buffer replaced under the menu could leave the frozen
+            // range off a character boundary. `sync_from_store` closes the menu in that
+            // case, so this only guards the offsets themselves (rule 11).
+            return;
+        }
         if let AcItem::Command { cmd, .. } = item {
             self.field.replace(menu.start..end, "");
             self.ac = Autocomplete::Closed;

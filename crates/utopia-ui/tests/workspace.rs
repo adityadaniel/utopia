@@ -6255,3 +6255,64 @@ fn fr_2_17_cmd_enter_is_not_swallowed_by_an_empty_menu(cx: &mut TestAppContext) 
         );
     });
 }
+
+/// FR-2.17: the menu replaces the query it was opened for, not whatever range the caret
+/// happens to sit in when Enter arrives (machine issue 2). Shift+Left puts the caret at the
+/// start of a selection, one byte before the end of the query.
+#[gpui::test]
+fn fr_2_17_accept_replaces_the_query_the_menu_was_opened_for(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Alpha").unwrap();
+    });
+    cx.simulate_input("Met [[Alp");
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, cx| w.editor().read(cx).autocomplete().is_open()),
+        "the [[ menu is open"
+    );
+    cx.simulate_keystrokes("shift-left");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "Met [[Alpha]]");
+}
+/// FR-2.17: a menu describes the buffer it was opened on. When the buffer is replaced
+/// wholesale under it (an undo, a remote edit, a plugin through the store), its frozen
+/// `start..caret` range names text that is gone; accepting from it would insert a
+/// completion into the middle of another string.
+#[gpui::test]
+fn fr_2_17_a_menu_does_not_outlive_the_text_it_was_opened_for(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Alpha").unwrap();
+    });
+    cx.simulate_input("[[Al");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    let block = editor.read_with(cx, |e, _| e.target().cloned().expect("editing").block);
+    assert!(
+        editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the [[ menu is open"
+    );
+    // The store rewrites the block: the caret offset 4 now falls inside a three-byte
+    // character, so the menu's range is not even a character boundary any more.
+    app.update(cx, |app, cx| {
+        let r = app
+            .store
+            .set_block_text(&page, &block, "ab日", None, Some(2));
+        assert!(app.report(r).is_some());
+        app.changed(vec![page.clone()], false, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "ab日");
+    assert!(
+        !editor.read_with(cx, |e, _| e.autocomplete().is_open()),
+        "the menu was about text that is no longer there"
+    );
+    // Enter is the block's again: it splits rather than taking a suggestion.
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(rows_str(&rows(&app, &page, cx)), [("ab日", 0), ("", 0)]);
+}
