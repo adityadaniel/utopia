@@ -441,6 +441,15 @@ impl RebuildCycle {
     }
 }
 
+/// What store changes this view's rows depend on (rebuild-cycle issue 2). A query block
+/// reads every page through the index, and an open transclusion renders another page's
+/// blocks; everything else only needs `Changed` for the page (or feed day) it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Interest {
+    ThisPage,
+    AllPages,
+}
+
 #[derive(Clone)]
 struct DraggedBlock {
     page: PageId,
@@ -526,6 +535,9 @@ pub struct PageView {
     /// How attribute blocks are drawn (PG-1), mirrored from `settings.json` so a change
     /// made in Settings rebuilds this page's rows.
     attribute_blocks: crate::appearance::AttributeBlocks,
+    /// What store changes this view's rows depend on, recomputed from the rows it just
+    /// built: a query block or an open transclusion makes every page's change relevant.
+    interest: Interest,
     cycle: RebuildCycle,
     /// How many times the rows were rebuilt, and how many of those passes ran inside a
     /// frame (rule 10). Debug builds only, so the rebuild-cycle tests can prove a change
@@ -618,8 +630,17 @@ impl PageView {
                         .journal
                         .as_ref()
                         .is_some_and(|j| j.pages.iter().any(|d| e.pages.contains(d)));
-                if e.structural || e.pages.is_empty() || shown || this.has_embeds() {
+                if e.structural
+                    || e.pages.is_empty()
+                    || shown
+                    || this.interest == Interest::AllPages
+                {
                     if this.cycle.store_changed(e.version, Invalidation::rows()) {
+                        if this.interest == Interest::AllPages {
+                            // A query block or an open transclusion reads other pages:
+                            // answer in this handler, never in a frame (rule 10).
+                            this.rebuild(cx);
+                        }
                         cx.notify();
                     }
                 }
@@ -630,6 +651,9 @@ impl PageView {
                 if this.page.as_ref() == Some(&e.from) {
                     this.page = Some(e.to.clone());
                     this.refs_key = None;
+                    // Transclusions belong to the page that was replaced.
+                    this.open_embeds.clear();
+                    this.interest = Interest::ThisPage;
                     this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }
@@ -706,6 +730,7 @@ impl PageView {
             page_menu: false,
             hovered_row: None,
             attribute_blocks: crate::appearance::attribute_blocks(cx),
+            interest: Interest::ThisPage,
             cycle: RebuildCycle::new(),
             #[cfg(debug_assertions)]
             rebuilds: 0,
@@ -727,12 +752,25 @@ impl PageView {
         self.frame_rebuilds
     }
 
-    fn has_embeds(&self) -> bool {
-        !self.open_embeds.is_empty()
-            || self
-                .items
-                .iter()
-                .any(|i| matches!(i, Item::QueryHeader { .. }))
+    /// Whether this view's rows depend on every page's changes (debug builds only): a
+    /// query block or an open transclusion is present.
+    #[cfg(debug_assertions)]
+    pub fn interested_in_all_pages(&self) -> bool {
+        self.interest == Interest::AllPages
+    }
+
+    /// The interest the rows just built imply: a query header or an open transclusion
+    /// means another page's change can change this view.
+    fn interest_after_build(&self) -> Interest {
+        let query = self
+            .items
+            .iter()
+            .any(|i| matches!(i, Item::QueryHeader { .. }));
+        if query || !self.open_embeds.is_empty() {
+            Interest::AllPages
+        } else {
+            Interest::ThisPage
+        }
     }
 
     /// Show `page` (optionally zoomed into a block).
@@ -846,6 +884,10 @@ impl PageView {
                 .unwrap_or_default();
             self.expanded_groups = saved.into_iter().map(PageId).collect();
             self.expanded_children.clear();
+            // An opened transclusion was a row of the page being left; keeping it would
+            // make every later change on any page rebuild this one (issue 2).
+            self.open_embeds.clear();
+            self.interest = Interest::ThisPage;
         }
         self.page_menu = false;
         self.controls_menu = None;
@@ -1154,6 +1196,7 @@ impl PageView {
         // one, even if it is this view's own (nothing here writes).
         let store = self.app.read(cx).version;
         self.rebuild_rows(cx);
+        self.interest = self.interest_after_build();
         // Every path through `rebuild_rows` ends with the list spliced, including the
         // early returns for a missing page or header: clear the whole reason set here, in
         // one place, so no caller can leave a reason behind.

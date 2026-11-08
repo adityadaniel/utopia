@@ -2892,6 +2892,101 @@ fn a_handler_rebuild_is_not_repeated_by_its_own_change(cx: &mut TestAppContext) 
     );
 }
 
+/// Rule 10: a query block reads every page, so a change on any page must answer it — in
+/// the change handler, not in the next frame. The old `has_embeds` marked the rows dirty
+/// and `render` ran the query (rebuild-cycle issue 2).
+#[gpui::test]
+fn a_query_block_answers_other_pages_changes_outside_the_frame(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    cx.simulate_input("Read [[Dune]] #book");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("{{query: {and: [[Dune]] #book}}}");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert!(
+        view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "a query block makes every page's change relevant"
+    );
+    let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+
+    // A change this view does not show: the query's answer can still change.
+    app.update(cx, |app, cx| {
+        app.changed(vec![PageId("elsewhere".into())], false, cx)
+    });
+    cx.run_until_parked();
+
+    let (after, frames_after) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
+    assert!(
+        after > before,
+        "the view rebuilt for a change it is interested in"
+    );
+    assert_eq!(
+        frames_after, frames_before,
+        "the query ran in the handler, not inside render (rule 10)"
+    );
+}
+
+/// A transclusion of another page is an interest in that page only while its row is open.
+/// Leaving the page must drop it, or every later change anywhere rebuilt this view
+/// (rebuild-cycle issue 2: `open_embeds` was not in the per-page reset list).
+#[gpui::test]
+fn leaving_a_page_drops_its_open_transclusions(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let (target, home, other) = app.update(cx, |app, _| {
+        let target = app.store.create_page("Target").unwrap();
+        let t = app.store.ensure_first_block(&target).unwrap();
+        app.store
+            .set_block_text(&target, &t, "a thought", None, None)
+            .unwrap();
+        app.store.commit_block(&target, &t).unwrap();
+        let home = app.store.create_page("Home").unwrap();
+        let b = app.store.ensure_first_block(&home).unwrap();
+        app.store
+            .set_block_text(&home, &b, &format!("(({t}))"), None, None)
+            .unwrap();
+        app.store.commit_block(&home, &b).unwrap();
+        app.store.sync_index().unwrap();
+        let other = app.store.create_page("Other").unwrap();
+        (target, home, other)
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(home, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let content = cx
+        .debug_bounds("content-1")
+        .expect("the reference row is drawn");
+    // The chip starts at the text's left edge; the container is as wide as the row.
+    cx.simulate_click(
+        point(content.origin.x + px(8.), content.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    let view = ws.read_with(cx, |w, _| w.main_view());
+    assert!(
+        view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "the opened transclusion reads the target page"
+    );
+
+    ws.update_in(cx, |w, window, cx| {
+        w.open(other, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        !view.read_with(cx, |v, _| v.interested_in_all_pages()),
+        "the transclusion belonged to the page that was left"
+    );
+    let before = view.read_with(cx, |v, _| v.rebuilds());
+    app.update(cx, |app, cx| app.changed(vec![target.clone()], false, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.rebuilds()),
+        before,
+        "a change to the old transclusion's page no longer rebuilds this view"
+    );
+}
+
 #[gpui::test]
 fn full_search_and_quick_capture(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
