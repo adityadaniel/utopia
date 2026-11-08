@@ -1,5 +1,47 @@
 # Block editor autocomplete menu (`[[`, `#`, `((`, `/`)
 
+## Status
+
+The menu is one explicit value now. `Autocomplete` (`editor.rs:137`) is
+`Closed | Suppressed { trigger_start, query } | Open(AutocompleteMenu)`, where
+`AutocompleteMenu` (`:153`) owns the trigger kind, the frozen `start..caret` query range, the
+items and the highlight. `Autocomplete::captures_keys()` (`:167`) is the single question the
+renderer, the key context and every key handler ask — "does the menu own the keyboard?" — so
+"a trigger exists" and "there is something to take" can no longer be answered differently by
+different handlers. The state is private and read through `BlockEditor::autocomplete()`
+(`:432`), like the session machine hides its target.
+
+| Issue | State | Failing-first test, then fix |
+|---|---|---|
+| 1 Two definitions of "open" | **fixed** | `fr_2_17_escape_leaves_a_menu_with_nothing_to_show`, `fr_2_17_cmd_enter_is_not_swallowed_by_an_empty_menu` (`crates/utopia-ui/tests/workspace.rs`). `escape` (`:1652`) and `insert_above` (`:1325`) now ask `captures_keys()` like `newline`, `accept_completion`, `vertical`, `render_autocomplete` and the key context, so a menu that found nothing (`/xyz`, `#zzz`, `((zzz`) no longer eats the first Escape and Cmd+Enter starts a block above instead of creating a page from the query. |
+| 2 `accept` uses the live caret against a frozen `start` | **fixed** | `fr_2_17_accept_replaces_the_query_the_menu_was_opened_for`. `AutocompleteMenu.caret` records the caret the items were computed for and `accept` (`:1114`) replaces `start..caret` plus an already typed closer, so Shift+Left (which puts the caret at the selection start) can no longer leave the tail of the query behind (`[[Alp` → `[[Alpha]]p]]`). The frozen range brings one new obligation the old live caret did not have, so `fr_2_17_a_menu_does_not_outlive_the_text_it_was_opened_for` pins it: `sync_from_store` re-derives the menu when it replaces the buffer (undo, remote edit, a plugin through the store) and `accept` refuses a range that is not in the text at all. |
+| 3 Menu can open during IME composition | **fixed** | `ac_13_5_mouse_down_does_not_open_a_menu_mid_composition`. `mouse_down` (`:1699`) returns early while `field.composing()`, and `refresh_autocomplete` (`:1004`) refuses to run then, so no menu ever describes provisional glyphs (§13.5). |
+| 4 `ac_dismissed` is a raw byte offset | **fixed** | `fr_2_17_a_dismissed_trigger_follows_its_query`. `Suppressed` keeps the dismissed trigger's `query` as well, and `refresh_autocomplete` stays shut only while the offset *and* the query match, so one edit (a paste, an undo) that puts a different trigger on the same offset opens its menu. |
+
+What was deliberately not done:
+
+- **The menu still lives beside the session**, not inside `Editing`, as
+  `block-editor-session.md` decided. Every path that ends a session (`begin` on a vanished
+  block, `end`, `detach`, `focus_lost`) assigns `Autocomplete::Closed`, so the two cannot
+  drift; moving it into `Editing` is a change to the session machine.
+- **Cmd+Enter on a *visible* slash menu** still creates a page out of the slash query
+  (`/hea` + Cmd+Enter → a page "hea"). That predates this machine and issues 1 and 2 do not
+  cover it; a future pass should make `accept(create = true)` refuse a `Slash` menu, since
+  "create page from query" (FR-2.17) only means something for `[[`/`#[[`/`#`.
+- **Selection gestures still do not re-derive the menu** (`select_left/right/up/down`,
+  `select_all`, `mouse_move` only `notify`). Issue 2 froze the replaced range, so they can no
+  longer corrupt an accept, and re-querying the store on every drag would churn it for a menu
+  the user is not choosing from.
+
+Two shots captured from the app for the visible parts
+(`docs/verification/block-editor-autocomplete/`): `accept-frozen-query.png` (Shift+Left then
+Enter in a `[[` menu leaves `Met [[Alpha]]`, not `Met [[Alpha]]p]]`) and
+`cmd-enter-empty-menu.png` (Cmd+Enter over `/zzz`, whose menu has nothing to offer, starts a
+block above it instead of creating a page "zzz").
+
+The line numbers and tables below describe the pre-fix code (`main f5da7d1`); the states they
+list still hold, in the shapes named above.
+
 ## What it controls
 
 Whether a completion menu is open, which trigger kind, its items and highlighted row, and
@@ -39,7 +81,7 @@ Not read outside this file (grep for `.ac` in `page_view.rs`/`workspace.rs` is e
   `ac.start..cursor + skip` with the completion using the **current** caret (`:773, :781`).
 - `mouse_down` (`:1278`) calls `refresh_autocomplete` unconditionally.
 
-## Impossible or unhandled combinations (evidence)
+## Impossible or unhandled combinations (evidence, pre-fix)
 
 1. **Two definitions of "open".** Render, `newline`, `accept_completion`, `vertical` and the
    key context all use `is_some_and(|a| !a.items.is_empty())` (`:890, :909, :1071, :1296-1298,
@@ -61,7 +103,24 @@ Not read outside this file (grep for `.ac` in `page_view.rs`/`workspace.rs` is e
    edits before the trigger shift a different trigger onto the same offset, it stays
    suppressed. No routine path found that hits this — uncertain, minor.
 
-## Diagram
+## Diagram (current states and transitions)
+
+```mermaid
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> OpenVisible : trigger detected, items > 0
+    Closed --> OpenInvisible : trigger detected, items == 0
+    OpenVisible --> OpenVisible : Up/Down (selected wraps) | keystroke re-query
+    OpenVisible --> OpenInvisible : query narrows to 0 items
+    OpenInvisible --> OpenVisible : query widens
+    OpenVisible --> Suppressed : Escape | Enter/Tab accept | wrapped selection
+    OpenInvisible --> Closed : Enter/Tab split | Escape (ends the block) | Cmd+Enter (inserts above)
+    OpenVisible --> Closed : begin/end/indent/outdent/backspace-at-trigger | focus_lost
+    Suppressed --> Closed : caret leaves the trigger, or the trigger's query changes
+    Suppressed --> OpenVisible : a different query at the same offset
+```
+
+## Diagram (pre-fix)
 
 ```mermaid
 stateDiagram-v2
@@ -79,20 +138,32 @@ stateDiagram-v2
     OpenVisible --> Closed : begin/end/indent/outdent/backspace-at-trigger
 ```
 
-## Would an explicit state type help?
+## The explicit state that was built
 
-Yes. Make "no items" a distinct, non-capturing state so every handler asks one question.
+The sketch above was sound and is what now exists (`editor.rs:130-196`), with two additions the
+code needed:
 
 ```rust
-enum Autocomplete {
+pub enum Autocomplete {
     Closed,
-    Suppressed { trigger_start: usize },
-    Open { kind: AcKind, start: usize, query: String, items: Vec<AcItem>, selected: usize },
+    /// Keyed by the query too: a raw offset is not a trigger's identity (issue 4).
+    Suppressed { trigger_start: usize, query: String },
+    /// `items` may be empty; only a non-empty menu captures a key, which is what
+    /// `captures_keys` answers for every handler.
+    Open(AutocompleteMenu),
+}
+pub struct AutocompleteMenu {
+    pub kind: AcKind,
+    pub start: usize,
+    pub query: String,
+    pub items: Vec<AcItem>,
+    pub selected: usize,
+    /// The caret the items were computed for: `accept` replaces `start..caret` (issue 2).
+    pub caret: usize,
 }
 impl Autocomplete {
-    fn captures_keys(&self) -> bool { matches!(self, Open { items, .. } if !items.is_empty()) }
+    pub fn captures_keys(&self) -> bool {
+        matches!(self, Autocomplete::Open(menu) if !menu.items.is_empty())
+    }
 }
 ```
-
-`escape`/`insert_above` would then call `captures_keys()` like everyone else, and `accept`
-could take the frozen `start..caret_at_refresh` range instead of the live caret.
