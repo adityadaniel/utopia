@@ -85,8 +85,10 @@ final class GraphModel: ObservableObject {
     }
 
     /// One sync round with the configured relay, off the main thread.
+    ///
+    /// A tap while a round is running starts nothing (the core answers `busy`).
     func sync(settings: SyncSettings) {
-        guard let graph, !settings.relayURL.isEmpty else { return }
+        guard let graph, !settings.relayURL.isEmpty, !syncing else { return }
         syncing = true
         let token = Keychain.get("utopia-sync")
         let passphrase = Keychain.get("utopia-sync-passphrase")
@@ -99,14 +101,22 @@ final class GraphModel: ObservableObject {
             await MainActor.run {
                 self.syncing = false
                 switch result {
-                case .success(let s):
-                    let failed = s.failed > 0 ? " — \(s.failed) page(s) failed" : ""
-                    self.lastSync = "Synced: \(s.pushed) sent, \(s.importedPages) pages updated\(failed)"
+                case .success(let outcome):
+                    self.lastSync = Self.describe(outcome)
                     self.reload()
                 case .failure(let e):
                     self.lastSync = "Offline: \(e)"
                 }
             }
+        }
+    }
+
+    private static func describe(_ outcome: SyncOutcome) -> String {
+        switch outcome {
+        case .synced(let s):
+            return "Synced: \(s.pushed) sent, \(s.importedPages) pages updated"
+        case .busy:
+            return "Sync: already running"
         }
     }
 }

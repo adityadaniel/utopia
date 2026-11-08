@@ -1,8 +1,20 @@
 //! The mobile surface (§14.3): daily capture, references, backlinks, offline + sync.
 
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use utopia_ffi::{FfiError, Graph};
+use utopia_ffi::{FfiError, Graph, SyncOutcome, SyncSummary};
+
+/// The counts of a clean round; every other answer is the test's failure.
+fn synced(outcome: SyncOutcome) -> SyncSummary {
+    match outcome {
+        SyncOutcome::Synced { summary } => summary,
+        other => panic!("expected a clean round, got {other:?}"),
+    }
+}
 
 #[test]
 fn capture_links_and_backlinks() {
@@ -57,8 +69,10 @@ fn phone_and_desktop_sync_through_a_relay() {
         g.set_today(Some("2026-11-02".into())).unwrap();
     }
     let sync = |g: &Graph| {
-        g.sync(url.clone(), "g1".into(), None, Some("shared secret".into()))
-            .unwrap()
+        synced(
+            g.sync(url.clone(), "g1".into(), None, Some("shared secret".into()))
+                .unwrap(),
+        )
     };
     // Offline capture on the phone, then sync.
     let day = phone.today().unwrap();
@@ -101,4 +115,56 @@ fn phone_and_desktop_sync_through_a_relay() {
 
 async fn axum_serve(listener: tokio::net::TcpListener, app: utopia_syncd::Router) {
     utopia_syncd::serve(listener, app).await.unwrap();
+}
+
+/// A relay that accepts the connection, reads the request, waits `delay`, then answers 503
+/// and closes. It exists to put a round on the wire for longer than a UI frame.
+fn slow_relay(delay: Duration) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let s2 = stop.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            if s2.load(Ordering::SeqCst) {
+                break;
+            }
+            let Ok(mut stream) = stream else { break };
+            std::thread::spawn(move || {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                std::thread::sleep(delay);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.flush();
+            });
+        }
+    });
+    // The listener is owned by the thread, which serves until the process ends.
+    format!("http://{addr}")
+}
+
+/// §12.6: a second tap while a round is running starts nothing; it answers at once instead
+/// of queueing a second full round behind the first (issue 2).
+#[test]
+fn ac_12_6_a_second_tap_during_a_round_is_busy() {
+    let url = slow_relay(Duration::from_millis(1500));
+    let g = Arc::new(Graph::in_memory().unwrap());
+    let g2 = g.clone();
+    let first_url = url.clone();
+    let round = std::thread::spawn(move || g2.sync(first_url, "g1".into(), None, None));
+    std::thread::sleep(Duration::from_millis(300));
+    let started = Instant::now();
+    let second = g.sync(url, "g1".into(), None, None).unwrap();
+    let waited = started.elapsed();
+    assert_eq!(
+        second,
+        SyncOutcome::Busy,
+        "a tap during a round must not queue another one"
+    );
+    assert!(
+        waited < Duration::from_secs(1),
+        "the second tap waited {waited:?} behind the first round"
+    );
+    let _ = round.join().unwrap();
 }
