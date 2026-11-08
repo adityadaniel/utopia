@@ -25,7 +25,9 @@
 //! A request becomes a [`ApiCall`] with one explicit state ([`CallState`]): `Pending` until
 //! the store's owner claims it (`Running` → `Done`) or the request gives up (`Expired`,
 //! terminal). Exactly one side wins that race, so a call that answered 504 can never run
-//! afterwards and a retry cannot write twice; see `docs/state-machines/api-call-inbox.md`.
+//! afterwards and a retry cannot write twice. The queue is bounded ([`Limits::queue`]), so a
+//! stalled owner answers 429 instead of accumulating work; see
+//! `docs/state-machines/api-call-inbox.md`.
 
 use std::future::Future as _;
 use std::net::SocketAddr;
@@ -354,6 +356,9 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
 /// Bounds on the calls an [`ApiServer`] accepts and how long a request waits for one.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
+    /// How many calls may wait for the store's owner before new requests are refused with
+    /// 429. A stalled UI thread must not let the queue grow without bound.
+    pub queue: usize,
     /// How long a request waits for its answer before its call is cancelled (504). A call
     /// older than this never runs, so a client that gave up and retried cannot write twice.
     pub wait: Duration,
@@ -362,8 +367,10 @@ pub struct Limits {
 impl Default for Limits {
     fn default() -> Self {
         // Long enough for a slow write on a big day, short enough that a wedged UI thread
-        // does not hold a client forever.
+        // does not hold a client forever; 64 calls is far more than the app drains in a
+        // frame, and each is a few hundred bytes.
         Self {
+            queue: 64,
             wait: Duration::from_secs(30),
         }
     }
@@ -561,7 +568,7 @@ pub fn new_token() -> String {
 
 #[derive(Clone)]
 struct Ctx {
-    calls: mpsc::Sender<ApiCall>,
+    calls: mpsc::SyncSender<ApiCall>,
     token: String,
     port: u16,
     wait: Duration,
@@ -586,7 +593,7 @@ pub fn serve_with(addr: &str, token: String, limits: Limits) -> std::io::Result<
     let listener = std::net::TcpListener::bind(addr)?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
-    let (calls_tx, calls) = mpsc::channel();
+    let (calls_tx, calls) = mpsc::sync_channel(limits.queue.max(1));
     let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
     let ctx = Ctx {
         calls: calls_tx,
@@ -682,8 +689,17 @@ async fn call(ctx: Ctx, headers: HeaderMap, op: Op) -> Response {
     let (reply, mut rx) = oneshot::channel();
     let call = ApiCall::new(op, reply, ctx.wait);
     let state = call.state.clone();
-    if ctx.calls.send(call).is_err() {
-        return err(503, "the app is not running; nothing was written");
+    if let Err(e) = ctx.calls.try_send(call) {
+        return match e {
+            // The owner is behind; refuse rather than let the queue grow. Nothing ran, so
+            // the client can try again later.
+            mpsc::TrySendError::Full(_) => {
+                err(429, "the app is busy; nothing was written, try again")
+            }
+            mpsc::TrySendError::Disconnected(_) => {
+                err(503, "the app is not running; nothing was written")
+            }
+        };
     }
     // Keep `rx` across the wait (a plain `timeout` would consume it): the answer can land
     // at the very moment the wait ends.

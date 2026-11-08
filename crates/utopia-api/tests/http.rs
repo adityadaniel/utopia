@@ -216,6 +216,7 @@ fn ac_4_1_a_timed_out_capture_is_not_written_when_the_owner_gets_to_it() {
             "secret-token".into(),
             Limits {
                 wait: Duration::from_millis(150),
+                ..Limits::default()
             },
         )
         .unwrap(),
@@ -277,4 +278,75 @@ fn ac_4_1_a_timed_out_capture_is_not_written_when_the_owner_gets_to_it() {
         .map(|(id, _)| st.block(&id).unwrap().text.clone())
         .collect();
     assert_eq!(texts, ["one"], "the timed-out call wrote nothing");
+}
+
+/// AC §4.1 (local automation API): a stalled owner must not let the queue grow without
+/// bound. A call that does not fit is refused with 429, which — unlike one that was queued
+/// and then abandoned — never runs (docs/state-machines/api-call-inbox.md).
+#[test]
+fn ac_4_1_a_stalled_owner_refuses_calls_instead_of_queueing_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let server = Arc::new(serve("127.0.0.1:0", "secret-token".into()).unwrap());
+    let queue = Limits::default().queue.max(1);
+    let stop = Arc::new(AtomicBool::new(false));
+    let (s2, st2, p2) = (server.clone(), stop.clone(), path.clone());
+    let owner = std::thread::spawn(move || {
+        let mut store = Store::open(p2).unwrap();
+        store.set_today(NaiveDate::from_ymd_opt(2026, 11, 2));
+        // Let every request arrive before draining a single call.
+        std::thread::sleep(Duration::from_millis(600));
+        while !st2.load(Ordering::SeqCst) {
+            if let Some(call) = s2.recv_timeout(Duration::from_millis(20)) {
+                call.run(&mut store);
+            }
+        }
+        store
+    });
+    let mut threads = Vec::new();
+    for i in 0..queue + 36 {
+        let url = format!("{}/v1/capture", server.url());
+        threads.push(std::thread::spawn(move || {
+            let body = json!({ "text": format!("n{i}") }).to_string();
+            let req = ureq::post(&url)
+                .set("Authorization", "Bearer secret-token")
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_millis(150));
+            match req.send_string(&body) {
+                Ok(_) | Err(ureq::Error::Status(504, _)) => None, // queued, then gave up
+                Err(ureq::Error::Status(code, r)) => Some((code, r.into_string().unwrap())),
+                Err(ureq::Error::Transport(_)) => None, // gave up before an answer
+            }
+        }));
+    }
+    let mut refused = Vec::new();
+    for t in threads {
+        if let Some(r) = t.join().unwrap() {
+            refused.push(r);
+        }
+    }
+    assert!(
+        !refused.is_empty(),
+        "the queue accepted all {} calls",
+        queue + 36
+    );
+    for (code, body) in &refused {
+        assert_eq!(*code, 429, "{body}");
+        let body: Value = serde_json::from_str(body).unwrap();
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap()
+                .contains("nothing was written"),
+            "{body}"
+        );
+    }
+    stop.store(true, Ordering::SeqCst);
+    let mut store = owner.join().unwrap();
+    let pages = store.list_pages(true).unwrap();
+    let wrote = pages
+        .iter()
+        .map(|p| store.page_state(&p.id).unwrap().live_preorder().len())
+        .sum::<usize>();
+    assert!(wrote <= queue, "{wrote} writes from a queue of {queue}");
 }
