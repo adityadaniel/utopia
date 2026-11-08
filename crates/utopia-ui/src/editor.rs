@@ -752,6 +752,11 @@ impl BlockEditor {
             self.accept_composition(cx);
         }
         self.commit_block(true, cx);
+        // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
+        // above may also have rewritten the text it was offering completions for (an
+        // expanded relative date), so accepting from it later would edit the wrong range.
+        self.ac = None;
+        self.ac_dismissed = None;
     }
 
     /// Queue a host request that must wait for the input method (§13.5). The latest request

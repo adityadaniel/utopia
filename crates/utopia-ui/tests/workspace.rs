@@ -5709,13 +5709,16 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     use gpui::Focusable as _;
     let (app, ws, cx) = setup(cx);
     cx.simulate_input("f [[tomorrow");
-    // Only the menu is dismissed: the auto-paired link is still where the caret is.
-    cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(
         day_texts(&app, today(), cx),
         ["f [[tomorrow]]"],
         "auto-paired, with the caret inside the link"
+    );
+    let editor = ws.update(cx, |w, _| w.editor());
+    assert!(
+        editor.read_with(cx, |e, _| e.ac.is_some()),
+        "the [[ menu is open"
     );
     // The keyboard goes to the workspace; no host calls `end` (a click into the search box
     // or another pane does the same).
@@ -5728,6 +5731,10 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(day_texts(&app, today(), cx), ["f [[November 3rd, 2026]]"]);
     assert_tomorrow_linked(&app, cx);
+    assert!(
+        editor.read_with(cx, |e, _| e.ac.is_none()),
+        "the menu was about text the commit rewrote"
+    );
 }
 
 /// Accepting the suggestion (Tab or Enter) inserts the day's title directly.
