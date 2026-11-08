@@ -257,6 +257,29 @@ impl SettingsView {
             cx.set_global(Theme::for_appearance(window.appearance()));
             cx.notify();
         }));
+        let focus = cx.focus_handle();
+        // A recording belongs to this window, so it ends when the keyboard goes elsewhere:
+        // another control taking focus here (the filter field — the only other focusable
+        // thing in the window), focus leaving the view, or the window losing activation
+        // (Cmd+Tab, a click in the main window). Otherwise the chip keeps saying
+        // "Press keys…" for a keystroke typed somewhere else, and the interceptor swallows
+        // the Escape the field is waiting for (`settings-key-capture.md`, issues 2 and 5).
+        //
+        // Focus on *this* handle is not enough: the field is a descendant, so moving into it
+        // is not a focus-out of the window's own handle. A focusable control added to this
+        // window later needs its own listener here.
+        let search_focus = search.read(cx).focus_handle(cx);
+        subs.push(cx.on_focus(&search_focus, window, |this, _, cx| {
+            this.capture_left_the_window(cx);
+        }));
+        subs.push(cx.on_focus_out(&focus, window, |this, _, _, cx| {
+            this.capture_left_the_window(cx);
+        }));
+        subs.push(cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() {
+                this.capture_left_the_window(cx);
+            }
+        }));
         Self {
             config_dir,
             overrides,
@@ -271,7 +294,7 @@ impl SettingsView {
             query: String::new(),
             flash: None,
             keys_scroll: ScrollHandle::default(),
-            focus: cx.focus_handle(),
+            focus,
             _subs: subs,
         }
     }
@@ -291,6 +314,17 @@ impl SettingsView {
     /// Stop recording, if a recording is in progress.
     fn cancel_capture(&mut self) {
         self.capture = Capture::Idle;
+    }
+
+    /// End a capture because the keyboard went somewhere else. Said out loud: the chip going
+    /// back to the keys in force without a word looks like the recording was applied.
+    fn capture_left_the_window(&mut self, cx: &mut Context<Self>) {
+        if self.capture.action().is_none() {
+            return;
+        }
+        self.cancel_capture();
+        self.status = Some("Capture cancelled.".into());
+        cx.notify();
     }
 
     /// Start listening for the next keystroke and bind it to `d`.

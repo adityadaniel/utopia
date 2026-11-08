@@ -83,6 +83,105 @@ fn escape_cancels_capture(cx: &mut TestAppContext) {
     assert!(keymap_json(dir.path()).is_none(), "nothing to save");
 }
 
+/// `settings-key-capture.md`, issue 2: a recording belongs to the Settings window. Clicking
+/// into the filter field used to leave it running: the chip kept saying "Press keys…" and
+/// the interceptor swallowed the Escape meant for the field (issue 5).
+#[gpui::test]
+fn clicking_into_the_filter_ends_the_capture(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    // Focus events only reach a listener while the window is active (as it is in the app,
+    // where Settings is the front window).
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+
+    let chip = cx
+        .debug_bounds("settings-chip-GoToday")
+        .expect("the key chip is the control");
+    cx.simulate_click(chip.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.capturing().map(|d| d.action)),
+        Some("GoToday"),
+        "clicking the chip starts recording"
+    );
+
+    let field = cx
+        .debug_bounds("settings-search")
+        .expect("the filter field");
+    cx.simulate_click(field.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.capturing().is_none(),
+            "focus moving into another control ends the recording"
+        );
+        assert!(v.overrides().is_empty(), "nothing was rebound");
+        assert_eq!(v.status(), Some("Capture cancelled."));
+    });
+
+    // And the field's own Escape works again instead of being swallowed.
+    cx.simulate_input("zoom");
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.query().to_string()), "zoom");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.query().to_string()),
+        "",
+        "escape reaches the field again"
+    );
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
+/// `settings-key-capture.md`, issue 2: Cmd+Tab (or clicking the main window) deactivates the
+/// Settings window. The recording must not outlive it, or coming back shows a chip waiting
+/// for keys pressed somewhere else.
+#[gpui::test]
+fn leaving_the_window_ends_the_capture(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+    cx.run_until_parked();
+
+    let today = doc("GoToday").unwrap();
+    view.update_in(cx, |v, window, cx| {
+        window.activate_window();
+        v.start_capture(today, window, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.capturing().map(|d| d.action)),
+        Some("GoToday")
+    );
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    view.read_with(cx, |v, _| {
+        assert!(
+            v.capturing().is_none(),
+            "the recording ends when the window loses the keyboard"
+        );
+        assert!(v.overrides().is_empty(), "nothing was rebound");
+        assert_eq!(v.status(), Some("Capture cancelled."));
+    });
+    assert!(keymap_json(dir.path()).is_none(), "nothing to save");
+}
+
 /// `settings-key-capture.md`, issue 3: Escape means "back out" whatever modifiers are held.
 /// A modified Escape used to be treated as a chord, so the action was quietly bound to a
 /// combination that reads to the user as a cancel — and nothing in the app answers to it.
