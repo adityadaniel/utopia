@@ -707,7 +707,7 @@ impl Store {
             }
             // The blocks already live in the survivor (rule 8). Restoring a merged page means
             // going there, never resurrecting a tile with nothing under it.
-            PageFate::Merged { into, .. } => return Ok(into),
+            PageFate::Merged { .. } => return self.merge_survivor(page),
             // A purged page has no shard, so the read above already failed; keeping the arm
             // makes the four states exhaustive here.
             PageFate::Purged { .. } => return Err(StoreError::NotFound(format!("page {page}"))),
@@ -738,6 +738,20 @@ impl Store {
             }
         };
         Ok(survivor)
+    }
+
+    /// The end of a chain of merges (§8.6): `merged_into` may point at a page that was merged
+    /// away later (A onto B, then B onto C), and only the last one holds the blocks. Bounded
+    /// like `reconcile_merged`, so a cycle in the pointers can never hang a read.
+    fn merge_survivor(&mut self, page: &PageId) -> Result<PageId> {
+        let mut current = page.clone();
+        for _ in 0..8 {
+            match PageFate::of(self.page_state(&current)?) {
+                PageFate::Merged { into, .. } => current = into,
+                _ => break,
+            }
+        }
+        Ok(current)
     }
 
     /// Rewrite `page` even though its shard did not change, so the writer can drop a trash
@@ -1042,6 +1056,46 @@ mod tests {
         assert!(
             matches!(
                 PageFate::of(s.page_state(&from).unwrap()),
+                PageFate::Merged { .. }
+            ),
+            "restore must not resurrect a merged page (rule 8)"
+        );
+    }
+
+    /// Review: merge chains exist (A onto B, then B onto C, §8.6), so A's `merged_into`
+    /// points at a page that is itself a tombstone. Restore must resolve the *end* of the
+    /// chain — where the blocks actually live — not the intermediate hop.
+    #[test]
+    fn ac_4_6_restoring_a_page_merged_twice_returns_the_final_survivor() {
+        let mut s = Store::open_in_memory().unwrap();
+        let a = s.create_page("A").unwrap();
+        let b = s.create_page("B").unwrap();
+        let c = s.create_page("C").unwrap();
+        let block = s.ensure_first_block(&a).unwrap();
+        s.set_block_text(&a, &block, "moved twice", None, None)
+            .unwrap();
+        s.merge_pages(&a, &b).unwrap();
+        s.merge_pages(&b, &c).unwrap();
+
+        let texts: Vec<String> = {
+            let st = s.page_state(&c).unwrap();
+            st.live_preorder()
+                .into_iter()
+                .map(|(id, _)| st.block(&id).unwrap().text.clone())
+                .collect()
+        };
+        assert!(
+            texts.iter().any(|t| t == "moved twice"),
+            "the blocks reached the end of the chain: {texts:?}"
+        );
+        assert_eq!(
+            s.restore_page(&a).unwrap(),
+            c,
+            "the survivor is the end of the merge chain, not the hop A points at"
+        );
+        assert!(
+            matches!(
+                PageFate::of(s.page_state(&a).unwrap()),
                 PageFate::Merged { .. }
             ),
             "restore must not resurrect a merged page (rule 8)"

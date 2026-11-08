@@ -37,8 +37,10 @@ Fixed on `fix/page-lifecycle-trash` (schema v8). Line numbers below are from the
   is the sync engine's behaviour and is unchanged here.
 - **Found while doing it, not in the list: restore on a `Merged` page.** It used to clear
   both tombstone fields and return a live page whose every block had `moved_to` the survivor
-  — a page with nothing to draw. Restore now returns the survivor and leaves the merge
-  tombstone alone (rule 8); `ac_4_6_restoring_a_merged_page_returns_the_survivor`.
+  — a page with nothing to draw. Restore now returns the survivor, following the chain of
+  merges to its end (A onto B, then B onto C: the blocks are in C), and leaves the merge
+  tombstone alone (rule 8). Tests: `ac_4_6_restoring_a_merged_page_returns_the_survivor`,
+  `ac_4_6_restoring_a_page_merged_twice_returns_the_final_survivor`.
 
 ## What it controls
 
