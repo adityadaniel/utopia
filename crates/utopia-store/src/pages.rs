@@ -84,23 +84,43 @@ impl Store {
             .map(PageId))
     }
 
-    /// Whether `id` was ever used by a page on this device: live, tombstoned, an in-memory
-    /// shard that is queued or written, a durable shard (`page_doc`), or an id that is still
-    /// a session alias for the page a merged promotion moved to (FR-1.2). An alias is
-    /// reserved: reusing it would make every read of the new page follow the old survivor.
+    /// Whether `id` was ever used by a page on this device: live, tombstoned, purged by Empty
+    /// Trash (the local `tombstone` memory), an in-memory shard that is queued or written, a
+    /// durable shard (`page_doc`), or an id that is still a session alias for the page a
+    /// merged promotion moved to (FR-1.2). An alias is reserved: reusing it would make every
+    /// read of the new page follow the old survivor.
     fn id_taken(&self, id: &PageId) -> Result<bool> {
         Ok(self.promotions.contains_key(id)
             || self.claims_id(id)
-            || self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM page_doc WHERE page_id=?1)",
-                [id.as_str()],
+            || self.query_exists("SELECT EXISTS(SELECT 1 FROM page_doc WHERE page_id=?1)", id)?
+            || self.query_exists("SELECT EXISTS(SELECT 1 FROM page WHERE id=?1)", id)?
+            // Empty Trash leaves no page row behind; the memory is what keeps the id reserved
+            // (rule 4, `PageFate::Purged`).
+            || self.query_exists("SELECT EXISTS(SELECT 1 FROM tombstone WHERE id=?1)", id)?)
+    }
+
+    fn query_exists(&self, sql: &str, id: &PageId) -> Result<bool> {
+        Ok(self.conn.query_row(sql, [id.as_str()], |r| r.get(0))?)
+    }
+
+    /// This device's view of a page's lifecycle
+    /// (docs/state-machines/page-lifecycle-trash.md). `Purged` is the state Empty Trash
+    /// leaves behind: no shard and no page row, only the local memory that reserves the id.
+    /// `None` for an id this graph has never seen.
+    pub fn page_fate(&mut self, page: &PageId) -> Result<Option<PageFate>> {
+        if self.page_exists(page)? {
+            return Ok(Some(PageFate::of(self.page_state(page)?)));
+        }
+        self.read_barrier()?;
+        let at: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT deleted_at FROM tombstone WHERE id=?1",
+                [page.as_str()],
                 |r| r.get(0),
-            )?
-            || self.conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM page WHERE id=?1)",
-                [id.as_str()],
-                |r| r.get(0),
-            )?)
+            )
+            .optional()?;
+        Ok(at.map(|at| PageFate::Purged { at }))
     }
 
     /// Whether an in-memory shard for `id` counts as the page existing. A shard that was

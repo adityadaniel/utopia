@@ -5,7 +5,7 @@ use chrono::NaiveDate;
 use utopia_core::outline::{self, Plan};
 use utopia_core::{BlockId, BlockKind, Command, PageId, PageKind};
 use utopia_doc::Frontier;
-use utopia_store::{BlockRefStatus, EditOpts, RefQuery, RefTarget, Store, StoreError};
+use utopia_store::{BlockRefStatus, EditOpts, PageFate, RefQuery, RefTarget, Store, StoreError};
 
 fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
@@ -588,6 +588,10 @@ fn ac_1_5_empty_trash_never_reissues_a_purged_id() {
     assert!(
         s.page_row(&id).unwrap().is_none(),
         "Empty Trash is a hard delete (rule 5)"
+    );
+    assert!(
+        matches!(s.page_fate(&id).unwrap(), Some(PageFate::Purged { .. })),
+        "only the local tombstone memory is left"
     );
 
     let again = s.create_page("Foo").unwrap();

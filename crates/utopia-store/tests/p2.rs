@@ -146,13 +146,79 @@ fn v6_migration_backfills_attributes() {
     // Simulate a v5 file: drop the table and roll the version back.
     {
         let c = rusqlite::Connection::open(&path).unwrap();
-        c.execute_batch("DROP TABLE attr; DROP TABLE attachment; PRAGMA user_version = 5;")
-            .unwrap();
+        c.execute_batch(
+            "DROP TABLE attr; DROP TABLE attachment; DROP TABLE tombstone;
+             PRAGMA user_version = 5;",
+        )
+        .unwrap();
     }
     let s = Store::open(&path).unwrap();
     assert_eq!(
         hits(&s, "{attr: author [[Frank Herbert]]}"),
         vec!["Author:: Frank Herbert"]
+    );
+}
+
+/// v8 (docs/state-machines/page-lifecycle-trash.md issue 3): an older graph keeps opening
+/// and gains the tombstone memory, so a title trashed before the upgrade is not issued the
+/// same uuidv5 again after Empty Trash. The same migration drops a trash row that outlived
+/// its tombstone (the state an undo of a delete used to leave, issue 1).
+#[test]
+fn v8_migration_remembers_tombstones_and_repairs_the_trash() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let (gone, live) = {
+        let mut s = Store::open(&path).unwrap();
+        let gone = s.create_page("Gone").unwrap();
+        write(&mut s, &gone, "kept in the trash");
+        s.delete_page(&gone).unwrap();
+        let live = s.create_page("Live").unwrap();
+        s.sync_index().unwrap();
+        (gone, live)
+    };
+    // Simulate a v7 file: no tombstone memory, and a trash row for a live page.
+    {
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch(&format!(
+            "DROP TABLE tombstone;
+             INSERT OR REPLACE INTO trash(id, kind, payload, deleted_at)
+               VALUES ('{live}', 'page', X'7b7d', 1);
+             PRAGMA user_version = 7;"
+        ))
+        .unwrap();
+    }
+
+    let mut s = Store::open(&path).unwrap();
+    assert_eq!(
+        s.list_trash().unwrap().len(),
+        1,
+        "the trashed page is still listed"
+    );
+    let stale: i64 = s
+        .conn()
+        .query_row(
+            "SELECT count(*) FROM trash WHERE id=?1",
+            [live.as_str()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stale, 0, "a row that outlived its tombstone is dropped");
+    let trashed_at = s.list_trash().unwrap()[0].2;
+    assert_eq!(
+        s.page_fate(&gone).unwrap(),
+        Some(utopia_store::PageFate::Trashed { at: trashed_at }),
+        "the migration does not change a page's fate"
+    );
+    assert_eq!(s.empty_trash(None).unwrap(), 1);
+    assert_eq!(
+        s.page_fate(&gone).unwrap(),
+        Some(utopia_store::PageFate::Purged { at: trashed_at }),
+        "the memory outlives the shard and the page row"
+    );
+    assert_ne!(
+        s.create_page("Gone").unwrap(),
+        gone,
+        "a purged id is not issued again (rule 4)"
     );
 }
 

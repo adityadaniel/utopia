@@ -8,7 +8,7 @@
 
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: i64 = 7;
+pub const SCHEMA_VERSION: i64 = 8;
 
 const V1: &str = r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -186,6 +186,26 @@ CREATE TABLE attachment (
 CREATE INDEX attachment_upload ON attachment(uploaded) WHERE uploaded = 0;
 "#;
 
+/// v8: the local tombstone memory (docs/state-machines/page-lifecycle-trash.md issue 3).
+/// Empty Trash removes the shard and the page row, which used to be the only record that an
+/// id had been tombstoned: the next `create_page` reissued the same uuidv5 (rule 4) and a
+/// peer that still held the tombstoned shard imported the new page's ops into it, bringing
+/// `deleted_at` back. These rows are local bookkeeping, not a projection, so
+/// `rebuild_index` never drops them.
+///
+/// Backfilled from every page that is tombstoned today, and the same migration drops a
+/// trash row that outlived its tombstone (the state an undo of a delete used to leave).
+const V8: &str = r#"
+CREATE TABLE tombstone (
+  id         TEXT PRIMARY KEY,
+  deleted_at INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO tombstone(id, deleted_at)
+  SELECT id, deleted_at FROM page WHERE deleted_at IS NOT NULL;
+DELETE FROM trash WHERE NOT EXISTS (
+  SELECT 1 FROM page p WHERE p.id = trash.id AND p.deleted_at IS NOT NULL);
+"#;
+
 /// Attribute row values for a block's text, if it is an attribute block.
 pub(crate) fn attr_row(text: &str) -> Option<(String, String, String, String)> {
     use utopia_core::{inline, title::normalize_title};
@@ -274,6 +294,15 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if version < 7 {
         let tx = conn.transaction()?;
         tx.execute_batch(V7)?;
+        // Stamp the version this migration builds, not the newest one: each block commits
+        // on its own, and a crash between two of them must not leave a file that claims a
+        // schema it does not have.
+        tx.execute_batch("PRAGMA user_version = 7")?;
+        tx.commit()?;
+    }
+    if version < 8 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V8)?;
         tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
         tx.commit()?;
     }

@@ -96,7 +96,8 @@ impl Store {
     }
 
     /// Rebuild all derived tables from the shards (principle 6: derived data is
-    /// disposable).
+    /// disposable). The local `tombstone` memory is not derived data (§10.3, rule 4): a
+    /// purged page has no shard to rebuild it from, so it is never dropped here.
     pub fn rebuild_index(&mut self) -> Result<()> {
         self.sync_index()?;
         self.load_all_docs()?;

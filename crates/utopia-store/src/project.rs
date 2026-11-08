@@ -338,6 +338,16 @@ impl Projector<'_> {
         )?;
         self.conn
             .execute("DELETE FROM alias WHERE page_id=?1", [st.page_id.as_str()])?;
+        // Rule 4: remember that this id was tombstoned. Empty Trash deletes the shard and the
+        // page row, so this row is the only thing that stops the deterministic id from being
+        // issued again (docs/state-machines/page-lifecycle-trash.md issue 3).
+        if let Some(at) = st.meta.deleted_at {
+            self.conn.execute(
+                "INSERT INTO tombstone(id, deleted_at) VALUES (?1, ?2)
+                 ON CONFLICT(id) DO UPDATE SET deleted_at=excluded.deleted_at",
+                params![st.page_id.as_str(), at],
+            )?;
+        }
         if st.meta.deleted_at.is_none() {
             for a in &st.meta.aliases {
                 let key = normalize_title(a);
