@@ -294,6 +294,16 @@ impl PdfView {
         cx.notify();
     }
 
+    /// Drop the live drag without writing anything: the button is no longer held, or the
+    /// release landed where no page could finish it (the gutter, the header, outside the
+    /// window).
+    fn cancel_drag(&mut self, cx: &mut Context<Self>) {
+        if self.dragging() {
+            self.gesture = Gesture::Idle;
+            cx.notify();
+        }
+    }
+
     /// Start a drag on `page`; an Option-drag highlights an area (a figure) instead of
     /// selecting text.
     fn begin_drag(&mut self, page: usize, at: Point<Pixels>, area: bool) {
@@ -539,6 +549,19 @@ impl Render for PdfView {
             .on_key_down(cx.listener(|_, e: &gpui::KeyDownEvent, _, cx| {
                 if e.keystroke.key == "escape" {
                     cx.emit(PdfEvent::Close);
+                }
+            }))
+            // The page a drag started on finishes it; a release anywhere else (the gutter,
+            // the header) cancels it rather than leaving its rectangle on screen.
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.cancel_drag(cx)),
+            )
+            // A release outside the window has no hovered element to tell; the next move
+            // with no button held is when the viewer learns the drag is over.
+            .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
+                if e.pressed_button != Some(MouseButton::Left) {
+                    this.cancel_drag(cx);
                 }
             }))
             .size_full()
