@@ -3599,7 +3599,10 @@ impl PageView {
             }
             PropertyKind::Plain => {
                 let line = crate::appearance::density(cx).line_height();
-                self.render_rich(&p.value, &p.block, None, line, 0, cx)
+                div()
+                    .text_size(px(crate::theme::TAG.size))
+                    .child(self.render_rich(&p.value, &p.block, None, line, 0, cx))
+                    .into_any_element()
             }
         }
     }
@@ -3654,7 +3657,7 @@ impl PageView {
         value = match &self.alias_input {
             Some(input) => value.child(
                 div()
-                    .w(px(160.))
+                    .w(px(crate::theme::PROPERTY_ALIAS_WIDTH))
                     .px_1()
                     .border_1()
                     .border_color(th.link)
@@ -3692,7 +3695,7 @@ impl PageView {
                 div()
                     .id("add-property")
                     .debug_selector(|| "add-property".into())
-                    .h(px(28.))
+                    .h(px(crate::theme::PROPERTY_CONTROL_HEIGHT))
                     .flex()
                     .items_center()
                     .gap_1()
@@ -3714,7 +3717,7 @@ impl PageView {
                     .flex()
                     .items_center()
                     .gap_1()
-                    .text_size(px(crate::theme::SMALL.size))
+                    .text_size(px(crate::theme::CAPTION_SIZE))
                     .text_color(th.muted)
                     .child("First mentioned")
                     .child(
@@ -4908,8 +4911,8 @@ impl PageView {
                     .when(!collapsed, |d| {
                         d.rounded_t(px(crate::theme::RADIUS_PANEL)).border_b_0()
                     })
-                    .px(px(crate::theme::SPACING[4]))
-                    .py(px(crate::theme::SPACING[3]))
+                    .px(px(crate::theme::SPACING[3]))
+                    .py(px(crate::theme::SPACING[2]))
                     .flex()
                     .items_center()
                     .gap_2()

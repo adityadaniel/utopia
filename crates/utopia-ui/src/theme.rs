@@ -233,6 +233,10 @@ pub const AVATAR_SIZE: f32 = 22.;
 pub const AVATAR_TEXT: f32 = 10.;
 /// The key column's property icon (§3.8: 15 px).
 pub const PROPERTY_ICON: f32 = 15.;
+/// The bar's "Add property" and alias input control height (§3.8).
+pub const PROPERTY_CONTROL_HEIGHT: f32 = 28.;
+/// The alias input's width while adding one (§3.8).
+pub const PROPERTY_ALIAS_WIDTH: f32 = 160.;
 /// 48 px between the page body and the Linked references panel (§4.2).
 pub const PAGE_REFS_GAP: f32 = 48.;
 /// A keyboard hint chip: 20 px tall, radius 4.
