@@ -100,6 +100,13 @@ impl UndoGroup {
     }
 }
 
+/// The direction of one history transition: a Cmd+Z or a Cmd+Shift+Z.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Undo,
+    Redo,
+}
+
 #[derive(Debug, Default)]
 pub struct UndoStack {
     undo: Vec<UndoGroup>,
@@ -138,23 +145,36 @@ impl UndoStack {
         }
     }
 
-    pub fn pop_undo(&mut self) -> Option<UndoGroup> {
-        self.undo.pop()
+    /// Take the group `dir` applies out of the history.
+    ///
+    /// From here the caller owns it and must hand it back: [`UndoStack::finish`] when the
+    /// commands were applied, [`UndoStack::abort`] when they were not. That is what makes
+    /// a group that sits in neither stack — history that vanished because something after
+    /// the pop failed — impossible to produce.
+    pub fn begin(&mut self, dir: Direction) -> Option<UndoGroup> {
+        match dir {
+            Direction::Undo => self.undo.pop(),
+            Direction::Redo => self.redo.pop(),
+        }
     }
 
-    pub fn push_redo(&mut self, mut g: UndoGroup) {
-        g.coalesce = Coalesce::Sealed;
-        self.redo.push(g);
+    /// The transition happened: the group is now the other stack's top. It never coalesces,
+    /// because applying a group ends the run of text edits it belonged to.
+    pub fn finish(&mut self, dir: Direction, mut group: UndoGroup) {
+        group.coalesce = Coalesce::Sealed;
+        match dir {
+            Direction::Undo => self.redo.push(group),
+            Direction::Redo => self.undo.push(group),
+        }
     }
 
-    pub fn pop_redo(&mut self) -> Option<UndoGroup> {
-        self.redo.pop()
-    }
-
-    /// Re-push a redone group without clearing the redo stack.
-    pub fn push_undone(&mut self, mut g: UndoGroup) {
-        g.coalesce = Coalesce::Sealed;
-        self.undo.push(g);
+    /// The transition did not happen: the group goes back where it came from, unchanged —
+    /// its coalescing state included, so a failed Cmd+Z does not split a run of keystrokes.
+    pub fn abort(&mut self, dir: Direction, group: UndoGroup) {
+        match dir {
+            Direction::Undo => self.undo.push(group),
+            Direction::Redo => self.redo.push(group),
+        }
     }
 
     pub fn can_undo(&self) -> bool {
@@ -231,10 +251,23 @@ mod tests {
     fn redo_cleared_by_new_edit() {
         let mut s = UndoStack::new();
         s.push(text_group("a", 0));
-        let g = s.pop_undo().unwrap();
-        s.push_redo(g);
+        let g = s.begin(Direction::Undo).unwrap();
+        s.finish(Direction::Undo, g);
         assert!(s.can_redo());
         s.push(text_group("b", 5000));
         assert!(!s.can_redo());
+    }
+
+    #[test]
+    fn an_aborted_transition_restores_the_group_as_it_was() {
+        let mut s = UndoStack::new();
+        s.push(text_group("a", 0));
+        let g = s.begin(Direction::Undo).unwrap();
+        s.abort(Direction::Undo, g);
+        assert_eq!(s.len(), 1);
+        assert!(!s.can_redo());
+        // Still open for coalescing: a failed undo is not an edit boundary.
+        s.push(text_group("a", 100));
+        assert_eq!(s.len(), 1, "the run of keystrokes is unchanged");
     }
 }

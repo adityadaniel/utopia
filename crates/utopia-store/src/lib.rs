@@ -33,7 +33,7 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use utopia_core::outline::Plan;
-use utopia_core::undo::{Caret, Coalesce, UndoGroup, UndoStack, UndoStep};
+use utopia_core::undo::{Caret, Coalesce, Direction, UndoGroup, UndoStack, UndoStep};
 use utopia_core::{BlockId, Command, DateFormat, DocDelta, DomainError, PageId, PageState};
 use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
@@ -1142,15 +1142,59 @@ impl Store {
 
     /// Cmd+Z. Returns the caret to restore.
     pub fn undo(&mut self) -> Result<Option<Caret>> {
-        let Some(group) = self.undo.pop_undo() else {
+        self.history(Direction::Undo)
+    }
+
+    /// Cmd+Shift+Z.
+    pub fn redo(&mut self) -> Result<Option<Caret>> {
+        self.history(Direction::Redo)
+    }
+
+    /// One history transition (FR-2.12). The group is taken out of the history first and
+    /// handed back on every path — applied and moved to the other stack, or restored
+    /// untouched when the graph cannot be read (docs/state-machines/
+    /// undo-group-coalescing.md, issue 1).
+    fn history(&mut self, dir: Direction) -> Result<Option<Caret>> {
+        let Some(group) = self.undo.begin(dir) else {
             return Ok(None);
         };
         let now = self.now();
+        // Everything that reads the graph happens before the first command, so a failed
+        // read leaves the history and every shard as they were. A page Empty Trash removed
+        // (§6.5) has no shard left to undo into: its steps are skipped, never fatal, so the
+        // rest of the group still comes off.
+        let mut gone: HashSet<PageId> = HashSet::new();
+        for page in group.pages() {
+            match self.load_doc(&page) {
+                Ok(_) => {}
+                Err(StoreError::NotFound(_)) => {
+                    gone.insert(page);
+                }
+                Err(e) => {
+                    self.undo.abort(dir, group);
+                    return Err(e);
+                }
+            }
+        }
+        let steps: Vec<&UndoStep> = match dir {
+            Direction::Undo => group.steps.iter().rev().collect(),
+            Direction::Redo => group.steps.iter().collect(),
+        };
         let mut touched: Vec<(PageId, Option<DocDelta>)> = Vec::new();
-        for step in group.steps.iter().rev() {
-            let entry = self.load_doc(&step.page)?;
+        for step in steps {
+            if gone.contains(&step.page) {
+                continue;
+            }
+            let cmds = match dir {
+                Direction::Undo => &step.inverse,
+                Direction::Redo => &step.forward,
+            };
+            // The pre-flight above loaded every page that still exists.
+            let entry = self
+                .load_doc(&step.page)
+                .expect("pre-flight loaded every page");
             let mut delta = DocDelta::default();
-            for cmd in &step.inverse {
+            for cmd in cmds {
                 // A remote edit can make an inverse inapplicable; skip it rather than
                 // abort the whole undo (never lose a character, §2.3).
                 if let Ok(d) = entry.doc.apply(cmd, now) {
@@ -1159,32 +1203,16 @@ impl Store {
             }
             push_delta(&mut touched, &step.page, delta);
         }
-        self.queue(&touched, true)?;
-        let caret = group.caret_before.clone();
-        self.undo.push_redo(group);
-        Ok(caret)
-    }
-
-    /// Cmd+Shift+Z.
-    pub fn redo(&mut self) -> Result<Option<Caret>> {
-        let Some(group) = self.undo.pop_redo() else {
-            return Ok(None);
+        let caret = match dir {
+            Direction::Undo => group.caret_before.clone(),
+            Direction::Redo => group.caret_after.clone(),
         };
-        let now = self.now();
-        let mut touched: Vec<(PageId, Option<DocDelta>)> = Vec::new();
-        for step in &group.steps {
-            let entry = self.load_doc(&step.page)?;
-            let mut delta = DocDelta::default();
-            for cmd in &step.forward {
-                if let Ok(d) = entry.doc.apply(cmd, now) {
-                    delta.merge(d);
-                }
-            }
-            push_delta(&mut touched, &step.page, delta);
-        }
+        // The shards have the transition now, so the history must too — even when the commit
+        // below fails. A failed writer is repaired from the shards
+        // (docs/state-machines/store-commit-pipeline.md), so moving the group here is what
+        // keeps the stack and the graph agreeing.
+        self.undo.finish(dir, group);
         self.queue(&touched, true)?;
-        let caret = group.caret_after.clone();
-        self.undo.push_undone(group);
         Ok(caret)
     }
 
