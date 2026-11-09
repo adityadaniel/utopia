@@ -8,7 +8,7 @@ Fixed on `fix/encryption-at-rest-state`. Line numbers below are from the
 - **The file's state is one type.** `utopia_store::FileKind`
   (`crates/utopia-store/src/crypt.rs:22`) is `Plain`, `Encrypted` or `Corrupt`, and
   `file_kind`/`is_encrypted` classify by SQLite's 16-byte header. `open_keyed`
-  (`crypt.rs:148`) maps `SQLITE_NOTADB` through the same type, so the header — not the
+  (`crypt.rs:152`) maps `SQLITE_NOTADB` through the same type, so the header — not the
   error code alone — decides whether the graph is locked or damaged.
 - **Issue 1 fixed.** A plain graph whose header survives but whose pages do not opens as
   `StoreError::Corrupt` and `is_encrypted` is false: the app shows "Could not open …"
@@ -19,8 +19,8 @@ Fixed on `fix/encryption-at-rest-state`. Line numbers below are from the
   ciphertext without a key; it still reads as `Encrypted` (the only reading a passphrase
   can resolve).
 - **Issue 2 fixed.** An open `Store` holds a shared `FileLock` on a sidecar
-  (`<graph>.utopia-lock`) for its lifetime, and `set_encryption` takes the exclusive side
-  or returns `StoreError::Busy` (`crypt.rs:81-145`, `:194`; `lib.rs:205`, `:222`). The
+  (`<graph>.lock`, appended to the whole path) for its lifetime, and `set_encryption` takes the exclusive side
+  or returns `StoreError::Busy` (`crypt.rs:81-149`, `:194`; `lib.rs:205`, `:222`). The
   lock is not on the database file because macOS implements `flock` with `fcntl`, which
   collides with SQLite's own locks; the sidecar is intentionally left behind (removing it
   while a process waits would let another lock a fresh inode). Test:
