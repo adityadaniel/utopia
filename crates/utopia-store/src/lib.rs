@@ -39,7 +39,7 @@ use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
 pub use attach::{sha256_hex, Attachment, BlobState, PdfHighlight, MAX_BLOB_BYTES};
 pub use blockquery::{QueryHit, QueryResult};
-pub use crypt::{encryption_available, is_encrypted, set_encryption};
+pub use crypt::{encryption_available, file_kind, is_encrypted, set_encryption, FileKind};
 pub use doctor::DoctorReport;
 pub use extras::{ImportReport, Mention, TEMPLATE_PREFIX};
 pub use pagegraph::{GraphNode, GraphOptions, PageGraph};
@@ -75,6 +75,9 @@ pub enum StoreError {
     /// The graph is encrypted at rest and the passphrase is missing or wrong.
     #[error("this graph is encrypted; the passphrase is missing or wrong")]
     Encrypted,
+    /// The file is not a database: damaged, not encrypted (the header is still SQLite's).
+    #[error("this graph file is damaged; it is not a database")]
+    Corrupt,
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;

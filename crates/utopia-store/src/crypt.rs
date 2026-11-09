@@ -2,11 +2,74 @@
 //! database. The passphrase never touches the file or the sync relay; the app reads it
 //! from the macOS keychain or asks for it.
 
+use std::io::Read;
 use std::path::Path;
 
 use rusqlite::{Connection, ErrorCode};
 
 use crate::{Result, StoreError};
+
+/// SQLite's fixed file header. A plain database starts with it; SQLCipher replaces the
+/// header with a random salt, so a file that still starts with it is never ciphertext
+/// (`docs/state-machines/encryption-at-rest-state.md`).
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// What a graph file is before a passphrase is applied: an ordinary SQLite database, an
+/// encrypted one, or damage. `Corrupt` is the state that used to be reported as
+/// `Encrypted`: a file that still carries SQLite's header cannot be unlocked by a
+/// passphrase, so the UI must not show it as locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// Missing, empty, or a readable/unreadable SQLite file.
+    Plain,
+    /// No SQLite header, and SQLite cannot read it without a key.
+    Encrypted,
+    /// Carries the SQLite header but does not open as a database.
+    Corrupt,
+}
+
+impl FileKind {
+    /// Classify a file SQLite refused to read (`SQLITE_NOTADB`) from its header alone.
+    fn after_not_a_database(path: &Path) -> Self {
+        if has_sqlite_header(path) {
+            Self::Corrupt
+        } else {
+            Self::Encrypted
+        }
+    }
+}
+
+/// Whether `path` starts with SQLite's header. A missing or empty file counts as plain:
+/// SQLite creates a fresh database there.
+fn has_sqlite_header(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut header = [0u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => header == *SQLITE_HEADER,
+        // Shorter than the header: an empty file is a new plain database, and anything
+        // else is too short to be SQLCipher's 16-byte salt.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => true,
+        Err(_) => true,
+    }
+}
+
+/// Classify a graph without a passphrase. A headerless file that SQLite refuses is
+/// `Encrypted`: ciphertext and damage are indistinguishable there, so the safe reading is
+/// the one a passphrase can still resolve.
+pub fn file_kind(path: &Path) -> FileKind {
+    if !path.metadata().is_ok_and(|m| m.len() > 0) {
+        return FileKind::Plain;
+    }
+    match open_keyed(path, None) {
+        Ok(_) => FileKind::Plain,
+        Err(StoreError::Encrypted) => FileKind::after_not_a_database(path),
+        Err(StoreError::Corrupt) => FileKind::Corrupt,
+        // Permissions or another I/O error: not a graph we can show; still not a lock.
+        Err(_) => FileKind::Corrupt,
+    }
+}
 
 /// Open a connection, applying the key first (SQLCipher requires it before any read)
 /// and checking it can read the schema.
