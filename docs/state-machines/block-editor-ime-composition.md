@@ -57,10 +57,17 @@ Left as it was, deliberately:
   side. Pinned by a test rather than hidden.
 - `LineInput` still emits no `Changed` for composition text itself (only for the commit).
   That is right: a query should not filter on glyphs the IME has not committed.
-- `LineInput::set_text` still replaces the buffer even while the user composes in it, so a
-  `utopia://search` link that arrives mid-composition drops the composition (the field
-  cannot queue host writes the way the block editor does). It is not on the doc's list and
-  needs a deferral the single-line input does not have; recorded rather than guessed at.
+- `LineInput::set_text` is a host command and still replaces the buffer even while the user
+  composes in it, so a `utopia://search` link that arrives mid-composition drops the
+  composition (documented host-wins). `LineInput::fill`, the Settings load path, does not:
+  it keeps the stored value in `pending_fill`, applies it when a *cancelled* composition
+  ends, and drops it when the composition committed or the user had already typed
+  (`user_edited`). `SyncSetup::finish` clears a submitted secret through `fill`, so an
+  Apply settling under a live composition no longer ends it; `submitted` (`request`) resets
+  the dirty flag for the values the request just read. Pinned by
+  `fill_waits_for_an_ime_composition`, `fill_after_typing_does_not_overwrite` and
+  `a_cancelled_composition_lets_a_deferred_fill_through` (`tests/line_input.rs`) and
+  `ac_13_5_sync_setup_fields_wait_for_the_input_method` (`tests/settings.rs`).
 - Caret moves (`mouse_down`, left/right/home/end) still move `sel` while composing if the
   platform lets the key through. The composition text survives; the reported selection is
   then outside the marked range, which macOS takes as "the IME's selection changed". No
