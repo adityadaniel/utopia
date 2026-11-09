@@ -586,10 +586,7 @@ mod tests {
     /// tall rect would leave the middle two lines blank.
     #[test]
     fn a_wrapped_tag_chip_fills_every_visual_line() {
-        let bounds = Bounds::new(
-            point(px(40.), px(100.)),
-            gpui::size(px(600.), px(500.)),
-        );
+        let bounds = Bounds::new(point(px(40.), px(100.)), gpui::size(px(600.), px(500.)));
         let rects = chip_line_rects(
             point(px(100.), px(100.)),
             point(px(200.), px(184.)),
@@ -606,8 +603,14 @@ mod tests {
             );
             assert!((f32::from(r.size.height) - 22.).abs() < 0.5, "{r:?}");
         }
-        assert!((f32::from(rects[0].origin.x) - 93.).abs() < 0.5, "{rects:?}");
-        assert!((f32::from(rects[3].size.width) - 167.).abs() < 0.5, "{rects:?}");
+        assert!(
+            (f32::from(rects[0].origin.x) - 93.).abs() < 0.5,
+            "{rects:?}"
+        );
+        assert!(
+            (f32::from(rects[3].size.width) - 167.).abs() < 0.5,
+            "{rects:?}"
+        );
     }
 
     #[test]

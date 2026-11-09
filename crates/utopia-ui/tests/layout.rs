@@ -761,7 +761,10 @@ fn empty_days_are_individual_list_items(cx: &mut TestAppContext) {
     let first = bounds(cx, "empty-day-2026-11-01");
     let second = bounds(cx, "empty-day-2026-10-31");
     assert!(approx(first.size.height, 44.));
-    assert!(approx(second.origin.y - (first.origin.y + first.size.height), 4.));
+    assert!(approx(
+        second.origin.y - (first.origin.y + first.size.height),
+        4.
+    ));
 }
 
 /// DESIGN.md §3.1: rows follow the 28 px line grid. The caret slot (20 px) sits in the
@@ -1237,7 +1240,11 @@ fn seed_nested_page(store: &mut Store, depth: usize) -> PageId {
     for level in 1..=depth {
         let st = store.page_state(&page).unwrap().clone();
         let plan = outline::append_block(&st, Some(&parent));
-        let block = store.execute_plan(&page, plan, None).unwrap().unwrap().block;
+        let block = store
+            .execute_plan(&page, plan, None)
+            .unwrap()
+            .unwrap()
+            .block;
         store
             .set_block_text(&page, &block, &format!("level {level}"), None, None)
             .unwrap();
@@ -1253,7 +1260,9 @@ fn seed_nested_page(store: &mut Store, depth: usize) -> PageId {
 #[gpui::test]
 fn deep_blocks_stay_inside_a_narrow_sidebar_pane(cx: &mut TestAppContext) {
     let page = std::cell::RefCell::new(None);
-    let cx = setup_seeded(cx, |store| *page.borrow_mut() = Some(seed_nested_page(store, 8)));
+    let cx = setup_seeded(cx, |store| {
+        *page.borrow_mut() = Some(seed_nested_page(store, 8))
+    });
     let page = page.borrow_mut().take().expect("seeded page");
     let ws = cx
         .update(|window, _| window.root::<Workspace>())

@@ -23,11 +23,10 @@ use crate::rich::{self, LinkTarget};
 use crate::theme::{
     quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill, BULLET_SIZE,
     BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT, COLLAPSED_RING, COMPACT_INDENT,
-    CONTENT_MAX_WIDTH,
-    CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X,
-    DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE, EMPTY_DAY_GAP,
-    EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH, THREAD_OFFSET,
-    TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
+    CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE,
+    CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE,
+    EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH,
+    THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -4244,14 +4243,16 @@ impl PageView {
                         .ml_2()
                         .flex()
                         .items_center()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.start_day(write, window, cx);
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.start_day(write, window, cx);
+                            },
+                        )),
                     )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_day(date, window, cx)
-                    }))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.start_day(date, window, cx)),
+                    )
                     .into_any_element()
             }
             Item::DayEmpty { date } => div()
