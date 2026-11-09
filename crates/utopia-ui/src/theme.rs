@@ -4,8 +4,9 @@
 //!
 //! The colour tokens are exactly DESIGN.md §2.1's list (`paper` … `status_progress`). A
 //! handful of roles the spec does not cover yet keep their own tokens at the bottom of
-//! [`Theme`] (danger, warning, success, the text selection and the PDF overlays), because
-//! a call site may not invent a colour (§2's "don't hardcode values outside this list").
+//! [`Theme`] (danger, warning, success, the text selection, the code-block and banner
+//! fills, and the PDF overlays), because a call site may not invent a colour (§2's "don't
+//! hardcode values outside this list").
 //! [`tests`] checks every text/background pair the spec implies at 4.5:1, and that the
 //! two non-text greys are never promoted to text.
 //!
@@ -118,7 +119,7 @@ pub const COUNT: TypeRole = TypeRole {
     weight: SANS,
 };
 
-/// Every keyword in a typical list, ordered; §2.3 allows only these gaps (4 px base).
+/// The spacing scale: every gap §2.3 allows, on a 4 px base.
 pub const SPACING: [f32; 12] = [4., 8., 12., 16., 20., 24., 32., 40., 48., 56., 64., 96.];
 
 /// The content column's widest line: 760 px, centred (§2.3).
