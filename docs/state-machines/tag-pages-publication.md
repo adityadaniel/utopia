@@ -16,16 +16,26 @@ What is now explicit:
   `Mutex<Option<HashSet<PageId>>>`: "no set has ever been published" and "the published set
   is empty" can no longer be the same value. `Persister::tag_pages` still hands out an
   `Option` so callers do not change, but it maps the two variants one-to-one.
-- `Shared::scan_tag_pages` (`writer.rs:279`) is the one full classification, used both for
-  the first commit and for a republish; `Shared::publish_tag_pages` (`writer.rs:297`) keeps
-  the incremental path and only touches the slot when it has a complete answer.
-- `Store::republish_tag_pages` (`lib.rs:335`) classifies on the store's connection and
-  publishes the result. It is the store-level "the index moved without a commit" transition,
-  and the UI's startup copy goes through it too (`app_state.rs:82`).
+- `Shared::scan_tag_pages` (`writer.rs:279`) is the commit path's full classification, run
+  when the first commit finds the slot `Unscanned`; `Shared::publish_tag_pages`
+  (`writer.rs:297`) keeps the incremental path and only touches the slot when it has a
+  complete answer.
+- `Store::republish_tag_pages` (`lib.rs:340`) is the store-level "the index moved without a
+  commit" transition, and the only path a republish takes: it waits on the writer, runs
+  `query::hashtag_only_pages` on the store's own connection (counted by
+  `Store::tag_page_scans`, not `tag_scans`) and lands the result through
+  `Persister::republish_tag_pages` (`writer.rs:539`). The UI's startup copy goes through it
+  too (`app_state.rs:82`).
+- The wait is inside that method rather than in its callers: `hashtag_only_pages`' own read
+  barrier is a no-op in debounced mode (rule 10), which is the mode the UI publishes in, so
+  a scan taken before an in-flight commit landed would otherwise become the stale base every
+  later commit edits. A classification failure *after* the caller's write committed is
+  logged, not returned (`lib.rs:345-355`): the write happened, and reporting it as failed
+  would invite a retry of something already done (rule 11).
 
 Fixed:
 
-1. **Writes that bypass the writer republished nothing.** `set_date_format` (`lib.rs:811`),
+1. **Writes that bypass the writer republished nothing.** `set_date_format` (`lib.rs:827`),
    `empty_trash` (`pages.rs:811`) and `rebuild_index` (`doctor.rs:122`) now republish after
    their own `sync_index`, so the three transitions that leave the writer are closed. Tests:
    `sb_2_date_format_change_republishes_tag_pages` and
@@ -34,7 +44,9 @@ Fixed:
    `empty_trash` case cannot change a *destination's* classification in today's code — the
    trash commit already deleted the purged page's block and `ref` rows and published that —
    so its test pins the hook rather than a user-visible flip; the hook costs one scan on a
-   rare, destructive action and makes the rule total.
+   rare, destructive action and makes the rule total. A classification failure after one of
+   these writes committed is logged and the write's own answer is returned
+   (`sb_2_empty_trash_reports_the_purge_when_the_scan_fails`).
 2. **Two sources of truth at startup.** `AppState::new` used to classify beside the slot, so
    a session that opened an existing graph had a UI copy and `Unscanned`. It now calls
    `Store::republish_tag_pages`, so the copy the UI starts with *is* the published set. Test:
@@ -70,9 +82,9 @@ Left as is:
 
 | Piece | Location | Set | Cleared |
 |---|---|---|---|
-| Published set | `crates/utopia-store/src/writer.rs:207` `Shared.tag_pages: Mutex<TagPages>` | first commit does a full scan (`:277-289`); later commits update written pages + changed destinations (`:297-336`); `Store::republish_tag_pages` replaces it after a write that bypassed the writer (`:341-345`, `lib.rs:335-339`) | left untouched on classify error (`:329-332`) and on a failed commit, because it then still describes the index on disk |
+| Published set | `crates/utopia-store/src/writer.rs:207` `Shared.tag_pages: Mutex<TagPages>` | first commit does a full scan (`:277-289`); later commits update written pages + changed destinations (`:297-336`); `Store::republish_tag_pages` replaces it after a write that bypassed the writer (`:341-345`, `lib.rs:340-345`) | left untouched on classify error (`:329-332`) and on a failed commit, because it then still describes the index on disk |
 | UI copy | `crates/utopia-ui/src/app_state.rs:60` `tag_pages: HashSet<PageId>` | published at startup by `AppState::new` (`:82`); replaced on `index_updated` only if `store.tag_pages()` is `Some` (`:253-255`) — a store-level republish reaches it only through that, see "Left as is" | – |
-| Instrumentation | `writer.rs:208-216` counters; `lib.rs:341-364` | tests | – |
+| Instrumentation | `writer.rs:208-216` counters; `lib.rs:357-380` | tests | – |
 
 ## States
 
