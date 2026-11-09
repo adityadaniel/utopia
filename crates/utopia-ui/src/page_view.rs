@@ -3703,7 +3703,7 @@ impl PageView {
                     .child(input.clone()),
             ),
             None => value.child(
-                self.button("add-alias", "+ alias", cx)
+                self.button("add-alias", "Add alias", cx)
                     .debug_selector(|| "add-alias".into())
                     .on_click(cx.listener(|this, _, window, cx| this.start_alias(window, cx))),
             ),
