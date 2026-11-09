@@ -3,30 +3,35 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, TimeZone};
 use gpui::{
-    anchored, deferred, div, list, point, prelude::*, px, AnyElement, Context, Corner, Entity,
+    anchored, deferred, div, list, point, prelude::*, px, AnyElement, Context, Corner, Div, Entity,
     EventEmitter, FocusHandle, Focusable, ListAlignment, ListOffset, ListState, MouseButton,
     MouseDownEvent, SharedString, StyledText, Subscription, Window,
 };
 use utopia_core::inline::{extract_refs, plain_text};
 use utopia_core::outline::{self, Focus, Plan};
 use utopia_core::undo::Caret;
-use utopia_core::{BlockId, BlockKind, PageId, PageKind};
+use utopia_core::{BlockId, BlockKind, Command, PageId, PageKind};
 use utopia_store::{LinkedRefs, Mention, PageRow, RefChildren, RefHit, RefQuery, RefSort};
 
 use crate::app_state::{AppState, Changed, IndexUpdated, PageReplaced};
 use crate::editor::{BlockEditor, EditTarget, EditorEvent};
 use crate::field::Goal;
+use crate::icons::{icon, Icon};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
-    quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill, BULLET_SIZE,
-    BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT, COLLAPSED_RING, COMPACT_INDENT,
-    CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE,
-    CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE,
-    EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH,
-    MENU_OFFSET, PAGE_MENU_WIDTH, THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
+    outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill,
+    AVATAR_SIZE, AVATAR_TEXT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT,
+    COLLAPSED_RING, COMPACT_INDENT, CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP,
+    CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP,
+    DAY_HEADER_PAD_TOP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL,
+    LABEL_MONO, MAX_VISUAL_DEPTH, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_REFS_GAP,
+    PROPERTY_GAP_BELOW_TITLE, PROPERTY_HOVER_BLEED, PROPERTY_ICON, PROPERTY_KEY_WIDTH,
+    PROPERTY_KEY_WIDTH_COMPACT, PROPERTY_PADDING_Y, PROPERTY_ROW_MIN_HEIGHT, STATUS_DOT,
+    STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
+    UNLINKED_ROW_HEIGHT,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -106,17 +111,6 @@ pub struct RowItem {
 enum Item {
     Header,
     Row(RowItem),
-    /// A page attribute (`key:: value`) drawn as one compact muted row (PG-1). View only:
-    /// the block stays the source, and "Show as blocks" draws it in full again.
-    Attribute {
-        depth: usize,
-        key: String,
-        value: String,
-        block: BlockId,
-        /// Children folded away with the block, marked with "…" so nothing vanishes
-        /// silently; "Show as blocks" brings them back.
-        children: usize,
-    },
     Notice {
         depth: usize,
         text: SharedString,
@@ -145,12 +139,19 @@ enum Item {
     RefsHeader {
         title: SharedString,
         count: usize,
+        /// The feed day whose panel this is (`None` on a page view).
+        date: Option<NaiveDate>,
+        collapsed: bool,
     },
     RefsControls,
+    /// The panel's rounded bottom edge (the flat list draws the border item by item).
+    RefsEnd,
     GroupHeader {
         page: PageRow,
         count: usize,
         scheduled: bool,
+        /// The first group has no divider above it.
+        first: bool,
     },
     /// A referencing block (LR-3, LR-4): the group's page title and the block's first
     /// children travel with it, so paint never reads the store (rule 3).
@@ -395,8 +396,73 @@ struct Header {
     /// A day that is shown but not written yet (FR-1.2): nothing to delete.
     draft: bool,
     zoom_path: Vec<(BlockId, String)>,
-    /// `Key:: value` root blocks: the page metadata header (P1, W7).
-    attributes: Vec<(String, String)>,
+    /// The page's leading consecutive `key:: value` blocks: the properties bar
+    /// (DESIGN.md §3.8). Exactly these are drawn in the bar and nowhere else.
+    properties: Vec<PropertyBlock>,
+    /// "First mentioned <date>": the page's creation date, when the store knows it.
+    first_mentioned: Option<(NaiveDate, String)>,
+}
+
+/// A leading `key:: value` block drawn in the properties bar (DESIGN.md §3.8).
+#[derive(Debug, Clone)]
+struct PropertyBlock {
+    block: BlockId,
+    /// The key exactly as typed (lowercase is the display form).
+    key: String,
+    /// The value's raw markup, after `key:: `.
+    value: String,
+    kind: PropertyKind,
+}
+
+/// How a property's value is drawn (DESIGN.md §3.8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PropertyKind {
+    /// `status`: a pill with the in-progress dot.
+    Status,
+    /// Exactly one page link: an avatar and the link.
+    Linked,
+    /// Plain text, with links drawn as links.
+    Plain,
+}
+
+/// The page's leading consecutive property blocks. The first non-property root ends the
+/// bar; a property lower in the outline is an ordinary bullet (§3.8 rules 1-3).
+fn leading_properties(st: &utopia_core::PageState) -> Vec<PropertyBlock> {
+    let mut out = Vec::new();
+    for root in st.live_roots() {
+        let Some(b) = st.block(&root) else { break };
+        let Some((key, range)) = page_attribute(b.kind, &b.text) else {
+            break;
+        };
+        // The bar draws a row, not a subtree. A property with live children therefore ends
+        // the bar and stays an outline block, children included: skipping it would hide
+        // content nothing could focus or reveal (DESIGN.md §3.8 rule 1, read to preserve
+        // data rather than to orphan a child).
+        if st.has_live_children(&root) {
+            break;
+        }
+        let value = b.text[range].to_string();
+        let kind = if key.eq_ignore_ascii_case("status") {
+            PropertyKind::Status
+        } else {
+            let refs = utopia_core::inline::extract_refs(&value);
+            if refs.len() == 1
+                && refs[0].is_page_like()
+                && value.trim() == &value[refs[0].range.clone()]
+            {
+                PropertyKind::Linked
+            } else {
+                PropertyKind::Plain
+            }
+        };
+        out.push(PropertyBlock {
+            block: root,
+            key,
+            value,
+            kind,
+        });
+    }
+    out
 }
 
 /// Which of the reference controls has its menu open (LR-1).
@@ -427,7 +493,7 @@ struct Invalidation {
     refs: bool,
     /// The unlinked count is for another page or index version.
     unlinked: bool,
-    /// One of the appearance mirrors (`ref_children_limit`, `attribute_blocks`) changed.
+    /// The appearance preference this view mirrors (`ref_children_limit`) changed.
     prefs: bool,
 }
 
@@ -610,16 +676,27 @@ pub struct PageView {
     calendar_month: NaiveDate,
     /// The feed's day headings, in item order, for the sticky header (DN-3).
     day_headings: Vec<DayHeading>,
+    /// Normalized title and aliases of this page: a reference to it is bold ink, not a
+    /// link (DESIGN.md §3.7).
+    self_titles: Vec<String>,
+    /// The properties-bar row being edited (DESIGN.md §3.8). The bar renders that block as
+    /// its raw text; an empty commit deletes it.
+    property_edit: Option<BlockId>,
+    /// The empty property "Add property" inserted, until its first commit (it is not a
+    /// `key:: value` block yet, so the bar draws it while it is being edited).
+    pending_property: Option<BlockId>,
     /// The compact pane's own page menu (a right-sidebar or split card). The main pane's
     /// page actions live in the workspace top bar instead (DESIGN.md §3.3).
     page_menu: bool,
+    /// Feed days whose Linked references panel is collapsed (DESIGN.md §3.7). Local view
+    /// state only (rule 9).
+    collapsed_ref_days: HashSet<NaiveDate>,
     /// The page header's "···" menu is open (ALL-3).
     /// The row the pointer is over, so its bullet can read as a drag handle and its
     /// collapse arrow can appear (PG-4). Local UI state, never persisted (rule 9).
     hovered_row: Option<BlockId>,
     /// How attribute blocks are drawn (PG-1), mirrored from `settings.json` so a change
     /// made in Settings rebuilds this page's rows.
-    attribute_blocks: crate::appearance::AttributeBlocks,
     /// What store changes this view's rows depend on, recomputed from the rows it just
     /// built: a query block or an open transclusion makes every page's change relevant.
     interest: Interest,
@@ -747,9 +824,11 @@ impl PageView {
             cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
                 this.cycle
                     .invalidate(Invalidation::refs() | Invalidation::unlinked());
-                // LR-5: the unlinked count is keyed by the index version, so it is refreshed
-                // here rather than in `render` (rule 10: no database work in a frame).
-                this.refresh_unlinked(cx);
+                // DESIGN.md §3.7: unlinked references are searched only while the row is
+                // expanded. A closed row costs nothing when the index moves.
+                if this.unlinked_open {
+                    this.refresh_unlinked(cx);
+                }
                 // Rebuild now, while the index version is new: reference children are
                 // database reads, and a frame must only read the cache they fill.
                 this.rebuild(cx);
@@ -812,9 +891,12 @@ impl PageView {
             alias_input: None,
             calendar_month: today,
             day_headings: Vec::new(),
+            self_titles: Vec::new(),
+            property_edit: None,
+            pending_property: None,
             page_menu: false,
+            collapsed_ref_days: HashSet::new(),
             hovered_row: None,
-            attribute_blocks: crate::appearance::attribute_blocks(cx),
             interest: Interest::ThisPage,
             focused_rows: 0,
             cycle: RebuildCycle::new(),
@@ -1091,8 +1173,6 @@ impl PageView {
         self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
-        // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
-        self.refresh_unlinked(cx);
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::refs() | Invalidation::unlinked());
         self.rebuild(cx);
@@ -1110,6 +1190,9 @@ impl PageView {
         self.query = RefQuery::default();
         self.filter_titles.clear();
         self.unlinked = None;
+        self.unlinked_open = false;
+        self.property_edit = None;
+        self.pending_property = None;
         self.alias_input = None;
         self.filter.update(cx, |f, cx| f.set_text("", cx));
         let saved = self
@@ -1264,6 +1347,12 @@ impl PageView {
         // `page-view-rebuild-cycle.md` issue 7). After a splice the list has no measured
         // rows left, so the post-rebuild frame could not be measured anyway; scrolling
         // this block below the heading is at worst one heading's worth of motion.
+        // DESIGN.md §3.8: a leading property block is edited in the bar (the header item),
+        // not as a row. Any other target leaves the bar's edit state. The row being left is
+        // cleaned up after `begin` commits it: the editor switches targets without emitting
+        // `Blurred`, so waiting for that event would leave an emptied or pending row behind.
+        let previous = self.property_edit.take();
+        self.property_edit = self.is_property_block(&block).then(|| block.clone());
         let line = crate::appearance::density(cx).line_height();
         let under_heading = self
             .row_index(&block)
@@ -1295,6 +1384,8 @@ impl PageView {
                     host,
                     page,
                     block: block.clone(),
+                    // A properties-bar row edits its raw block text (§3.8) and bolds the key.
+                    property: self.property_edit.as_ref() == Some(&block),
                 },
                 caret,
                 goal,
@@ -1302,14 +1393,26 @@ impl PageView {
                 cx,
             )
         });
+        if let Some(old) = previous {
+            if self.property_edit.as_ref() != Some(&old) {
+                self.finish_property_block(old, cx);
+            }
+        }
         if !drawn {
             // Rebuild with the edit target set, so the folded attribute opens and this
             // block gets a row that can hold the editor (a focused element that is not
             // rendered gets no keystrokes).
             self.rebuild(cx);
         }
-        let ix = self.row_index(&block);
+        // The properties bar lives in the header item, which has no row index: keep its
+        // editor and return before the row scroll/end logic.
+        let in_bar = self.property_edit.as_ref() == Some(&block);
+        let ix = if in_bar { None } else { self.row_index(&block) };
         self.splice_items(self.items.len(), cx);
+        if in_bar {
+            cx.notify();
+            return;
+        }
         match ix {
             // DN-3: the row was under the pinned heading: put its top below it.
             Some(ix) if under_heading => self.list.scroll_to(ListOffset {
@@ -1377,26 +1480,17 @@ impl PageView {
             .position(|i| matches!(i, Item::Row(r) if r.block == *block))
     }
 
-    /// Re-read the two appearance preferences this view mirrors. The one place both are
-    /// resynced: `rebuild` calls it too, so an index-triggered pass cannot build rows with
-    /// the old setting and leave the next frame's `rebuild_if_dirty` to correct it (issue
-    /// 3: only `rebuild_if_dirty` used to notice `attribute_blocks`).
+    /// Re-read the appearance preferences this view mirrors. `rebuild` calls it too, so
+    /// an index-triggered pass cannot build rows with the old setting and leave the next
+    /// frame's `rebuild_if_dirty` to correct it.
     fn sync_preferences(&mut self, cx: &mut Context<Self>) {
         let children = crate::appearance::ref_children(cx);
-        let attributes = crate::appearance::attribute_blocks(cx);
-        let mut why = Invalidation::default();
         if self.ref_children_limit != children {
             self.ref_children_limit = children;
             // The children cache is keyed on the limit and heals on its own; the rows that
             // show those children are what is stale.
-            why = why | Invalidation::prefs() | Invalidation::rows();
-        }
-        if self.attribute_blocks != attributes {
-            self.attribute_blocks = attributes;
-            why = why | Invalidation::prefs() | Invalidation::rows();
-        }
-        if why.any() {
-            self.cycle.invalidate(why);
+            self.cycle
+                .invalidate(Invalidation::prefs() | Invalidation::rows());
         }
     }
 
@@ -1424,11 +1518,19 @@ impl PageView {
         let host = cx.entity_id();
         let editor = self.editor.read(cx);
         let handle = editor.focus_handle(cx);
+        let property_editing = self.property_edit.is_some();
         let handles: Vec<Option<FocusHandle>> = self
             .items
             .iter()
             .map(|i| match i {
                 Item::Row(r) if editor.is_editing(host, &r.page, &r.block) => Some(handle.clone()),
+                // The properties bar lives in the header item; while one of its rows is
+                // being edited the header must stay rendered, or the keystrokes are lost.
+                Item::Header
+                    if property_editing && editor.target().is_some_and(|t| t.host == host) =>
+                {
+                    Some(handle.clone())
+                }
                 _ => None,
             })
             .collect();
@@ -1482,8 +1584,6 @@ impl PageView {
             return;
         }
         let open_embeds = self.open_embeds.clone();
-        let compact_attributes = zoom.is_none() && self.attributes_are_compact();
-        let editing = self.editing_block(cx.entity_id(), cx);
         let refs_version = self.app.read(cx).refs_version;
         let need_refs = self.refs_key != Some((page.clone(), zoom.clone(), refs_version));
         let query = self.query.clone();
@@ -1499,15 +1599,17 @@ impl PageView {
             header.deleted = st.meta.deleted_at.is_some();
             header.kind = st.meta.kind;
             header.draft = app.store.is_draft(&page);
-            header.attributes = st
-                .live_roots()
-                .iter()
-                .filter_map(|r| {
-                    let b = st.block(r)?;
-                    page_attribute(b.kind, &b.text)
-                        .map(|(k, v)| (k, utopia_core::inline::plain_text(&b.text[v])))
-                })
-                .collect();
+            // DESIGN.md §3.8: the bar is exactly the leading consecutive property blocks.
+            if zoom.is_none() {
+                header.properties = leading_properties(&st);
+                let fmt = app.store.date_format().clone();
+                header.first_mentioned = chrono::Local
+                    .timestamp_millis_opt(st.meta.created_at)
+                    .single()
+                    .map(|dt| dt.date_naive())
+                    .filter(|_| st.meta.created_at > 0)
+                    .map(|d| (d, fmt.format(d)));
+            }
             header.date = st.meta.daily_date;
             header.aliases = st.meta.aliases.clone();
             if let Some(z) = &zoom {
@@ -1524,8 +1626,22 @@ impl PageView {
                 }
             }
             let mut rows = Vec::new();
-            // The header only exists on a whole page, so only there do we fold attributes
-            // into compact rows (PG-1); a zoomed view keeps its blocks as they are.
+            // The page view's leading properties are drawn once, in the bar, and skipped in
+            // the outline (DESIGN.md §3.8 rule 2). A zoomed view has no bar, so it keeps
+            // every block as it is.
+            let mut skip: Vec<BlockId> =
+                header.properties.iter().map(|p| p.block.clone()).collect();
+            // The empty row "Add property" created is drawn by the bar; until it becomes a
+            // real `key:: value` it is not a leading property, so it would otherwise also be
+            // a body bullet (and the first row focus_first finds).
+            if let Some(pending) = &self.pending_property {
+                skip.push(pending.clone());
+            }
+            // A row that empty text just dropped from `header.properties` is still being
+            // edited in the bar; it must not jump into the outline mid-edit.
+            if let Some(editing) = &self.property_edit {
+                skip.push(editing.clone());
+            }
             push_page_rows(
                 app,
                 &st,
@@ -1533,8 +1649,7 @@ impl PageView {
                 zoom.as_ref(),
                 &collapsed,
                 &open_embeds,
-                compact_attributes,
-                editing.as_ref(),
+                &skip,
                 &mut rows,
             );
             let refs = if need_refs {
@@ -1574,13 +1689,18 @@ impl PageView {
             self.suggestions = self.compute_suggestions(&page, cx);
         }
         self.header = header;
+        self.self_titles = std::iter::once(self.header.title.clone())
+            .chain(self.header.aliases.iter().cloned())
+            .filter(|t| !t.is_empty())
+            .map(|t| utopia_core::title::normalize_title(&t))
+            .collect();
         let mut items = vec![Item::Header];
         if self.header.missing {
             self.replace_items(items, cx);
             return;
         }
-        // A page whose only root blocks are folded attributes (PG-1) still needs somewhere
-        // to click to start writing.
+        // A page whose only root blocks are properties (drawn in the bar) still needs
+        // somewhere to click to start writing.
         if !rows.iter().any(|i| matches!(i, Item::Row(_))) {
             items.push(Item::Empty);
         }
@@ -1589,16 +1709,15 @@ impl PageView {
         }
         self.push_refs(&page, &mut items, cx);
         if zoom.is_none() {
-            // Unlinked References (FR-3.9, LR-5): the header always carries the count. It is
-            // read from the cache `refresh_unlinked` fills when the index reports a durable
-            // change or the page opens; the FTS scan behind it is database work and must not
-            // run in a frame (rule 10), so a stale entry shows no number for one frame
-            // rather than scanning here.
-            let current = self.unlinked.as_ref().filter(|(v, _)| *v == refs_version);
-            let count = current.map(|(_, m)| m.len());
-            let mentions = current
-                .map(|(_, m)| m.clone())
+            // Unlinked References (FR-3.9, LR-5, DESIGN.md §3.7): a collapsed row that is
+            // searched only once it is expanded, so a closed row never runs the FTS scan.
+            let current = self
+                .unlinked
+                .as_ref()
+                .filter(|(v, _)| *v == refs_version)
                 .filter(|_| self.unlinked_open);
+            let count = current.map(|(_, m)| m.len());
+            let mentions = current.map(|(_, m)| m.clone());
             items.push(Item::UnlinkedHeader {
                 count,
                 open: self.unlinked_open,
@@ -1624,8 +1743,9 @@ impl PageView {
         let Some(page) = self.page() else {
             return;
         };
-        if !matches!(self.mode, Mode::Page { .. }) {
-            // The section is only on a whole page; `set_mode` refreshes it when it is again.
+        if !matches!(self.mode, Mode::Page { .. }) || !self.unlinked_open {
+            // The section is only on a whole page, and only expanded content is searched
+            // (DESIGN.md §3.7).
             return;
         }
         let version = self.app.read(cx).refs_version;
@@ -1644,8 +1764,6 @@ impl PageView {
     /// Rebuild the feed's outline for the calendar window down to `want_through`.
     fn rebuild_journal(&mut self, today: PageId, want_through: NaiveDate, cx: &mut Context<Self>) {
         let open_embeds = self.open_embeds.clone();
-        let compact_attributes = self.attributes_are_compact();
-        let editing = self.editing_block(cx.entity_id(), cx);
         let refs_version = self.app.read(cx).refs_version;
         let mut refs_cache = match self.mode.journal_mut() {
             Some(j) if j.refs_version == refs_version => std::mem::take(&mut j.refs),
@@ -1693,8 +1811,7 @@ impl PageView {
                         None,
                         &collapsed,
                         &open_embeds,
-                        compact_attributes,
-                        editing.as_ref(),
+                        &[],
                         &mut day.rows,
                     );
                     if !refs_cache.contains_key(&page) {
@@ -1765,11 +1882,19 @@ impl PageView {
                     // Like Roam's feed: Linked References under the day when it has any, and
                     // no Unlinked References (those stay on the day's own page).
                     if let Some(refs) = refs {
+                        let collapsed = self.collapsed_ref_days.contains(&day.date);
                         items.push(Item::RefsHeader {
-                            title: "Linked References".into(),
+                            title: "Linked references".into(),
                             count: refs.shown(),
+                            date: Some(day.date),
+                            collapsed,
                         });
-                        self.push_ref_groups(&page, refs, true, &mut items, cx);
+                        // The collapsed header is the whole panel (rounded all round); a
+                        // bottom edge under it would read as a shadow (§2.4).
+                        if !collapsed {
+                            self.push_ref_groups(&page, refs, true, &mut items, cx);
+                            items.push(Item::RefsEnd);
+                        }
                     }
                     ids.push(page);
                 }
@@ -1804,38 +1929,6 @@ impl PageView {
             j.feed = next_feed;
         }
         self.replace_items(items, cx);
-    }
-
-    /// The block this view is editing, if any: its row must be drawn as a row (PG-1).
-    fn editing_block(&self, host: gpui::EntityId, cx: &gpui::App) -> Option<BlockId> {
-        self.editor
-            .read(cx)
-            .target()
-            .filter(|t| t.host == host)
-            .map(|t| t.block.clone())
-    }
-
-    /// PG-1: an attribute block is drawn as one compact row unless the preference says to
-    /// show the blocks.
-    fn attributes_are_compact(&self) -> bool {
-        self.attribute_blocks == crate::appearance::AttributeBlocks::Compact
-    }
-
-    /// The header's "Show as blocks" toggle, and a click on a compact row: set the
-    /// preference, remember it, and rebuild the outline (PG-1).
-    fn set_attribute_blocks(
-        &mut self,
-        blocks: crate::appearance::AttributeBlocks,
-        cx: &mut Context<Self>,
-    ) {
-        if let Err(e) = crate::appearance::set_attribute_blocks(cx, blocks) {
-            self.app.update(cx, |app, _| {
-                app.last_error = Some(format!("could not save settings.json: {e}"))
-            });
-        }
-        self.attribute_blocks = blocks;
-        self.cycle.invalidate(Invalidation::rows());
-        cx.notify();
     }
 
     /// Load the next batch of older days into the feed (once per batch).
@@ -1878,23 +1971,27 @@ impl PageView {
         let title = if self.zoom().is_some() {
             "Referenced by"
         } else {
-            "Linked References"
+            "Linked references"
         };
         items.push(Item::RefsHeader {
             title: title.into(),
             count: shown,
+            date: None,
+            collapsed: false,
         });
         if self.zoom().is_none() {
             items.push(Item::RefsControls);
         }
         if self.refs.groups.is_empty() {
             items.push(Item::NoRefs);
+            items.push(Item::RefsEnd);
             return;
         }
         let daily = self.header.kind == PageKind::Daily;
         let refs = std::mem::take(&mut self.refs);
         self.push_ref_groups(page, &refs, daily, items, cx);
         self.refs = refs;
+        items.push(Item::RefsEnd);
     }
 
     /// One header per referencing page, then its hits (folded past `GROUP_PREVIEW`), each
@@ -1998,12 +2095,14 @@ impl PageView {
                 .insert((id.clone(), true), c.clone());
             children.insert(id, c);
         }
+        let mut first_group = true;
         for g in &refs.groups {
             let scheduled = daily && g.page.id != *page;
             items.push(Item::GroupHeader {
                 page: g.page.clone(),
                 count: g.hits.len(),
                 scheduled,
+                first: std::mem::take(&mut first_group),
             });
             let limit = shown(g);
             for h in g.hits.iter().take(limit) {
@@ -2064,6 +2163,7 @@ impl PageView {
             return;
         }
         if matches!(event, EditorEvent::Blurred) {
+            self.finish_property_edit(cx);
             // The editor dropped its target (Escape, navigation, a reference followed, the
             // block went away). The list still holds the focus handle it registered on the
             // old row, so it would keep force-rendering a row now drawn as text; re-splice
@@ -2084,6 +2184,17 @@ impl PageView {
         self.rebuild_if_dirty(cx);
         match event {
             EditorEvent::Split { caret } => {
+                if self.is_property_block(&t.block) {
+                    // DESIGN.md §3.8: Enter commits the row; at the end of the last one it
+                    // moves on to the first body block instead of splitting the property.
+                    let at_end = *caret >= editor.read(cx).field_text().len();
+                    let last = self.is_last_property(&t.block);
+                    self.editor.update(cx, |e, cx| e.end(cx));
+                    if at_end && last {
+                        self.focus_body(window, cx);
+                    }
+                    return;
+                }
                 let collapsed = self.app.read(cx).store.is_collapsed(&t.block);
                 self.run_plan(
                     &t.page,
@@ -2101,10 +2212,16 @@ impl PageView {
                 );
             }
             EditorEvent::Indent => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 self.run_plan_keep(&t, caret, |st| outline::indent(st, &t.block), window, cx);
             }
             EditorEvent::Outdent => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 let zoom = self.zoom();
                 // Never outdent out of the zoomed subtree.
@@ -2126,11 +2243,28 @@ impl PageView {
                     None
                 };
                 let collapsed = self.app.read(cx).store.collapsed_set().clone();
-                // PG-1 hides the children of a compact attribute row, so Backspace must merge
-                // into the previous row the user can *see*, not into a hidden descendant
-                // (FR-2.5). Visibility here is the renderer's, not the store's alone.
-                let compact = self.zoom().is_none() && self.attributes_are_compact();
-                let editing = t.block.clone();
+                // Visibility here is the renderer's, not the store's alone.
+                let properties: Vec<BlockId> = self
+                    .header
+                    .properties
+                    .iter()
+                    .map(|p| p.block.clone())
+                    .collect();
+                // The properties bar is not part of the outline. If the row above is a
+                // property (or there is none), Backspace has nothing to merge into.
+                let blocked = self.app.update(cx, |app, _| {
+                    let Ok(st) = app.store.page_state(&t.page) else {
+                        return true;
+                    };
+                    let rows = st.visible_rows(zoom.as_ref(), &|b| collapsed.contains(b));
+                    match rows.iter().position(|(r, _)| r == &t.block) {
+                        Some(0) | None => true,
+                        Some(ix) => properties.contains(&rows[ix - 1].0),
+                    }
+                });
+                if blocked {
+                    return;
+                }
                 let now = self.app.read(cx).store.now();
                 self.run_plan(
                     &t.page,
@@ -2139,10 +2273,7 @@ impl PageView {
                             st,
                             &t.block,
                             zoom.as_ref(),
-                            &|b| {
-                                collapsed.contains(b)
-                                    || is_folded_attribute(st, compact, Some(&editing), b)
-                            },
+                            &|b| collapsed.contains(b),
                             now,
                         )
                     },
@@ -2151,6 +2282,39 @@ impl PageView {
                 );
             }
             EditorEvent::Navigate { up, x } => {
+                if self.is_property_block(&t.block) {
+                    let props = self.property_blocks();
+                    let pos = props.iter().position(|b| b == &t.block);
+                    let next = pos.and_then(|p| {
+                        if *up {
+                            p.checked_sub(1).map(|i| (props[i].clone(), true))
+                        } else {
+                            props.get(p + 1).map(|b| (b.clone(), false))
+                        }
+                    });
+                    match next {
+                        Some((block, to_end)) => {
+                            let x = x.unwrap_or(px(0.));
+                            let goal = if *up {
+                                Goal::LastLine(x)
+                            } else {
+                                Goal::FirstLine(x)
+                            };
+                            let len = self.block_text_len(&block, cx);
+                            self.edit_property_at(
+                                block,
+                                to_end.then_some(len),
+                                Some(goal),
+                                window,
+                                cx,
+                            );
+                        }
+                        // Down from the last row, or up from the first: leave the bar.
+                        None if !*up => self.focus_body(window, cx),
+                        None => {}
+                    }
+                    return;
+                }
                 let Some(ix) = self.row_index(&t.block) else {
                     return;
                 };
@@ -2165,6 +2329,15 @@ impl PageView {
                     .collect();
                 let pos = rows.iter().position(|(i, _)| *i == ix);
                 let next = pos.and_then(|p| if *up { p.checked_sub(1) } else { Some(p + 1) });
+                if *up && next.is_none() {
+                    // Arrow up from the first body block moves into the last property row.
+                    if let Some(last) = self.property_blocks().last().cloned() {
+                        let x = x.unwrap_or(px(0.));
+                        let len = self.block_text_len(&last, cx);
+                        self.edit_property_at(last, Some(len), Some(Goal::LastLine(x)), window, cx);
+                        return;
+                    }
+                }
                 if let Some(r) = next.and_then(|n| rows.get(n)).map(|(_, r)| (*r).clone()) {
                     let x = x.unwrap_or(px(0.));
                     let goal = if *up {
@@ -2207,6 +2380,9 @@ impl PageView {
                 }
             }
             EditorEvent::MoveBlock { up } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 let up = *up;
                 self.run_plan_keep(
@@ -3249,6 +3425,474 @@ impl PageView {
             }))
     }
 
+    // ---------------------------------------------------------------- properties bar
+
+    /// The page's leading property blocks as the bar (DESIGN.md §3.8): they are drawn here
+    /// and skipped by the outline, so the same data never appears twice.
+    fn render_properties(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let key_w = if self.compact {
+            PROPERTY_KEY_WIDTH_COMPACT
+        } else {
+            PROPERTY_KEY_WIDTH
+        };
+        let mut bar = div()
+            .debug_selector(|| "properties-bar".into())
+            // The header column already puts 4 px between children; the spec asks for 20.
+            .mt(px(PROPERTY_GAP_BELOW_TITLE - 4.))
+            .py(px(PROPERTY_PADDING_Y))
+            .border_t_1()
+            .border_b_1()
+            .border_color(th.line_soft)
+            .flex()
+            .flex_col();
+        for (i, p) in self.header.properties.iter().enumerate() {
+            bar = bar.child(self.render_property_row(i, p, key_w, cx));
+        }
+        if let Some(pending) = &self.pending_property {
+            if !self.header.properties.iter().any(|p| &p.block == pending) {
+                bar = bar.child(self.render_property_edit(cx));
+            }
+        }
+        // The same for an existing row whose text is now empty: until the edit ends (and
+        // the block is removed) it stays a bar row instead of reappearing as a bullet.
+        if let Some(editing) = &self.property_edit {
+            if !self.header.properties.iter().any(|p| &p.block == editing)
+                && self.pending_property.as_ref() != Some(editing)
+            {
+                bar = bar.child(self.render_property_edit(cx));
+            }
+        }
+        bar = bar.child(self.render_alias_row(key_w, cx));
+        bar = bar.child(self.render_add_property(cx));
+        bar.into_any_element()
+    }
+
+    fn property_key_cell(
+        &self,
+        key: &str,
+        glyph: Icon,
+        key_w: f32,
+        th: &crate::theme::Theme,
+    ) -> Div {
+        div()
+            .w(px(key_w))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(icon(glyph, PROPERTY_ICON, th.ink_3))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(crate::theme::SMALL.size))
+                    .text_color(th.ink_3)
+                    .child(key.to_string()),
+            )
+    }
+
+    fn render_property_row(
+        &self,
+        i: usize,
+        p: &PropertyBlock,
+        key_w: f32,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = theme(cx).clone();
+        if self.property_edit.as_ref() == Some(&p.block) {
+            return self.render_property_edit(cx);
+        }
+        let block = p.block.clone();
+        div()
+            .id(("property", i))
+            .debug_selector(move || format!("property-{i}"))
+            // The row reaches past the content so its hover fill does not move the text.
+            .mx(px(-PROPERTY_HOVER_BLEED))
+            .px(px(PROPERTY_HOVER_BLEED))
+            .min_h(px(PROPERTY_ROW_MIN_HEIGHT))
+            .rounded(px(crate::theme::RADIUS_CONTROL))
+            .flex()
+            .items_center()
+            .gap_2()
+            .hover(|d| d.bg(th.shelf))
+            .cursor_pointer()
+            .child(self.property_key_cell(&p.key, Icon::DashedCircle, key_w, &th))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(self.render_property_value(p, cx)),
+            )
+            // On click, not mouse-down: gpui focuses the workspace root on mouse-down, and a
+            // focus taken during that same event is lost again when it finishes.
+            .on_click(
+                cx.listener(move |this, _, window, cx| {
+                    this.edit_property(block.clone(), window, cx)
+                }),
+            )
+            .into_any_element()
+    }
+
+    fn render_property_value(&self, p: &PropertyBlock, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        match p.kind {
+            PropertyKind::Status => div()
+                .debug_selector(|| "property-status".into())
+                .h(px(STATUS_PILL_HEIGHT))
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(STATUS_PILL_PADDING_X))
+                .rounded_full()
+                .border_1()
+                .border_color(th.line_strong)
+                .bg(th.paper)
+                .child(
+                    div()
+                        .size(px(STATUS_DOT))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(th.status_progress),
+                )
+                .child(
+                    div()
+                        .text_size(px(crate::theme::SMALL.size))
+                        .text_color(th.ink)
+                        // Title-cased for display only; the block keeps what was typed.
+                        .child(title_case(&p.value)),
+                )
+                .into_any_element(),
+            PropertyKind::Linked => {
+                let title = utopia_core::inline::extract_refs(&p.value)
+                    .first()
+                    .map(|r| r.target.clone())
+                    .unwrap_or_else(|| p.value.clone());
+                let follow = title.clone();
+                div()
+                    .debug_selector(|| "property-avatar-row".into())
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .debug_selector(|| "property-avatar".into())
+                            .size(px(AVATAR_SIZE))
+                            .flex_none()
+                            .rounded_full()
+                            .bg(th.tag_bg)
+                            .text_color(th.tag_ink)
+                            .text_size(px(AVATAR_TEXT))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(initials(&title)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(crate::theme::TAG.size))
+                            .text_color(th.link)
+                            .cursor_pointer()
+                            .child(title)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.follow(
+                                        LinkTarget::Page(follow.clone()),
+                                        None,
+                                        e.modifiers.shift,
+                                        window,
+                                        cx,
+                                    );
+                                }),
+                            ),
+                    )
+                    .into_any_element()
+            }
+            PropertyKind::Plain => {
+                let line = crate::appearance::density(cx).line_height();
+                div()
+                    .text_size(px(crate::theme::TAG.size))
+                    .child(self.render_rich(&p.value, &p.block, None, line, 0, cx))
+                    .into_any_element()
+            }
+        }
+    }
+
+    fn render_property_edit(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        div()
+            .debug_selector(|| "property-edit".into())
+            .mx(px(-PROPERTY_HOVER_BLEED))
+            .px(px(PROPERTY_HOVER_BLEED))
+            .min_h(px(PROPERTY_ROW_MIN_HEIGHT))
+            .flex()
+            .items_center()
+            .child(
+                // The inset 1.5 px link ring around the raw text (§3.8).
+                div()
+                    .flex_1()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
+                    .border(px(1.5))
+                    .border_color(th.link)
+                    .bg(th.paper)
+                    .px_1()
+                    .py_0p5()
+                    .child(self.editor.clone()),
+            )
+            .into_any_element()
+    }
+
+    fn render_alias_row(&self, key_w: f32, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let mut value = div().flex().flex_wrap().items_center().gap_1();
+        for (i, a) in self.header.aliases.iter().enumerate() {
+            let alias = a.clone();
+            value = value.child(
+                div()
+                    .id(("alias", i))
+                    .debug_selector(move || format!("alias-{i}"))
+                    .h(px(crate::theme::AVATAR_SIZE))
+                    .flex()
+                    .items_center()
+                    .px_2()
+                    .rounded(px(crate::theme::RADIUS_CHIP))
+                    .bg(th.line_soft)
+                    .text_size(px(crate::theme::SMALL.size))
+                    .text_color(th.muted)
+                    .cursor_pointer()
+                    .hover(|s| s.bg(th.hover).text_color(th.ink))
+                    .child(format!("{a} ×"))
+                    .on_click(cx.listener(move |this, _, _, cx| this.remove_alias(&alias, cx))),
+            );
+        }
+        value = match &self.alias_input {
+            Some(input) => value.child(
+                div()
+                    .w(px(crate::theme::PROPERTY_ALIAS_WIDTH))
+                    .px_1()
+                    .border_1()
+                    .border_color(th.link)
+                    .rounded(px(crate::theme::RADIUS_CHIP))
+                    .child(input.clone()),
+            ),
+            None => value.child(
+                self.button("add-alias", "+ alias", cx)
+                    .debug_selector(|| "add-alias".into())
+                    .on_click(cx.listener(|this, _, window, cx| this.start_alias(window, cx))),
+            ),
+        };
+        div()
+            .debug_selector(|| "property-aliases".into())
+            .mx(px(-PROPERTY_HOVER_BLEED))
+            .px(px(PROPERTY_HOVER_BLEED))
+            .min_h(px(PROPERTY_ROW_MIN_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(self.property_key_cell("aliases", Icon::List, key_w, &th))
+            .child(value)
+            .into_any_element()
+    }
+
+    fn render_add_property(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let mut row = div()
+            .debug_selector(|| "add-property-row".into())
+            .min_h(px(PROPERTY_ROW_MIN_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(
+                div()
+                    .id("add-property")
+                    .debug_selector(|| "add-property".into())
+                    .h(px(crate::theme::PROPERTY_CONTROL_HEIGHT))
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .px_2()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
+                    .text_size(px(crate::theme::SMALL.size))
+                    .text_color(th.ink_3)
+                    .cursor_pointer()
+                    .hover(|d| d.bg(th.hover).text_color(th.ink))
+                    .child(icon(Icon::Plus, crate::icons::ICON_SIZE, th.ink_3))
+                    .child("Add property")
+                    .on_click(cx.listener(|this, _, window, cx| this.add_property(window, cx))),
+            )
+            .child(div().flex_1());
+        if let Some((date, label)) = self.header.first_mentioned.clone() {
+            row = row.child(
+                div()
+                    .debug_selector(|| "first-mentioned".into())
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.muted)
+                    .child("First mentioned")
+                    .child(
+                        div()
+                            .text_color(th.link)
+                            .cursor_pointer()
+                            .child(label)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                    this.pick_date(date, e.modifiers.shift, window, cx)
+                                }),
+                            ),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    // ---------------------------------------------------------------- properties editing
+
+    fn block_text_len(&self, block: &BlockId, cx: &mut Context<Self>) -> usize {
+        let Some(page) = self.page() else { return 0 };
+        self.app.update(cx, |app, _| {
+            app.store
+                .page_state(&page)
+                .ok()
+                .and_then(|st| st.block(block).map(|b| b.text.len()))
+                .unwrap_or(0)
+        })
+    }
+
+    /// The bar's blocks in the order the bar draws them: the leading properties, then the
+    /// pending "Add property" row, then a row whose empty text just dropped out of the
+    /// leading run but whose edit is still open.
+    fn property_blocks(&self) -> Vec<BlockId> {
+        let mut out: Vec<BlockId> = self
+            .header
+            .properties
+            .iter()
+            .map(|p| p.block.clone())
+            .collect();
+        for block in [&self.pending_property, &self.property_edit]
+            .into_iter()
+            .flatten()
+        {
+            if !out.contains(block) {
+                out.push(block.clone());
+            }
+        }
+        out
+    }
+
+    fn is_property_block(&self, block: &BlockId) -> bool {
+        self.header.properties.iter().any(|p| &p.block == block)
+            || self.pending_property.as_ref() == Some(block)
+            // Empty text removes the block from `header.properties` immediately, but its
+            // edit is still the bar's row until it ends: keyboard navigation and Split must
+            // keep treating it as one, or the editor is stranded on a block with no row.
+            || self.property_edit.as_ref() == Some(block)
+    }
+
+    fn is_last_property(&self, block: &BlockId) -> bool {
+        self.property_blocks().last() == Some(block)
+    }
+
+    /// Draw a property row as its raw block text and put the caret in it (§3.8).
+    fn edit_property(&mut self, block: BlockId, window: &mut Window, cx: &mut Context<Self>) {
+        let len = self.block_text_len(&block, cx);
+        self.edit_property_at(block, Some(len), None, window, cx);
+    }
+
+    fn edit_property_at(
+        &mut self,
+        block: BlockId,
+        caret: Option<usize>,
+        goal: Option<Goal>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(page) = self.page() else { return };
+        self.edit(page, block, caret, goal, window, cx);
+        cx.notify();
+    }
+
+    /// "Add property": a new empty root block after the last property, edited at once. It
+    /// joins the bar only when its text becomes a `key:: value`; until then the pending row
+    /// draws it, and an empty commit removes it again.
+    fn add_property(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(page) = self.page() else { return };
+        let after = self.header.properties.last().map(|p| p.block.clone());
+        let id = BlockId::new();
+        self.app.update(cx, |app, cx| {
+            let r = app.store.execute(
+                &page,
+                vec![Command::InsertBlock {
+                    id: id.clone(),
+                    parent: None,
+                    after,
+                    text: String::new(),
+                    kind: BlockKind::Bullet,
+                }],
+                utopia_store::EditOpts {
+                    no_undo: true,
+                    ..Default::default()
+                },
+            );
+            app.report(r);
+            app.changed(vec![page.clone()], true, cx);
+        });
+        self.pending_property = Some(id.clone());
+        self.edit_property_at(id, Some(0), None, window, cx);
+    }
+
+    /// The bar's edit ended (Enter, Escape, a click elsewhere): an emptied property row is
+    /// removed (DESIGN.md §3.8), and a pending row stops being pending either way.
+    fn finish_property_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(block) = self.property_edit.take() else {
+            return;
+        };
+        self.finish_property_block(block, cx);
+    }
+
+    /// Clean up one property row whose edit is over. Split from `finish_property_edit` so a
+    /// new target can finish the old row after the editor has committed it: `begin` switches
+    /// targets without emitting `Blurred`, so this is the only place that sees both.
+    fn finish_property_block(&mut self, block: BlockId, cx: &mut Context<Self>) {
+        if self.pending_property.as_ref() == Some(&block) {
+            self.pending_property = None;
+        }
+        let Some(page) = self.page() else { return };
+        let text = self.app.update(cx, |app, _| {
+            app.store
+                .page_state(&page)
+                .ok()
+                .and_then(|st| st.block(&block).map(|b| b.text.clone()))
+        });
+        if !text.as_deref().is_some_and(|t| t.trim().is_empty()) {
+            return;
+        }
+        let now = self.app.read(cx).store.now();
+        self.app.update(cx, |app, cx| {
+            let plan = app
+                .store
+                .page_state(&page)
+                .ok()
+                .and_then(|st| outline::delete_subtree(st, &block, now).ok());
+            if let Some(plan) = plan {
+                let r = app.store.execute_plan(&page, plan, None);
+                app.report(r);
+                app.changed(vec![page.clone()], true, cx);
+            }
+        });
+        self.cycle.invalidate(Invalidation::rows());
+    }
+
+    /// Enter at the end of the last property row: the first body block, created if needed.
+    fn focus_body(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.focus_first(window, cx);
+    }
+
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let h = self.header.clone();
@@ -3398,81 +4042,36 @@ impl PageView {
                 .into_any_element(),
         };
         col = col.child(title_el);
-        // PG-2: the page's own controls in one row under the title: alias chips, "+ alias",
-        // and the "···" menu kept at the far right of the column.
-        if self.zoom().is_none() && !h.deleted {
-            let mut left = div()
-                .flex()
-                .flex_wrap()
-                .items_center()
-                .gap_1()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.muted);
-            for (i, a) in h.aliases.iter().enumerate() {
-                let alias = a.clone();
-                left = left.child(
-                    div()
-                        .id(("alias", i))
-                        .debug_selector(move || format!("alias-{i}"))
-                        .px_2()
-                        .py_0p5()
-                        .rounded(px(crate::theme::RADIUS_CONTROL))
-                        .bg(th.line_soft)
-                        .text_color(th.muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(th.hover).text_color(th.ink))
-                        .child(format!("{a} ×"))
-                        .on_click(cx.listener(move |this, _, _, cx| this.remove_alias(&alias, cx))),
-                );
-            }
-            left = match &self.alias_input {
-                Some(input) => left.child(
-                    div()
-                        .w(px(160.))
-                        .px_1()
-                        .border_1()
-                        .border_color(th.link)
-                        .rounded(px(crate::theme::RADIUS_CONTROL))
-                        .child(input.clone()),
-                ),
-                None => left.child(
-                    self.button("add-alias", "+ alias", cx)
-                        .debug_selector(|| "add-alias".into())
-                        .on_click(cx.listener(|this, _, window, cx| this.start_alias(window, cx))),
-                ),
-            };
-            // A compact card keeps its own page actions; the main pane's live in the
-            // workspace top bar (DESIGN.md §3.3).
-            let menu = (!h.draft && self.compact).then(|| {
-                div()
-                    .relative()
-                    .child(
-                        self.button("pane-page-menu", "···", cx)
-                            .debug_selector(|| "pane-page-menu".into())
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.page_menu = !this.page_menu;
-                                cx.notify();
-                            })),
-                    )
-                    .children(self.page_menu.then(|| {
-                        deferred(
-                            anchored()
-                                .anchor(Corner::TopRight)
-                                .offset(point(px(0.), px(MENU_OFFSET)))
-                                .child(self.page_menu_popup(cx)),
-                        )
-                        .with_priority(1)
-                    }))
-            });
+        // A compact card keeps its own page actions; the main pane's live in the
+        // workspace top bar (DESIGN.md §3.3). The aliases moved into the properties bar.
+        if self.zoom().is_none() && !h.deleted && self.compact && !h.draft {
             col = col.child(
                 div()
                     .debug_selector(|| "page-toolbar".into())
                     .flex()
                     .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .child(left)
-                    .children(menu),
+                    .justify_end()
+                    .child(
+                        div()
+                            .relative()
+                            .child(
+                                self.button("pane-page-menu", "···", cx)
+                                    .debug_selector(|| "pane-page-menu".into())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.page_menu = !this.page_menu;
+                                        cx.notify();
+                                    })),
+                            )
+                            .children(self.page_menu.then(|| {
+                                deferred(
+                                    anchored()
+                                        .anchor(Corner::TopRight)
+                                        .offset(point(px(0.), px(MENU_OFFSET)))
+                                        .child(self.page_menu_popup(cx)),
+                                )
+                                .with_priority(1)
+                            })),
+                    ),
             );
         }
         if self.show_calendar {
@@ -3495,67 +4094,8 @@ impl PageView {
                     )),
             );
         }
-        if self.zoom().is_none() && !h.attributes.is_empty() {
-            // Page metadata header (P1, W7): the page's `Key:: value` blocks at a glance.
-            // PG-1 keeps it, and adds the toggle that decides whether the blocks are drawn
-            // in full under it or folded to one muted row each.
-            let mut grid = div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .gap_0p5()
-                .py_1()
-                .text_size(px(crate::theme::BODY_SIZE));
-            for (k, v) in &h.attributes {
-                let key = k.clone();
-                grid = grid.child(
-                    div()
-                        .debug_selector(move || format!("meta-{key}"))
-                        .flex()
-                        .gap_2()
-                        .child(div().w(px(110.)).text_color(th.muted).child(k.clone()))
-                        .child(div().text_color(th.ink).child(v.clone())),
-                );
-            }
-            let on = !self.attributes_are_compact();
-            let toggle = div()
-                .id("attribute-blocks-toggle")
-                .debug_selector(|| "attribute-blocks-toggle".into())
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_0p5()
-                .rounded(px(crate::theme::RADIUS_CONTROL))
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(if on { th.ink } else { th.muted })
-                .cursor_pointer()
-                .hover(|d| d.bg(th.hover).text_color(th.ink))
-                .child(
-                    div()
-                        .size(px(10.))
-                        .flex_none()
-                        .rounded(px(2.))
-                        .border_1()
-                        .border_color(if on { th.link } else { th.line_strong })
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .font_family(crate::theme::MONO)
-                        .text_size(px(8.))
-                        .when(on, |d| d.bg(th.link).text_color(th.paper).child("✓")),
-                )
-                .child("Show as blocks")
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    let next = if on {
-                        crate::appearance::AttributeBlocks::Compact
-                    } else {
-                        crate::appearance::AttributeBlocks::Blocks
-                    };
-                    this.set_attribute_blocks(next, cx);
-                }));
-            col = col.child(div().flex().items_start().gap_2().child(grid).child(toggle));
+        if self.zoom().is_none() && !h.deleted {
+            col = col.child(self.render_properties(cx));
         }
         col.into_any_element()
     }
@@ -3618,6 +4158,9 @@ impl PageView {
             app.changed(vec![m.page.clone(), page.clone()], true, cx);
         });
         self.unlinked = None;
+        if self.unlinked_open {
+            self.refresh_unlinked(cx);
+        }
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
@@ -3637,6 +4180,9 @@ impl PageView {
             app.changed(vec![page.clone()], true, cx);
         });
         self.unlinked = None;
+        if self.unlinked_open {
+            self.refresh_unlinked(cx);
+        }
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
@@ -3985,43 +4531,6 @@ impl PageView {
         match item {
             Item::Header => self.render_header(cx),
             Item::Row(r) => self.render_row(ix, &r, cx),
-            // PG-1: the attribute's block, folded to the one line the header already
-            // carries. A click shows the blocks again, which is what the row means.
-            Item::Attribute {
-                depth,
-                key,
-                value,
-                block,
-                children,
-            } => {
-                div()
-                    .id(("attr", ix))
-                    .debug_selector(|| format!("attr-{ix}"))
-                    .pl(px(
-                        depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
-                    ))
-                    .pr_2()
-                    .py_0p5()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .text_size(px(crate::theme::CONTROL_SIZE))
-                    .line_height(px(18.))
-                    .text_color(th.muted)
-                    .cursor_pointer()
-                    .hover(|s| s.text_color(th.ink))
-                    .child(format!("{key} · {value}"))
-                    .when(children > 0, |d| {
-                        d.child(div().text_color(th.muted).child(format!("… {children}")))
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        // Reveal the block and start editing it: the row is a shortcut to
-                        // the real block, not a second copy of the data.
-                        this.set_attribute_blocks(crate::appearance::AttributeBlocks::Blocks, cx);
-                        this.focus_block(&block, Some(0), window, cx);
-                    }))
-                    .into_any_element()
-            }
             Item::Notice { depth, text } => div()
                 .pl(px(
                     depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
@@ -4170,14 +4679,26 @@ impl PageView {
                     }
                 }
             }
+            // DESIGN.md §4.2: an empty body is a muted placeholder behind a `line_strong`
+            // bullet.
             Item::Empty => div()
                 .id("empty")
                 .debug_selector(|| "empty".into())
                 .px(px(CONTENT_PADDING_X))
                 .py_1()
-                .text_color(th.muted)
+                .flex()
+                .items_center()
+                .gap_2()
                 .cursor_text()
-                .child("Click to start writing")
+                .child(
+                    div()
+                        .debug_selector(|| "empty-bullet".into())
+                        .size(px(6.))
+                        .flex_none()
+                        .rounded_full()
+                        .bg(th.line_strong),
+                )
+                .child(div().text_color(th.muted).child("Click to start writing"))
                 .on_click(cx.listener(|this, _, window, cx| this.focus_first(window, cx)))
                 .into_any_element(),
             // DESIGN.md §3.5: a mono weekday label above the title, a Today pill on today,
@@ -4382,48 +4903,163 @@ impl PageView {
                 .text_color(th.muted)
                 .child("No earlier notes.")
                 .into_any_element(),
-            Item::RefsHeader { title, count } => div()
-                .debug_selector(|| "refs-header".into())
-                .mt_6()
-                .mx(px(if self.compact {
+            // DESIGN.md §3.7: a bordered well panel with a 12 x 16 header. On a page view
+            // the header carries the Filter button; in the feed it is a full-width button
+            // that collapses that day's panel.
+            Item::RefsHeader {
+                title,
+                count,
+                date,
+                collapsed,
+            } => {
+                let th = th.clone();
+                let pad = if self.compact {
                     crate::theme::SPACING[3]
                 } else {
                     CONTENT_PADDING_X
-                }))
-                .pt_2()
-                .pb_1()
-                .border_t_1()
-                .border_color(th.line)
-                .flex()
-                .items_center()
-                .gap_2()
-                .text_size(px(crate::theme::BODY_SIZE))
-                .text_color(th.muted)
-                .child(div().debug_selector(|| "refs-title".into()).child(title))
-                .child(
-                    crate::theme::count_chip(count, &th)
-                        .debug_selector(move || format!("refs-count-{count}")),
-                )
-                .into_any_element(),
-            Item::RefsControls => self.render_controls(cx),
+                };
+                let mut header = div()
+                    .id(("refs-header", ix))
+                    .debug_selector(|| "refs-header".into())
+                    .mx(px(pad))
+                    .mt(px(if self.is_journal() {
+                        crate::theme::SPACING[5]
+                    } else {
+                        PAGE_REFS_GAP
+                    }))
+                    .bg(th.well)
+                    .border_1()
+                    .border_color(th.line)
+                    .when(collapsed, |d| d.rounded(px(crate::theme::RADIUS_PANEL)))
+                    .when(!collapsed, |d| {
+                        d.rounded_t(px(crate::theme::RADIUS_PANEL)).border_b_0()
+                    })
+                    .px(px(crate::theme::SPACING[3]))
+                    .py(px(crate::theme::SPACING[2]))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(crate::theme::SMALL.size))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(th.ink_2);
+                match date {
+                    Some(date) => {
+                        let iso = utopia_core::date::iso(date);
+                        header = header
+                            .cursor_pointer()
+                            .hover(|d| d.bg(th.hover))
+                            .child(
+                                div()
+                                    .debug_selector(move || {
+                                        format!(
+                                            "refs-state-{iso}-{}",
+                                            if collapsed { "closed" } else { "open" }
+                                        )
+                                    })
+                                    .child(icon(
+                                        if collapsed {
+                                            Icon::ChevronRight
+                                        } else {
+                                            Icon::ChevronDown
+                                        },
+                                        crate::icons::ICON_SIZE,
+                                        th.ink_3,
+                                    )),
+                            )
+                            .child(div().debug_selector(|| "refs-title".into()).child(title))
+                            .child(
+                                crate::theme::count_chip(count, &th)
+                                    .debug_selector(move || format!("refs-count-{count}")),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.collapsed_ref_days.remove(&date) {
+                                    this.collapsed_ref_days.insert(date);
+                                }
+                                this.cycle.invalidate(Invalidation::rows());
+                                cx.notify();
+                            }));
+                    }
+                    None => {
+                        header = header
+                            .child(div().debug_selector(|| "refs-title".into()).child(title))
+                            .child(
+                                crate::theme::count_chip(count, &th)
+                                    .debug_selector(move || format!("refs-count-{count}")),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                outline_button("refs-filter", "Filter", &th)
+                                    .debug_selector(|| "refs-filter".into())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.filter.update(cx, |f, _| f.focus(window));
+                                    })),
+                            );
+                    }
+                }
+                header.into_any_element()
+            }
+            Item::RefsEnd => {
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
+                div()
+                    .debug_selector(|| "refs-end".into())
+                    .mx(px(pad))
+                    .h(px(crate::theme::SPACING[1]))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_b_1()
+                    .border_color(th.line)
+                    .rounded_b(px(crate::theme::RADIUS_PANEL))
+                    .into_any_element()
+            }
+            Item::RefsControls => {
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
+                div()
+                    .mx(px(pad))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .child(self.render_controls(cx))
+                    .into_any_element()
+            }
             Item::GroupHeader {
                 page,
                 count,
                 scheduled,
+                first,
             } => {
                 let id = page.id.clone();
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
                 div()
                     .id(("group", ix))
                     .flex()
                     .items_center()
-                    .mx_2()
-                    .px_2()
-                    .pt_2()
-                    .rounded(px(crate::theme::RADIUS_CHIP))
+                    .mx(px(pad))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .when(!first, |d| d.border_t_1())
+                    .px(px(crate::theme::SPACING[4]))
+                    .pt(px(crate::theme::SPACING[3] + 2.))
+                    .pb(px(crate::theme::SPACING[1]))
                     .cursor_pointer()
                     .hover(|s| s.bg(th.hover))
-                    // The count follows the name as a chip (LR-2), and there are no icons in
-                    // the header: the title and its count are enough.
+                    // The source page link is 14/500 `link` (DESIGN.md §3.7); the count chip
+                    // and the ref type label follow it.
                     .child(
                         div()
                             .flex()
@@ -4432,6 +5068,7 @@ impl PageView {
                             .child(
                                 div()
                                     .debug_selector(|| format!("group-title-{ix}"))
+                                    .text_size(px(crate::theme::TAG.size))
                                     .font_weight(gpui::FontWeight::MEDIUM)
                                     .text_color(th.link)
                                     .child(page.title.clone()),
@@ -4467,59 +5104,116 @@ impl PageView {
                 // The same row the right sidebar draws (RS-1), with the path above it (LR-3)
                 // and its first children inline (LR-4).
                 let th = th.clone();
-                crate::reference::reference_row(
-                    "hit",
-                    ix,
-                    crate::reference::RefRow {
-                        hit: &hit,
-                        page_title: &page_title,
-                        children: &children,
-                        hidden,
-                    },
-                    &th,
-                    &self.app.read(cx).store,
-                    24.,
-                    cx.entity(),
-                )
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
+                div()
+                    .mx(px(pad))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .child(crate::reference::reference_row(
+                        "hit",
+                        ix,
+                        crate::reference::RefRow {
+                            hit: &hit,
+                            page_title: &page_title,
+                            children: &children,
+                            hidden,
+                        },
+                        &th,
+                        &self.app.read(cx).store,
+                        &self.self_titles,
+                        crate::theme::SPACING[4],
+                        cx.entity(),
+                    ))
+                    .into_any_element()
             }
-            Item::More { page, hidden } => div()
-                .id(("more", ix))
-                .px_6()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.link)
-                .cursor_pointer()
-                .child(format!("+{hidden} more"))
-                .on_click(cx.listener(move |this, _, _, cx| this.set_expanded(page.clone(), cx)))
-                .into_any_element(),
-            Item::NoRefs => div()
-                .px_4()
-                .pb_6()
-                .text_size(px(crate::theme::BODY_SIZE))
-                .text_color(th.muted)
-                .child("No linked references yet.")
-                .into_any_element(),
+            Item::More { page, hidden } => {
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
+                div()
+                    .id(("more", ix))
+                    .mx(px(pad))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .px(px(crate::theme::SPACING[4]))
+                    .text_size(px(crate::theme::CAPTION_SIZE))
+                    .text_color(th.link)
+                    .cursor_pointer()
+                    .child(format!("+{hidden} more"))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.set_expanded(page.clone(), cx)),
+                    )
+                    .into_any_element()
+            }
+            Item::NoRefs => {
+                let pad = if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                };
+                div()
+                    .mx(px(pad))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .px(px(crate::theme::SPACING[4]))
+                    .pb_6()
+                    .text_size(px(crate::theme::BODY_SIZE))
+                    .text_color(th.muted)
+                    .child("No linked references yet.")
+                    .into_any_element()
+            }
+            // DESIGN.md §3.7: a collapsed row at least 44 px tall with a top divider and a
+            // chevron-right. The mentions are searched when it is expanded, not before.
             Item::UnlinkedHeader { count, open } => div()
                 .id("unlinked-header")
                 .debug_selector(|| "unlinked-header".into())
                 .mt_4()
-                .mx_4()
-                .pt_2()
-                .pb_1()
+                .mx(px(if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                }))
+                .h(px(UNLINKED_ROW_HEIGHT))
+                .px_2()
                 .border_t_1()
                 .border_color(th.line)
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(crate::theme::BODY_SIZE))
-                .text_color(th.muted)
+                .text_size(px(crate::theme::SMALL.size))
+                .text_color(th.ink_2)
                 .cursor_pointer()
-                .hover(|s| s.text_color(th.ink))
+                .hover(|s| s.bg(th.hover))
                 .child(
                     div()
                         .debug_selector(move || format!("unlinked-arrow-{open}"))
-                        .child(if open { "▾" } else { "▸" }),
+                        .child(icon(
+                            if open {
+                                crate::icons::Icon::ChevronDown
+                            } else {
+                                crate::icons::Icon::ChevronRight
+                            },
+                            crate::icons::ICON_SIZE,
+                            th.ink_3,
+                        )),
                 )
-                .child(div().child("Unlinked References"))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child("Unlinked references"),
+                )
                 .children(count.map(|c| {
                     crate::theme::count_chip(c, &th)
                         .debug_selector(move || format!("unlinked-count-{c}"))
@@ -4536,6 +5230,10 @@ impl PageView {
                 }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.unlinked_open = !this.unlinked_open;
+                    if this.unlinked_open {
+                        // The one place the FTS scan runs (DESIGN.md §3.7, rule 10).
+                        this.refresh_unlinked(cx);
+                    }
                     this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }))
@@ -4671,6 +5369,34 @@ fn start_note(
     })
 }
 
+/// DESIGN.md §3.8: the status value is title-cased for display only.
+fn title_case(value: &str) -> String {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+/// The avatar's initials: the first letters of the first and last words ("Ana Lovelace" →
+/// "AL"), two letters of a single word.
+fn initials(title: &str) -> String {
+    let words: Vec<&str> = title.split_whitespace().collect();
+    let mut out = String::new();
+    if let Some(first) = words.first() {
+        out.extend(first.chars().next().map(|c| c.to_uppercase().to_string()));
+        if let Some(last) = words.last().filter(|_| words.len() > 1) {
+            out.extend(last.chars().next().map(|c| c.to_uppercase().to_string()));
+        } else {
+            out.extend(first.chars().nth(1).map(|c| c.to_uppercase().to_string()));
+        }
+    }
+    if out.is_empty() {
+        out.push('?');
+    }
+    out
+}
+
 /// PG-1's one classification of page metadata: a root `key:: value` block is an attribute,
 /// except a code block — the index never records code as an attribute (`attr_row` is skipped
 /// for `BlockKind::Code`), so `std::cout << …` stays a code block and not a `std` key.
@@ -4681,37 +5407,8 @@ fn page_attribute(kind: BlockKind, text: &str) -> Option<(String, std::ops::Rang
     utopia_core::inline::attribute(text)
 }
 
-/// PG-1 folds a root `key:: value` block into one compact row and hides its children, so
-/// its subtree is not drawn. The subtree holding `editing` stays open: the row that holds
-/// the editor — and its focus handle — must always be rendered, or every keystroke after
-/// the fold is lost (AGENTS.md, "the list keeps rendering the row being edited").
-///
-/// This is the one answer to "is this attribute drawn folded", used by the renderer and by
-/// anything that asks which row the user can see (Backspace's merge, FR-2.5).
-fn is_folded_attribute(
-    st: &utopia_core::PageState,
-    compact: bool,
-    editing: Option<&BlockId>,
-    id: &BlockId,
-) -> bool {
-    if !compact || st.depth(id) != 0 {
-        return false;
-    }
-    let Some(block) = st.block(id) else {
-        return false;
-    };
-    if page_attribute(block.kind, &block.text).is_none() {
-        return false;
-    }
-    match editing {
-        Some(active) => active != id && !st.ancestors(active).contains(id),
-        None => true,
-    }
-}
-
-/// Push a page's visible rows, folding each root `key:: value` attribute block into one
-/// compact row (PG-1) when `compact_attributes`. The block and its subtree stay in the
-/// shard; folding is only what this frame draws, and the "…" says children went with it.
+/// Push a page's visible rows. `skip` holds the leading property blocks the properties bar
+/// already draws (DESIGN.md §3.8 rule 2): they and their subtrees are not drawn again.
 #[allow(clippy::too_many_arguments)]
 fn push_page_rows(
     app: &mut AppState,
@@ -4720,8 +5417,7 @@ fn push_page_rows(
     zoom: Option<&BlockId>,
     collapsed: &HashSet<BlockId>,
     open_embeds: &HashSet<(BlockId, String)>,
-    compact_attributes: bool,
-    editing: Option<&BlockId>,
+    skip: &[BlockId],
     out: &mut Vec<Item>,
 ) {
     let mut folded: Option<usize> = None;
@@ -4731,19 +5427,9 @@ fn push_page_rows(
         }
         folded = None;
         let Some(b) = st.block(&id) else { continue };
-        if compact_attributes && is_folded_attribute(st, true, editing, &id) {
-            if let Some((key, value)) = page_attribute(b.kind, &b.text) {
-                let children = st.live_children(Some(&id)).len();
-                out.push(Item::Attribute {
-                    depth,
-                    key,
-                    value: plain_text(&b.text[value]),
-                    block: id.clone(),
-                    children,
-                });
-                folded = Some(depth);
-                continue;
-            }
+        if skip.contains(&id) {
+            folded = Some(depth);
+            continue;
         }
         let item = RowItem {
             page: page.clone(),

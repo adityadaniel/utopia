@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{
     anchored, deferred, div, prelude::*, px, ClipboardItem, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, HighlightStyle, MouseButton, MouseDownEvent,
+    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, StyledText, Subscription, Task,
     UnderlineStyle, Window,
 };
@@ -28,6 +28,8 @@ pub struct EditTarget {
     pub host: EntityId,
     pub page: PageId,
     pub block: BlockId,
+    /// The block is a properties-bar row (DESIGN.md §3.8): its `key:` is drawn semibold.
+    pub property: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2170,6 +2172,19 @@ impl Render for BlockEditor {
             )
         } else {
             let mut hl = source_highlights(&text, &th);
+            if self.target().is_some_and(|t| t.property) {
+                if let Some((key, _)) = utopia_core::inline::attribute(&text) {
+                    hl.push((
+                        0..key.len(),
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::BOLD),
+                            color: Some(th.ink),
+                            ..Default::default()
+                        },
+                    ));
+                    hl.sort_by_key(|(r, _)| r.start);
+                }
+            }
             if let Some(m) = self.field.marked() {
                 hl.retain(|(r, _)| r.end <= m.start || r.start >= m.end);
                 hl.push((

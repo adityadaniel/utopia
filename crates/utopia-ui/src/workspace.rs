@@ -2633,6 +2633,7 @@ impl Workspace {
                             crate::reference::RefRow::alone(hit, &group.page.title),
                             &th,
                             &self.app.read(cx).store,
+                            &[],
                             8.,
                             me.clone(),
                         ));

@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use crate::actions::{
     by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
-use crate::appearance::{self, AttributeBlocks, Density, UiFont};
+use crate::appearance::{self, Density, UiFont};
 use crate::help::{shot_image, TOPICS};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::sync_runner;
@@ -671,25 +671,6 @@ impl SettingsView {
                 Ok(()) => format!("The density is now {}.", density.label()).into(),
             },
         );
-        cx.notify();
-    }
-
-    /// Settings → Appearance: how pages draw their attribute blocks (PG-1). The same
-    /// preference the page's "Show as blocks" toggle writes.
-    pub fn choose_attribute_blocks(&mut self, value: AttributeBlocks, cx: &mut Context<Self>) {
-        let before = appearance::attribute_blocks(cx);
-        self.status = Some(match appearance::set_attribute_blocks(cx, value) {
-            Err(e) => format!(
-                "{} applies now, but could not save {}: {e}",
-                value.label(),
-                appearance::FILE
-            )
-            .into(),
-            Ok(()) if before == value => {
-                format!("Attribute blocks are already {}.", value.label()).into()
-            }
-            Ok(()) => format!("Attribute blocks are now {}.", value.label()).into(),
-        });
         cx.notify();
     }
 }
@@ -1556,59 +1537,6 @@ impl SettingsView {
             false,
             &th,
         ));
-        list = list.child(appearance_row(
-            div()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(div().child("Attribute blocks"))
-                .child(
-                    div()
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.muted)
-                        .child(
-                            "A page's key:: value blocks also appear in the metadata header. \
-                             Compact rows draw them once, quietly, under it.",
-                        ),
-                ),
-            false,
-            &th,
-        ));
-        let current_attributes = appearance::attribute_blocks(cx);
-        for (i, &a) in AttributeBlocks::ALL.iter().enumerate() {
-            let on = a == current_attributes;
-            list = list.child(appearance_row(
-                div()
-                    .id(SharedString::from(format!("attributes-{}", a.key())))
-                    .debug_selector(move || format!("settings-attributes-{}", a.key()))
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .when(on, |x| x.bg(th.line_soft))
-                    .cursor_pointer()
-                    .hover(|x| x.bg(th.hover))
-                    .child(radio(on, &th))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .flex_1()
-                            .child(div().child(a.label()))
-                            .child(
-                                div()
-                                    .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
-                                    .child(a.hint()),
-                            ),
-                    )
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.choose_attribute_blocks(a, cx)),
-                    ),
-                i + 1 == AttributeBlocks::ALL.len(),
-                &th,
-            ));
-        }
-
         // SB-3: the pages pinned to the sidebar live in settings.json.
         let pinned = appearance::pinned(cx).len();
         list = list.child(card_top(&th, "Pinned pages").mt_4());

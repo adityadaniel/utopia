@@ -208,6 +208,37 @@ pub const CALENDAR_CELL_HEIGHT: f32 = 30.;
 pub const CALENDAR_DOT: f32 = 4.;
 /// The footer's status dot: 8 px.
 pub const FOOTER_DOT: f32 = 8.;
+/// A collapsed "Unlinked references" row (DESIGN.md §3.7): at least 44 px tall.
+pub const UNLINKED_ROW_HEIGHT: f32 = 44.;
+
+// Properties bar (DESIGN.md §3.8).
+/// The key column: 140 px on a page, narrower in a compact pane.
+pub const PROPERTY_KEY_WIDTH: f32 = 140.;
+pub const PROPERTY_KEY_WIDTH_COMPACT: f32 = 90.;
+/// A property row is at least 36 px tall.
+pub const PROPERTY_ROW_MIN_HEIGHT: f32 = 36.;
+/// 6 px above and below the rows, behind the 1 px `line_soft` borders.
+pub const PROPERTY_PADDING_Y: f32 = 6.;
+/// 20 px between the page title and the bar.
+pub const PROPERTY_GAP_BELOW_TITLE: f32 = 20.;
+/// A hovered row reaches 8 px past the content on each side.
+pub const PROPERTY_HOVER_BLEED: f32 = 8.;
+/// A status value's pill (§3.8): 26 px tall, 10 px sides, fully round.
+pub const STATUS_PILL_HEIGHT: f32 = 26.;
+pub const STATUS_PILL_PADDING_X: f32 = 10.;
+/// Its in-progress dot.
+pub const STATUS_DOT: f32 = 7.;
+/// A page-link value's avatar (§3.8): 22 px round, 10 px semibold initials.
+pub const AVATAR_SIZE: f32 = 22.;
+pub const AVATAR_TEXT: f32 = 10.;
+/// The key column's property icon (§3.8: 15 px).
+pub const PROPERTY_ICON: f32 = 15.;
+/// The bar's "Add property" and alias input control height (§3.8).
+pub const PROPERTY_CONTROL_HEIGHT: f32 = 28.;
+/// The alias input's width while adding one (§3.8).
+pub const PROPERTY_ALIAS_WIDTH: f32 = 160.;
+/// 48 px between the page body and the Linked references panel (§4.2).
+pub const PAGE_REFS_GAP: f32 = 48.;
 /// A keyboard hint chip: 20 px tall, radius 4.
 pub const KBD_HEIGHT: f32 = 20.;
 /// The focus ring §3.4 asks for: 2 px, offset 2. gpui 0.2 has no outline, so controls draw
