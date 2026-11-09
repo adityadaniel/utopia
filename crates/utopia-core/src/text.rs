@@ -51,6 +51,33 @@ pub fn next_word_end(s: &str, offset: usize) -> usize {
     s.len()
 }
 
+/// Ctrl+T (Emacs `transpose-chars`, Cocoa `transpose:`): swap the two graphemes either
+/// side of `caret` and step past them.
+///
+/// With nothing after the caret on its paragraph (the text ends there, or a newline
+/// follows) the two graphemes *before* it swap instead and the caret stays, as TextEdit
+/// does. Returns the edit as `(range, replacement, caret after)` so callers apply it
+/// through their usual replace path, or `None` when there is no pair to swap.
+pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usize)> {
+    let caret = floor_char_boundary(text, caret.min(text.len()));
+    let at_end = text[caret..].chars().next().is_none_or(|c| c == '\n');
+    let (left, mid, right) = if at_end {
+        let mid = prev_grapheme(text, caret);
+        (prev_grapheme(text, mid), mid, caret)
+    } else {
+        (
+            prev_grapheme(text, caret),
+            caret,
+            next_grapheme(text, caret),
+        )
+    };
+    if left == mid || mid == right {
+        return None;
+    }
+    let swapped = format!("{}{}", &text[mid..right], &text[left..mid]);
+    Some((left..right, swapped, right))
+}
+
 /// The word range containing `offset`, for double-click selection.
 pub fn word_range_at(s: &str, offset: usize) -> Range<usize> {
     for (i, w) in s.split_word_bound_indices() {
@@ -352,6 +379,34 @@ mod tests {
         assert_eq!(empty_pair_at("(]", 1), None);
         assert_eq!(empty_pair_at("()", 0), None);
         assert_eq!(empty_pair_at("日()", 4), Some(3..5));
+    }
+
+    /// Ctrl+T swaps the pair around the caret and moves past it; at a line end the two
+    /// before it swap instead, and a grapheme cluster is never split.
+    #[test]
+    fn transpose_swaps_graphemes() {
+        let apply = |t: &str, c: usize| {
+            transpose(t, c).map(|(r, new, caret)| {
+                let mut out = t.to_string();
+                out.replace_range(r, &new);
+                (out, caret)
+            })
+        };
+        assert_eq!(apply("abcd", 1), Some(("bacd".into(), 2)));
+        assert_eq!(apply("abcd", 3), Some(("abdc".into(), 4)));
+        // End of the text: the two before it, caret stays.
+        assert_eq!(apply("abcd", 4), Some(("abdc".into(), 4)));
+        // End of a paragraph: same, and the newline stays where it was.
+        assert_eq!(apply("ab\ncd", 2), Some(("ba\ncd".into(), 2)));
+        // Nothing to do: empty, at the very start, one grapheme only.
+        assert_eq!(apply("", 0), None);
+        assert_eq!(apply("a", 0), None);
+        assert_eq!(apply("a", 1), None);
+        // Multi-byte and a family emoji move as whole graphemes.
+        assert_eq!(apply("a日", 4), Some(("日a".into(), 4)));
+        assert_eq!(apply("日本", 3), Some(("本日".into(), 6)));
+        let fam = "a👩‍👩‍👧b";
+        assert_eq!(apply(fam, 1), Some(("👩‍👩‍👧ab".into(), 1 + "👩‍👩‍👧".len())));
     }
 
     #[test]

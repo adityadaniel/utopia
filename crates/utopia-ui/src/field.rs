@@ -166,6 +166,55 @@ impl TextField {
         self.text[c..].find('\n').map_or(self.text.len(), |i| c + i)
     }
 
+    /// The wrapped line the caret sits on: what macOS means by "line" in Cmd+Left,
+    /// Cmd+Shift+Right and Cmd+Delete. A paragraph (the text between newlines) may wrap
+    /// into several of these. The end of a soft-wrapped line is where the next one starts,
+    /// so selecting to it takes the space the line broke at, as TextEdit does.
+    ///
+    /// Until the field has been laid out (nothing painted yet) nothing has wrapped, so the
+    /// paragraph answers.
+    pub fn visual_line(&self) -> Range<usize> {
+        self.visual_line_at(self.cursor())
+    }
+
+    /// [`Self::visual_line`] for the line `ix` is drawn on.
+    pub fn visual_line_at(&self, ix: usize) -> Range<usize> {
+        let ix = t::floor_char_boundary(&self.text, ix.min(self.text.len()));
+        let para_start = self.text[..ix].rfind('\n').map_or(0, |i| i + 1);
+        let para_end = self.text[ix..]
+            .find('\n')
+            .map_or(self.text.len(), |i| ix + i);
+        let para = para_start..para_end;
+        let Some(y) = self.point_for(ix).map(|p| p.y) else {
+            return para;
+        };
+        // Probe char boundaries only, so a probe never lands inside `日` or an emoji.
+        let bounds: Vec<usize> = self.text[para.clone()]
+            .char_indices()
+            .map(|(i, _)| para.start + i)
+            .chain([para.end])
+            .collect();
+        let row = |b: usize| self.point_for(b).map_or(y, |p| p.y);
+        let start = bounds[bounds.partition_point(|&b| row(b) < y)];
+        let end = bounds
+            .get(bounds.partition_point(|&b| row(b) <= y))
+            .copied()
+            .unwrap_or(para.end);
+        start..end
+    }
+
+    /// Where Cmd+Right puts the caret: the end of the wrapped line. On a soft-wrapped line
+    /// that is before the last character (usually the space it broke at), because the
+    /// offset where the next line starts is drawn on the next line.
+    pub fn visual_line_end_caret(&self) -> usize {
+        let line = self.visual_line();
+        if line.end < self.line_end() {
+            t::prev_grapheme(&self.text, line.end).max(line.start)
+        } else {
+            line.end
+        }
+    }
+
     // ------------------------------------------------------------ UTF-16 mapping
 
     pub fn offset_from_utf16(&self, offset: usize) -> usize {
@@ -661,6 +710,17 @@ mod tests {
         f.set_text("one\ntwo\nthree", 6);
         assert_eq!(f.line_start(), 4);
         assert_eq!(f.line_end(), 7);
+    }
+
+    /// Without a laid-out frame the visual line is the paragraph: nothing has wrapped.
+    #[test]
+    fn visual_line_falls_back_to_the_newline_delimited_line() {
+        let mut f = TextField::new(true);
+        f.set_text("one\ntwo three", 6);
+        assert_eq!(f.visual_line(), 4..13);
+        assert_eq!(f.visual_line_end_caret(), 13);
+        f.move_to(1);
+        assert_eq!(f.visual_line(), 0..3);
     }
 
     /// §13.5: whether the input method owns the buffer is one explicit mode, entered and

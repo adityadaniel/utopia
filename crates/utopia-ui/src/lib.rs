@@ -9,6 +9,7 @@ pub mod field;
 pub mod fonts;
 pub mod graph_view;
 pub mod help;
+pub mod kill;
 pub mod line_input;
 pub mod page_view;
 pub mod pdf;
