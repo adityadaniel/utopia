@@ -284,7 +284,7 @@ impl Workspace {
             .store
             .path()
             .and_then(|p| p.parent().map(|d| d.join("backup")));
-        let subs = vec![
+        let mut subs = vec![
             cx.subscribe_in(&main, window, Self::on_page_event),
             cx.subscribe_in(
                 &editor,
@@ -341,6 +341,31 @@ impl Workspace {
             .store
             .path()
             .is_some_and(utopia_store::is_encrypted);
+        {
+            // DESIGN.md §3.3: the page menu is transient. An interceptor sees Escape before
+            // the keymap, so closing the menu does not also end the block edit behind it.
+            let handle = window.window_handle();
+            let me = cx.entity().downgrade();
+            subs.push(cx.intercept_keystrokes(move |ev, window, cx| {
+                if window.window_handle() != handle || ev.keystroke.key != "escape" {
+                    return;
+                }
+                let closed = me
+                    .update(cx, |this, cx| {
+                        if this.page_menu {
+                            this.page_menu = false;
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if closed {
+                    cx.stop_propagation();
+                }
+            }));
+        }
         let mut me = Self {
             app,
             editor,
@@ -912,6 +937,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.editor.update(cx, |e, cx| e.end(cx));
+        self.page_menu = false;
         self.note_opened(&page, cx);
         if sidebar {
             // Shift-click stacks the page beside the current one (§0, W6).
@@ -1394,6 +1420,7 @@ impl Workspace {
     /// Today is a draft until it is written (FR-1.2); older days only if they exist.
     pub fn open_journal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.new_day = false;
+        self.page_menu = false;
         let today = self.app.read(cx).store.today();
         self.today = today;
         let page = self.app.update(cx, |app, cx| {
@@ -1453,6 +1480,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.page_menu = false;
         let page = self.app.update(cx, |app, cx| {
             let r = app.store.draft_daily(d);
             let p = app.report(r);
@@ -1603,6 +1631,12 @@ impl Workspace {
 
     pub fn left_sidebar_open(&self) -> bool {
         self.left_open
+    }
+
+    /// Whether the top bar's page menu is open (DESIGN.md §3.3), for scripts: it is
+    /// transient and must be false after any navigation, Escape or an outside click.
+    pub fn page_menu_open(&self) -> bool {
+        self.page_menu
     }
 
     /// Whether the footer's sync view is open (SB-4).
@@ -3139,6 +3173,10 @@ impl Workspace {
             .children(pin.map(|p| p.w_full().justify_start()))
             .child(div().h(px(1.)).my_1().bg(th.line))
             .child(delete.w_full().justify_start())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.page_menu = false;
+                cx.notify();
+            }))
     }
 }
 

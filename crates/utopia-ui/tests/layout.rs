@@ -1760,6 +1760,76 @@ fn top_bar_day_navigation_moves_the_feed(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §3.3: the page menu is transient. Navigating (a sidebar page, the feed),
+/// Escape or a click outside it closes it, and the next page never inherits it.
+#[gpui::test]
+fn page_menu_is_dismissed_by_navigation_escape_and_outside_click(cx: &mut TestAppContext) {
+    let pages = std::cell::RefCell::new(Vec::new());
+    let cx = setup_seeded(cx, |store| {
+        *pages.borrow_mut() = vec![
+            store.create_page("Alpha Page").unwrap(),
+            store.create_page("Beta Page").unwrap(),
+        ];
+    });
+    let (alpha, beta) = {
+        let pages = pages.borrow();
+        (pages[0].clone(), pages[1].clone())
+    };
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    ws.update_in(cx, |w, window, cx| {
+        w.open(alpha.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let open = |cx: &mut VisualTestContext| ws.update(cx, |w, _| w.page_menu_open());
+
+    // Navigation: click Beta in the sidebar while the menu is open.
+    let menu = bounds(cx, "page-menu");
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(open(cx), "the menu opened");
+    let row = bounds(cx, "page-row-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        ws.update(cx, |w, cx| w.main_page(cx)),
+        Some(beta),
+        "the click navigated"
+    );
+    assert!(!open(cx), "navigating closes the menu");
+
+    // Escape closes it (and does not leave it open for the next page).
+    let menu = bounds(cx, "page-menu");
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(open(cx));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(!open(cx), "Escape closes the menu");
+
+    // A click outside the menu closes it.
+    let menu = bounds(cx, "page-menu");
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(open(cx));
+    let content = bounds(cx, "main-pane");
+    let outside = gpui::point(content.center().x, content.origin.y + px(200.));
+    cx.simulate_click(outside, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(!open(cx), "an outside click closes the menu");
+
+    // Leaving for the feed with the menu open must not leave it armed either.
+    let menu = bounds(cx, "page-menu");
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(open(cx));
+    cx.simulate_keystrokes("cmd-shift-d");
+    cx.run_until_parked();
+    assert!(!open(cx), "opening the feed closes the menu");
+}
+
 /// DESIGN.md §2.5: icon-only buttons name themselves through a tooltip (gpui 0.2 has no
 /// accessibility tree), just like the collapse, settings, calendar and menu buttons.
 #[gpui::test]

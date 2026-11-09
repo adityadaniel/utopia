@@ -1061,6 +1061,7 @@ impl PageView {
             self.rename = None;
             self.show_calendar = false;
         }
+        self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
         // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
@@ -3215,6 +3216,10 @@ impl PageView {
             // A hairline sets the destructive item apart, always last.
             .child(div().h(px(1.)).my_1().bg(th.line))
             .child(delete.w_full().justify_start())
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.page_menu = false;
+                cx.notify();
+            }))
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
