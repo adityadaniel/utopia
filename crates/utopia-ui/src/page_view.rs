@@ -3543,9 +3543,13 @@ impl PageView {
             .cursor_pointer()
             .child(self.property_key_cell(&p.key, Icon::DashedCircle, key_w, &th))
             .child(
+                // A flex value cell lets the status pill size to its text instead of
+                // filling the column like a block-level child (gpui divs are blocks).
                 div()
                     .flex_1()
                     .min_w_0()
+                    .flex()
+                    .items_center()
                     .child(self.render_property_value(p, cx)),
             )
             // On click, not mouse-down: gpui focuses the workspace root on mouse-down, and a
