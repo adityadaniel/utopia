@@ -988,21 +988,48 @@ impl PageView {
             return;
         }
         let top = self.list.logical_scroll_top().item_ix;
-        let Some(current) = self
-            .day_headings
-            .partition_point(|h| h.ix <= top)
-            .checked_sub(1)
-        else {
-            return;
-        };
+        // A stop is an open day's heading or the first row of an empty-day run: every day
+        // is one stop, but a run of empty rows (DESIGN.md §3.6) is not stepped through row
+        // by row. `day_headings` only has open days, which used to skip the empty days
+        // between them.
+        let stops: Vec<usize> = self
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, item)| match item {
+                Item::DayHeader { .. } => Some(ix),
+                Item::EmptyDay { first: true, .. } => Some(ix),
+                _ => None,
+            })
+            .collect();
+        let current = stops.iter().rposition(|ix| *ix <= top);
         let target = if delta < 0 {
-            (current + 1 < self.day_headings.len()).then_some(current + 1)
+            // Previous = older, matching `PrevDay`; the feed lists newest first.
+            match current {
+                Some(i) => stops.get(i + 1).copied(),
+                None => stops.first().copied(),
+            }
         } else {
-            current.checked_sub(1)
+            current.and_then(|i| i.checked_sub(1)).map(|i| stops[i])
         };
-        if let Some(i) = target {
+        if let Some(ix) = target {
             self.list.scroll_to(ListOffset {
-                item_ix: self.day_headings[i].ix,
+                item_ix: ix,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+            return;
+        }
+        // At the oldest loaded day, prev used to be a no-op forever. Scroll the tail into
+        // view so the sentinel asks for the next window (FR-1.2); the list then grows.
+        if delta < 0
+            && self
+                .items
+                .last()
+                .is_some_and(|i| matches!(i, Item::JournalEnd))
+        {
+            self.list.scroll_to(ListOffset {
+                item_ix: self.items.len() - 1,
                 offset_in_item: px(0.),
             });
             cx.notify();

@@ -1830,6 +1830,48 @@ fn page_menu_is_dismissed_by_navigation_escape_and_outside_click(cx: &mut TestAp
     assert!(!open(cx), "opening the feed closes the menu");
 }
 
+/// DESIGN.md §3.3: prev/next move between days, including the empty days between open
+/// ones — a run of empty-day rows is one stop, not skipped and not stepped row by row.
+#[gpui::test]
+fn day_nav_stops_at_empty_days(cx: &mut TestAppContext) {
+    // Today, three empty days, then an older written day; both ends hold enough that the
+    // feed can scroll the empty run to the top.
+    let (_ws, cx) = setup_feed(cx, &[(0, 30), (4, 30)], H);
+    let prev = bounds(cx, "day-prev").center();
+    cx.simulate_click(prev, gpui::Modifiers::default());
+    cx.run_until_parked();
+    let empty = bounds_of(cx, "empty-day-2026-11-01".into());
+    let top = content_top(cx);
+    assert!(
+        empty.origin.y > px(top) && empty.origin.y < px(top + 90.),
+        "prev stops at the first empty day of the run, not the older open day: {empty:?}"
+    );
+}
+
+/// DESIGN.md §3.3 with FR-1.2: prev at the oldest loaded day asks the feed for the next
+/// window instead of dead-ending; the window grows.
+#[gpui::test]
+fn prev_at_the_last_loaded_day_loads_the_next_window(cx: &mut TestAppContext) {
+    // Today is long enough that the empty tail and the sentinel start below the fold, and
+    // a note two weeks back keeps the feed from being exhausted: there is a next window.
+    let (ws, cx) = setup_feed(cx, &[(0, 30), (14, 30)], H);
+    let before = ws
+        .update(cx, |w, cx| w.journal_shown_through(cx))
+        .expect("in the feed");
+    for _ in 0..2 {
+        let prev = bounds(cx, "day-prev").center();
+        cx.simulate_click(prev, gpui::Modifiers::default());
+        cx.run_until_parked();
+    }
+    let after = ws
+        .update(cx, |w, cx| w.journal_shown_through(cx))
+        .expect("in the feed");
+    assert!(
+        after < before,
+        "prev at the oldest loaded day loaded older days: {before} -> {after}"
+    );
+}
+
 /// DESIGN.md §2.5: icon-only buttons name themselves through a tooltip (gpui 0.2 has no
 /// accessibility tree), just like the collapse, settings, calendar and menu buttons.
 #[gpui::test]
