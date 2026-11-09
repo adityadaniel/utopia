@@ -142,3 +142,25 @@ fn ac_12_5_atomic_settings_replacement_leaves_no_secret_or_temporary_file() {
     assert!(invalid.save(&file).is_err());
     assert_eq!(Preferences::load(&file).0, prefs);
 }
+
+/// §12.6: the graph's key marker is frozen only by a target that proved the key. An empty
+/// target has nothing to read back; an unreachable one has not been read at all.
+#[test]
+fn ac_12_6_an_empty_target_cannot_freeze_the_key_marker() {
+    use probe::{Connection, Probe};
+    let empty = Probe {
+        connection: Some(Connection::Reachable),
+        instance: Some("relay-store".into()),
+        holds_pages: false,
+    };
+    assert!(!may_freeze_key(&empty), "an empty target proves no key");
+    assert!(may_freeze_key(&Probe {
+        holds_pages: true,
+        ..empty.clone()
+    }));
+    assert!(!may_freeze_key(&Probe::default()), "nothing was read");
+    assert!(!may_freeze_key(&Probe {
+        connection: Some(Connection::Unreachable),
+        ..empty
+    }));
+}

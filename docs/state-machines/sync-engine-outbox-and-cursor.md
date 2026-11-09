@@ -26,6 +26,18 @@ same destination and a wiped store is not; when either side has no store id, the
 decides. A relay discovered later still changes the cursor space, which `VerifiedTarget`
 treats as a new target: it pulls one existing shard to prove the selected encryption can
 read it before any push (`ac_12_6_pairing_validates_existing_payloads_before_pushing`).
+An **empty** target proves no key, so the proof is re-checked before every round until a
+payload actually decrypts: a device that set up against a fresh relay with the wrong
+passphrase revokes its own verification the moment another key's ciphertext appears, and
+refuses to push into a graph it cannot read
+(`ac_12_6_an_empty_target_never_proves_a_key`). The graph's key marker is frozen only by a
+target that was read *and* held payloads (`setup::may_freeze_key`,
+`ac_12_6_an_empty_target_cannot_freeze_the_key_marker`). What remains is the race the
+protocol cannot decide: if two devices publish into the same empty target at the same
+instant with different keys, the first payload establishes the key and the other device is
+refused from then on — it does not mix ciphertext, but it also cannot join until it uses
+that passphrase. Previously the claim above overstated this: a wrong key on a second device
+could freeze itself into the graph and mix ciphertexts.
 A graph with no recorded destination — one that has been syncing through
 `UTOPIA_SYNC_URL`/`UTOPIA_SYNC_FOLDER` since before this bookkeeping existed — adopts the
 destination it opens with instead of exporting every shard into it, so the upgrade costs one

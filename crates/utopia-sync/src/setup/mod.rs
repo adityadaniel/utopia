@@ -246,6 +246,14 @@ pub mod probe;
 mod tests;
 pub mod verified_target;
 
+/// §12.6: whether this run may freeze the graph's key marker. Only a target that was read
+/// *and held payloads that decrypted with this key* proves it; an empty target proves
+/// nothing, so a passphrase whose ciphertext nothing has read back is never written into
+/// the graph file. A target whose payloads another key wrote is refused before this.
+pub fn may_freeze_key(probe: &probe::Probe) -> bool {
+    probe.connection() == probe::Connection::Reachable && probe.holds_pages
+}
+
 /// A non-secret, encrypted fixed marker protects the graph even if its Keychain item is
 /// lost or the graph is copied (§12.6). No passphrase, derived key or token is serialized.
 /// Like a page payload, the marker can only be opened by the original graph key.

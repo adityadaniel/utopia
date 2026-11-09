@@ -12,6 +12,11 @@ pub const UNREADABLE: &str = "The target's existing data cannot be read with the
 pub struct VerifiedTarget<T> {
     inner: T,
     verified: Option<CursorSpace>,
+    /// The target held a payload that decrypted with this key. An empty target proves
+    /// nothing: a device that joined a fresh relay with the wrong passphrase would
+    /// otherwise keep that proof and push its ciphertext into a graph another device is
+    /// already encrypting with the right one.
+    proven: bool,
     pub unreadable: bool,
 }
 impl<T: Transport> VerifiedTarget<T> {
@@ -19,8 +24,14 @@ impl<T: Transport> VerifiedTarget<T> {
         Self {
             inner,
             verified: None,
+            proven: false,
             unreadable: false,
         }
+    }
+    /// Whether the key was proven by payloads, not merely by an empty manifest. Setup uses
+    /// this to decide whether the graph may freeze its key marker (§12.6).
+    pub fn proven(&self) -> bool {
+        self.proven
     }
     fn writable(&self) -> Result<()> {
         if self.verified.as_ref() == Some(&self.inner.cursor_space()) {
@@ -32,13 +43,18 @@ impl<T: Transport> VerifiedTarget<T> {
 }
 impl<T: Transport> Transport for VerifiedTarget<T> {
     fn manifest(&mut self, conditional: Option<u64>) -> Result<Option<Manifest>> {
-        let needs_check = self.verified.as_ref() != Some(&self.inner.cursor_space());
+        let space = self.inner.cursor_space();
+        // Re-check on every read until a payload proves the key, so a target that was
+        // empty at verification cannot quietly gain foreign ciphertext.
+        let needs_check = self.verified.as_ref() != Some(&space) || !self.proven;
         let manifest = self
             .inner
             .manifest(if needs_check { None } else { conditional })?;
         let space = self.inner.cursor_space();
-        if self.verified.as_ref() != Some(&space) {
-            let Some(m) = &manifest else { return Ok(None) };
+        if self.verified != Some(space.clone()) || !self.proven {
+            let Some(m) = &manifest else {
+                return Ok(None);
+            };
             if m.protocol_version != PROTOCOL_VERSION {
                 return Err(SyncError::ProtocolVersion(m.protocol_version));
             }
@@ -66,9 +82,19 @@ impl<T: Transport> Transport for VerifiedTarget<T> {
                     Ok(())
                 });
                 if valid.is_err() {
+                    // Another device is writing this target under a key this one cannot
+                    // read. Revoke the proof and refuse to push: mixing ciphertexts would
+                    // leave every device with pages it can never read.
                     self.unreadable = true;
+                    self.verified = None;
+                    self.proven = false;
                     return Err(SyncError::Transport(UNREADABLE.into()));
                 }
+                self.proven = true;
+            } else {
+                // Nothing to read back yet; pushes are still allowed so the first device
+                // can establish the key, but this is not a proof.
+                self.proven = false;
             }
             self.unreadable = false;
             self.verified = Some(space);

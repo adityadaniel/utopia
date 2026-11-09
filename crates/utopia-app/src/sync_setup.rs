@@ -207,13 +207,19 @@ impl Coordinator {
                 // target that was reached and read with it. A launch with saved or environment
                 // credentials against an unreachable target still starts: `VerifiedTarget`
                 // refuses to push until the target has been read, and the marker waits for a
-                // run that reaches it.
+                // run that reaches it. An empty target is not proof either — nothing can be
+                // read back — so a wrong passphrase is never frozen into the graph file
+                // (§12.6, `ac_12_6_an_empty_target_never_proves_a_key`).
                 let mut key_check = key_check;
-                if cfg.passphrase.is_some() && marker.is_none() && connection != Connection::Reachable {
-                    if save {
-                        return Err(format!("Verify the target before first enabling E2E encryption. {}", connection.message()));
+                if cfg.passphrase.is_some() && marker.is_none() {
+                    if connection != Connection::Reachable {
+                        if save {
+                            return Err(format!("Verify the target before first enabling E2E encryption. {}", connection.message()));
+                        }
+                        key_check = None;
+                    } else if !utopia_sync::setup::may_freeze_key(&connected) {
+                        key_check = None;
                     }
-                    key_check = None;
                 }
                 // Only explicit setup writes credentials. Environment values override this
                 // run without changing Keychain; the graph's marker still prevents re-keying.

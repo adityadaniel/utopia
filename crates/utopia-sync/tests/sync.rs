@@ -1488,3 +1488,49 @@ fn ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph()
         "the upgrade republished the whole graph into its existing target"
     );
 }
+/// §12.6: an empty target has nothing to read back, so it proves no key. A device that
+/// proved its passphrase there must re-check before its first push once foreign payloads
+/// exist — otherwise it mixes ciphertext into a graph encrypted with another key.
+#[test]
+fn ac_12_6_an_empty_target_never_proves_a_key() {
+    use utopia_sync::{
+        e2e::{Encrypted, GraphKey},
+        setup::verified_target::VerifiedTarget,
+    };
+    let relay = Relay::new();
+    let transport = || RelayTransport::new(relay.clone(), "g");
+    let key = |pass| GraphKey::derive(pass, "g").unwrap();
+    // A joins while the relay is empty and publishes nothing: it learned no key.
+    let mut a = Store::open_in_memory().unwrap();
+    let mut ca = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("original"), "g")),
+        &a,
+    )
+    .unwrap();
+    ca.sync_once(&mut a).unwrap();
+    // B's wrong key arrives at the still-empty relay and publishes.
+    let mut b = Store::open_in_memory().unwrap();
+    let page_b = b.create_page("B's notebook").unwrap();
+    write(&mut b, &page_b, "encrypted with the wrong key");
+    let mut cb = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("wrong"), "g")),
+        &b,
+    )
+    .unwrap();
+    cb.sync_once(&mut b).unwrap();
+    let pushed = relay.manifest("g");
+    assert_eq!(pushed.pages.len(), 1);
+    // A now edits and syncs: it must notice it cannot read the target before adding its
+    // own ciphertext to it.
+    let page_a = a.create_page("A's notebook").unwrap();
+    write(&mut a, &page_a, "encrypted with the original key");
+    assert!(
+        ca.sync_once(&mut a).is_err(),
+        "the round must refuse a target it cannot read"
+    );
+    assert_eq!(
+        relay.manifest("g").pages.len(),
+        pushed.pages.len(),
+        "A pushed ciphertext into a graph it cannot read"
+    );
+}
