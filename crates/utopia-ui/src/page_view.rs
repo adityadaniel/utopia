@@ -1154,6 +1154,12 @@ impl PageView {
     /// a reference cache or an unlinked count behind for the view it replaced
     /// (`docs/state-machines/page-view-mode.md`).
     fn set_mode(&mut self, next: Mode, cx: &mut Context<Self>) {
+        // A property row's edit ends with the page it belongs to. `Workspace::open` ends the
+        // editor, but its `Blurred` is delivered after this update; by then `reset_page_ui`
+        // would have cleared the row and `self.page()` would be the *new* page. Finish it
+        // here, while the old page is still the one this view shows (§3.8).
+        self.editor.update(cx, |e, cx| e.end(cx));
+        self.finish_property_edit(cx);
         let prev = std::mem::replace(&mut self.mode, next);
         // Every opening of the feed counts as a page change: it starts a fresh window of
         // days and builds them from the default query, so the view it replaces must not
