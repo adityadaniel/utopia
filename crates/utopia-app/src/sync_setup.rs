@@ -309,7 +309,10 @@ impl Coordinator {
                             app.store.sync_set("setup_graph", &graph)?;
                             app.store.prepare_sync_destination(&prepared.destination)
                         });
+                        // Every failure from here on leaves no runner, so a relay this
+                        // device was hosting must stop with it.
                         if ready.is_err() {
+                            this.lan = None;
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination. Local data is unchanged.".into(), cx));
                             return (old, false);
                         }
@@ -317,6 +320,7 @@ impl Coordinator {
                         // the destination record, never before a target is known to work.
                         if save {
                             if let Err(error) = prefs.save(&file) {
+                                this.lan = None;
                                 this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
                                 return (old, false);
                             }
@@ -326,6 +330,7 @@ impl Coordinator {
                         });
                         let started = this.ws.update(cx, |ws, cx| ws.start_prepared_sync(&prepared.cfg, prepared.transport, cx));
                         if !started {
+                            this.lan = None;
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: the runner could not start. Local editing is still available.".into(), cx));
                             return (old, false);
                         }
