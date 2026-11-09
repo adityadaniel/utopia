@@ -1,5 +1,47 @@
 # Encryption at rest: key present / absent / wrong, and the schema version chain
 
+## Status
+
+Fixed on `fix/encryption-at-rest-state`. Line numbers below are from the
+`state-machines` branch at `main f5da7d1`; the code added here is referenced by name.
+
+- **The file's state is one type.** `utopia_store::FileKind`
+  (`crates/utopia-store/src/crypt.rs:22`) is `Plain`, `Encrypted` or `Corrupt`, and
+  `file_kind`/`is_encrypted` classify by SQLite's 16-byte header. `open_keyed`
+  (`crypt.rs:148`) maps `SQLITE_NOTADB` through the same type, so the header — not the
+  error code alone — decides whether the graph is locked or damaged.
+- **Issue 1 fixed.** A plain graph whose header survives but whose pages do not opens as
+  `StoreError::Corrupt` and `is_encrypted` is false: the app shows "Could not open …"
+  instead of an unlock screen no passphrase can satisfy. Test:
+  `ac_15_6_a_damaged_plain_graph_is_not_a_lock` (`crates/utopia-store/tests/p2.rs`).
+  Limit: a file whose header was destroyed cannot be told apart from SQLCipher
+  ciphertext without a key; it still reads as `Encrypted` (the only reading a passphrase
+  can resolve).
+- **Issue 2 fixed.** An open `Store` holds a shared `FileLock` on a sidecar
+  (`<graph>.utopia-lock`) for its lifetime, and `set_encryption` takes the exclusive side
+  or returns `StoreError::Busy` (`crypt.rs:81-145`, `:194`; `lib.rs:205`, `:222`). The
+  lock is not on the database file because macOS implements `flock` with `fcntl`, which
+  collides with SQLite's own locks; the sidecar is intentionally left behind (removing it
+  while a process waits would let another lock a fresh inode). Test:
+  `ac_15_6_encrypting_refuses_while_the_graph_is_open`.
+- **Issue 3 was already fixed; verified, no change.** `backup()` still uses `VACUUM INTO`,
+  but SQLCipher carries the key into the copy. The existing
+  `encryption_at_rest_round_trip` asserts the backup `is_encrypted` and opens with the
+  same passphrase.
+- **Issue 4 fixed.** `migrate` refuses `user_version > SCHEMA_VERSION` with
+  `StoreError::SchemaTooNew { found, supported }` (`schema.rs:285-296`), and the v9 block
+  stamps the literal `9`, not the newest constant (`schema.rs:360`), so a constant bump
+  without a migration cannot make an old file claim the new schema. Tests:
+  `ac_14_4_a_graph_from_a_newer_build_is_refused` and
+  `ac_14_4_a_new_graph_is_stamped_with_the_builds_schema_version`.
+- **Not adopted from the sketch: `Store` carrying the key.** `open_with_key` already
+  passes the one key it receives to both the reader and `Persister::spawn`, so the two
+  connections cannot be spawned with different keys today. Keeping a copy for the store's
+  lifetime would only hold the secret in memory longer; no listed bug depends on it.
+
+The sections below describe the machine as it was when this doc was written; line numbers
+there are historical.
+
 ## What it controls
 
 Whether the two SQLite connections (read + writer) can open the graph file (SQLCipher on
