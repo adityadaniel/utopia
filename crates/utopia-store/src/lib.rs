@@ -22,6 +22,7 @@ mod pages;
 mod project;
 mod query;
 mod schema;
+mod sync_destination;
 mod writer;
 
 use std::collections::{HashMap, HashSet};

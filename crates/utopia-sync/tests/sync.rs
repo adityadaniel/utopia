@@ -1326,3 +1326,66 @@ fn ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire() {
         "the capture reached the relay"
     );
 }
+
+/// §12.7: a new target needs acknowledged and imported content, not only pending edits.
+#[test]
+fn ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates() {
+    let old = Relay::new();
+    let (mut a, mut ca) = device(&old);
+    let (mut b, mut cb) = device(&old);
+    let page = a.create_page("Keep every block").unwrap();
+    write(&mut a, &page, "written on A");
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    write(&mut b, &page, "written on B");
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    let before = texts(&mut a, &page);
+    let new = Relay::new();
+    let mut moved = SyncClient::new(RelayTransport::new(new.clone(), "g1"), &a).unwrap();
+    a.prepare_sync_destination("new-relay").unwrap();
+    moved.sync_once(&mut a).unwrap();
+    let (mut c, mut cc) = device(&new);
+    cc.sync_once(&mut c).unwrap();
+    assert_eq!(texts(&mut c, &page), before);
+    a.prepare_sync_destination("old-relay").unwrap();
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    assert_eq!(texts(&mut b, &page), before);
+    assert_eq!(texts(&mut a, &page), before);
+    assert!(a.doctor().unwrap().is_ok());
+}
+
+/// §12.7 / rule 12: publication acknowledgements belong to a destination, including blobs.
+#[test]
+fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {
+    use utopia_sync::folder::FolderTransport;
+    let relay = Relay::new();
+    let (mut a, mut ca) = device(&relay);
+    let page = a.create_page("Attachments survive switching").unwrap();
+    let bytes = b"mock attachment for sync setup";
+    let blob = a.add_blob("example.txt", bytes).unwrap();
+    write(&mut a, &page, &format!("[example.txt](blob:{})", blob.hash));
+    ca.sync_once(&mut a).unwrap();
+    assert_eq!(
+        a.attachment_state(&blob.hash).unwrap(),
+        Some(utopia_store::BlobState::Uploaded)
+    );
+    let folder = tempfile::tempdir().unwrap();
+    a.prepare_sync_destination("shared-folder").unwrap();
+    let queued = a.outbox_count().unwrap();
+    a.prepare_sync_destination("shared-folder").unwrap();
+    assert_eq!(
+        a.outbox_count().unwrap(),
+        queued,
+        "repeated Apply must not enqueue again"
+    );
+    let mut moved = SyncClient::new(FolderTransport::new(folder.path(), "a").unwrap(), &a).unwrap();
+    moved.sync_once(&mut a).unwrap();
+    let mut b = Store::open_in_memory().unwrap();
+    let mut reader =
+        SyncClient::new(FolderTransport::new(folder.path(), "b").unwrap(), &b).unwrap();
+    reader.sync_once(&mut b).unwrap();
+    assert_eq!(texts(&mut a, &page), texts(&mut b, &page));
+    assert_eq!(
+        b.blob(&blob.hash).unwrap().as_deref(),
+        Some(bytes.as_slice())
+    );
+}
