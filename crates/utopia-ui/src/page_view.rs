@@ -3336,7 +3336,7 @@ impl PageView {
                                     .px_2()
                                     .py_1()
                                     .font_family(crate::theme::MONO)
-                                    .text_size(px(13.));
+                                    .text_size(px(crate::theme::CODE_TEXT_SIZE));
                                 match &code {
                                     Some((lang, _, _)) => card.child(
                                         div()
@@ -4163,7 +4163,7 @@ impl PageView {
             let existing: HashSet<NaiveDate> = HashSet::new();
             col = col.child(
                 div()
-                    .w(px(200.))
+                    .w(px(crate::theme::CALENDAR_PANEL_WIDTH))
                     .p_2()
                     .border_1()
                     .border_color(th.line)
@@ -4573,7 +4573,7 @@ impl PageView {
             .id("refs-menu-popup")
             .debug_selector(|| "refs-menu-popup".into())
             .occlude()
-            .w(px(160.))
+            .w(px(crate::theme::REFS_MENU_WIDTH))
             .p_1()
             .flex()
             .flex_col()
@@ -4658,7 +4658,7 @@ impl PageView {
                     .child(
                         div()
                             .flex_none()
-                            .w(px(160.))
+                            .w(px(crate::theme::REF_TITLE_WIDTH))
                             .overflow_hidden()
                             .text_size(px(crate::theme::BODY_SIZE))
                             .text_color(th.link)
@@ -4935,7 +4935,7 @@ impl PageView {
                             &th,
                         )
                         .debug_selector(move || write_sel.clone())
-                        .h(px(28.))
+                        .h(px(crate::theme::GHOST_TEXT_HEIGHT))
                         .ml_2()
                         .flex()
                         .items_center()

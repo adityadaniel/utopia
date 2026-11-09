@@ -190,6 +190,18 @@ pub const LINE_GRID: f32 = 28.;
 // Controls (§3.4) and the sidebar/top bar frame (§3.2, §3.3).
 /// A ghost icon button: 32 × 32, radius 6.
 pub const GHOST_BUTTON: f32 = 32.;
+/// Ghost text button height (§3.4: 28–32 px).
+pub const GHOST_TEXT_HEIGHT: f32 = 28.;
+/// Code card text size (§3.1).
+pub const CODE_TEXT_SIZE: f32 = 13.;
+/// The header date calendar's width.
+pub const CALENDAR_PANEL_WIDTH: f32 = 200.;
+/// The reference filter/sort menu width.
+pub const REFS_MENU_WIDTH: f32 = 160.;
+/// The source-page column above a reference hit.
+pub const REF_TITLE_WIDTH: f32 = 160.;
+/// The sidebar's sync popover width.
+pub const SYNC_POPOVER_WIDTH: f32 = 232.;
 /// A text button or the day-navigation group: 32 px tall.
 pub const BUTTON_HEIGHT: f32 = 32.;
 /// A ghost text button's side padding (§3.4: 0 8–10).
@@ -480,9 +492,10 @@ pub fn theme(cx: &App) -> &Theme {
     cx.global::<Theme>()
 }
 
-/// A quiet control (DESIGN.md §3.4): 6 px radius, a 13 px `ink_3` label and one hairline
-/// that appears only on hover, so controls read as controls without shouting over the
-/// notes. Use [`quiet_menu`] when a menu opens from it.
+/// A quiet control (DESIGN.md §3.4): 6 px radius, a 13 px `ink_3` label and a `hover`
+/// background on hover. The transparent border keeps the hit box stable; no line appears,
+/// because a ghost button has no border (the outline button does). Use [`quiet_menu`] when
+/// a menu opens from it.
 pub fn quiet_control(
     id: impl Into<ElementId>,
     label: impl Into<SharedString>,
@@ -498,7 +511,7 @@ pub fn quiet_control(
         .text_size(px(SMALL.size))
         .text_color(th.ink_3)
         .cursor_pointer()
-        .hover(|d| d.bg(th.hover).border_color(th.line).text_color(th.ink))
+        .hover(|d| d.bg(th.hover).text_color(th.ink))
         .child(label.into())
 }
 

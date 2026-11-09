@@ -2357,7 +2357,7 @@ impl Workspace {
         div()
             .id("sync-popover")
             .debug_selector(|| "sync-popover".into())
-            .w(px(232.))
+            .w(px(crate::theme::SYNC_POPOVER_WIDTH))
             .p_2()
             .flex()
             .flex_col()
