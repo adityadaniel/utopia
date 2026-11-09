@@ -142,16 +142,19 @@ impl LineInput {
         if self.field.composing() {
             return;
         }
+        // The composition ended on the text it started from, so it was cancelled and the
+        // committed text is unchanged. Cancelling must preserve the previous dirty state:
+        // a secret submitted before it is still the submitted value, not a new edit.
+        let cancelled = self.field.composition_base() == Some(self.field.text.as_str());
         if let Some(text) = self.pending_fill.take() {
-            // The composition ended on the text it started from, so it was cancelled and
-            // nothing the user committed is newer than the queued stored value.
-            let cancelled = self.field.composition_base() == Some(self.field.text.as_str());
             if cancelled && !self.user_edited {
                 self.write_fill(&text, cx);
                 return;
             }
         }
-        self.user_edited = true;
+        if !cancelled {
+            self.user_edited = true;
+        }
         cx.emit(LineInputEvent::Changed(self.field.text.clone()));
     }
 

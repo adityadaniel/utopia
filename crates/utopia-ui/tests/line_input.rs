@@ -214,3 +214,27 @@ fn a_cancelled_composition_lets_a_deferred_fill_through(cx: &mut TestAppContext)
         None
     );
 }
+
+/// §13.5: cancelling a composition leaves the committed text exactly as it was, so a
+/// secret the host already submitted must still be clearable when its request finishes.
+#[gpui::test]
+fn a_cancelled_composition_keeps_a_submitted_field_clean(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::light()));
+    let (input, cx) = cx.add_window_view(|_, cx| LineInput::new("secret", cx));
+    input.update(cx, |i, cx| {
+        i.fill("saved-token", cx);
+        i.submitted();
+    });
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "", None, window, cx)
+    });
+    assert_eq!(text(&input, cx), "saved-token");
+
+    // The request settles: the submitted secret clears even though a composition was
+    // started and cancelled after it was submitted.
+    input.update(cx, |i, cx| i.fill("", cx));
+    assert_eq!(text(&input, cx), "");
+}
