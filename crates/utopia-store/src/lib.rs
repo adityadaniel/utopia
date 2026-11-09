@@ -33,7 +33,7 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use utopia_core::outline::Plan;
-use utopia_core::undo::{Caret, UndoGroup, UndoStack, UndoStep};
+use utopia_core::undo::{Caret, Coalesce, UndoGroup, UndoStack, UndoStep};
 use utopia_core::{BlockId, Command, DateFormat, DocDelta, DomainError, PageId, PageState};
 use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
@@ -998,8 +998,10 @@ impl Store {
             .map(|(page, cmds)| (self.redirect(&page).unwrap_or(page), cmds))
             .collect();
         let now = self.now();
-        let mut group = UndoGroup::new(now);
-        group.coalesce = opts.coalesce.clone();
+        let mut group = UndoGroup::new();
+        if let Some(block) = opts.coalesce.clone() {
+            group.coalesce = Coalesce::open(block, now);
+        }
         group.caret_before = opts.caret_before.clone();
         group.caret_after = opts.caret_after.clone();
         let mut deltas: Vec<(PageId, DocDelta)> = Vec::new();
