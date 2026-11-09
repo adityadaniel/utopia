@@ -1931,6 +1931,9 @@ fn page_top_bar_breadcrumb_and_actions(cx: &mut TestAppContext) {
         title.origin.y >= bar.origin.y + bar.size.height - px(0.5),
         "the content title stays below the bar: {title:?} {bar:?}"
     );
+    // Deliberate for this phase, not a contract: the app has no history or favorite
+    // action, so the controls stay out rather than being invented. Remove these two
+    // assertions when back/forward and the star get real actions.
     assert!(
         cx.debug_bounds("go-back").is_none() && cx.debug_bounds("go-forward").is_none(),
         "no history actions exist, so no back/forward controls are drawn"
