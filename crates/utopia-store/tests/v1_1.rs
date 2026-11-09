@@ -888,3 +888,47 @@ fn sb_2_empty_trash_republishes_tag_pages() {
     );
     assert_eq!(s.tag_pages().unwrap(), s.hashtag_only_pages().unwrap());
 }
+
+/// SB-2: the published set classifies the index, so a republish must not scan while a
+/// commit it was handed is still in flight. The set it would publish is stale, and because
+/// the slot is then `Published`, every later commit edits it incrementally — the wrong
+/// classification survives the session instead of being fixed by the next full scan.
+#[test]
+fn sb_2_republish_waits_for_a_submitted_commit() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    let block = write(&mut s, &notes, "about #alpha");
+    s.sync_index().unwrap();
+    let alpha = s
+        .find_page("alpha")
+        .unwrap()
+        .expect("the tag made the page");
+    assert!(s.tag_pages().unwrap().contains(&alpha));
+
+    // Debounced is the UI's mode (rule 10): index reads never wait for the writer, and
+    // `AppState::new` publishes the startup classification in exactly this state.
+    s.set_debounced(true).unwrap();
+    // Hold the write lock, so the next commit can be submitted but cannot land: the index
+    // (and a scan of it) still says "tag page" while the job is in flight.
+    let holder = rusqlite::Connection::open(s.path().unwrap()).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    s.set_block_text(&notes, &block, "about [[alpha]]", None, None)
+        .unwrap();
+    s.flush().unwrap();
+    // Release the lock shortly, so a republish that waits can finish.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        holder.execute_batch("COMMIT").unwrap();
+    });
+
+    let published = s.republish_tag_pages().unwrap();
+    assert!(
+        published.is_empty(),
+        "the set published the index the commit left, not the one it found: {published:?}"
+    );
+    assert_eq!(
+        s.tag_pages().unwrap(),
+        s.hashtag_only_pages().unwrap(),
+        "and that is what the slot holds"
+    );
+}

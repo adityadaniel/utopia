@@ -332,7 +332,13 @@ impl Store {
     /// themselves, or the UI keeps reading a classification of an index that is gone. They
     /// call this after their own `sync_index`, so the index it classifies has no pending
     /// edits.
+    ///
+    /// The wait is part of the contract, not the caller's: `hashtag_only_pages`' own read
+    /// barrier is a no-op in debounced mode (rule 10), which is the mode the UI publishes
+    /// its startup copy in. Without it a scan taken before an in-flight commit landed would
+    /// become `Published`, and every later commit would edit that stale base incrementally.
     pub fn republish_tag_pages(&self) -> Result<HashSet<PageId>> {
+        self.persister.wait()?;
         let set = self.hashtag_only_pages()?;
         self.persister.republish_tag_pages(set.clone());
         Ok(set)
