@@ -88,6 +88,18 @@ impl LineInput {
         cx.notify();
     }
 
+    /// Show a saved value for editing (a Settings field): caret at the end, nothing
+    /// selected. [`Self::set_text`] selects what it wrote, which is right for a value the
+    /// user is expected to replace and wrong for one they are expected to keep.
+    pub fn fill(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.field.text == text {
+            return;
+        }
+        self.field.set_text(text, text.len());
+        cx.emit(LineInputEvent::Changed(self.field.text.clone()));
+        cx.notify();
+    }
+
     pub fn focus(&self, window: &mut Window) {
         window.focus(&self.focus);
     }

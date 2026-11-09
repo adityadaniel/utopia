@@ -2,6 +2,27 @@
 
 ## Status
 
+In-app setup update (§12.7): `Coordinator` now prepares transports off the UI thread and
+installs them with `Workspace::start_prepared_sync`. Apply first calls `stop_sync`, which
+removes the runner and its owned poll task, clears target/facts and notifies the sidebar.
+The coordinator joins the old realtime listener and stops its LAN host on the background
+executor before installing a replacement. A failed setup stays Off with a visible error;
+a successful one starts exactly one poll task and one listener (no listener for folders).
+The generation checks still discard results from an obsolete round. A blocking HTTP call
+already executing may finish within its transport timeout, but it cannot apply to the new
+runner or schedule another round. Test connection leaves the current runner untouched.
+
+A launch reads the saved preferences (or the environment override) through the same
+`Coordinator::run` path with `save = false`, so startup and Apply share one state machine;
+the only difference is that a launch never writes Keychain or the settings file, and records
+the E2E key marker only once the target has been read with that key.
+Settings → Sync now edits configuration and can recover from auth refusal without a restart.
+The realtime stop issue documented below is fixed by the owned cancellable listener; see
+`realtime-listener.md` Status. Additional coverage:
+`ac_12_7_disabling_sync_stops_polling_and_reenable_starts_one_loop` and the two listener
+shutdown tests. The earlier findings and line numbers below are retained as historical
+context, not as claims that setup is still launch-only.
+
 Made explicit: the round is now one `SyncPhase` (`crates/utopia-ui/src/sync_runner.rs:129`),
 so where the transport is and which half of the round is running are the same fact, and
 `begin_round` (`:221`) is the only way to take the transport out of `Idle`/`Refused`; the
@@ -41,7 +62,7 @@ are closed: replacing the runner mid-exchange
 network was reached (`a_store_failure_after_the_network_is_a_local_error`), and starting
 sync again after a refusal (`restarting_sync_after_a_refusal_polls_again`).
 
-Not fixed, deliberately:
+Original deferrals (the realtime deferral is resolved above):
 
 - **5** (`sync_target` vs `SyncFacts`). The two values answer different questions — "what was
   configured" versus "did sync start" — and the divergence is deliberate and tested

@@ -5,6 +5,7 @@ mod cli;
 mod hotkey;
 mod paths;
 mod shot;
+mod sync_setup;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -188,10 +189,7 @@ struct Ready {
     /// The global quick-capture hotkey (FR-2.19), polled every 150 ms; registered only in
     /// [`RunMode::Interactive`].
     _hotkey: Option<gpui::Task<()>>,
-    /// LAN discovery (§12.7.4), only when the sync transport is `lan`.
-    _discovery: Option<gpui::Task<()>>,
-    /// The relay this process hosts for LAN direct (§12.7.4), only with `UTOPIA_LAN_SERVE`.
-    _lan: Option<utopia_syncd::lan::LanRelay>,
+    _sync: Entity<sync_setup::Coordinator>,
     /// `utopia://` links and the automation API (P2); always running while a graph is open.
     _inbox: gpui::Task<()>,
 }
@@ -448,63 +446,7 @@ impl Root {
                         }))
                     }
                 };
-                let mut discovery = None;
-                let mut lan = None;
-                // LAN direct (§12.7.4): host the relay for this graph and sync through it.
-                if let Ok(bind) = std::env::var("UTOPIA_LAN_SERVE") {
-                    let graph = paths::graph_id(&path);
-                    let db = path.with_extension("lan-relay.db");
-                    match utopia_syncd::lan::serve_lan(&db, &bind, &graph, Default::default(), true)
-                    {
-                        Ok(relay) => {
-                            eprintln!("utopia: LAN relay for {graph} on {}", relay.addr);
-                            let cfg = utopia_ui::sync_runner::SyncConfig {
-                                target: utopia_ui::sync_runner::SyncTarget::Relay {
-                                    url: format!("http://127.0.0.1:{}", relay.addr.port()),
-                                    token: None,
-                                },
-                                graph,
-                                passphrase: std::env::var("UTOPIA_SYNC_PASSPHRASE").ok(),
-                            };
-                            ws.update(cx, |w, cx| w.start_sync(cfg, cx));
-                            lan = Some(relay);
-                        }
-                        Err(e) => eprintln!("utopia: LAN relay failed: {e}"),
-                    }
-                } else if let Some(cfg) = paths::sync_config(&path) {
-                    // Settings → Sync reports the transport only once a runner exists; for
-                    // LAN that is after discovery, not when the config is read (ST-5).
-                    let lan = matches!(&cfg.target, utopia_ui::sync_runner::SyncTarget::Relay { url, .. } if url == "lan");
-                    if lan {
-                        // Discover on a background thread; startup never waits on the network.
-                        let ws2 = ws.clone();
-                        discovery = Some(cx.spawn_in(window, async move |_, cx| {
-                            let graph = cfg.graph.clone();
-                            let found = cx
-                                .background_executor()
-                                .spawn(async move {
-                                    utopia_syncd::lan::discover(&graph, Duration::from_secs(5))
-                                })
-                                .await;
-                            let _ = cx.update(|_, cx| match found {
-                                Some(url) => {
-                                    let mut cfg = cfg;
-                                    if let utopia_ui::sync_runner::SyncTarget::Relay {
-                                        url: u,
-                                        ..
-                                    } = &mut cfg.target
-                                    {
-                                        *u = url;
-                                    }
-                                    ws2.update(cx, |w, cx| w.start_sync(cfg, cx));
-                                }
-                                None => eprintln!("utopia: no LAN relay found for {}", cfg.graph),
-                            });
-                        }));
-                    } else {
-                        ws.update(cx, |w, cx| w.start_sync(cfg, cx));
-                    }
-                }
+                let sync = sync_setup::Coordinator::install(ws.clone(), &path, config, cx);
                 // Links and the automation API run on the main thread against the same
                 // store the UI uses (P2: local HTTP API + utopia://).
                 let api = match std::env::var("UTOPIA_API").ok().filter(|v| !v.is_empty()) {
@@ -566,8 +508,7 @@ impl Root {
                 RootState::Ready(Ready {
                     ws,
                     _hotkey: hotkey,
-                    _discovery: discovery,
-                    _lan: lan,
+                    _sync: sync,
                     _inbox: inbox,
                 })
             }

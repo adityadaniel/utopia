@@ -115,13 +115,39 @@ links the simulator app; it needs `rustup target add aarch64-apple-ios-sim` and 
 iOS Simulator runtime (neither is present here; both are large downloads, so ask first).
 
 Sync (§12; secrets never go into the graph file, §15.6):
-- Relay: `cargo run -p utopia-syncd` (env `UTOPIA_SYNCD_ADDR`, `UTOPIA_SYNCD_DB`,
+- **Settings → Sync is the primary setup path.** Choose Off, Relay, Nearby Mac (mDNS), or
+  Shared folder, then Apply. Changes take effect without restarting. Nearby Mac can host a
+  token-protected relay; the other Mac discovers it or uses its LAN/Tailscale URL in Relay mode.
+  Test connection performs one manifest request in the background. Connect another device
+  shows the graph id and connection instructions, never the token or passphrase.
+- Non-secret settings live in `<config>/sync/<sha256-of-canonical-graph-path>.json`:
+  `{"version":1,"mode":"off|relay|nearby|folder","url":"","folder":null,"host":null}`.
+  Writes use a same-directory temporary file and atomic rename. Missing means Off; malformed
+  or unsupported settings mean Off with a visible notice. They never enter the CRDT.
+- Secret fields are masked; blank retains the saved value. Tokens and E2E passphrases use
+  macOS Keychain services `utopia-sync` / `utopia-sync-passphrase`, account = graph id.
+  Tests use the `Secrets` trait's in-memory double. For scripted verification set
+  `UTOPIA_SYNC_KEYCHAIN_PREFIX` to a scratch namespace; it prefixes both service names.
+- `sync_state` records the stable graph id (initially the graph filename), destination identity,
+  and an encrypted fixed key-check marker. The marker contains no password or derived key;
+  it refuses changing/removing the E2E passphrase even after the graph is copied. Apply with a
+  first passphrase insists on a target it can reach and read with it, then freezes the key
+  (Keychain + marker); a launch with saved or environment credentials records the marker only
+  once the target has been read, and `VerifiedTarget` refuses to push until then, so an
+  unreachable target at launch still starts sync without locking in an unproven key.
+  In-place re-keying is not supported.
+- Switching destination (relay ↔ folder, another relay) calls `Store::prepare_sync_destination`,
+  which queues a full update of every shard and marks uploaded attachments pending again, so
+  the new target receives everything, not only unsent edits (`sync-engine-outbox-and-cursor.md`).
+- Nearby Mac hosting runs the in-process relay with its database at
+  `<config>/sync/<sha256>.relay.db` and needs a token (except when `UTOPIA_LAN_SERVE` hosts).
+- Environment variables still override saved settings **for that run**. Transport precedence:
+  `UTOPIA_LAN_SERVE`, `UTOPIA_SYNC_URL` (`lan` discovers), `UTOPIA_SYNC_FOLDER`, saved transport.
+  `UTOPIA_SYNC_GRAPH`, `UTOPIA_SYNC_TOKEN`, `UTOPIA_SYNC_PASSPHRASE` override their corresponding
+  values. Settings names active overrides and disables Apply until relaunched without them.
+  Environment credentials are not copied into Keychain or settings files.
+- Standalone relay: `cargo run -p utopia-syncd` (env `UTOPIA_SYNCD_ADDR`, `UTOPIA_SYNCD_DB`,
   `UTOPIA_SYNCD_TOKENS`, `UTOPIA_SYNCD_QUOTA_MB`); realtime notices on `/v1/graphs/{gid}/events`.
-- App: `UTOPIA_SYNC_URL=<origin>` (or `lan` to discover over mDNS), or `UTOPIA_SYNC_FOLDER=<dir>`
-  for folder sync; `UTOPIA_LAN_SERVE=0.0.0.0:8787` hosts and advertises a relay from the app.
-  `UTOPIA_SYNC_GRAPH`, `UTOPIA_SYNC_TOKEN`, `UTOPIA_SYNC_PASSPHRASE` (end-to-end encryption)
-  — token and passphrase may also come from the macOS keychain (services `utopia-sync`,
-  `utopia-sync-passphrase`, account = graph id).
 
 ## Verifying a change (do this before opening a PR)
 
@@ -298,11 +324,12 @@ Implemented:
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
   snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.
-- **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with four tabs —
+- **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with five tabs —
   **Keybindings**, where every action can be rebound by pressing the keys and the change
   applies at once; **Shortcuts**, the cheat sheet of everything bound; **Appearance**, the font
   (System, or IBM Plex Sans bundled under the OFL in `crates/utopia-ui/assets/fonts`; code stays
-  Menlo), applied to every window at once and kept in `settings.json`; and **Help**, a tour of
+  Menlo), applied to every window at once and kept in `settings.json`; **Sync**, per-graph
+  transport setup, Keychain credentials, connection testing and device pairing; and **Help**, a tour of
   the features with screenshots captured from the app (`cargo run -p xtask -- help-shots`).
   `utopia_ui::actions::CATALOG` is the one source of truth: default keys plus the label,
   category and help text for each action, so the editor, the cheat sheet and the installed
@@ -324,6 +351,12 @@ Implemented:
 Known limits (pick these up deliberately, don't paper over them):
 - Keystroke→frame in `bench --ui` measures input handling + full render/layout/paint; it does
   not include GPU present or waiting for the display refresh.
+- Settings → Sync: `prepare_sync_destination` exports every shard on the UI thread when the
+  destination changes (a one-time cost proportional to the graph, run from Apply); "Test
+  connection" on a shared folder creates its `pages/` directory; Nearby Mac hosting and mDNS
+  discovery were verified by tests and by eye in the UI, not between two real Macs; the
+  shot script's clicks only land on a freshly painted frame, so scripted captures of the
+  pane take a throwaway `shot` after each click.
 - The first launch after a fresh build takes ~1 s (binary page-in plus runtime Metal shader
   compilation, because the Metal toolchain is not installed); later launches draw in ~150 ms.
 - Screenshots come from the app capturing its own window (`UTOPIA_SHOT_SCRIPT`); colours and

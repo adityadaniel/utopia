@@ -21,6 +21,14 @@ ulid.workspace = true
 ureq.workspace = true
 zstd.workspace = true
 
+tempfile.workspace = true
+url.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+tokio-tungstenite.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+
 [dev-dependencies]
 chrono.workspace = true
-tempfile.workspace = true

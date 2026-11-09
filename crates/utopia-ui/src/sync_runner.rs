@@ -10,7 +10,7 @@ pub const FAST: Duration = Duration::from_secs(5);
 pub const SLOW: Duration = Duration::from_secs(60);
 
 /// Where sync goes (§12.7 transports).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum SyncTarget {
     /// Hosted or self-hosted relay (`utopia-syncd`), with an optional bearer token.
     Relay { url: String, token: Option<String> },
@@ -19,7 +19,7 @@ pub enum SyncTarget {
 }
 
 /// Where and how to sync; resolved by the app from env/keychain, never stored in the graph.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct SyncConfig {
     pub target: SyncTarget,
     pub graph: String,
@@ -96,32 +96,6 @@ pub fn build_transport(cfg: &SyncConfig, client_id: &str) -> Result<BoxTransport
     })
 }
 
-/// Keep a realtime connection to the relay (§12.3) on a background thread; every notice
-/// raises `nudge`, which wakes the sync loop at once. Reconnects with backoff.
-pub fn spawn_realtime(
-    url: String,
-    graph: String,
-    token: Option<String>,
-    nudge: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) {
-    let _ = std::thread::Builder::new()
-        .name("utopia-realtime".into())
-        .spawn(move || {
-            let mut backoff = Duration::from_secs(2);
-            loop {
-                let r = utopia_sync::realtime::listen(&url, &graph, token.as_deref(), |_| {
-                    nudge.store(true, std::sync::atomic::Ordering::SeqCst);
-                    true
-                });
-                if matches!(r, Err(SyncError::Unauthorized)) {
-                    return;
-                }
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(SLOW);
-            }
-        });
-}
-
 /// Which half of a sync round is running, and therefore where the transport is (§12.3,
 /// §13.3). The transport's home is [`SyncPhase::Idle`]; no phase ever means "no transport
 /// exists". `interval` and `last` stay fields of [`SyncRunner`] on purpose: they are the
@@ -193,6 +167,7 @@ pub struct SyncRunner {
     /// cancels) the previous loop: it is replaced, never accumulated (`_tasks` would only
     /// release it with the workspace).
     pub loop_task: Option<gpui::Task<()>>,
+    pub realtime: Option<utopia_sync::realtime::Listener>,
 }
 
 impl SyncRunner {
@@ -207,6 +182,7 @@ impl SyncRunner {
             nudge: Default::default(),
             generation: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             loop_task: None,
+            realtime: None,
         }
     }
 

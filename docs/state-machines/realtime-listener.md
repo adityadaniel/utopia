@@ -1,4 +1,27 @@
-# Realtime WebSocket listener: connect, sleep, give up
+# Realtime WebSocket listener: connect, back off, stop
+
+## Status
+
+In-app setup replaces the desktop's detached blocking listener with
+`utopia_sync::realtime::Listener`, owned by `SyncRunner`. A oneshot cancellation signal
+races the entire async reconnect future, including connect/handshake, quiet socket reads
+and backoff. `Workspace::stop_sync` removes the poll task immediately and hands the listener
+to the setup coordinator, which signals and joins it on the background executor before
+starting the replacement. The listener starts only after the runner was created successfully.
+Dropping a runner also signals its listener, including workspace teardown.
+
+This fixes findings 1–4 below: successful connection resets backoff to 2 s; 401/403 retry at
+60 s instead of giving up forever; failed engine construction cannot orphan a listener;
+and a quiet or stalled connection no longer prevents cancellation. Connect/handshake has a
+10 s deadline. The blocking `listen` helper stays public for the relay's own end-to-end test
+(`crates/utopia-syncd/tests/http.rs`); the desktop no longer uses it. Jitter and server-side
+event-map retention (5–6) are unchanged. `Workspace::enable_sync` (the test path that builds
+its own transport) drops the previous listener without joining it; the signal still ends the
+thread, only the join is skipped.
+
+Regression tests: `ac_12_3_stop_cancels_a_quiet_socket_and_replacement_has_one_listener`
+and `ac_12_3_stop_cancels_a_stalled_handshake`. The sections below describe the original
+implementation and motivate the change; their line numbers are historical.
 
 ## What it controls
 

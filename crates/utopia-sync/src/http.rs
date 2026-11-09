@@ -28,7 +28,7 @@ pub struct HttpTransport {
 /// A stable spelling of a relay origin for the cursor space: scheme and authority
 /// lowercased, a default port dropped, no trailing slash. `http://Relay.Example:80/` and
 /// `http://relay.example` are the same relay; a different scheme or port is not.
-fn normalize_origin(base: &str) -> String {
+pub fn normalize_origin(base: &str) -> String {
     let base = base.trim_end_matches('/');
     let Some((scheme, rest)) = base.split_once("://") else {
         return base.to_ascii_lowercase();
@@ -45,6 +45,13 @@ fn normalize_origin(base: &str) -> String {
         _ => authority,
     };
     format!("{scheme}://{authority}{}", path.trim_end_matches('/'))
+}
+
+/// The destination origin of a relay (§12.7): its normalized URL plus the graph id. This
+/// is what a launch can know before a manifest has been read; the relay's store id is the
+/// finer part of the same destination (`utopia_store::sync_destination::Destination`).
+pub fn destination_origin(base: &str, graph: &str) -> String {
+    format!("relay:{}#{graph}", normalize_origin(base))
 }
 
 /// Graph ids travel in URLs; keep them to a safe alphabet.

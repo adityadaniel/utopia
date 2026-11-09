@@ -1326,3 +1326,211 @@ fn ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire() {
         "the capture reached the relay"
     );
 }
+
+/// §12.7: a new target needs acknowledged and imported content, not only pending edits.
+#[test]
+fn ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates() {
+    use utopia_store::Destination;
+    let old = Relay::new();
+    let (mut a, mut ca) = device(&old);
+    let (mut b, mut cb) = device(&old);
+    let page = a.create_page("Keep every block").unwrap();
+    write(&mut a, &page, "written on A");
+    // Setup records the destination this graph publishes to, before it is switched.
+    let old_space = utopia_sync::Transport::cursor_space(ca.transport_mut()).transport;
+    a.prepare_sync_destination(&Destination::new(&old_space, None))
+        .unwrap();
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    write(&mut b, &page, "written on B");
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    let before = texts(&mut a, &page);
+    let new = Relay::new();
+    let mut moved = SyncClient::new(RelayTransport::new(new.clone(), "g1"), &a).unwrap();
+    let new_space = utopia_sync::Transport::cursor_space(moved.transport_mut()).transport;
+    a.prepare_sync_destination(&Destination::new(new_space, None))
+        .unwrap();
+    moved.sync_once(&mut a).unwrap();
+    let (mut c, mut cc) = device(&new);
+    cc.sync_once(&mut c).unwrap();
+    assert_eq!(texts(&mut c, &page), before);
+    a.prepare_sync_destination(&Destination::new(&old_space, None))
+        .unwrap();
+    settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
+    assert_eq!(texts(&mut b, &page), before);
+    assert_eq!(texts(&mut a, &page), before);
+    assert!(a.doctor().unwrap().is_ok());
+}
+
+/// §12.6: a second device's wrong key must not mix new ciphertext into an existing graph.
+#[test]
+fn ac_12_6_pairing_validates_existing_payloads_before_pushing() {
+    use utopia_sync::{
+        e2e::{Encrypted, GraphKey},
+        setup::verified_target::VerifiedTarget,
+        Transport,
+    };
+    let relay = Relay::new();
+    let mut a = Store::open_in_memory().unwrap();
+    a.create_page("Encrypted original").unwrap();
+    let transport = || RelayTransport::new(relay.clone(), "g");
+    let key = |pass| GraphKey::derive(pass, "g").unwrap();
+    let mut original =
+        SyncClient::new(Encrypted::new(transport(), key("original"), "g"), &a).unwrap();
+    original.sync_once(&mut a).unwrap();
+    let before = relay.manifest("g").rev;
+    let mut b = Store::open_in_memory().unwrap();
+    b.create_page("Keep this local until paired").unwrap();
+    let mut wrong = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("wrong"), "g")),
+        &b,
+    )
+    .unwrap();
+    assert!(wrong.sync_once(&mut b).is_err());
+    assert_eq!(relay.manifest("g").rev, before);
+    let mut unencrypted = VerifiedTarget::new(transport());
+    assert!(unencrypted.manifest(None).is_err());
+    assert_eq!(relay.manifest("g").rev, before);
+    let mut correct = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("original"), "g")),
+        &b,
+    )
+    .unwrap();
+    correct.sync_once(&mut b).unwrap();
+    assert!(relay.manifest("g").rev > before);
+    assert!(b.find_page("Encrypted original").unwrap().is_some());
+}
+
+/// §12.7 / rule 12: publication acknowledgements belong to a destination, including blobs.
+#[test]
+fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {
+    use utopia_sync::folder::FolderTransport;
+    let relay = Relay::new();
+    let (mut a, mut ca) = device(&relay);
+    let page = a.create_page("Attachments survive switching").unwrap();
+    let bytes = b"mock attachment for sync setup";
+    let blob = a.add_blob("example.txt", bytes).unwrap();
+    write(&mut a, &page, &format!("[example.txt](blob:{})", blob.hash));
+    ca.sync_once(&mut a).unwrap();
+    assert_eq!(
+        a.attachment_state(&blob.hash).unwrap(),
+        Some(utopia_store::BlobState::Uploaded)
+    );
+    // The relay is the destination this graph recorded, so the folder is a real switch.
+    let relay_space = utopia_sync::Transport::cursor_space(ca.transport_mut()).transport;
+    a.prepare_sync_destination(&utopia_store::Destination::new(relay_space, None))
+        .unwrap();
+    let folder = tempfile::tempdir().unwrap();
+    let shared =
+        utopia_store::Destination::new(format!("folder:{}", folder.path().display()), None);
+    a.prepare_sync_destination(&shared).unwrap();
+    let queued = a.outbox_count().unwrap();
+    a.prepare_sync_destination(&shared).unwrap();
+    assert_eq!(
+        a.outbox_count().unwrap(),
+        queued,
+        "repeated Apply must not enqueue again"
+    );
+    let mut moved = SyncClient::new(FolderTransport::new(folder.path(), "a").unwrap(), &a).unwrap();
+    moved.sync_once(&mut a).unwrap();
+    let mut b = Store::open_in_memory().unwrap();
+    let mut reader =
+        SyncClient::new(FolderTransport::new(folder.path(), "b").unwrap(), &b).unwrap();
+    reader.sync_once(&mut b).unwrap();
+    assert_eq!(texts(&mut a, &page), texts(&mut b, &page));
+    assert_eq!(
+        b.blob(&blob.hash).unwrap().as_deref(),
+        Some(bytes.as_slice())
+    );
+}
+
+/// §12.7: the identity a launch observes is not the same online and offline. A relay is
+/// only identified by its own store id once its manifest has been read; an offline launch
+/// knows just the URL, and that difference must not look like a new destination — every
+/// flip would export the whole graph into the outbox again.
+#[test]
+fn ac_12_7_an_offline_launch_does_not_republish_the_graph() {
+    let mut a = Store::open_in_memory().unwrap();
+    let page = a.create_page("Offline launches").unwrap();
+    write(&mut a, &page, "one block");
+    let origin = utopia_sync::http::destination_origin("http://relay.example", "g1");
+    let online = utopia_store::Destination::new(origin.clone(), Some("store-1".into()));
+    let offline = utopia_store::Destination::new(origin, None);
+    a.prepare_sync_destination(&online).unwrap();
+    let queued = a.outbox_pending(usize::MAX >> 1).unwrap().len();
+    a.prepare_sync_destination(&offline).unwrap();
+    assert_eq!(
+        a.outbox_pending(usize::MAX >> 1).unwrap().len(),
+        queued,
+        "the URL-only identity of an offline launch republished the whole graph"
+    );
+}
+
+/// §12.7: a graph that was already syncing when this bookkeeping was introduced has no
+/// recorded destination. The first launch must adopt the current one instead of exporting
+/// every shard to the target it is already in sync with.
+#[test]
+fn ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph() {
+    let relay = Relay::new();
+    let (mut a, mut ca) = device(&relay);
+    let page = a.create_page("Already synced").unwrap();
+    write(&mut a, &page, "old content");
+    ca.sync_once(&mut a).unwrap();
+    assert_eq!(a.sync_get("setup_destination").unwrap(), None);
+    let queued = a.outbox_pending(usize::MAX >> 1).unwrap().len();
+    assert_eq!(queued, 0, "the previous round acknowledged everything");
+    let instance = utopia_sync::setup::probe::probe(ca.transport_mut()).instance;
+    let origin = utopia_sync::http::destination_origin("http://relay.example", "g1");
+    a.prepare_sync_destination(&utopia_store::Destination::new(origin, instance))
+        .unwrap();
+    assert_eq!(
+        a.outbox_pending(usize::MAX >> 1).unwrap().len(),
+        queued,
+        "the upgrade republished the whole graph into its existing target"
+    );
+}
+/// §12.6: an empty target has nothing to read back, so it proves no key. A device that
+/// proved its passphrase there must re-check before its first push once foreign payloads
+/// exist — otherwise it mixes ciphertext into a graph encrypted with another key.
+#[test]
+fn ac_12_6_an_empty_target_never_proves_a_key() {
+    use utopia_sync::{
+        e2e::{Encrypted, GraphKey},
+        setup::verified_target::VerifiedTarget,
+    };
+    let relay = Relay::new();
+    let transport = || RelayTransport::new(relay.clone(), "g");
+    let key = |pass| GraphKey::derive(pass, "g").unwrap();
+    // A joins while the relay is empty and publishes nothing: it learned no key.
+    let mut a = Store::open_in_memory().unwrap();
+    let mut ca = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("original"), "g")),
+        &a,
+    )
+    .unwrap();
+    ca.sync_once(&mut a).unwrap();
+    // B's wrong key arrives at the still-empty relay and publishes.
+    let mut b = Store::open_in_memory().unwrap();
+    let page_b = b.create_page("B's notebook").unwrap();
+    write(&mut b, &page_b, "encrypted with the wrong key");
+    let mut cb = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("wrong"), "g")),
+        &b,
+    )
+    .unwrap();
+    cb.sync_once(&mut b).unwrap();
+    let pushed = relay.manifest("g");
+    assert_eq!(pushed.pages.len(), 1);
+    // A now edits and syncs: it must notice it cannot read the target before adding its
+    // own ciphertext to it.
+    let page_a = a.create_page("A's notebook").unwrap();
+    write(&mut a, &page_a, "encrypted with the original key");
+    assert!(
+        ca.sync_once(&mut a).is_err(),
+        "the round must refuse a target it cannot read"
+    );
+    assert_eq!(
+        relay.manifest("g").pages.len(),
+        pushed.pages.len(),
+        "A pushed ciphertext into a graph it cannot read"
+    );
+}
