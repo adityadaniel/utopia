@@ -1243,6 +1243,32 @@ impl Store {
         )? as usize)
     }
 
+    /// Backlink counts for every page that has one, in a single grouped query. The
+    /// sidebar's PAGES list shows a count per row (DESIGN.md §3.2); asking
+    /// [`Store::backlink_count`] once per page would be one query per row on every index
+    /// update.
+    pub fn page_backlink_counts(&self) -> Result<HashMap<PageId, usize>> {
+        self.read_barrier()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT r.dst_page_id, count(DISTINCT r.src_block_id)
+             FROM ref r JOIN block b ON b.id=r.src_block_id
+             WHERE r.dst_kind='page' AND r.dst_page_id IS NOT NULL AND b.deleted_at IS NULL
+             GROUP BY r.dst_page_id",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                PageId(row.get::<_, String>(0)?),
+                row.get::<_, i64>(1)? as usize,
+            ))
+        })?;
+        let mut out = HashMap::new();
+        for row in rows {
+            let (page, count) = row?;
+            out.insert(page, count);
+        }
+        Ok(out)
+    }
+
     /// "Referenced by (N)" for a block (FR-3.5).
     pub fn block_backlinks(&self, block: &BlockId) -> Result<Vec<RefHit>> {
         self.read_barrier()?;
