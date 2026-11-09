@@ -3915,8 +3915,11 @@ impl PageView {
                     text: String::new(),
                     kind: BlockKind::Bullet,
                 }],
+                // Record the insert, and keep it open for the first text edit (the
+                // editor coalesces within 500 ms), so one Cmd+Z removes the whole row
+                // instead of leaving an empty block behind (§3.8).
                 utopia_store::EditOpts {
-                    no_undo: true,
+                    coalesce: Some(id.clone()),
                     ..Default::default()
                 },
             );
