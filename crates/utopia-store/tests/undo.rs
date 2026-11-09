@@ -138,3 +138,52 @@ fn fr_2_12_undo_keeps_the_group_when_its_commit_fails() {
         "the group moved to the redo stack instead of into the void"
     );
 }
+
+/// Issue 3: `execute_multi` queued the commit before recording the group, so an edit whose
+/// commit was refused (a failed writer reports the failure, it does not undo the keystroke,
+/// rule 5) stayed in the shard and in `pending` but never reached the history.
+#[test]
+fn fr_2_12_an_edit_whose_commit_failed_is_still_undoable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = Store::open(dir.path().join("graph.utopia")).unwrap();
+    s.set_today(Some(date(2026, 11, 2)));
+    let page = s.create_page("Alpha").unwrap();
+    let block = write(&mut s, &page, "one");
+    s.sync_index().unwrap();
+
+    // One commit fails, and the repair's snapshot fails too: the writer stays failed.
+    s.conn()
+        .execute_batch(
+            "CREATE TRIGGER fail_commit BEFORE INSERT ON block
+             BEGIN SELECT RAISE(ABORT, 'injected commit failure'); END",
+        )
+        .unwrap();
+    s.set_block_text(&page, &block, "one two", None, None)
+        .unwrap();
+    assert!(s.sync_index().is_err(), "the injected failure is reported");
+    s.seal_undo();
+
+    let depth = s.undo_depth();
+    let edited = s.set_block_text(&page, &block, "one two three", None, None);
+    assert!(edited.is_err(), "the failed writer refuses the commit");
+    assert_eq!(
+        text(&mut s, &page, &block),
+        "one two three",
+        "the keystroke is in the shard (rule 5)"
+    );
+    assert_eq!(
+        s.undo_depth(),
+        depth + 1,
+        "an edit that happened is undoable even when its commit did not land"
+    );
+
+    // Once the writer is repaired the edit is durable, and Cmd+Z takes it back.
+    // The barrier that repairs the writer still reports the failure it repaired
+    // (docs/state-machines/store-commit-pipeline.md); the next one sees a healthy store.
+    s.conn().execute_batch("DROP TRIGGER fail_commit").unwrap();
+    let _ = s.sync_index();
+    s.sync_index().unwrap();
+    s.undo().unwrap();
+    assert_eq!(text(&mut s, &page, &block), "one two");
+    assert!(s.doctor().unwrap().is_ok());
+}

@@ -1034,12 +1034,18 @@ impl Store {
             .iter()
             .map(|(p, d)| (p.clone(), Some(d.clone())))
             .collect();
-        self.queue(&pages, true)?;
+        // A failed commit does not take the edit back (rule 5): the shard keeps it and the
+        // repair ships it later, so the group is recorded either way. Holding the error
+        // until after `push` is what makes "in memory but not on the stack" impossible
+        // (docs/state-machines/undo-group-coalescing.md, issue 3).
+        let queued = self.queue(&pages, true);
         // Only plain text edits are debounced; structure and identity reach the writer
         // at once so resolution and autocomplete see them.
-        if deltas.iter().any(|(_, d)| d.structural || d.meta_changed) {
-            self.flush()?;
-        }
+        let committed = if deltas.iter().any(|(_, d)| d.structural || d.meta_changed) {
+            queued.and_then(|()| self.flush())
+        } else {
+            queued
+        };
         // A draft that promotion merged into the day (see `resolve_promotion`) has this
         // group's commands in the survivor's shard now. Point the undo step *and the two
         // saved carets* there too: undo/redo restore the caret into the page it names, and a
@@ -1058,6 +1064,7 @@ impl Store {
         if !opts.no_undo {
             self.undo.push(group);
         }
+        committed?;
         Ok(deltas)
     }
 
@@ -1138,6 +1145,12 @@ impl Store {
 
     pub fn can_redo(&self) -> bool {
         self.undo.can_redo()
+    }
+
+    /// How many groups the undo stack holds (tests: a transition records, moves or restores
+    /// exactly one).
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
     }
 
     /// Cmd+Z. Returns the caret to restore.
