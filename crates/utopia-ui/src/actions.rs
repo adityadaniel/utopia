@@ -989,11 +989,30 @@ pub fn canonical_keys(keys: &str) -> String {
 }
 
 pub fn platform_keys(keys: &str) -> String {
-    if cfg!(target_os = "macos") {
+    platform_keys_on(keys, cfg!(target_os = "macos"))
+}
+
+fn platform_keys_on(keys: &str, macos: bool) -> String {
+    if macos {
         keys.to_string()
     } else {
         keys.replace("cmd-", "ctrl-")
     }
+}
+
+/// The default keys of `d` on this platform.
+pub fn default_keys(d: &ActionDoc) -> String {
+    default_keys_on(d, cfg!(target_os = "macos"))
+}
+
+/// Cocoa's Ctrl text keys (Ctrl+A, Ctrl+K, …) are a macOS convention. Elsewhere
+/// `cmd-` becomes `ctrl-`, and those chords belong to Select All, Quick Jump and the
+/// rest, so these actions have no default keys there (they can still be bound).
+fn default_keys_on(d: &ActionDoc, macos: bool) -> String {
+    if !macos && d.action.starts_with("Emacs") {
+        return String::new();
+    }
+    platform_keys_on(d.keys, macos)
 }
 
 /// Keystrokes rendered the way a macOS menu would show them (`cmd-shift-d` → `⇧⌘D`).
@@ -1242,9 +1261,7 @@ impl Override {
     /// Read one entry of `keymap.json`. The verdict is computed here, once, so no reader has
     /// to decide for itself whether the keys are usable or different from the default.
     fn parse(action: &str, raw: &str) -> Self {
-        let default = doc(action)
-            .map(|d| platform_keys(d.keys))
-            .unwrap_or_default();
+        let default = doc(action).map(default_keys).unwrap_or_default();
         if canonical_keys(raw) == canonical_keys(&default) {
             return Override::SameAsDefault;
         }
@@ -1348,11 +1365,15 @@ impl Overrides {
     /// entry gpui cannot bind is not in force, so every reader reports the default — the
     /// three copies used to disagree here (keymap machine doc, issue 1).
     pub fn keys_for(&self, d: &ActionDoc) -> String {
+        self.keys_for_on(d, cfg!(target_os = "macos"))
+    }
+
+    fn keys_for_on(&self, d: &ActionDoc, macos: bool) -> String {
         self.0
             .get(d.action)
             .and_then(|o| o.keys())
             .map(str::to_string)
-            .unwrap_or_else(|| platform_keys(d.keys))
+            .unwrap_or_else(|| default_keys_on(d, macos))
     }
 
     /// Whether the row differs from the catalog: an entry exists in the map only when it
@@ -1401,10 +1422,18 @@ impl Overrides {
     /// binding is live, not how its context string is spelled, so a binding in the editor and
     /// one in the editor-or-line-input are compared (keymap machine doc, issue 3).
     pub fn conflicts(&self) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
+        self.conflicts_on(cfg!(target_os = "macos"))
+    }
+
+    fn conflicts_on(&self, macos: bool) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
         let mut out = Vec::new();
         for (i, a) in CATALOG.iter().enumerate() {
+            let keys = canonical_keys(&self.keys_for_on(a, macos));
+            if keys.is_empty() {
+                continue;
+            }
             for b in CATALOG.iter().skip(i + 1) {
-                if canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                if keys == canonical_keys(&self.keys_for_on(b, macos))
                     && scopes_touch(a.context, b.context)
                 {
                     out.push((a, b));
@@ -1470,7 +1499,7 @@ fn clauses(context: &str) -> Option<Vec<BTreeSet<String>>> {
 /// catalog default when nothing is bound yet (a test app before `install`).
 pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
     let Some(action) = action_for(d.action) else {
-        return platform_keys(d.keys);
+        return default_keys(d);
     };
     let bindings = cx.key_bindings();
     let map = bindings.borrow();
@@ -1484,7 +1513,7 @@ pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")
         })
-        .unwrap_or_else(|| platform_keys(d.keys))
+        .unwrap_or_else(|| default_keys(d))
 }
 
 /// Install default bindings, then the user's overrides on top. A rebound action loses its
@@ -1512,7 +1541,7 @@ pub fn install(cx: &mut App, overrides: &Overrides) {
     let mut bindings: Vec<KeyBinding> = CATALOG
         .iter()
         .filter(|d| !replaced.contains(d.action))
-        .filter_map(|d| binding(d.action, &platform_keys(d.keys), d.context))
+        .filter_map(|d| binding(d.action, &default_keys(d), d.context))
         .collect();
     // Overrides come last: gpui lets a later binding win for the same keys.
     bindings.extend(user);
@@ -1563,6 +1592,18 @@ mod tests {
     fn defaults_do_not_conflict() {
         let c = Overrides::default().conflicts();
         assert!(c.is_empty(), "conflicting defaults: {c:?}");
+    }
+
+    /// Off macOS `cmd-` becomes `ctrl-`, so Select All, Bold, Inline Code and Quick Jump
+    /// land on Ctrl+A/B/E/K. Cocoa's Ctrl text keys must not take those chords there.
+    #[test]
+    fn defaults_do_not_conflict_off_macos() {
+        let c = Overrides::default().conflicts_on(false);
+        let names: Vec<_> = c.iter().map(|(a, b)| (a.action, b.action)).collect();
+        assert!(
+            names.is_empty(),
+            "conflicting defaults off macOS: {names:?}"
+        );
     }
 
     /// QJ-5: every command the palette can list has an action to run, spelled the way the
