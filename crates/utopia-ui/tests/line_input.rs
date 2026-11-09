@@ -113,3 +113,15 @@ fn macos_text_keys_work_in_a_single_line_input(cx: &mut TestAppContext) {
         "the earlier kill, not the passphrase"
     );
 }
+
+/// Ctrl+H and Ctrl+D leave a composition alone, like every other editing key (§13.5).
+#[gpui::test]
+fn ctrl_h_and_ctrl_d_wait_for_the_input_method(cx: &mut TestAppContext) {
+    let (input, cx) = focused_input(cx);
+    cx.simulate_input("ab");
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    cx.simulate_keystrokes("ctrl-h ctrl-d");
+    assert_eq!(text(&input, cx), "abにほ");
+}

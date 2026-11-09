@@ -111,6 +111,10 @@ impl LineInput {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        // §13.5: the input method owns the buffer while it composes.
+        if self.field.composing() {
+            return;
+        }
         if self.field.sel.is_empty() {
             let to = self.field.prev_boundary();
             self.field.select_to(to);
@@ -120,6 +124,10 @@ impl LineInput {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        // §13.5: see `backspace`.
+        if self.field.composing() {
+            return;
+        }
         if self.field.sel.is_empty() {
             let to = self.field.next_boundary();
             self.field.select_to(to);
