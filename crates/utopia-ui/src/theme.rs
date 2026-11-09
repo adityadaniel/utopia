@@ -23,6 +23,8 @@ use gpui::{
     SharedString, Stateful, WindowAppearance,
 };
 
+use crate::icons::{icon, Icon, ICON_SIZE};
+
 /// A type role (DESIGN.md §2.2): everything a call site may say about type at once.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TypeRole {
@@ -118,6 +120,18 @@ pub const COUNT: TypeRole = TypeRole {
     line: 16.,
     weight: SANS,
 };
+/// The workspace name in the sidebar row: 15 / 22, semibold (§3.2).
+pub const WORKSPACE_NAME: TypeRole = TypeRole {
+    size: 15.,
+    line: 22.,
+    weight: SANS_SEMIBOLD,
+};
+/// An inline tag chip's text: 14 px (§3.1).
+pub const TAG: TypeRole = TypeRole {
+    size: 14.,
+    line: 22.,
+    weight: SANS,
+};
 /// The "Today" pill: Mono 12 weight 500 on a 20 px line (§3.4).
 pub const PILL: TypeRole = TypeRole {
     size: 12.,
@@ -172,6 +186,36 @@ pub const RADIUS_PILL: f32 = 13.;
 
 /// The line grid a block row follows: 28 px (§3.1).
 pub const LINE_GRID: f32 = 28.;
+
+// Controls (§3.4) and the sidebar/top bar frame (§3.2, §3.3).
+/// A ghost icon button: 32 × 32, radius 6.
+pub const GHOST_BUTTON: f32 = 32.;
+/// A text button or the day-navigation group: 32 px tall.
+pub const BUTTON_HEIGHT: f32 = 32.;
+/// A ghost text button's side padding (§3.4: 0 8–10).
+pub const BUTTON_PADDING_X: f32 = 10.;
+/// A sidebar nav row: 34 px tall, radius 6.
+pub const NAV_ROW_HEIGHT: f32 = 34.;
+/// The sidebar search field: 36 px tall, radius 8.
+pub const SEARCH_HEIGHT: f32 = 36.;
+/// The workspace row's initial square: 24 px.
+pub const WORKSPACE_SQUARE: f32 = 24.;
+/// A page row in the sidebar: 32 px tall.
+pub const PAGE_ROW_HEIGHT: f32 = 32.;
+/// A mini-calendar day cell: 30 px tall.
+pub const CALENDAR_CELL_HEIGHT: f32 = 30.;
+/// The day-with-notes dot under a calendar date: 4 px.
+pub const CALENDAR_DOT: f32 = 4.;
+/// The footer's status dot: 8 px.
+pub const FOOTER_DOT: f32 = 8.;
+/// A keyboard hint chip: 20 px tall, radius 4.
+pub const KBD_HEIGHT: f32 = 20.;
+/// The focus ring §3.4 asks for: 2 px, offset 2. gpui 0.2 has no outline, so controls draw
+/// this themselves when they have a focus handle.
+pub const FOCUS_RING: f32 = 2.;
+pub const FOCUS_RING_OFFSET: f32 = 2.;
+/// A "Today" pill or tag chip's side padding (§3.4).
+pub const CHIP_PADDING_X: f32 = 7.;
 
 // Block row (§3.1). A row starts with a 20 px caret slot in the gutter outside the text
 // column, then a 24 px bullet slot, then the content; children step right by the spec's
@@ -431,6 +475,110 @@ pub fn quiet_menu(
 ) -> Stateful<Div> {
     let label: SharedString = label.into();
     quiet_control(id, format!("{label} ▾"), th)
+}
+
+/// A ghost icon button (DESIGN.md §3.4): 32 × 32, radius 6, transparent, `hover` under the
+/// pointer. The icon is monochrome and takes the control's colour; gpui 0.2 has no
+/// accessibility tree, so the caller names it for the scripted UI (`debug_selector`) and,
+/// where it has one, a tooltip stands in for the missing label.
+pub fn ghost_icon(id: impl Into<ElementId>, glyph: Icon, th: &Theme) -> Stateful<Div> {
+    div()
+        .id(id)
+        .size(px(GHOST_BUTTON))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(RADIUS_CONTROL))
+        .cursor_pointer()
+        .hover(|d| d.bg(th.hover))
+        .child(icon(glyph, ICON_SIZE, th.ink_3))
+}
+
+/// A ghost text button (§3.4): 32 px tall, 10 px sides, 13 px `ink_3`, `hover` under the
+/// pointer. Use [`outline_button`] where the spec asks for a hairline.
+pub fn ghost_text(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    th: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(BUTTON_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px(px(BUTTON_PADDING_X))
+        .rounded(px(RADIUS_CONTROL))
+        .text_size(px(SMALL.size))
+        .text_color(th.ink_3)
+        .cursor_pointer()
+        .hover(|d| d.bg(th.hover).text_color(th.ink))
+        .child(label.into())
+}
+
+/// An outline button (§3.4): a ghost text button with a `line_strong` hairline and paper
+/// fill.
+pub fn outline_button(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    th: &Theme,
+) -> Stateful<Div> {
+    ghost_text(id, label, th)
+        .bg(th.paper)
+        .border_1()
+        .border_color(th.line_strong)
+}
+
+/// A keyboard hint chip (§2.1 "kbd background", §3.4): mono 12 on `hover`, radius 4.
+pub fn kbd(label: impl Into<SharedString>, th: &Theme) -> Div {
+    div()
+        .h(px(KBD_HEIGHT))
+        .flex_none()
+        .flex()
+        .items_center()
+        .px(px(6.))
+        .rounded(px(RADIUS_CHIP))
+        .bg(th.hover)
+        .font_family(LABEL_MONO)
+        .text_size(px(COUNT.size))
+        .text_color(th.ink_3)
+        .child(label.into())
+}
+
+/// A sidebar nav row (§3.2): 34 px tall, radius 6, 14 px. Active: `selected` fill, `ink`
+/// at 500 with the icon in `link`; hover: `nav_hover`.
+pub fn nav_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    glyph: Option<Icon>,
+    active: bool,
+    th: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(NAV_ROW_HEIGHT))
+        .flex()
+        .items_center()
+        .gap_2()
+        .px_2()
+        .rounded(px(RADIUS_CONTROL))
+        .text_size(px(UI.size))
+        .line_height(px(UI.line))
+        .text_color(if active { th.ink } else { th.ink_2 })
+        .when(active, |d| {
+            d.bg(th.selected).font_weight(FontWeight::MEDIUM)
+        })
+        .cursor_pointer()
+        .hover(|d| d.bg(th.nav_hover))
+        .when_some(glyph, |d, glyph| {
+            d.child(icon(
+                glyph,
+                ICON_SIZE,
+                if active { th.link } else { th.ink_3 },
+            ))
+        })
+        .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
 /// The one monospace family for code: Menlo, whatever the notes are set in.
@@ -788,6 +936,7 @@ mod tests {
         assert_eq!(COUNT.size, 12.);
         assert_eq!((PILL.size, PILL.line), (12., 20.));
         assert_eq!(REF_LABEL.size, 11.);
+        assert_eq!((WORKSPACE_NAME.size, TAG.size), (15., 14.));
 
         let scale = [
             PAGE_TITLE.size,
