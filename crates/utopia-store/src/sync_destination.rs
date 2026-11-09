@@ -54,9 +54,11 @@ impl Store {
     /// remain tagged; only a pull from the new relay may authorize its compaction (§12.6).
     pub fn prepare_sync_destination(&mut self, destination: &Destination) -> Result<()> {
         self.sync_index()?;
-        let stored = self.sync_get(ORIGIN)?.map(|origin| Destination {
+        let stored_origin = self.sync_get(ORIGIN)?;
+        let stored_instance = self.sync_get(INSTANCE)?;
+        let stored = stored_origin.map(|origin| Destination {
             origin,
-            instance: self.sync_get(INSTANCE).ok().flatten(),
+            instance: stored_instance,
         });
         if let Some(stored) = &stored {
             if destination.matches(stored) {
