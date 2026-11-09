@@ -66,6 +66,11 @@ pub enum EditorEvent {
     InsertTemplate(PageId),
     /// After undo/redo: where the caret should go.
     Restore(Caret),
+    /// A deferred `begin` finally switched away from `from` after an IME composition
+    /// ended, so the host can finish the row it left (§13.5).
+    Switched {
+        from: BlockId,
+    },
     Blurred,
 }
 
@@ -379,6 +384,13 @@ impl EventEmitter<EditorEvent> for BlockEditor {}
 impl Focusable for BlockEditor {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+impl BlockEditor {
+    /// Whether an input method composition currently owns the buffer (§13.5).
+    pub fn composing(&self) -> bool {
+        self.field.composing()
     }
 }
 
@@ -853,7 +865,15 @@ impl BlockEditor {
                 target,
                 caret,
                 goal,
-            }) => self.begin(target, caret, goal, window, cx),
+            }) => {
+                let from = self.target().map(|t| t.block.clone());
+                self.begin(target, caret, goal, window, cx);
+                if let Some(from) = from {
+                    if self.target().map(|t| &t.block) != Some(&from) {
+                        cx.emit(EditorEvent::Switched { from });
+                    }
+                }
+            }
         }
     }
 

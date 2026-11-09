@@ -1357,6 +1357,10 @@ impl PageView {
         // not as a row. Any other target leaves the bar's edit state. The row being left is
         // cleaned up after `begin` commits it: the editor switches targets without emitting
         // `Blurred`, so waiting for that event would leave an emptied or pending row behind.
+        // A live composition defers `begin` (editor.rs §13.5): the editor still targets
+        // the old row, so its store text may be empty without the row being finished. The
+        // deferred `begin` emits `Switched`, which finishes it then (see on_editor_event).
+        let composing = self.editor.read(cx).composing();
         let previous = self.property_edit.take();
         self.property_edit = self.is_property_block(&block).then(|| block.clone());
         let line = crate::appearance::density(cx).line_height();
@@ -1400,7 +1404,7 @@ impl PageView {
             )
         });
         if let Some(old) = previous {
-            if self.property_edit.as_ref() != Some(&old) {
+            if !composing && self.property_edit.as_ref() != Some(&old) {
                 self.finish_property_block(old, cx);
             }
         }
@@ -2168,6 +2172,17 @@ impl PageView {
             self.restore(caret, window, cx);
             return;
         }
+        if let EditorEvent::Switched { from } = event {
+            // The composition ended and the editor finally moved to the row the user
+            // picked; finish the row it left now that its text is committed.
+            self.finish_property_block(from.clone(), cx);
+            if self.property_edit.as_ref() == Some(from) {
+                self.property_edit = None;
+            }
+            self.cycle.invalidate(Invalidation::rows());
+            cx.notify();
+            return;
+        }
         if matches!(event, EditorEvent::Blurred) {
             self.finish_property_edit(cx);
             // The editor dropped its target (Escape, navigation, a reference followed, the
@@ -2474,7 +2489,7 @@ impl PageView {
                     self.edit(t.page.clone(), f, None, None, window, cx);
                 }
             }
-            EditorEvent::Restore(_) | EditorEvent::Blurred => {}
+            EditorEvent::Restore(_) | EditorEvent::Blurred | EditorEvent::Switched { .. } => {}
         }
     }
 
