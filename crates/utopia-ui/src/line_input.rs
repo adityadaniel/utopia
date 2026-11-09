@@ -545,7 +545,7 @@ impl Render for LineInput {
                 StyledText::new(p.clone()).with_highlights([(
                     0..p.len(),
                     HighlightStyle {
-                        color: Some(th.faint),
+                        color: Some(th.muted),
                         ..Default::default()
                     },
                 )]),

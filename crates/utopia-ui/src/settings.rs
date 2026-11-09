@@ -741,16 +741,16 @@ impl Render for SettingsView {
                     .gap_2()
                     .px_2()
                     .py(px(if density == Density::Compact { 5. } else { 8. }))
-                    .rounded_md()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
                     .cursor_pointer()
                     .text_size(px(crate::theme::CONTROL_SIZE))
-                    .when(on, |d| d.bg(th.chip_bg).text_color(th.accent))
-                    .when(!on, |d| d.text_color(th.text).hover(|x| x.bg(th.hover)))
+                    .when(on, |d| d.bg(th.line_soft).text_color(th.link))
+                    .when(!on, |d| d.text_color(th.ink).hover(|x| x.bg(th.hover)))
                     .child(
                         div()
                             .w(px(18.))
                             .flex_none()
-                            .text_color(if on { th.accent } else { th.muted })
+                            .text_color(if on { th.link } else { th.muted })
                             .child(t.icon()),
                     )
                     .child(t.label())
@@ -771,13 +771,13 @@ impl Render for SettingsView {
             .py_4()
             .border_r_1()
             .border_color(th.line)
-            .bg(th.sidebar_bg)
+            .bg(th.shelf)
             .child(
                 div()
                     .px_2()
                     .pb_3()
                     .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .font_weight(FontWeight::MEDIUM)
                     .child("Settings"),
             )
@@ -810,8 +810,8 @@ impl Render for SettingsView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(th.bg)
-            .text_color(th.text)
+            .bg(th.paper)
+            .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
             .font_family(appearance::font_family(cx))
@@ -852,7 +852,7 @@ impl Render for SettingsView {
                     .py_2()
                     .border_t_1()
                     .border_color(th.line)
-                    .bg(th.surface)
+                    .bg(th.well)
                     .text_size(px(crate::theme::CAPTION_SIZE))
                     .text_color(th.muted)
                     .child(s)
@@ -900,10 +900,10 @@ fn card(th: &Theme) -> Div {
         .mx_auto()
         // A card is as tall as its rows; the pane scrolls instead of squeezing it.
         .flex_shrink_0()
-        .rounded_lg()
+        .rounded(px(crate::theme::RADIUS_INPUT))
         .border_1()
         .border_color(th.line)
-        .bg(th.surface)
+        .bg(th.well)
         .overflow_hidden()
 }
 
@@ -914,7 +914,7 @@ fn card_title(th: &Theme, label: &str) -> Div {
         .pt_3()
         .pb_1p5()
         .text_size(px(crate::theme::CAPTION_SIZE))
-        .text_color(th.faint)
+        .text_color(th.muted)
         .font_weight(FontWeight::MEDIUM)
         .child(label.to_string())
 }
@@ -976,7 +976,7 @@ fn key_card_row<E: Styled + gpui::prelude::FluentBuilder>(
 fn card_top(th: &Theme, label: &str) -> Div {
     column()
         .debug_selector(move || format!("settings-card-{label}"))
-        .bg(th.surface)
+        .bg(th.well)
         .border_1()
         .border_b_0()
         .border_color(th.line)
@@ -985,7 +985,7 @@ fn card_top(th: &Theme, label: &str) -> Div {
         .pt_3()
         .pb_1p5()
         .text_size(px(crate::theme::CAPTION_SIZE))
-        .text_color(th.faint)
+        .text_color(th.muted)
         .font_weight(FontWeight::MEDIUM)
         .child(label.to_string())
 }
@@ -1060,12 +1060,12 @@ fn radio(on: bool, th: &Theme) -> Div {
         .flex_none()
         .rounded_full()
         .border_1()
-        .border_color(if on { th.accent } else { th.faint })
+        .border_color(if on { th.link } else { th.line_strong })
         .flex()
         .items_center()
         .justify_center()
         .when(on, |d| {
-            d.child(div().size(px(8.)).rounded_full().bg(th.accent))
+            d.child(div().size(px(8.)).rounded_full().bg(th.link))
         })
 }
 
@@ -1081,15 +1081,15 @@ impl SettingsView {
             .gap_2()
             .px_3()
             .py_1p5()
-            .rounded_lg()
+            .rounded(px(crate::theme::RADIUS_INPUT))
             .border_1()
             .border_color(th.line)
-            .bg(th.surface)
+            .bg(th.well)
             .child(
                 div()
                     .flex_none()
                     .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .child("Filter"),
             )
             .child(self.search.clone())
@@ -1204,24 +1204,28 @@ impl SettingsView {
             .debug_selector(move || format!("settings-chip-{}", d.action))
             .px_2()
             .py_1()
-            .rounded_md()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
             .border_1()
             .border_color(if capturing || invalid.is_some() {
-                th.accent
+                th.link
             } else {
                 th.line
             })
-            .bg(if capturing { th.banner_bg } else { th.chip_bg })
+            .bg(if capturing {
+                th.banner_bg
+            } else {
+                th.line_soft
+            })
             .text_color(if invalid.is_some() {
                 th.warning
             } else if capturing {
-                th.accent
+                th.link
             } else {
-                th.text
+                th.ink
             })
             .text_size(px(crate::theme::CAPTION_SIZE))
             .cursor_pointer()
-            .hover(|x| x.border_color(th.accent))
+            .hover(|x| x.border_color(th.link))
             .child(if capturing {
                 "Press keys…".to_string()
             } else if let Some((raw, _)) = &invalid {
@@ -1247,11 +1251,11 @@ impl SettingsView {
                 .flex_none()
                 .px_1()
                 .py_0p5()
-                .rounded_md()
+                .rounded(px(crate::theme::RADIUS_CONTROL))
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
                 .cursor_pointer()
-                .hover(|x| x.bg(th.hover).text_color(th.text))
+                .hover(|x| x.bg(th.hover).text_color(th.ink))
                 .child("↺")
                 .on_click(cx.listener(move |this, _, _, cx| this.reset_one(d, cx)))
         });
@@ -1264,7 +1268,7 @@ impl SettingsView {
             .debug_selector(move || format!("settings-row-{}", d.action))
             .flex()
             .flex_col()
-            .bg(th.surface)
+            .bg(th.well)
             .hover(|x| x.bg(th.hover))
             .when(flashed, |x| x.bg(th.banner_bg))
             .child(
@@ -1337,7 +1341,7 @@ impl SettingsView {
                         })
                         .underline()
                         .cursor_pointer()
-                        .hover(|x| x.text_color(th.text))
+                        .hover(|x| x.text_color(th.ink))
                         .child(other.label)
                         .on_click(cx.listener(move |this, _, _, cx| this.jump_to(other, cx))),
                 );
@@ -1402,7 +1406,7 @@ impl SettingsView {
                     .items_baseline()
                     .justify_between()
                     .gap_4()
-                    .bg(th.surface)
+                    .bg(th.well)
                     .hover(|x| x.bg(th.hover))
                     .child(div().text_size(px(crate::theme::BODY_SIZE)).child(d.label))
                     .child(
@@ -1433,7 +1437,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when(on, |d| d.bg(th.chip_bg))
+                    .when(on, |d| d.bg(th.line_soft))
                     .cursor_pointer()
                     .hover(|x| x.bg(th.hover))
                     .child(radio(on, &th))
@@ -1471,7 +1475,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when(on, |x| x.bg(th.chip_bg))
+                    .when(on, |x| x.bg(th.line_soft))
                     .cursor_pointer()
                     .hover(|x| x.bg(th.hover))
                     .child(radio(on, &th))
@@ -1534,10 +1538,10 @@ impl SettingsView {
                             .py_1()
                             .flex()
                             .justify_center()
-                            .rounded_md()
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
                             .border_1()
-                            .border_color(if on { th.accent } else { th.line })
-                            .when(on, |d| d.bg(th.chip_bg).text_color(th.accent))
+                            .border_color(if on { th.link } else { th.line })
+                            .when(on, |d| d.bg(th.line_soft).text_color(th.link))
                             .when(!on, |d| d.text_color(th.muted))
                             .cursor_pointer()
                             .hover(|x| x.bg(th.hover))
@@ -1580,7 +1584,7 @@ impl SettingsView {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .when(on, |x| x.bg(th.chip_bg))
+                    .when(on, |x| x.bg(th.line_soft))
                     .cursor_pointer()
                     .hover(|x| x.bg(th.hover))
                     .child(radio(on, &th))
@@ -1628,7 +1632,7 @@ impl SettingsView {
                 .gap_4()
                 .child(
                     div()
-                        .text_color(if pinned == 0 { th.muted } else { th.text })
+                        .text_color(if pinned == 0 { th.muted } else { th.ink })
                         .child(match pinned {
                             0 => "No pinned pages".to_string(),
                             1 => "1 pinned page".to_string(),
@@ -1696,13 +1700,13 @@ impl SettingsView {
                     .debug_selector(move || format!("help-nav-{i}"))
                     .px_2()
                     .py_1p5()
-                    .rounded_md()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
                     .cursor_pointer()
                     .text_size(px(crate::theme::CONTROL_SIZE))
-                    .when(on, |d| d.bg(th.chip_bg).text_color(th.accent))
+                    .when(on, |d| d.bg(th.line_soft).text_color(th.link))
                     .when(!on, |d| {
                         d.text_color(th.muted)
-                            .hover(|x| x.bg(th.hover).text_color(th.text))
+                            .hover(|x| x.bg(th.hover).text_color(th.ink))
                     })
                     .child(t.title)
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1726,8 +1730,8 @@ impl SettingsView {
                         div()
                             .px_2()
                             .py_0p5()
-                            .rounded_md()
-                            .bg(th.chip_bg)
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
+                            .bg(th.line_soft)
                             .text_size(px(crate::theme::CAPTION_SIZE))
                             .child(pretty_keys(&self.overrides.keys_for(d))),
                     )
@@ -1772,7 +1776,7 @@ impl SettingsView {
                         img(image)
                             .w(px(HELP_SHOT_WIDTH))
                             .h(px(HELP_SHOT_HEIGHT))
-                            .rounded_md()
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
                             .border_1()
                             .border_color(th.line),
                     ),

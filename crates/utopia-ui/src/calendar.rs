@@ -70,7 +70,7 @@ pub fn render<V: 'static>(
             div()
                 .w(px(26.))
                 .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.faint)
+                .text_color(th.muted)
                 .flex()
                 .justify_center()
                 .child(*n)
@@ -90,11 +90,11 @@ pub fn render<V: 'static>(
             .justify_center()
             .items_center()
             .text_size(px(crate::theme::CAPTION_SIZE))
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
-            .text_color(if in_month { th.text } else { th.faint })
+            .text_color(if in_month { th.ink } else { th.muted })
             .when(has, |c| c.font_weight(gpui::FontWeight::BOLD))
-            .when(is_today, |c| c.bg(th.chip_bg).text_color(th.accent))
+            .when(is_today, |c| c.bg(th.line_soft).text_color(th.link))
             .hover(|s| s.bg(th.hover))
             .child(d.day().to_string())
             .on_mouse_down(
@@ -139,7 +139,7 @@ impl<V> Copy for StripActions<V> {}
 /// The left sidebar's month strip (SB-5): a quiet 7-column grid under Journal. The month
 /// name is the collapse control — one click folds the grid away; the arrows still move
 /// between months either way. Days with an entry get a small dot under the number, and
-/// today is drawn in the accent colour. Display only: the days are existing daily pages
+/// today is drawn in the link colour. Display only: the days are existing daily pages
 /// (§5.5, rule 6), nothing is created by looking at the month.
 pub fn render_month_strip<V: 'static>(
     cx: &mut Context<V>,
@@ -154,11 +154,11 @@ pub fn render_month_strip<V: 'static>(
         div()
             .id(id)
             .px_1()
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
             .text_size(px(crate::theme::CAPTION_SIZE))
-            .text_color(th.faint)
-            .hover(|d| d.bg(th.hover).text_color(th.text))
+            .text_color(th.muted)
+            .hover(|d| d.bg(th.hover).text_color(th.ink))
             .child(glyph)
             .on_click(cx.listener(move |v, _, _, cx| (actions.shift)(v, delta, cx)))
     };
@@ -176,11 +176,11 @@ pub fn render_month_strip<V: 'static>(
                 .gap_1()
                 .px_2()
                 .py_0p5()
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
-                .hover(|d| d.bg(th.hover).text_color(th.text))
+                .hover(|d| d.bg(th.hover).text_color(th.ink))
                 .child(if open { "▾" } else { "▸" })
                 .child(month.format("%B %Y").to_string())
                 .on_click(cx.listener(move |v, _, _, cx| (actions.toggle)(v, cx))),
@@ -199,7 +199,7 @@ pub fn render_month_strip<V: 'static>(
                 .flex()
                 .justify_center()
                 .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.faint)
+                .text_color(th.muted)
                 .child(*n)
         }));
     let cells: Vec<_> = grid(month)
@@ -217,16 +217,16 @@ pub fn render_month_strip<V: 'static>(
                 .flex()
                 .flex_col()
                 .items_center()
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .line_height(px(15.))
                 .text_color(if is_today {
-                    th.accent
+                    th.link
                 } else if in_month {
-                    th.muted
+                    th.ink_2
                 } else {
-                    th.faint
+                    th.muted
                 })
                 .when(is_today, |d| d.font_weight(gpui::FontWeight::MEDIUM))
                 .hover(|d| d.bg(th.hover))
@@ -237,7 +237,7 @@ pub fn render_month_strip<V: 'static>(
                             .debug_selector(move || format!("cal-dot-{dot_iso}"))
                             .size(px(3.))
                             .rounded_full()
-                            .bg(if is_today { th.accent } else { th.faint }),
+                            .bg(if is_today { th.link } else { th.muted }),
                     )
                 }))
                 .on_mouse_down(

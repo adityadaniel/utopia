@@ -8,7 +8,7 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
-use utopia_ui::theme::{Theme, INDENT};
+use utopia_ui::theme::{Theme, INDENT, SIDEBAR_WIDTH};
 use utopia_ui::workspace::Workspace;
 
 const W: f32 = 1280.;
@@ -113,7 +113,7 @@ fn three_column_window(cx: &mut TestAppContext) {
     let left = bounds(cx, "left-sidebar");
     let main = bounds(cx, "main-pane");
     assert!(
-        approx(left.origin.x, 0.) && approx(left.size.width, 250.),
+        approx(left.origin.x, 0.) && approx(left.size.width, SIDEBAR_WIDTH),
         "{left:?}"
     );
     assert!(
@@ -121,11 +121,11 @@ fn three_column_window(cx: &mut TestAppContext) {
         "sidebar fills the height: {left:?}"
     );
     assert!(
-        approx(main.origin.x, 250.),
+        approx(main.origin.x, SIDEBAR_WIDTH),
         "main pane starts after the sidebar: {main:?}"
     );
     assert!(
-        approx(main.size.width, W - 250.),
+        approx(main.size.width, W - SIDEBAR_WIDTH),
         "main pane fills the rest: {main:?}"
     );
     assert!(
@@ -140,7 +140,10 @@ fn three_column_window(cx: &mut TestAppContext) {
         approx(right.size.width, 380.) && approx(right.origin.x + right.size.width, W),
         "{right:?}"
     );
-    assert!(approx(main.size.width, W - 250. - 380.), "{main:?}");
+    assert!(
+        approx(main.size.width, W - SIDEBAR_WIDTH - 380.),
+        "{main:?}"
+    );
     assert!(
         main.origin.x + main.size.width <= right.origin.x + px(0.5),
         "no overlap"
@@ -610,7 +613,7 @@ fn minimum_window_size_still_lays_out(cx: &mut TestAppContext) {
     cx.simulate_input("still editable at the minimum size");
     let main = bounds(cx, "main-pane");
     let row = bounds(cx, "content-1");
-    assert!(approx(main.size.width, 720. - 250.), "{main:?}");
+    assert!(approx(main.size.width, 720. - SIDEBAR_WIDTH), "{main:?}");
     assert!(
         row.origin.x + row.size.width <= px(720.) + px(0.5),
         "rows wrap inside the window"
@@ -1106,7 +1109,7 @@ fn left_sidebar_collapses_to_a_rail(cx: &mut TestAppContext) {
     );
     cx.simulate_keystrokes("cmd-\\");
     let main = bounds(cx, "main-pane");
-    assert!(approx(main.origin.x, 250.), "{main:?}");
+    assert!(approx(main.origin.x, SIDEBAR_WIDTH), "{main:?}");
     let toggle = bounds(cx, "toggle-calendar");
     cx.simulate_click(toggle.center(), gpui::Modifiers::none());
     let cal = bounds(cx, "left-calendar");
@@ -1188,7 +1191,7 @@ fn the_right_sidebar_resizes_and_closes(cx: &mut TestAppContext) {
     );
     let main = bounds(cx, "main-pane");
     assert!(
-        approx(main.size.width, W - 250. - 440.),
+        approx(main.size.width, W - SIDEBAR_WIDTH - 440.),
         "the page gives the space up: {main:?}"
     );
 
@@ -1197,7 +1200,7 @@ fn the_right_sidebar_resizes_and_closes(cx: &mut TestAppContext) {
     cx.simulate_click(close.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     let main = bounds(cx, "main-pane");
-    assert!(approx(main.size.width, W - 250.), "{main:?}");
+    assert!(approx(main.size.width, W - SIDEBAR_WIDTH), "{main:?}");
 
     // Reopening brings the dragged width back (RS-4 "remember").
     cx.simulate_keystrokes("cmd-shift-\\");
@@ -1225,13 +1228,15 @@ fn type_scale_caps_outline_headings_at_h1(cx: &mut TestAppContext) {
         title.size.height > h1.size.height,
         "the title outranks H1: {title:?} {h1:?}"
     );
+    // DESIGN.md §2.2: a section heading is 20 / 28 and body is 16 / 28, so the heading
+    // outranks the body by type size, not by line box: both rows are 28 px tall.
     assert!(
-        h1.size.height > body.size.height,
-        "H1 outranks body: {h1:?} {body:?}"
+        h1.size.height >= body.size.height && h1.size.height <= body.size.height + px(0.5),
+        "H1 and body share the 28 px line grid: {h1:?} {body:?}"
     );
     assert!(
         h1.size.height <= px(utopia_ui::theme::H1_SIZE + 8.),
-        "H1 is 20 px on a 28 px line, never the old 24 px: {h1:?}"
+        "H1 is 20 px on a 28 px line: {h1:?}"
     );
 }
 
@@ -2797,8 +2802,8 @@ fn reference_shows_the_full_path_above_the_block(cx: &mut TestAppContext) {
         "the path sits above the block: {path:?} {hit:?}"
     );
     assert!(
-        path.size.height <= px(24.),
-        "one 12.5 px line, not a stacked crumb list: {path:?}"
+        path.size.height <= px(20.),
+        "one caption line, not a stacked crumb list: {path:?}"
     );
     assert!(
         ancestor.origin.x >= page.origin.x + page.size.width - px(1.),

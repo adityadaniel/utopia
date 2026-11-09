@@ -79,7 +79,7 @@ fn scope_keeps_page(scope: SearchScope, daily: bool) -> bool {
     }
 }
 
-/// A block row's text with the matched terms on a soft accent wash (SR-1). The anchors
+/// A block row's text with the matched terms on a soft link wash (SR-1). The anchors
 /// come from the store, which computed them against this same plain text.
 fn marked(text: &str, anchors: &[(usize, usize)], th: &Theme) -> StyledText {
     let highlights: Vec<(Range<usize>, HighlightStyle)> = anchors
@@ -91,7 +91,7 @@ fn marked(text: &str, anchors: &[(usize, usize)], th: &Theme) -> StyledText {
             (
                 a..b,
                 HighlightStyle {
-                    background_color: Some(th.accent.opacity(0.16)),
+                    background_color: Some(th.link.opacity(0.16)),
                     ..Default::default()
                 },
             )
@@ -126,15 +126,15 @@ fn group_header(group: usize, g: &BlockGroup, th: &Theme) -> gpui::Stateful<gpui
                 .debug_selector(move || format!("search-group-title-{group}"))
                 .flex_1()
                 .min_w_0()
-                .text_color(th.text)
+                .text_color(th.ink)
                 .child(g.title.clone()),
         )
         .child(
             div()
                 .flex_none()
                 .px_2()
-                .rounded_md()
-                .bg(th.chip_bg)
+                .rounded(px(crate::theme::RADIUS_CONTROL))
+                .bg(th.line_soft)
                 .text_size(px(CAPTION_SIZE))
                 .text_color(th.muted)
                 .child(format!("{}", g.hits.len())),
@@ -726,14 +726,14 @@ impl JumpPalette {
         let label = Self::state_label(p.kind, p.checked);
         let muted_state = p.kind == utopia_core::BlockKind::Bullet
             || (p.kind == utopia_core::BlockKind::Todo && p.checked);
-        let fg = if muted_state { th.muted } else { th.accent };
+        let fg = if muted_state { th.muted } else { th.link };
         let mut state = div().flex().items_center().gap_2().child(
             div()
                 .debug_selector(|| "search-preview-state".into())
                 .px_2()
                 .py_0p5()
-                .rounded_md()
-                .bg(th.chip_bg)
+                .rounded(px(crate::theme::RADIUS_CONTROL))
+                .bg(th.line_soft)
                 .text_size(px(CAPTION_SIZE))
                 .text_color(fg)
                 .child(label),
@@ -750,7 +750,7 @@ impl JumpPalette {
             .child(state)
             .child(
                 div()
-                    .text_color(th.text)
+                    .text_color(th.ink)
                     .line_clamp(6)
                     .child(marked(&body, anchors, th)),
             )
@@ -781,7 +781,7 @@ impl JumpPalette {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .text_color(if c.checked { th.muted } else { th.text })
+                            .text_color(if c.checked { th.muted } else { th.ink })
                             .line_clamp(2)
                             .child(utopia_core::inline::plain_text(&c.text)),
                     ),
@@ -817,7 +817,7 @@ impl JumpPalette {
                     th,
                 )
                 .debug_selector(move || format!("search-scope-{key}"))
-                .when(selected, |d| d.bg(th.chip_bg).text_color(th.accent))
+                .when(selected, |d| d.bg(th.line_soft).text_color(th.link))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.scope = s;
                     this.age_menu = false;
@@ -832,7 +832,7 @@ impl JumpPalette {
                 .child(
                     quiet_menu("search-age", self.age.label(), th)
                         .debug_selector(|| "search-age".into())
-                        .when(menu_open, |d| d.bg(th.chip_bg).text_color(th.accent))
+                        .when(menu_open, |d| d.bg(th.line_soft).text_color(th.link))
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.age_menu = !this.age_menu;
                             cx.notify();
@@ -860,11 +860,10 @@ impl JumpPalette {
             .flex()
             .flex_col()
             .gap_0p5()
-            .bg(th.surface)
+            .bg(th.well)
             .border_1()
             .border_color(th.line)
-            .rounded_md()
-            .shadow_md()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
             // The results list is underneath: stop the mouse-down here or a row would
             // choose itself before the menu item's click runs (found by the scope test).
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
@@ -880,7 +879,7 @@ impl JumpPalette {
                 .debug_selector(move || format!("search-age-{key}"))
                 .w_full()
                 .justify_start()
-                .when(selected, |d| d.bg(th.chip_bg).text_color(th.accent))
+                .when(selected, |d| d.bg(th.line_soft).text_color(th.link))
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.age = a;
                     this.age_menu = false;
@@ -917,14 +916,14 @@ impl JumpPalette {
             .px_3()
             .py_1()
             .pl(px(46.))
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
             .hover(|d| d.bg(th.hover))
             .when(i == self.selected, |d| d.bg(th.hover))
             .child(
                 div()
                     .debug_selector(move || format!("search-hit-text-{group}-{hit}"))
-                    .text_color(th.text)
+                    .text_color(th.ink)
                     .line_clamp(2)
                     .child(marked(&text, &b.anchors, th)),
             )
@@ -1024,11 +1023,11 @@ impl JumpPalette {
             _ => (true, format!("qj-label-{i}")),
         };
         let label_color = if accent {
-            th.accent
+            th.link
         } else if selectable {
-            th.text
+            th.ink
         } else {
-            th.faint
+            th.muted
         };
         div()
             .id(("qj", i))
@@ -1038,11 +1037,11 @@ impl JumpPalette {
             .gap_2()
             .px_2()
             .py_1()
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .when(selectable, |d| d.cursor_pointer())
-            .when(accent, |d| d.text_color(th.accent))
+            .when(accent, |d| d.text_color(th.link))
             .when(selectable, |d| d.hover(|d| d.bg(th.hover)))
-            .when(selected, |d| d.bg(th.chip_bg))
+            .when(selected, |d| d.bg(th.line_soft))
             .child(row_icon(i, kind, &th))
             .child(
                 div()
@@ -1058,7 +1057,7 @@ impl JumpPalette {
                     .debug_selector(move || format!("qj-detail-{i}"))
                     .flex_none()
                     .text_size(px(CAPTION_SIZE))
-                    .text_color(if selectable { th.muted } else { th.faint })
+                    .text_color(th.muted)
                     .child(detail),
             )
             .on_mouse_down(
@@ -1089,17 +1088,17 @@ fn row_icon(i: usize, kind: RowKind, th: &Theme) -> AnyElement {
                 div()
                     .w(px(8.))
                     .h(px(10.))
-                    .rounded_xs()
+                    .rounded(px(crate::theme::RADIUS_CHIP))
                     .border_1()
-                    .border_color(th.faint),
+                    .border_color(th.line_strong),
             )
             .into_any_element(),
         RowKind::Day => slot
-            .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(th.muted))
+            .child(div().w(px(7.)).h(px(7.)).rounded_full().bg(th.ink_3))
             .into_any_element(),
         RowKind::Tag => slot
             .text_size(px(CONTROL_SIZE))
-            .text_color(th.tag)
+            .text_color(th.tag_ink)
             .font_weight(FontWeight::SEMIBOLD)
             .child("#")
             .into_any_element(),
@@ -1110,7 +1109,7 @@ fn row_icon(i: usize, kind: RowKind, th: &Theme) -> AnyElement {
             .into_any_element(),
         RowKind::Create => slot
             .text_size(px(CONTROL_SIZE))
-            .text_color(th.accent)
+            .text_color(th.link)
             .font_weight(FontWeight::SEMIBOLD)
             .child("+")
             .into_any_element(),
@@ -1177,7 +1176,7 @@ impl Render for JumpPalette {
                 Row::Block { group, hit } => rows.push(self.block_row(i, group, hit, &th, cx)),
             }
         }
-        // "Create page" is last, above a hairline, in the accent colour (QJ-2).
+        // "Create page" is last, above a hairline, in the link colour (QJ-2).
         let create_row = create.map(|el| {
             div()
                 .debug_selector(|| "jump-create".into())
@@ -1199,11 +1198,10 @@ impl Render for JumpPalette {
             .max_h(px(max_h))
             .flex()
             .flex_col()
-            .bg(th.surface)
+            .bg(th.well)
             .border_1()
             .border_color(th.line)
-            .rounded_lg()
-            .shadow_lg()
+            .rounded(px(crate::theme::RADIUS_INPUT))
             .p_2()
             .gap_1()
             .child(
@@ -1220,7 +1218,7 @@ impl Render for JumpPalette {
                     .py_1()
                     .border_1()
                     .border_color(th.line)
-                    .rounded_md()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
                     .child(self.input.clone()),
             )
             .children(scopes)
@@ -1229,6 +1227,8 @@ impl Render for JumpPalette {
                     .id("jump-results-row")
                     .flex()
                     .gap_2()
+                    .flex_1()
+                    .min_h_0()
                     .max_h(px(pane_h))
                     .child(
                         div()
@@ -1249,12 +1249,13 @@ impl Render for JumpPalette {
             .child(
                 div()
                     .debug_selector(|| "jump-footer".into())
+                    .flex_none()
                     .border_t_1()
                     .border_color(th.line)
                     .pt_1()
                     .px_1()
                     .text_size(px(CAPTION_SIZE))
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .child(hints),
             )
     }

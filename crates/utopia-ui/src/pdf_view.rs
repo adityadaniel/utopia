@@ -478,7 +478,7 @@ impl PdfView {
                         .w(px(f32::from((start.x - cur.x).abs())))
                         .h(px(f32::from((start.y - cur.y).abs())))
                         .border_1()
-                        .border_color(th.accent)
+                        .border_color(th.link)
                         .bg(yellow),
                 );
             }
@@ -513,7 +513,7 @@ impl Render for PdfView {
             .child(
                 div()
                     .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .child(format!(
                         "{count} pages · {} highlights · drag over a page to highlight",
                         self.highlights.len()
@@ -538,7 +538,7 @@ impl Render for PdfView {
                 .flex()
                 .justify_center()
                 .items_center()
-                .text_color(th.faint)
+                .text_color(th.muted)
                 .child(if self.path.is_none() {
                     "This PDF has not synced to this device yet."
                 } else {
@@ -576,7 +576,7 @@ impl Render for PdfView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(th.surface)
+            .bg(th.well)
             .child(header)
             .child(body)
     }
