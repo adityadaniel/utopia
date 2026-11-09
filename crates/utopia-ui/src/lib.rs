@@ -18,5 +18,6 @@ pub mod reference;
 pub mod rich;
 pub mod settings;
 pub mod sync_runner;
+pub mod sync_setup;
 pub mod theme;
 pub mod workspace;
