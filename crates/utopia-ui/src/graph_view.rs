@@ -4,7 +4,7 @@
 //!
 //! The redesign's graph screen (GR-1..GR-5) is a view change only: the store still owns
 //! identity, references and the index. Nodes grow from 6 px to 18 px with their distinct
-//! link count, the page the graph was opened from keeps a 2 px accent ring (GR-1); hovering
+//! link count, the page the graph was opened from keeps a 2 px link ring (GR-1); hovering
 //! fades everything but the page and its neighbours to 25 % and floats a card with the
 //! first block (GR-2); the count and colour key sit at the bottom left and the zoom controls
 //! at the bottom right (GR-3); edges grow from 1 px to 3 px with the stored reference count
@@ -401,7 +401,7 @@ impl GraphView {
         let th = theme(cx).clone();
         quiet_control(id, label, &th)
             .debug_selector(move || id.into())
-            .when(on, |d| d.bg(th.chip_bg).text_color(th.accent))
+            .when(on, |d| d.bg(th.line_soft).text_color(th.link))
             .when(!on, |d| d.text_color(th.muted))
     }
 
@@ -431,7 +431,7 @@ impl GraphView {
                     .h(px(9.))
                     .rounded_full()
                     .border_2()
-                    .border_color(th.accent)
+                    .border_color(th.link)
                     .flex_none(),
             )
             .child("Current page");
@@ -447,13 +447,13 @@ impl GraphView {
             .text_size(px(CAPTION_SIZE))
             .text_color(th.muted)
             .child(key(th.bullet, "Pages"))
-            .child(key(th.tag, "Journal pages"))
+            .child(key(th.tag_ink, "Journal pages"))
             .child(ring)
             .child(
                 div()
                     .debug_selector(|| "graph-legend-count".into())
                     .pt_0p5()
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .child(format!(
                         "{} pages · {} links",
                         self.graph.nodes.len(),
@@ -696,7 +696,7 @@ impl Render for GraphView {
                                     continue;
                                 }
                                 let color = if accent {
-                                    th.accent
+                                    th.link
                                 } else if hover.is_some() {
                                     th.line.opacity(FADE)
                                 } else {
@@ -712,7 +712,7 @@ impl Render for GraphView {
                             let touching = hover.is_some_and(|h| h == a || h == b);
                             let color = if hover.is_some() {
                                 if touching {
-                                    th.accent
+                                    th.link
                                 } else {
                                     th.line.opacity(FADE)
                                 }
@@ -733,9 +733,9 @@ impl Render for GraphView {
                             let is_origin = origin_page.as_ref() == Some(&n.page);
                             let is_hover = hover == Some(i);
                             let dim = faded(i);
-                            let base = if n.daily { th.tag } else { th.bullet };
+                            let base = if n.daily { th.tag_ink } else { th.bullet };
                             let color = if is_hover {
-                                th.accent
+                                th.link
                             } else if dim {
                                 base.opacity(FADE)
                             } else {
@@ -745,16 +745,16 @@ impl Render for GraphView {
                             window.paint_quad(gpui::fill(nb, color).corner_radii(px(r)));
                             if is_origin {
                                 // GR-1: the page the graph was opened from keeps a 2 px
-                                // accent ring, whether or not it is the local centre.
+                                // link ring, whether or not it is the local centre.
                                 let ring =
                                     Bounds::centered_at(p, size(px(r * 2. + 4.), px(r * 2. + 4.)));
                                 window.paint_quad(
                                     gpui::fill(ring, transparent_black())
                                         .border_widths(px(2.))
                                         .border_color(if dim {
-                                            th.accent.opacity(FADE)
+                                            th.link.opacity(FADE)
                                         } else {
-                                            th.accent
+                                            th.link
                                         })
                                         .corner_radii(px(r + 2.)),
                                 );
@@ -769,7 +769,7 @@ impl Render for GraphView {
                                     len: text.len(),
                                     font: font.clone(),
                                     color: if is_hover {
-                                        th.text
+                                        th.ink
                                     } else if dim {
                                         th.muted.opacity(FADE)
                                     } else {
@@ -805,16 +805,15 @@ impl Render for GraphView {
                                 .flex()
                                 .flex_col()
                                 .gap_0p5()
-                                .bg(th.surface)
+                                .bg(th.well)
                                 .border_1()
                                 .border_color(th.line)
-                                .rounded_md()
-                                .shadow_md()
+                                .rounded(px(crate::theme::RADIUS_CONTROL))
                                 .text_size(px(CONTROL_SIZE))
                                 .child(
                                     div()
                                         .font_weight(gpui::FontWeight::MEDIUM)
-                                        .text_color(th.text)
+                                        .text_color(th.ink)
                                         .child(info.title.clone()),
                                 )
                                 .child(
@@ -843,7 +842,7 @@ impl Render for GraphView {
                         .w_full()
                         .flex()
                         .justify_center()
-                        .text_color(th.faint)
+                        .text_color(th.muted)
                         .child("No links yet. Type [[ to link pages and they appear here."),
                 )
             });
@@ -873,7 +872,7 @@ impl Render for GraphView {
             .size_full()
             .flex()
             .flex_col()
-            .bg(th.bg)
+            .bg(th.paper)
             .child(header)
             .child(body)
             .when(self.panel, |d| {

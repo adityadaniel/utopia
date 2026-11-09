@@ -11,7 +11,7 @@ use utopia_core::{BlockId, PageId};
 use utopia_store::{BlockRefStatus, RefHit, Store};
 
 use crate::rich::{self, ChipState, LinkTarget};
-use crate::theme::{Theme, CAPTION_SIZE};
+use crate::theme::{Theme, CAPTION_SIZE, REFERENCE};
 
 /// How a `((uid))` chip should look in a row of `store` (FR-4.3, FR-4.7, AC-4.5).
 pub fn chip_state(store: &Store, uid: &str, row_block: &BlockId) -> ChipState {
@@ -146,7 +146,8 @@ pub fn reference_row<H: RefRowHost + 'static>(
         .items_center()
         .gap_1()
         .text_size(px(CAPTION_SIZE))
-        .text_color(th.faint);
+        .line_height(px(crate::theme::SMALL_TIGHT.line))
+        .text_color(th.muted);
     if !hit.breadcrumb.is_empty() {
         let target = page.clone();
         let part_host = host.clone();
@@ -156,7 +157,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
                 .id(("path-page", ix))
                 .debug_selector(|| format!("hit-path-part-{ix}-0"))
                 .cursor_pointer()
-                .hover(|s| s.text_color(th.accent))
+                .hover(|s| s.text_color(th.link))
                 .child(page_title)
                 .on_mouse_down(MouseButton::Left, move |e, window, cx| {
                     // The row under the path opens the block; the page part opens the page.
@@ -187,7 +188,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
                     .id(("path-part", ix * 100 + i))
                     .debug_selector(|| format!("hit-path-part-{ix}-{}", i + 1))
                     .cursor_pointer()
-                    .hover(|s| s.text_color(th.accent))
+                    .hover(|s| s.text_color(th.link))
                     .child(label)
                     .on_mouse_down(MouseButton::Left, move |e, window, cx| {
                         cx.stop_propagation();
@@ -243,9 +244,9 @@ pub fn reference_row<H: RefRowHost + 'static>(
             .debug_selector(|| format!("hit-more-{ix}-{}", row.hidden))
             .ml(px(28.))
             .px_2()
-            .rounded_md()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
             .text_size(px(CAPTION_SIZE))
-            .text_color(th.accent)
+            .text_color(th.link)
             .cursor_pointer()
             .hover(|s| s.bg(th.hover))
             .child(format!("+{} more", row.hidden))
@@ -261,9 +262,12 @@ pub fn reference_row<H: RefRowHost + 'static>(
     div()
         .id(("reference", ix))
         .debug_selector(move || format!("{prefix}-row-{ix}"))
+        // DESIGN.md §2.2/§3.7: a referenced block is one step below body text.
+        .text_size(px(REFERENCE.size))
+        .line_height(px(REFERENCE.line))
         .px(px(pad_x))
         .py_0p5()
-        .rounded_sm()
+        .rounded(px(crate::theme::RADIUS_CHIP))
         .flex()
         .flex_col()
         .cursor_pointer()

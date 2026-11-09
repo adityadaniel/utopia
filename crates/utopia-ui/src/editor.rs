@@ -2112,10 +2112,10 @@ impl BlockEditor {
                 .id(("ac", i))
                 .px_2()
                 .py_1()
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
                 .when(i == ac.selected, |d| d.bg(th.hover))
-                .child(div().text_color(th.text).child(label))
+                .child(div().text_color(th.ink).child(label))
                 .when_some(detail, |d, s| {
                     d.child(
                         div()
@@ -2140,11 +2140,10 @@ impl BlockEditor {
                         .mt_1()
                         .w(px(340.))
                         .p_1()
-                        .bg(th.surface)
+                        .bg(th.well)
                         .border_1()
                         .border_color(th.line)
-                        .rounded_md()
-                        .shadow_md()
+                        .rounded(px(crate::theme::RADIUS_CONTROL))
                         .children(rows),
                 ),
             )
@@ -2163,7 +2162,7 @@ impl Render for BlockEditor {
                 StyledText::new(hint).with_highlights([(
                     0..hint.len(),
                     HighlightStyle {
-                        color: Some(th.faint),
+                        color: Some(th.muted),
                         ..Default::default()
                     },
                 )]),
@@ -2178,7 +2177,7 @@ impl Render for BlockEditor {
                     HighlightStyle {
                         underline: Some(UnderlineStyle {
                             thickness: px(1.),
-                            color: Some(th.text),
+                            color: Some(th.ink),
                             wavy: false,
                         }),
                         ..Default::default()

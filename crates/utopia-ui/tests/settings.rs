@@ -1453,7 +1453,7 @@ mod appearance {
         let mut s = VisualTestContext::from_window(settings, cx);
         // The Appearance tab is a scrolling column and this card is its last one, so give
         // the window room to show it rather than clicking bounds that are scrolled away.
-        s.simulate_resize(gpui::size(gpui::px(1100.), gpui::px(1200.)));
+        s.simulate_resize(gpui::size(gpui::px(1100.), gpui::px(1600.)));
         s.run_until_parked();
         assert!(
             s.debug_bounds("settings-sidebar-width-460").is_some(),

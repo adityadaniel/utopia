@@ -120,13 +120,13 @@ impl Builder<'_> {
                 }
                 Inline::PageRef { title, .. } => {
                     let mut st = self.style(m);
-                    st.color = Some(self.theme.accent);
+                    st.color = Some(self.theme.link);
                     let r = self.push(title, st);
                     self.links.push((r, LinkTarget::Page(title.clone())));
                 }
                 Inline::Tag { title, .. } => {
                     let mut st = self.style(m);
-                    st.color = Some(self.theme.tag);
+                    st.color = Some(self.theme.tag_ink);
                     let r = self.push(&format!("#{title}"), st);
                     self.links.push((r, LinkTarget::Page(title.clone())));
                 }
@@ -134,11 +134,11 @@ impl Builder<'_> {
                     let state = (self.chip)(uid);
                     let (label, bg, fg) = match state {
                         ChipState::Live(t) => {
-                            (format!(" {} ›", chip_label(&t)), self.theme.chip_bg, None)
+                            (format!(" {} ›", chip_label(&t)), self.theme.line_soft, None)
                         }
                         ChipState::Deleted => (
                             " deleted block ".to_string(),
-                            self.theme.chip_bg,
+                            self.theme.line_soft,
                             Some(self.theme.muted),
                         ),
                         ChipState::Missing => (
@@ -148,7 +148,7 @@ impl Builder<'_> {
                         ),
                         ChipState::Cyclic => (
                             " ↻ cyclic reference ".to_string(),
-                            self.theme.chip_bg,
+                            self.theme.line_soft,
                             Some(self.theme.muted),
                         ),
                     };
@@ -169,7 +169,7 @@ impl Builder<'_> {
                         ChipState::Cyclic => " ↻ cyclic reference ".to_string(),
                     };
                     let st = HighlightStyle {
-                        background_color: Some(self.theme.chip_bg),
+                        background_color: Some(self.theme.line_soft),
                         color: Some(self.theme.muted),
                         ..Default::default()
                     };
@@ -185,10 +185,10 @@ impl Builder<'_> {
                 }
                 Inline::Link { text, url, .. } => {
                     let mut st = self.style(m);
-                    st.color = Some(self.theme.accent);
+                    st.color = Some(self.theme.link);
                     st.underline = Some(UnderlineStyle {
                         thickness: px(1.),
-                        color: Some(self.theme.accent),
+                        color: Some(self.theme.link),
                         wavy: false,
                     });
                     let r = self.push(text, st);
@@ -357,8 +357,8 @@ pub fn source_highlights(src: &str, theme: &Theme) -> Vec<(Range<usize>, Highlig
         .into_iter()
         .map(|r| {
             let color = match r.kind {
-                RefKind::Tag => theme.tag,
-                _ => theme.accent,
+                RefKind::Tag => theme.tag_ink,
+                _ => theme.link,
             };
             (
                 r.range,

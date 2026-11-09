@@ -18,6 +18,8 @@ pub mod quick_jump;
 pub mod reference;
 pub mod rich;
 pub mod settings;
+#[cfg(test)]
+pub mod sources;
 pub mod sync_runner;
 pub mod sync_setup;
 pub mod theme;

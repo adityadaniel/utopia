@@ -523,8 +523,8 @@ impl Render for Root {
         let density = utopia_ui::appearance::density(cx);
         let shell = div()
             .size_full()
-            .bg(th.bg)
-            .text_color(th.text)
+            .bg(th.paper)
+            .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
             .font_family(utopia_ui::appearance::font_family(cx));
@@ -539,8 +539,8 @@ impl Render for Root {
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(utopia_ui::theme::H1_SIZE))
-                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_size(px(utopia_ui::theme::SECTION.size))
+                                .font_weight(utopia_ui::theme::SECTION.weight)
                                 .child("Welcome to Utopia"),
                         )
                         .child(
@@ -553,11 +553,11 @@ impl Render for Root {
                                 .px_2()
                                 .py_1()
                                 .border_1()
-                                .border_color(th.accent)
-                                .rounded_md()
+                                .border_color(th.link)
+                                .rounded(px(utopia_ui::theme::RADIUS_CONTROL))
                                 .child(input.clone()),
                         )
-                        .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.faint).child(format!(
+                        .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.muted).child(format!(
                             "Creates {}/<name>.utopia",
                             paths::graphs_dir().display()
                         )))
@@ -579,8 +579,8 @@ impl Render for Root {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(utopia_ui::theme::H1_SIZE))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(utopia_ui::theme::SECTION.size))
+                            .font_weight(utopia_ui::theme::SECTION.weight)
                             .child("This graph is locked"),
                     )
                     .child(div().text_color(th.muted).child(format!(
@@ -594,11 +594,11 @@ impl Render for Root {
                             .px_2()
                             .py_1()
                             .border_1()
-                            .border_color(th.accent)
-                            .rounded_md()
+                            .border_color(th.link)
+                            .rounded(px(utopia_ui::theme::RADIUS_CONTROL))
                             .child(input.clone()),
                     )
-                    .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.faint).child(
+                    .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.muted).child(
                         "Tip: store it in the keychain (service utopia-db) to unlock automatically.",
                     ))
                     .children(

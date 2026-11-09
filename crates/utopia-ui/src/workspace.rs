@@ -128,13 +128,12 @@ impl Render for SidebarTooltip {
             .max_w(px(240.))
             .px_2()
             .py_1()
-            .rounded_md()
-            .bg(th.surface)
+            .rounded(px(crate::theme::RADIUS_CONTROL))
+            .bg(th.well)
             .border_1()
             .border_color(th.line)
-            .shadow_md()
             .text_size(px(crate::theme::CAPTION_SIZE))
-            .text_color(th.text)
+            .text_color(th.ink)
             .child(self.text.clone())
     }
 }
@@ -1800,11 +1799,11 @@ impl Workspace {
             .id(id)
             .px_2()
             .py_0p5()
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
-            .text_color(if active { th.accent } else { th.text })
+            .text_color(if active { th.link } else { th.ink })
             .when(active, |d| d.bg(th.hover))
             .hover(|s| s.bg(th.hover))
             .child(label.into())
@@ -1844,11 +1843,11 @@ impl Workspace {
             .gap_1()
             .px_2()
             .py_0p5()
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
-            .text_color(if active { th.accent } else { th.text })
+            .text_color(if active { th.link } else { th.ink })
             .when(active, |d| d.bg(th.hover))
             .hover(|s| s.bg(th.hover))
             .when(tagged, |d| {
@@ -1857,7 +1856,7 @@ impl Workspace {
                         .debug_selector(move || format!("tag-glyph-{key}"))
                         .flex_none()
                         .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.tag)
+                        .text_color(th.tag_ink)
                         .child("#"),
                 )
             })
@@ -1876,11 +1875,11 @@ impl Workspace {
                         .debug_selector(move || format!("unpin-{index}"))
                         .flex_none()
                         .px_1()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::RADIUS_CHIP))
                         .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.faint)
+                        .text_color(th.muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(th.line).text_color(th.text))
+                        .hover(|s| s.bg(th.line).text_color(th.ink))
                         .child("✕")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -1943,11 +1942,11 @@ impl Workspace {
             .items_center()
             .gap_2()
             .px_2()
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .line_height(px(compact.line_height()))
             .text_size(px(compact.text_size()))
             .cursor_pointer()
-            .text_color(if active { th.accent } else { th.text })
+            .text_color(if active { th.link } else { th.ink })
             .when(active, |d| d.bg(th.hover))
             .hover(|s| s.bg(th.hover))
             .child(div().flex_1().min_w_0().truncate().child(title))
@@ -2001,15 +2000,15 @@ impl Workspace {
         };
         let mut col = div()
             .debug_selector(|| "left-sidebar".into())
-            .w(px(250.))
+            .w(px(crate::theme::SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
             .flex()
             .flex_col()
-            .bg(th.sidebar_bg)
+            .bg(th.shelf)
             .border_r_1()
             .border_color(th.line)
-            .p_2()
+            .p(px(crate::theme::SIDEBAR_PADDING))
             .child(
                 div()
                     .flex()
@@ -2037,7 +2036,7 @@ impl Workspace {
             .child({
                 let active = self.main.read(cx).is_journal();
                 self.nav_item("daily-notes", "Daily Notes", None, cx)
-                    .when(active, |d| d.text_color(th.accent).bg(th.hover))
+                    .when(active, |d| d.text_color(th.link).bg(th.hover))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(|this, _, window, cx| this.open_journal(window, cx)),
@@ -2106,7 +2105,7 @@ impl Workspace {
                 div()
                     .px_2()
                     .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.faint)
+                    .text_color(th.muted)
                     .child("Type [[ or # to make a page."),
             );
         }
@@ -2134,7 +2133,7 @@ impl Workspace {
         let dot = sync_dot(self.sync.as_ref());
         self.rendered_sync_dot = Some(dot);
         let dot_color = match dot {
-            SyncDot::Off => th.faint,
+            SyncDot::Off => th.disabled,
             SyncDot::Synced => th.success,
             SyncDot::Syncing => th.warning,
             SyncDot::Error => th.danger,
@@ -2157,7 +2156,7 @@ impl Workspace {
                     .gap_2()
                     .py_0p5()
                     .cursor_pointer()
-                    .rounded_sm()
+                    .rounded(px(crate::theme::RADIUS_CHIP))
                     .hover(|d| d.bg(th.hover))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.sync_open = !this.sync_open;
@@ -2171,8 +2170,8 @@ impl Workspace {
                             .truncate()
                             .px_1p5()
                             .py_0p5()
-                            .rounded_md()
-                            .bg(th.chip_bg)
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
+                            .bg(th.line_soft)
                             .child(file),
                     )
                     .child(
@@ -2206,9 +2205,15 @@ impl Workspace {
                                         .border_1()
                                         .border_b_0()
                                         .rounded_t_sm()
-                                        .border_color(th.muted),
+                                        .border_color(th.ink_3),
                                 )
-                                .child(div().w(px(8.)).h(px(6.)).rounded_sm().bg(th.muted)),
+                                .child(
+                                    div()
+                                        .w(px(8.))
+                                        .h(px(6.))
+                                        .rounded(px(crate::theme::RADIUS_CHIP))
+                                        .bg(th.ink_3),
+                                ),
                         )
                     })
                     .children(open.then(|| {
@@ -2221,7 +2226,7 @@ impl Workspace {
                         .with_priority(1)
                     })),
             )
-            .when_some(notice, |d, n| d.child(div().text_color(th.text).child(n)))
+            .when_some(notice, |d, n| d.child(div().text_color(th.ink).child(n)))
             .when_some(err, |d, e| d.child(div().text_color(th.danger).child(e)))
     }
 
@@ -2246,15 +2251,14 @@ impl Workspace {
             .flex()
             .flex_col()
             .gap_1()
-            .bg(th.surface)
+            .bg(th.well)
             .border_1()
             .border_color(th.line)
-            .rounded_md()
-            .shadow_md()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
             .child(
                 div()
                     .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(th.text)
+                    .text_color(th.ink)
                     .child("Sync"),
             )
             .child(div().when(warn, |d| d.text_color(th.warning)).child(line))
@@ -2265,7 +2269,7 @@ impl Workspace {
                 "Not encrypted at rest."
             }))
             .when(self.sync.is_none(), |d| {
-                d.child(div().text_color(th.faint).child(
+                d.child(div().text_color(th.muted).child(
                     "Set UTOPIA_SYNC_URL or UTOPIA_SYNC_FOLDER, then reopen the graph, to sync.",
                 ))
             })
@@ -2285,7 +2289,7 @@ impl Workspace {
             .px_2()
             .py_1()
             .text_size(px(crate::theme::CAPTION_SIZE))
-            .text_color(th.faint)
+            .text_color(th.muted)
             .child(text)
             .into_any_element()
     }
@@ -2343,11 +2347,11 @@ impl Workspace {
                 .debug_selector(move || id.to_string())
                 .px_2()
                 .py_0p5()
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .text_size(px(crate::theme::CONTROL_SIZE))
                 .cursor_pointer()
                 .text_color(if this.panel_tab == t {
-                    th.accent
+                    th.link
                 } else {
                     th.muted
                 })
@@ -2419,9 +2423,9 @@ impl Workspace {
                 .debug_selector(move || id.to_string())
                 .px_2()
                 .text_size(px(crate::theme::CAPTION_SIZE))
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
-                .text_color(if this.tab == t { th.accent } else { th.muted })
+                .text_color(if this.tab == t { th.link } else { th.muted })
                 .when(this.tab == t, |d| d.bg(th.hover))
                 .child(label)
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -2483,7 +2487,7 @@ impl Workspace {
                         .px_2()
                         .pt_2()
                         .pb_0p5()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::RADIUS_CHIP))
                         .cursor_pointer()
                         .hover(|d| d.bg(th.hover))
                         .child(
@@ -2496,8 +2500,8 @@ impl Workspace {
                         .child(
                             div()
                                 .px_1()
-                                .rounded_sm()
-                                .bg(th.chip_bg)
+                                .rounded(px(crate::theme::RADIUS_CHIP))
+                                .bg(th.line_soft)
                                 .text_size(px(crate::theme::CAPTION_SIZE))
                                 .text_color(th.muted)
                                 .child(group.hits.len().to_string()),
@@ -2670,14 +2674,14 @@ impl Workspace {
                     .pr_2()
                     .pl(px(8. + e.depth.min(6) as f32 * 10.))
                     .py_0p5()
-                    .rounded_sm()
+                    .rounded(px(crate::theme::RADIUS_CHIP))
                     .cursor_pointer()
                     .text_size(px(match e.level {
                         1 => crate::theme::H1_SIZE,
                         2 => crate::theme::H2_SIZE,
                         _ => crate::theme::H3_SIZE,
                     }))
-                    .text_color(th.text)
+                    .text_color(th.ink)
                     .hover(|d| d.bg(th.hover))
                     .child(div().flex_1().min_w_0().child(e.text.clone()))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -2743,7 +2747,7 @@ impl Workspace {
                     .gap_1()
                     .px_2()
                     .py_0p5()
-                    .rounded_sm()
+                    .rounded(px(crate::theme::RADIUS_CHIP))
                     .cursor_pointer()
                     .hover(|d| d.bg(th.hover))
                     .child(div().flex_1().min_w_0().child(title))
@@ -2752,10 +2756,10 @@ impl Workspace {
                             .id(("unpin", i))
                             .debug_selector(move || format!("unpin-{i}"))
                             .px_1()
-                            .rounded_sm()
+                            .rounded(px(crate::theme::RADIUS_CHIP))
                             .text_color(th.muted)
                             .cursor_pointer()
-                            .hover(|d| d.bg(th.hover).text_color(th.text))
+                            .hover(|d| d.bg(th.hover).text_color(th.ink))
                             .child("×")
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 cx.stop_propagation();
@@ -2819,14 +2823,14 @@ impl Render for Workspace {
                 .flex_col()
                 .items_center()
                 .pt_2()
-                .bg(th.sidebar_bg)
+                .bg(th.shelf)
                 .border_r_1()
                 .border_color(th.line)
                 .child(
                     div()
                         .id("expand-left")
                         .px_1()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::RADIUS_CHIP))
                         .text_size(px(crate::theme::CAPTION_SIZE))
                         .text_color(th.muted)
                         .cursor_pointer()
@@ -2907,7 +2911,7 @@ impl Render for Workspace {
                 .flex_none()
                 .flex()
                 .flex_row()
-                .bg(th.surface)
+                .bg(th.well)
                 .border_l_1()
                 .border_color(th.line)
                 // RS-4: a 4 px handle on the left edge. The drag is tracked from here and
@@ -2921,8 +2925,8 @@ impl Render for Workspace {
                         .h_full()
                         .flex_none()
                         .cursor(gpui::CursorStyle::ResizeLeftRight)
-                        .when(self.resize_from.is_some(), |d| d.bg(th.accent))
-                        .hover(|d| d.bg(th.accent))
+                        .when(self.resize_from.is_some(), |d| d.bg(th.link))
+                        .hover(|d| d.bg(th.link))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -2939,11 +2943,11 @@ impl Render for Workspace {
                         .id("right-close")
                         .debug_selector(|| "right-close".into())
                         .px_1()
-                        .rounded_sm()
+                        .rounded(px(crate::theme::RADIUS_CHIP))
                         .text_size(px(crate::theme::CONTROL_SIZE))
                         .text_color(th.muted)
                         .cursor_pointer()
-                        .hover(|d| d.bg(th.hover).text_color(th.text))
+                        .hover(|d| d.bg(th.hover).text_color(th.ink))
                         .child("×")
                         .on_click(cx.listener(|this, _, window, cx| this.hide_right(window, cx))),
                 ),
@@ -2967,7 +2971,7 @@ impl Render for Workspace {
                     div()
                         .p_4()
                         .text_size(px(crate::theme::BODY_SIZE))
-                        .text_color(th.faint)
+                        .text_color(th.muted)
                         .child("Shift-click a link to open it here."),
                 );
             }
@@ -2999,11 +3003,11 @@ impl Render for Workspace {
                                 .id(("pane-collapse", i))
                                 .debug_selector(move || format!("pane-collapse-{i}"))
                                 .px_1()
-                                .rounded_sm()
+                                .rounded(px(crate::theme::RADIUS_CHIP))
                                 .text_size(px(crate::theme::CONTROL_SIZE))
                                 .text_color(th.muted)
                                 .cursor_pointer()
-                                .hover(|d| d.text_color(th.text))
+                                .hover(|d| d.text_color(th.ink))
                                 .child(if collapsed { "▸" } else { "▾" })
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     let host = this.panes.get(i).map(|p| p.view.entity_id());
@@ -3032,11 +3036,11 @@ impl Render for Workspace {
                                 .id(("pane-close", i))
                                 .debug_selector(move || format!("pane-close-{i}"))
                                 .px_1()
-                                .rounded_sm()
+                                .rounded(px(crate::theme::RADIUS_CHIP))
                                 .text_size(px(crate::theme::CONTROL_SIZE))
                                 .text_color(th.muted)
                                 .cursor_pointer()
-                                .hover(|d| d.bg(th.hover).text_color(th.text))
+                                .hover(|d| d.bg(th.hover).text_color(th.ink))
                                 .child("×")
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     if i < this.panes.len() {
@@ -3135,8 +3139,8 @@ impl Render for Workspace {
             .size_full()
             .flex()
             .flex_row()
-            .bg(th.bg)
-            .text_color(th.text)
+            .bg(th.paper)
+            .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
             .font_family(font.family())
