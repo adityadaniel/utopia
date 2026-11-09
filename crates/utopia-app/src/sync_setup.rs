@@ -193,20 +193,18 @@ impl Coordinator {
             let prefs = request.preferences.clone();
             let mut old_lan = old_lan;
             loop {
-            // The relay database sits next to the settings file; the background task owns
-            // this copy, the UI thread owns the other.
-            let (request, graph, env, secrets, discover, active_url, client, relay_file, marker, old_lan) = (
-                request.clone(),
-                graph.clone(),
-                env.clone(),
-                secrets.clone(),
-                discover.clone(),
-                active_url.clone(),
-                client.clone(),
-                file.clone(),
-                marker.clone(),
-                old_lan.take(),
-            );
+            // A retry runs the same setup again; the background task gets its own copies
+            // (the relay database sits next to the settings file the UI thread keeps).
+            let request = request.clone();
+            let graph = graph.clone();
+            let env = env.clone();
+            let secrets = secrets.clone();
+            let discover = discover.clone();
+            let active_url = active_url.clone();
+            let client = client.clone();
+            let relay_file = file.clone();
+            let marker = marker.clone();
+            let old_lan = old_lan.take();
             let result = cx.background_executor().spawn(async move {
                 if test_only {
                     return test_target(&request, &graph, &env, secrets.as_ref(), active_url, discover.as_ref()).map(|message| (None, message));
