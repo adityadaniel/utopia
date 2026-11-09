@@ -6790,8 +6790,12 @@ checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.29.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -7050,6 +7054,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.9.5",
+ "rustls",
+ "rustls-pki-types",
  "sha1",
  "thiserror 2.0.21",
 ]
@@ -7521,13 +7527,18 @@ dependencies = [
  "argon2",
  "chacha20poly1305",
  "chrono",
+ "futures-util",
+ "security-framework",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-tungstenite",
  "tungstenite 0.24.0",
  "ulid",
  "ureq",
+ "url",
  "utopia-core",
  "utopia-doc",
  "utopia-proto",
