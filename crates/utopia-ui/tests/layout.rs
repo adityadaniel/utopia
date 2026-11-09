@@ -1760,6 +1760,31 @@ fn top_bar_day_navigation_moves_the_feed(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §2.5: icon-only buttons name themselves through a tooltip (gpui 0.2 has no
+/// accessibility tree), just like the collapse, settings, calendar and menu buttons.
+#[gpui::test]
+fn day_nav_arrows_carry_a_label(cx: &mut TestAppContext) {
+    let (_ws, cx) = setup_feed(cx, &[(0, 3), (1, 3)], H);
+    for (id, label) in [
+        ("day-prev", "Previous day"),
+        ("day-next", "Next day"),
+    ] {
+        let arrow = bounds(cx, id);
+        cx.simulate_mouse_move(arrow.center(), None, gpui::Modifiers::default());
+        // gpui waits 500 ms before showing a tooltip.
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(700));
+        cx.run_until_parked();
+        let tip = cx.debug_bounds("tip").unwrap_or_else(|| {
+            panic!("{id} has no label tooltip");
+        });
+        assert!(
+            tip.size.width > px(20.) && tip.size.height >= px(12.),
+            "{id}'s label ({label}) is drawn: {tip:?}"
+        );
+    }
+}
+
 /// DESIGN.md §3.3: a page view's top bar has the "Pages / title" breadcrumb, the page's ⋯
 /// menu and the right-panel toggle. Back/forward and the star are absent: the app has no
 /// history and no favorite action to bind them to.

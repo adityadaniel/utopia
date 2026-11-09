@@ -2985,10 +2985,12 @@ impl Workspace {
             .border_1()
             .border_color(th.line_strong)
             .child(
-                seg("day-prev", Icon::ChevronLeft, &th).on_click(cx.listener(|this, _, _, cx| {
-                    this.main
-                        .update(cx, |m, cx| m.scroll_to_adjacent_day(-1, cx))
-                })),
+                seg("day-prev", Icon::ChevronLeft, &th)
+                    .tooltip(tip("Previous day"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.main
+                            .update(cx, |m, cx| m.scroll_to_adjacent_day(-1, cx))
+                    })),
             )
             .child(divider())
             .child(
@@ -3002,10 +3004,12 @@ impl Workspace {
             )
             .child(divider())
             .child(
-                seg("day-next", Icon::ChevronRight, &th).on_click(cx.listener(|this, _, _, cx| {
-                    this.main
-                        .update(cx, |m, cx| m.scroll_to_adjacent_day(1, cx))
-                })),
+                seg("day-next", Icon::ChevronRight, &th)
+                    .tooltip(tip("Next day"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.main
+                            .update(cx, |m, cx| m.scroll_to_adjacent_day(1, cx))
+                    })),
             )
             .into_any_element()
     }
