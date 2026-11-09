@@ -13,7 +13,8 @@ Fixed on `fix/encryption-at-rest-state`. Line numbers below are from the
 - **Issue 1 fixed.** A plain graph whose header survives but whose pages do not opens as
   `StoreError::Corrupt` and `is_encrypted` is false: the app shows "Could not open …"
   instead of an unlock screen no passphrase can satisfy. Test:
-  `ac_15_6_a_damaged_plain_graph_is_not_a_lock` (`crates/utopia-store/tests/p2.rs`).
+  `ac_15_6_a_damaged_plain_graph_is_not_a_lock` (`crates/utopia-store/tests/p2.rs`);
+  shot: `docs/verification/encryption-at-rest-state/damaged-graph.png`.
   Limit: a file whose header was destroyed cannot be told apart from SQLCipher
   ciphertext without a key; it still reads as `Encrypted` (the only reading a passphrase
   can resolve).
