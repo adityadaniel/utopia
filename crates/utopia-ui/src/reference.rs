@@ -107,11 +107,12 @@ fn body(text: &str, block: &BlockId, theme: &Theme, store: &Store) -> Body {
         StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
     let layout = styled.layout().clone();
     let links: Vec<Range<usize>> = rendered.links.iter().map(|(r, _)| r.clone()).collect();
+    let chips = rendered.chips.clone();
     Body {
         element: div()
             .flex_1()
             .min_w_0()
-            .child(rich::LinkText::new(styled, links))
+            .child(rich::LinkText::new(styled, links).with_chips(chips, theme.tag_bg))
             .into_any_element(),
         layout,
         rendered,

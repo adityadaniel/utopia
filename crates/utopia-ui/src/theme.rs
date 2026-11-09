@@ -118,6 +118,18 @@ pub const COUNT: TypeRole = TypeRole {
     line: 16.,
     weight: SANS,
 };
+/// The "Today" pill: Mono 12 weight 500 on a 20 px line (§3.4).
+pub const PILL: TypeRole = TypeRole {
+    size: 12.,
+    line: DAY_CAPTION_LINE,
+    weight: SANS_MEDIUM,
+};
+/// A reference type label ("Scheduled for this day"): Mono 11, §3.1.
+pub const REF_LABEL: TypeRole = TypeRole {
+    size: 11.,
+    line: 16.,
+    weight: SANS_MEDIUM,
+};
 
 /// The spacing scale: every gap §2.3 allows, on a 4 px base.
 pub const SPACING: [f32; 12] = [4., 8., 12., 16., 20., 24., 32., 40., 48., 56., 64., 96.];
@@ -160,6 +172,44 @@ pub const RADIUS_PILL: f32 = 13.;
 
 /// The line grid a block row follows: 28 px (§3.1).
 pub const LINE_GRID: f32 = 28.;
+
+// Block row (§3.1). A row starts with a 20 px caret slot in the gutter outside the text
+// column, then a 24 px bullet slot, then the content; children step right by the spec's
+// 31 px margin + 13 px padding + 1 px thread line.
+pub const CARET_SLOT: f32 = 20.;
+pub const BULLET_SLOT: f32 = 24.;
+pub const CHILD_INDENT: f32 = 45.;
+/// Where a thread line sits from the row it belongs to, under the parent bullet's centre.
+pub const THREAD_OFFSET: f32 = 31.;
+pub const BULLET_SIZE: f32 = 6.;
+/// The ring around a collapsed block's bullet (§3.1).
+pub const COLLAPSED_RING: f32 = 12.;
+/// The collapse chevron (§3.1).
+pub const CARET_SIZE: f32 = 12.;
+/// A to-do's checkbox and the gap before its text (§3.1).
+pub const TODO_SIZE: f32 = 16.;
+pub const TODO_GAP: f32 = 10.;
+/// The check drawn inside a done to-do.
+pub const TODO_CHECK_SIZE: f32 = 11.;
+/// An inline tag chip: height 22, 7 px sides, radius 5 (§3.1, §2.4).
+pub const TAG_HEIGHT: f32 = 22.;
+pub const TAG_PADDING_X: f32 = 7.;
+/// A ref-type label: height 20, 7 px sides, radius 4 (§3.1).
+pub const REF_TYPE_HEIGHT: f32 = 20.;
+pub const REF_TYPE_PADDING_X: f32 = 7.;
+
+// Day header and empty day rows (§3.5, §3.6).
+/// The weekday line, tall enough for the Today pill.
+pub const DAY_CAPTION_LINE: f32 = 20.;
+pub const DAY_HEADER_PAD_TOP: f32 = 4.;
+/// The gap below a day title before its first block (§3.5).
+pub const DAY_HEADER_GAP: f32 = 16.;
+/// An empty day row is a click target, at least 44 px (§3.6).
+pub const EMPTY_DAY_HEIGHT: f32 = 44.;
+/// The weekday column of an empty day row, fixed so the dates line up (§3.6).
+pub const EMPTY_DAY_WEEKDAY_WIDTH: f32 = 92.;
+/// Empty day rows in one group sit 4 px apart (§3.6).
+pub const EMPTY_DAY_GAP: f32 = 4.;
 
 #[derive(Clone, Debug)]
 pub struct Theme {
@@ -400,6 +450,42 @@ pub fn count_chip(count: usize, th: &Theme) -> Div {
         .child(count.to_string())
 }
 
+/// The "Today" pill beside a day's weekday label (§3.4, §3.5): a fully round
+/// `link_tint` chip in the link colour. The caller adds the id and, in the feed, the click
+/// that scrolls back to today (§4.1).
+pub fn today_pill(label: impl Into<SharedString>, th: &Theme) -> Div {
+    div()
+        .h(px(DAY_CAPTION_LINE))
+        .flex()
+        .items_center()
+        .px(px(REF_TYPE_PADDING_X))
+        .rounded_full()
+        .bg(th.link_tint)
+        .font_family(LABEL_MONO)
+        .text_size(px(PILL.size))
+        .font_weight(PILL.weight)
+        .text_color(th.link)
+        .child(label.into())
+}
+
+/// A reference type label ("Scheduled for this day", §3.1): a 20 px white chip with a
+/// hairline and mono 11 text. It marks what kind of reference a group is.
+pub fn ref_type_label(label: impl Into<SharedString>, th: &Theme) -> Div {
+    div()
+        .h(px(REF_TYPE_HEIGHT))
+        .flex()
+        .items_center()
+        .px(px(REF_TYPE_PADDING_X))
+        .rounded(px(RADIUS_CHIP))
+        .border_1()
+        .border_color(th.line_strong)
+        .bg(th.paper)
+        .font_family(LABEL_MONO)
+        .text_size(px(REF_LABEL.size))
+        .text_color(th.ink_3)
+        .child(label.into())
+}
+
 /// A control's label size: the UI role's size (rows size their own line box).
 pub const CONTROL_SIZE: f32 = UI.size;
 
@@ -416,7 +502,6 @@ pub const CAPTION_SIZE: f32 = SMALL_TIGHT.size;
 /// [`crate::appearance`] picks these or the compact pair.
 pub const TEXT_SIZE: f32 = BODY.size;
 pub const LINE_HEIGHT: f32 = BODY.line;
-pub const INDENT: f32 = 22.;
 /// The UI caps visual indentation; deeper blocks show a depth badge (§6.1).
 pub const MAX_VISUAL_DEPTH: usize = 12;
 
@@ -597,11 +682,18 @@ mod tests {
                     path.display()
                 );
             }
-            for (i, line) in src.lines().enumerate() {
-                if line.contains(&["text_color(th.", "bullet)"].concat()) {
+            let lines: Vec<&str> = src.lines().collect();
+            let bullet_colour = ["text_color(th.", "bullet)"].concat();
+            for (i, line) in lines.iter().enumerate() {
+                if line.contains(&bullet_colour) {
                     // The only allowed use is a bullet or caret glyph, never a sentence.
+                    // The glyph is the child on the next line, hence the window.
+                    let end = (i + 4).min(lines.len());
+                    let window = &lines[i.saturating_sub(2)..end];
                     assert!(
-                        line.contains("\"•\"") || line.contains("\"▸\"") || line.contains("\"▾\""),
+                        window.iter().any(|l| l.contains("\"•\"")
+                            || l.contains("\"▸\"")
+                            || l.contains("\"▾\"")),
                         "{}:{}: bullet used as text: {}",
                         path.display(),
                         i + 1,
@@ -689,6 +781,8 @@ mod tests {
         assert_eq!((LABEL.size, LABEL.line), (12., 16.));
         assert_eq!(SIDEBAR_LABEL.size, 11.);
         assert_eq!(COUNT.size, 12.);
+        assert_eq!((PILL.size, PILL.line), (12., 20.));
+        assert_eq!(REF_LABEL.size, 11.);
 
         let scale = [
             PAGE_TITLE.size,
