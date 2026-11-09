@@ -8,10 +8,7 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
-use utopia_ui::theme::{
-    Theme, CHILD_INDENT, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP,
-    SIDEBAR_WIDTH,
-};
+use utopia_ui::theme::{Theme, CHILD_INDENT, DAY_GAP, DAY_HEADER_PAD_TOP, SIDEBAR_WIDTH};
 use utopia_ui::workspace::Workspace;
 
 const W: f32 = 1280.;
@@ -3147,6 +3144,38 @@ fn leaving_an_empty_added_property_by_click_removes_it(cx: &mut TestAppContext) 
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(block_text(cx, &ids[2]), "!An ordinary note");
+}
+
+/// DESIGN.md §3.8: an existing row emptied by the keyboard is removed when the edit leaves
+/// it (here with the arrow key), not only by Escape: the block must not survive as an empty
+/// root that ends the bar and demotes the properties below it.
+#[gpui::test]
+fn leaving_an_emptied_property_removes_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let row = bounds(cx, "property-0");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    // Empty the row, then leave it with the arrow key: the edit moves to the next property
+    // and the emptied block is removed on the way out.
+    cx.simulate_keystrokes("cmd-a backspace down");
+    cx.run_until_parked();
+    assert_eq!(
+        editor_target(cx),
+        Some(ids[1].clone()),
+        "the edit moved on to the owner"
+    );
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "the emptied status block is gone and the owner is still a property"
+    );
+    // The owner is the only bar row left (gpui keeps stale debug bounds, so the store
+    // assertion above is the proof; this just checks a row still draws).
+    bounds(cx, "property-0");
 }
 
 /// DESIGN.md §3.8: Enter on an empty "Add property" row also cleans it up before focusing
