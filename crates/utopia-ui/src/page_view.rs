@@ -26,7 +26,7 @@ use crate::theme::{
     CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE,
     CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE,
     EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH,
-    THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
+    MENU_OFFSET, PAGE_MENU_WIDTH, THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -3198,7 +3198,7 @@ impl PageView {
             // Without `occlude` the menu is drawn over the page but clicks pass through it
             // to whatever is underneath, so its items never fire (found by test).
             .occlude()
-            .w(px(180.))
+            .w(px(PAGE_MENU_WIDTH))
             .p_1()
             .flex()
             .flex_col()
@@ -3426,7 +3426,7 @@ impl PageView {
                         deferred(
                             anchored()
                                 .anchor(Corner::TopRight)
-                                .offset(point(px(0.), px(6.)))
+                                .offset(point(px(0.), px(MENU_OFFSET)))
                                 .child(self.page_menu_popup(cx)),
                         )
                         .with_priority(1)
@@ -3772,7 +3772,7 @@ impl PageView {
                                 deferred(
                                     anchored()
                                         .anchor(Corner::TopLeft)
-                                        .offset(point(px(0.), px(6.)))
+                                        .offset(point(px(0.), px(MENU_OFFSET)))
                                         .child(self.controls_menu_popup(ControlMenu::Date, cx)),
                                 )
                                 .with_priority(1)
@@ -3798,7 +3798,7 @@ impl PageView {
                                 deferred(
                                     anchored()
                                         .anchor(Corner::TopLeft)
-                                        .offset(point(px(0.), px(6.)))
+                                        .offset(point(px(0.), px(MENU_OFFSET)))
                                         .child(self.controls_menu_popup(ControlMenu::Sort, cx)),
                                 )
                                 .with_priority(1)

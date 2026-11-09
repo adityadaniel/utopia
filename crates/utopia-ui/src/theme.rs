@@ -216,6 +216,16 @@ pub const FOCUS_RING: f32 = 2.;
 pub const FOCUS_RING_OFFSET: f32 = 2.;
 /// A "Today" pill or tag chip's side padding (§3.4).
 pub const CHIP_PADDING_X: f32 = 7.;
+/// A keyboard hint chip's side padding.
+pub const KBD_PADDING_X: f32 = 6.;
+/// The page actions menu's width (§3.3).
+pub const PAGE_MENU_WIDTH: f32 = 190.;
+/// The gap between a control and its floating menu.
+pub const MENU_OFFSET: f32 = 6.;
+/// The room a sidebar footer's vault name may take before it truncates (§3.2).
+pub const VAULT_NAME_MAX_WIDTH: f32 = 120.;
+/// The widest a button's label tooltip grows (§2.5's nearest thing to a label).
+pub const TOOLTIP_MAX_WIDTH: f32 = 240.;
 
 // Block row (§3.1). A row starts with a 20 px caret slot in the gutter outside the text
 // column, then a 24 px bullet slot, then the content; children step right by the spec's
@@ -537,7 +547,7 @@ pub fn kbd(label: impl Into<SharedString>, th: &Theme) -> Div {
         .flex_none()
         .flex()
         .items_center()
-        .px(px(6.))
+        .px(px(KBD_PADDING_X))
         .rounded(px(RADIUS_CHIP))
         .bg(th.hover)
         .font_family(LABEL_MONO)

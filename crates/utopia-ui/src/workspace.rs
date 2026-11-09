@@ -29,9 +29,10 @@ use crate::sync_runner::{
 };
 use crate::theme::{
     ghost_icon, ghost_text, kbd, nav_row, quiet_control, quiet_danger, theme, BUTTON_HEIGHT, COUNT,
-    FOOTER_DOT, LABEL_MONO, PAGE_ROW_HEIGHT, RADIUS_CHIP, RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG,
-    SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT, TAG_PADDING_X, TOP_BAR_MIN_HEIGHT,
-    TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI, WORKSPACE_NAME, WORKSPACE_SQUARE,
+    FOOTER_DOT, LABEL_MONO, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
+    RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT,
+    TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI,
+    VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
 };
 
 /// The reference panel's sub-tabs: which way the edges are looked at (FR-4.6).
@@ -140,7 +141,7 @@ impl Render for Tip {
         let th = theme(cx).clone();
         div()
             .debug_selector(|| "tip".into())
-            .max_w(px(240.))
+            .max_w(px(TOOLTIP_MAX_WIDTH))
             .px_2()
             .py_1()
             .rounded(px(crate::theme::RADIUS_CONTROL))
@@ -2235,7 +2236,7 @@ impl Workspace {
                                 div()
                                     .debug_selector(|| "vault-name".into())
                                     .flex_none()
-                                    .max_w(px(120.))
+                                    .max_w(px(VAULT_NAME_MAX_WIDTH))
                                     .truncate()
                                     .text_size(px(SMALL.size))
                                     .font_weight(gpui::FontWeight::MEDIUM)
@@ -2975,7 +2976,14 @@ impl Workspace {
                 .hover(|d| d.bg(th.hover))
                 .child(icon(glyph, ICON_SIZE, th.ink_3))
         };
-        let divider = || div().w(px(1.)).h(px(20.)).flex_none().bg(th.line);
+        // 20 px: the group is 32 px tall, leaving 6 px above and below the hairline.
+        let divider = || {
+            div()
+                .w(px(1.))
+                .h(px(BUTTON_HEIGHT - 12.))
+                .flex_none()
+                .bg(th.line)
+        };
         div()
             .debug_selector(|| "day-nav".into())
             .h(px(BUTTON_HEIGHT))
@@ -3035,7 +3043,7 @@ impl Workspace {
                 deferred(
                     anchored()
                         .anchor(gpui::Corner::TopRight)
-                        .offset(gpui::point(px(0.), px(6.)))
+                        .offset(gpui::point(px(0.), px(MENU_OFFSET)))
                         .child(self.page_menu_popup(cx)),
                 )
                 .with_priority(1)
@@ -3115,7 +3123,7 @@ impl Workspace {
             // Without `occlude` the menu is drawn over the page but clicks pass through it,
             // so its items never fire (found by test).
             .occlude()
-            .w(px(190.))
+            .w(px(PAGE_MENU_WIDTH))
             .p_1()
             .flex()
             .flex_col()

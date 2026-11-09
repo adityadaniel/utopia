@@ -1765,10 +1765,7 @@ fn top_bar_day_navigation_moves_the_feed(cx: &mut TestAppContext) {
 #[gpui::test]
 fn day_nav_arrows_carry_a_label(cx: &mut TestAppContext) {
     let (_ws, cx) = setup_feed(cx, &[(0, 3), (1, 3)], H);
-    for (id, label) in [
-        ("day-prev", "Previous day"),
-        ("day-next", "Next day"),
-    ] {
+    for (id, label) in [("day-prev", "Previous day"), ("day-next", "Next day")] {
         let arrow = bounds(cx, id);
         cx.simulate_mouse_move(arrow.center(), None, gpui::Modifiers::default());
         // gpui waits 500 ms before showing a tooltip.
