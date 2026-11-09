@@ -89,30 +89,6 @@ pub fn graph_id(graph: &Path) -> String {
         .collect()
 }
 
-/// Sync settings (§12): `UTOPIA_SYNC_URL` (relay) or `UTOPIA_SYNC_FOLDER` (shared folder)
-/// enables sync; the graph id defaults to the graph's file name. Secrets — the relay token
-/// and the end-to-end passphrase — come from env or the macOS keychain (services
-/// `utopia-sync` and `utopia-sync-passphrase`, account = graph id), never from the graph
-/// file (§15.6).
-pub fn sync_config(graph: &Path) -> Option<utopia_ui::sync_runner::SyncConfig> {
-    use utopia_ui::sync_runner::{SyncConfig, SyncTarget};
-    let env = |k: &str| std::env::var(k).ok().filter(|v| !v.trim().is_empty());
-    let graph_id = graph_id(graph);
-    let target = if let Some(url) = env("UTOPIA_SYNC_URL") {
-        let token = env("UTOPIA_SYNC_TOKEN").or_else(|| keychain_secret("utopia-sync", &graph_id));
-        SyncTarget::Relay { url, token }
-    } else {
-        SyncTarget::Folder(PathBuf::from(env("UTOPIA_SYNC_FOLDER")?))
-    };
-    let passphrase = env("UTOPIA_SYNC_PASSPHRASE")
-        .or_else(|| keychain_secret("utopia-sync-passphrase", &graph_id));
-    Some(SyncConfig {
-        target,
-        graph: graph_id,
-        passphrase,
-    })
-}
-
 /// Passphrase for a graph encrypted at rest: `UTOPIA_DB_PASSPHRASE`, else the macOS
 /// keychain item (service `utopia-db`, account = graph id). Never stored in the graph.
 pub fn db_passphrase(graph: &Path) -> Option<String> {

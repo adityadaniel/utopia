@@ -875,6 +875,7 @@ GET  /v1/graphs/{gid}/pages/{pid}/updates?since={frontier}
 - Collapse state, sidebar width, scroll position, caret, selection → **local-only** (avoids sync churn and surprise jumps).
 - Search index → rebuilt locally.
 - Window/UI preferences → local-only, except a small `graph_settings` shard (date format, export defaults).
+- The **sync graph id** (the relay path and part of the E2E AAD) is chosen when the graph first syncs and frozen from then on. A copy of a graph file can pick its own id before that, so duplicating `Notes.utopia` starts a second notebook instead of publishing into the original's relay graph.
 
 ### 12.6 Failure handling
 
@@ -1109,6 +1110,7 @@ Daily note (today only) · bullet capture · page/block refs (insert) · backlin
 - Local graph unencrypted at rest in v1 (rely on OS full-disk encryption); SQLCipher option in v1.1.
 - Sync tokens stored in the OS keychain, never in `graph.db`.
 - Server sees ciphertext only once E2E lands.
+- The E2E key-check marker (`setup_e2e_check`, a fixed plaintext sealed under the graph key) is an **offline verifier**: anyone holding the graph file or a rolling backup can test passphrase guesses against it at the Argon2 cost, without the relay. That is the same oracle a relay's ciphertext gives, and the file already holds the notes, so the exposure is passphrase reuse elsewhere; the marker is what makes a copied graph or a lost Keychain item unable to re-key silently (§12.6). A distinct, higher-cost derivation for the marker alone would not remove the oracle (the relay's ciphertext still is one), so the cost stays shared with payload encryption and the trade-off is documented here instead.
 
 ### 15.7 Platform support
 

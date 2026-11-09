@@ -18,6 +18,7 @@ pub mod folder;
 pub mod http;
 pub mod realtime;
 pub mod relay;
+pub mod setup;
 
 /// The v1 wire format, shared with the relay server.
 pub use utopia_proto as wire;

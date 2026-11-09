@@ -437,6 +437,7 @@ impl Workspace {
         cfg: crate::sync_runner::SyncConfig,
         cx: &mut Context<Self>,
     ) -> bool {
+        drop(self.stop_sync(cx));
         // Say where sync goes without the token or passphrase (never shown, §15.6); the
         // sidebar names the target even when the transport below cannot be built.
         self.sync_target = Some(match &cfg.target {
@@ -450,15 +451,21 @@ impl Workspace {
         match transport {
             Ok(t) => {
                 let nudge = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                if let crate::sync_runner::SyncTarget::Relay { url, token } = &cfg.target {
-                    crate::sync_runner::spawn_realtime(
-                        url.clone(),
-                        cfg.graph.clone(),
-                        token.clone(),
-                        nudge.clone(),
-                    );
+                let started = self.enable_sync_with(t, Some(nudge.clone()), cx);
+                if started {
+                    if let crate::sync_runner::SyncTarget::Relay { url, token } = &cfg.target {
+                        if let Some(runner) = &mut self.sync {
+                            runner.realtime = utopia_sync::realtime::Listener::start(
+                                url.clone(),
+                                cfg.graph.clone(),
+                                token.clone(),
+                                nudge,
+                            )
+                            .ok();
+                        }
+                    }
                 }
-                self.enable_sync_with(t, Some(nudge), cx)
+                started
             }
             Err(e) => {
                 eprintln!("utopia: sync disabled: {e}");
@@ -468,6 +475,55 @@ impl Workspace {
                 false
             }
         }
+    }
+
+    /// Stop polling immediately; the returned listener is joined off the UI thread.
+    pub fn stop_sync(&mut self, cx: &mut Context<Self>) -> Option<utopia_sync::realtime::Listener> {
+        let listener = self
+            .sync
+            .take()
+            .and_then(|mut runner| runner.realtime.take());
+        self.sync_target = None;
+        let mut facts = crate::sync_runner::facts(cx);
+        facts.target = None;
+        facts.encrypted = false;
+        cx.set_global(facts);
+        cx.notify();
+        listener
+    }
+
+    /// Install a transport prepared off the UI thread (key derivation and folder I/O).
+    pub fn start_prepared_sync(
+        &mut self,
+        cfg: &crate::sync_runner::SyncConfig,
+        transport: BoxTransport,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        drop(self.stop_sync(cx));
+        let facts = crate::sync_runner::SyncFacts::from_config(cfg);
+        self.sync_target = facts.target.clone();
+        let started = self.enable_sync_with(transport, None, cx);
+        if started {
+            if let (Some(runner), crate::sync_runner::SyncTarget::Relay { url, token }) =
+                (&mut self.sync, &cfg.target)
+            {
+                runner.realtime = utopia_sync::realtime::Listener::start(
+                    url.clone(),
+                    cfg.graph.clone(),
+                    token.clone(),
+                    runner.nudge.clone(),
+                )
+                .ok();
+            }
+            if let Some(runner) = &self.sync {
+                runner
+                    .nudge
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            cx.set_global(facts);
+        }
+        cx.notify();
+        started
     }
 
     /// Start sync for `cfg` and publish what Settings → Sync should say (ST-5). The enabled
@@ -2170,7 +2226,8 @@ impl Workspace {
     }
 
     /// The sync view the footer opens (SB-4): what sync is doing, where it goes and whether
-    /// this graph is encrypted at rest. Read-only; settings come from the environment (§15.6).
+    /// this graph is encrypted at rest. Read-only; setup lives in Settings → Sync, and no
+    /// secret is shown here (§15.6).
     fn sync_popover(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
         let (line, warn) = match &self.sync {

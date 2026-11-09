@@ -2,6 +2,58 @@
 
 ## Status
 
+In-app setup update (§12.7): cursor isolation alone did not publish content already
+acknowledged by a previous destination. `Store::prepare_sync_destination` now queues a
+full CRDT update for every persisted shard, including imported/tombstoned pages, when the
+selected destination identity changes. It also makes previously uploaded attachments
+pending for the new destination. These bookkeeping changes and the destination identity
+commit in one `BEGIN IMMEDIATE` transaction, after flushing pending store writes.
+
+These are ordinary updates, not truncating relay snapshots. Cursor/revision tags remain
+intact; compaction still requires a cursor measured in the current relay's space.
+
+The destination is recorded as `Destination { origin, instance }`
+(`crates/utopia-store/src/sync_destination.rs`): `origin` is the transport's stable address
+(a relay's normalized URL plus the graph id, or a folder's root) and `instance` is the
+relay database's own id from the manifest. Setup asks for the manifest before recording, so
+a reachable relay is identified by its store id as well as its URL. Comparing only the
+identity sampled at launch was wrong: a launch without a network can read no manifest, so
+its identity is the URL alone, and treating that as a different destination exported the
+whole graph into the outbox — and pushed a copy the relay cannot dedupe — on every
+offline/online flip (`ac_12_7_an_offline_launch_does_not_republish_the_graph`). Two known
+store ids decide on their own, so a relay that moved to another lease or LAN port is the
+same destination and a wiped store is not; when either side has no store id, the origin
+decides. A relay discovered later still changes the cursor space, which `VerifiedTarget`
+treats as a new target: it pulls one existing shard to prove the selected encryption can
+read it before any push (`ac_12_6_pairing_validates_existing_payloads_before_pushing`).
+An **empty** target proves no key, so the proof is re-checked before every round until a
+payload actually decrypts: a device that set up against a fresh relay with the wrong
+passphrase revokes its own verification the moment another key's ciphertext appears, and
+refuses to push into a graph it cannot read
+(`ac_12_6_an_empty_target_never_proves_a_key`). The graph's key marker is frozen only by a
+target that was read *and* held payloads (`setup::may_freeze_key`,
+`ac_12_6_an_empty_target_cannot_freeze_the_key_marker`). What remains is the race the
+protocol cannot decide: if two devices publish into the same empty target at the same
+instant with different keys, the first payload establishes the key and the other device is
+refused from then on — it does not mix ciphertext, but it also cannot join until it uses
+that passphrase. Previously the claim above overstated this: a wrong key on a second device
+could freeze itself into the graph and mix ciphertexts.
+
+Nearby Mac discovery is not a one-shot at launch: a client that finds no host keeps looking
+on the runner's slow cadence while the saved mode is Nearby and no runner exists, because the
+host machine is often asleep when the laptop starts (`ac_12_7_a_nearby_client_keeps_looking_for_its_host`).
+
+A graph with no recorded destination — one that has been syncing through
+`UTOPIA_SYNC_URL`/`UTOPIA_SYNC_FOLDER` since before this bookkeeping existed — adopts the
+destination it opens with instead of exporting every shard into it, so the upgrade costs one
+launch no republish (`ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph`).
+Repeating Apply for the same destination does not enqueue the graph again; switching back
+can re-send updates, but CRDT import remains idempotent.
+
+`ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates` covers two
+stores, a fresh relay, and switching back without lost or duplicate blocks. The existing
+cursor-space and compaction tests remain the guards against truncating unseen remote data.
+
 Made explicit on `fix/sync-engine-outbox` (`crates/utopia-sync`, plus the relay's push path
 in `crates/utopia-syncd`):
 

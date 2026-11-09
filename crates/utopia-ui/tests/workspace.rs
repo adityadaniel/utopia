@@ -7598,3 +7598,51 @@ fn editing_shortcuts_wait_for_the_input_method(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// §12.7: Off cancels the loop, and a replacement gets exactly one loop.
+#[gpui::test]
+fn ac_12_7_disabling_sync_stops_polling_and_reenable_starts_one_loop(cx: &mut TestAppContext) {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    let (_app, ws, cx) = setup(cx);
+    let relay = Relay::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    ws.update(cx, |w, cx| {
+        w.enable_sync_with(
+            Box::new(CountingTransport {
+                inner: RelayTransport::new(relay.clone(), "g"),
+                calls: calls.clone(),
+            }),
+            None,
+            cx,
+        );
+    });
+    ws.update(cx, |w, cx| {
+        drop(w.stop_sync(cx));
+    });
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    cx.update(|_, cx| assert!(!utopia_ui::sync_runner::facts(cx).is_on()));
+    ws.update(cx, |w, cx| {
+        w.enable_sync_with(
+            Box::new(CountingTransport {
+                inner: RelayTransport::new(relay, "g"),
+                calls: calls.clone(),
+            }),
+            None,
+            cx,
+        );
+    });
+    for _ in 0..4 {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}

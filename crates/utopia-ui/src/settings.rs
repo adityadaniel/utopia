@@ -10,9 +10,15 @@
 //!   to `keymap.json`; only the actions you changed are stored.
 //! - **Shortcuts** — the cheat sheet of everything currently bound, which is also what the
 //!   Help menu's "Keyboard Shortcuts" opens.
-//! - **Sync** — where this graph syncs to and whether its pages are encrypted on the way
-//!   (§12). Read only: the transport is resolved from the environment and the keychain at
-//!   launch, and no secret is shown.
+//! - **Sync** — the setup screen for this graph's sync (§12): Off, a relay, a nearby Mac
+//!   (mDNS, optionally hosting the relay from this Mac) or a shared folder, applied without
+//!   a restart. The relay token and the end-to-end passphrase are typed into masked fields
+//!   and go only to the macOS keychain (§15.6); the non-secret choice is kept per graph
+//!   under `<config>/sync/`. Environment variables override the saved choice for the run
+//!   and the pane says so. "Test connection" makes one manifest request off the UI thread;
+//!   "Connect another device" shows what the other instance needs, never a secret. The
+//!   pane itself is [`crate::sync_setup::SyncSetup`], installed by the app for the open
+//!   graph; without one (component tests) the tab shows the transport facts only.
 //! - **Help** — a tour of the app's features, with screenshots taken from the app itself.
 //!
 //! Capture uses a gpui *keystroke interceptor* rather than a key-down handler on purpose:
@@ -96,8 +102,8 @@ impl Tab {
             }
             Tab::Shortcuts => "Everything bound right now, as a cheat sheet.",
             Tab::Sync => {
-                "Where this graph syncs to, and whether its pages are encrypted on \
-                          the way."
+                "Where this graph syncs to: choose a transport, enter its credentials \
+                 and connect another device."
             }
             Tab::Help => {
                 "A short tour of what the app can do, with pictures of the real \
@@ -1775,11 +1781,14 @@ impl SettingsView {
         pane("help-detail", "help-detail").child(body)
     }
 
-    /// Settings → Sync (ST-5): what the transport in force is, and how it is set up. Read
-    /// only on purpose: the relay URL, token and passphrase are resolved from the
-    /// environment and the keychain at launch (§12), and secrets are never echoed here or
-    /// written to `settings.json` (§15.6, rule 9).
-    fn render_sync(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Setup is provided by the app for the open graph. Headless component tests can
+    /// still render transport facts without installing a coordinator (§12, ST-5).
+    fn render_sync(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if let Some(setup) = cx.try_global::<crate::sync_setup::SetupHandle>() {
+            return pane("settings-sync-pane", "settings-sync-pane")
+                .child(setup.0.clone())
+                .into_any_element();
+        }
         let th = theme(cx).clone();
         let density = appearance::density(cx);
         let facts = sync_runner::facts(cx);
@@ -1853,39 +1862,14 @@ impl SettingsView {
 
         this_graph = this_graph.child(card_row(
             div()
-                .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
-                .child(
-                    "Sync is configured when Utopia starts, not in this window: \
-                     UTOPIA_SYNC_URL (or `lan`) for a relay, UTOPIA_SYNC_FOLDER for a shared \
-                     folder. The relay token and the end-to-end passphrase come from the \
-                     environment or the macOS keychain (services utopia-sync and \
-                     utopia-sync-passphrase), never from the graph.",
-                ),
+                .child("Open a graph to configure its sync transport and credentials."),
             4,
             &th,
             density,
         ));
-
-        let how = card(&th)
-            .debug_selector(|| "settings-sync-how".into())
-            .child(card_title(&th, "How it is set up"))
-            .child(card_row(
-                div()
-                    .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.muted)
-                    .child(
-                        "Nothing on this pane is written down: settings.json holds only \
-                         local preferences, and the graph holds no token. Restart Utopia \
-                         with different variables to point it somewhere else.",
-                    ),
-                0,
-                &th,
-                density,
-            ));
-
         pane("settings-sync-pane", "settings-sync-pane")
             .child(this_graph)
-            .child(how)
+            .into_any_element()
     }
 }
