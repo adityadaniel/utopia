@@ -18,6 +18,14 @@ use utopia_ui::{
     workspace::Workspace,
 };
 
+/// How this device finds a Mac hosting this graph (§12.7 Nearby): mDNS on the local
+/// network. Injected so the discovery retry can be driven in a test without multicast.
+type Discover = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+fn lan_discovery() -> Discover {
+    Arc::new(|graph: &str| utopia_syncd::lan::discover(graph, Duration::from_secs(5)))
+}
+
 pub struct Coordinator {
     ws: Entity<Workspace>,
     view: Entity<SyncSetup>,
@@ -25,6 +33,7 @@ pub struct Coordinator {
     graph: String,
     env: Environment,
     secrets: Arc<dyn Secrets>,
+    discover: Discover,
     lan: Option<utopia_syncd::lan::LanRelay>,
     /// The initial load; its own slot because it ends by calling [`Self::run`], which
     /// replaces `task` while this one is still being polled.
@@ -50,6 +59,24 @@ impl Coordinator {
         cx: &mut App,
     ) -> Entity<Self> {
         let env = Environment::read(|k| std::env::var(k).ok());
+        let secrets: Arc<dyn Secrets> = Arc::new(Keychain::new(
+            std::env::var("UTOPIA_SYNC_KEYCHAIN_PREFIX").ok(),
+        ));
+        Self::install_with(ws, graph_path, config, env, secrets, lan_discovery(), cx)
+    }
+
+    /// The real app passes the Keychain and mDNS; tests pass the in-memory `Secrets` double
+    /// and a discovery that can be made to succeed on a later attempt, so no test touches a
+    /// real credential or the network.
+    fn install_with(
+        ws: Entity<Workspace>,
+        graph_path: &Path,
+        config: &Path,
+        env: Environment,
+        secrets: Arc<dyn Secrets>,
+        discover: Discover,
+        cx: &mut App,
+    ) -> Entity<Self> {
         let default_graph = crate::paths::graph_id(graph_path);
         let graph = env.graph.clone().unwrap_or_else(|| {
             ws.read(cx).app().clone().update(cx, |app, _| {
@@ -74,9 +101,6 @@ impl Coordinator {
         let file = config.join("sync").join(format!("{id}.json"));
         let view = cx.new(|cx| SyncSetup::new(graph.clone(), cx));
         cx.set_global(SetupHandle(view.clone()));
-        let secrets: Arc<dyn Secrets> = Arc::new(Keychain::new(
-            std::env::var("UTOPIA_SYNC_KEYCHAIN_PREFIX").ok(),
-        ));
         cx.new(|cx| {
             let sub = cx.subscribe(&view, |this: &mut Self, _, request: &Request, cx| {
                 this.run(request.clone(), true, cx)
@@ -88,6 +112,7 @@ impl Coordinator {
                 graph,
                 env,
                 secrets,
+                discover,
                 lan: None,
                 load: None,
                 task: None,
@@ -152,25 +177,29 @@ impl Coordinator {
         let file = self.file.clone();
         let secrets = self.secrets.clone();
         let env = self.env.clone();
+        let discover = self.discover.clone();
         let test_only = request.test_only;
         let active_url = self.view.read(cx).active_url.clone();
-        let old_listener = if test_only {
-            None
-        } else {
-            self.ws.update(cx, |ws, cx| ws.stop_sync(cx))
-        };
-        let old_lan = if test_only { None } else { self.lan.take() };
+        // Nothing that already works is torn down before the new target is ready: a failed
+        // Apply (a bad URL, an unreachable host, a key mismatch) leaves the running sync
+        // alone. Hosting is the exception, because the port has to be free before a new
+        // relay can bind it; it is released below, where the bind happens.
+        let hosting = !test_only
+            && request.preferences.mode == Mode::Nearby
+            && request.preferences.host.is_some();
+        let old_lan = if hosting { self.lan.take() } else { None };
         self.task = Some(cx.spawn(async move |this, cx| {
             let prefs = request.preferences.clone();
+            let mut old_lan = old_lan;
+            // The relay database sits next to the settings file; the background task owns
+            // this copy, the UI thread owns the other.
+            let relay_file = file.clone();
             let result = cx.background_executor().spawn(async move {
-                if let Some(listener) = old_listener { listener.stop(); }
-                drop(old_lan);
                 if test_only {
-                    return test_target(&request, &graph, &env, secrets.as_ref(), active_url).map(|message| (None, message));
+                    return test_target(&request, &graph, &env, secrets.as_ref(), active_url, discover.as_ref()).map(|message| (None, message));
                 }
                 request.preferences.validate()?;
                 if request.preferences.mode == Mode::Off {
-                    if save { request.preferences.save(&file)?; }
                     return Ok((None, "Sync is Off. Your notes and queued edits are kept.".into()));
                 }
                 let (token, passphrase) = credentials(&request, &graph, &env, secrets.as_ref())?;
@@ -182,14 +211,16 @@ impl Coordinator {
                     Mode::Nearby => {
                         let url = if let Some(bind) = &request.preferences.host {
                             if env.host.is_none() && token.as_ref().is_none_or(|s| s.is_empty()) { return Err("Hosting requires a relay token. Enter one, then Apply.".into()); }
-                            if let Some(parent) = file.parent() { std::fs::create_dir_all(parent).map_err(|_| "Could not create the relay directory.")?; }
-                            let db = file.with_extension("relay.db");
+                            if let Some(parent) = relay_file.parent() { std::fs::create_dir_all(parent).map_err(|_| "Could not create the relay directory.")?; }
+                            let db = relay_file.with_extension("relay.db");
                             let cfg = utopia_syncd::Config { tokens: token.clone().into_iter().collect(), ..Default::default() };
+                            // The old host holds the listen address until it is dropped.
+                            drop(old_lan.take());
                             let relay = utopia_syncd::lan::serve_lan(&db, bind, &graph, cfg, true).map_err(|_| "Could not host the relay. Check the listen address and whether its port is in use.")?;
                             let url = format!("http://127.0.0.1:{}", relay.addr.port());
                             lan = Some(relay); url
                         } else {
-                            utopia_syncd::lan::discover(&graph, Duration::from_secs(5)).ok_or("No Nearby Mac found for this graph. Enable hosting on the other Mac, then Apply again.")?
+                            discover(&graph).ok_or("No Nearby Mac found for this graph. Enable hosting on the other Mac, then Apply again.")?
                         };
                         SyncTarget::Relay { url, token }
                     }
@@ -225,46 +256,85 @@ impl Coordinator {
                 // run without changing Keychain; the graph's marker still prevents re-keying.
                 if save {
                     save_secrets(secrets.as_ref(), &graph, &request.token, &request.passphrase)?;
-                    request.preferences.save(&file)?;
                 }
                 let transport: BoxTransport = Box::new(transport);
                 let destination = destination(&cfg, transport.cursor_space(), connected.instance);
                 Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on. The sidebar shows connection status.".into()))
             }).await;
-            let _ = this.update(cx, |this, cx| {
+            let update = this.update(cx, |this, cx| {
                 match result {
-                    Ok((prepared, message)) => {
-                        if let Some(prepared) = prepared {
-                            let ready = this.ws.read(cx).app().clone().update(cx, |app, _| {
-                                if let Some(marker) = &prepared.key_check { app.store.sync_set("setup_e2e_check", marker)?; }
-                                app.store.prepare_sync_destination(&prepared.destination)
-                            });
-                            match ready {
-                                Ok(()) => {
-                                    this.view.update(cx, |view, _| {
-                                        view.active_url = match &prepared.cfg.target { SyncTarget::Relay { url, .. } => Some(url.clone()), _ => None };
-                                    });
-                                    let started = this.ws.update(cx, |ws, cx| ws.start_prepared_sync(&prepared.cfg, prepared.transport, cx));
-                                    if !started {
-                                        this.view.update(cx, |view, cx| view.finish("Sync is Off: the runner could not start. Local editing is still available.".into(), cx));
-                                        return;
-                                    }
-                                    this.lan = prepared.lan;
-                                }
-                                Err(_) => {
-                                    this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination. Local data is unchanged.".into(), cx));
-                                    return;
+                    Ok((None, message)) => {
+                        // Off (or a connection test): only stopping sync touches the runner.
+                        let old = if test_only { None } else { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)) };
+                        if !test_only {
+                            this.lan = None;
+                            this.view.update(cx, |view, _| view.active_url = None);
+                            if save {
+                                if let Err(error) = prefs.save(&file) {
+                                    this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
+                                    return old;
                                 }
                             }
-                        } else if !test_only { this.view.update(cx, |view, _| view.active_url = None); }
+                        }
                         this.view.update(cx, |view, cx| {
-                            if !test_only { view.preferences = prefs; if save { view.notice = None; } }
+                            if !test_only { view.preferences = prefs.clone(); if save { view.notice = None; } }
                             view.finish(message, cx);
                         });
+                        old
                     }
-                    Err(message) => this.view.update(cx, |view, cx| view.finish(if test_only { message } else { format!("Sync is Off: {message}") }, cx)),
+                    Ok((Some(prepared), message)) => {
+                        // The old runner is stopped only now, and before the destination is
+                        // queued: a round still in flight must not push the republished rows
+                        // to the target being replaced.
+                        let old = if test_only { None } else { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)) };
+                        let ready = this.ws.read(cx).app().clone().update(cx, |app, _| {
+                            if let Some(marker) = &prepared.key_check { app.store.sync_set("setup_e2e_check", marker)?; }
+                            app.store.prepare_sync_destination(&prepared.destination)
+                        });
+                        if ready.is_err() {
+                            this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination. Local data is unchanged.".into(), cx));
+                            return old;
+                        }
+                        // The settings describe what is running, so they are written after
+                        // the destination record, never before a target is known to work.
+                        if save {
+                            if let Err(error) = prefs.save(&file) {
+                                this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
+                                return old;
+                            }
+                        }
+                        this.view.update(cx, |view, _| {
+                            view.active_url = match &prepared.cfg.target { SyncTarget::Relay { url, .. } => Some(url.clone()), _ => None };
+                        });
+                        let started = this.ws.update(cx, |ws, cx| ws.start_prepared_sync(&prepared.cfg, prepared.transport, cx));
+                        if !started {
+                            this.view.update(cx, |view, cx| view.finish("Sync is Off: the runner could not start. Local editing is still available.".into(), cx));
+                            return old;
+                        }
+                        this.lan = prepared.lan;
+                        this.view.update(cx, |view, cx| {
+                            view.preferences = prefs.clone();
+                            if save { view.notice = None; }
+                            view.finish(message, cx);
+                        });
+                        old
+                    }
+                    Err(message) => {
+                        // The previous target, if any, keeps running: nothing was torn down.
+                        this.view.update(cx, |view, cx| view.finish(if test_only { message } else { format!("Sync is Off: {message}") }, cx));
+                        if hosting {
+                            // Its listen socket is gone with the old host, so it cannot work.
+                            this.ws.update(cx, |ws, cx| ws.stop_sync(cx))
+                        } else {
+                            None
+                        }
+                    }
                 }
             });
+            // Joining a listener blocks, so it never runs on the UI thread.
+            if let Ok(Some(listener)) = update {
+                cx.background_executor().spawn(async move { listener.stop() }).await;
+            }
         }));
     }
 }
@@ -321,6 +391,7 @@ fn test_target(
     env: &Environment,
     secrets: &dyn Secrets,
     active_url: Option<String>,
+    discover: &(dyn Fn(&str) -> Option<String> + Send + Sync),
 ) -> Result<String, String> {
     let (token, _) = credentials(request, graph, env, secrets)?;
     let url = match request.preferences.mode {
@@ -328,8 +399,7 @@ fn test_target(
         Mode::Nearby if request.preferences.host.is_some() => {
             active_url.ok_or("Apply hosting first, then test the connection.")?
         }
-        Mode::Nearby => utopia_syncd::lan::discover(graph, Duration::from_secs(5))
-            .ok_or("No Nearby Mac found for this graph.")?,
+        Mode::Nearby => discover(graph).ok_or("No Nearby Mac found for this graph.")?,
         Mode::Folder => {
             let path = request
                 .preferences
@@ -353,6 +423,143 @@ fn test_target(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
+    use std::sync::Mutex;
+    use utopia_store::Store;
+    use utopia_ui::app_state::AppState;
+    use utopia_ui::theme::Theme;
+    use utopia_ui::workspace::Workspace;
+
+    /// The `Secrets` double: no test touches a real Keychain item (§15.6).
+    #[derive(Default)]
+    struct MemorySecrets(Mutex<Vec<(String, String, String)>>);
+    impl Secrets for MemorySecrets {
+        fn get(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            Ok(self
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(s, a, _)| s == service && a == account)
+                .map(|(_, _, value)| value.clone()))
+        }
+        fn set(&self, service: &str, account: &str, value: &str) -> Result<(), String> {
+            let mut all = self.0.lock().unwrap();
+            all.retain(|(s, a, _)| !(s == service && a == account));
+            all.push((service.into(), account.into(), value.into()));
+            Ok(())
+        }
+    }
+
+    /// The settings file the coordinator reads for `graph` (`sync/<sha256>.json`).
+    fn settings_file(config: &Path, graph: &Path) -> PathBuf {
+        let canonical = graph.canonicalize().unwrap_or_else(|_| graph.to_path_buf());
+        config.join("sync").join(format!(
+            "{}.json",
+            utopia_store::sha256_hex(canonical.to_string_lossy().as_bytes())
+        ))
+    }
+
+    struct Harness {
+        ws: Entity<Workspace>,
+        setup: Entity<SyncSetup>,
+        /// Held, as the app's `Ready` holds it: an entity nobody owns is released and its
+        /// background tasks can no longer update it.
+        _coordinator: Entity<Coordinator>,
+        graph: PathBuf,
+        config: PathBuf,
+    }
+
+    /// A workspace over a scratch graph, with the coordinator installed the way the app
+    /// installs it at startup (`saved` is what the settings file holds).
+    fn harness(
+        cx: &mut TestAppContext,
+        dir: &Path,
+        saved: Option<&Preferences>,
+        discover: Discover,
+    ) -> Harness {
+        let graph = dir.join("Demo.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let config = dir.join("config");
+        if let Some(prefs) = saved {
+            let file = settings_file(&config, &graph);
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            prefs.save(&file).unwrap();
+        }
+        cx.update(|cx| {
+            cx.set_global(Theme::light());
+            utopia_ui::actions::install_keymap(cx, None);
+        });
+        let store = Store::open_in_memory().unwrap();
+        let app = cx.new(|_| AppState::new(store));
+        let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+        let secrets: Arc<dyn Secrets> = Arc::new(MemorySecrets::default());
+        let coordinator = cx.update(|_, cx| {
+            Coordinator::install_with(
+                ws.clone(),
+                &graph,
+                &config,
+                Environment::default(),
+                secrets,
+                discover,
+                cx,
+            )
+        });
+        let setup = coordinator.read_with(cx, |coordinator, _| coordinator.view.clone());
+        Harness {
+            ws,
+            setup,
+            _coordinator: coordinator,
+            graph,
+            config,
+        }
+    }
+
+    /// §12.7: a failed Apply must not stop the sync that already works. The saved settings
+    /// keep naming the old target, so the pane and the next launch agree with the runner.
+    #[gpui::test]
+    fn ac_12_7_a_failed_apply_keeps_the_running_sync(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let saved = Preferences {
+            mode: Mode::Folder,
+            folder: Some(shared.clone()),
+            ..Default::default()
+        };
+        let h = harness(cx, dir.path(), Some(&saved), lan_discovery());
+        cx.run_until_parked();
+        assert!(
+            h.ws.read_with(cx, |ws, _| ws.sync_phase().is_some()),
+            "the saved folder starts sync: {}",
+            h.setup.read_with(cx, |view, _| view.status.clone())
+        );
+        // A folder under a file cannot be opened, so the Apply fails after the transport
+        // is built — one of the failures that used to stop the working sync.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"not a directory").unwrap();
+        let unreachable = blocker.join("shared");
+        h.setup.update(cx, |view, cx| {
+            view.choose(Mode::Folder, cx);
+            view.folder.update(cx, |input, cx| {
+                input.fill(&unreachable.display().to_string(), cx)
+            });
+            view.request(false, cx);
+        });
+        cx.run_until_parked();
+        let status = h.setup.read_with(cx, |view, _| view.status.clone());
+        assert!(status.starts_with("Sync is Off:"), "{status}");
+        assert!(
+            h.ws.read_with(cx, |ws, _| ws.sync_phase().is_some()),
+            "a failed Apply stopped the working sync: {status}"
+        );
+        assert_eq!(
+            Preferences::load(&settings_file(&h.config, &h.graph)).0,
+            saved,
+            "the saved settings still name the target that is running"
+        );
+    }
+
     struct Stored;
     impl Secrets for Stored {
         fn get(&self, service: &str, _: &str) -> Result<Option<String>, String> {
