@@ -139,6 +139,33 @@ pub(crate) fn write_job(conn: &mut Connection, job: &Job) -> Result<HashSet<Page
     Ok(work.changed)
 }
 
+/// The published tag-page classification (SB-2), explicit (tag-pages-publication): "no set
+/// has been published" and "the set as of the last commit" are different states, and an
+/// empty set must never be read as "nothing classified yet".
+///
+/// The set is a classification of the *index*, so it is only as current as the last write
+/// that published it: every write path that moves the index (a commit, or a store method
+/// that bypasses the writer) has to end in a publish.
+#[derive(Default)]
+pub(crate) enum TagPages {
+    /// No commit has published a set and nobody has classified one yet: the UI computes the
+    /// first copy at startup.
+    #[default]
+    Unscanned,
+    /// The classification as of the last committed job (or the last explicit republish).
+    /// A failed commit does not replace it: it describes the index that is on disk.
+    Published(HashSet<PageId>),
+}
+
+impl TagPages {
+    fn as_set(&self) -> Option<&HashSet<PageId>> {
+        match self {
+            TagPages::Unscanned => None,
+            TagPages::Published(set) => Some(set),
+        }
+    }
+}
+
 /// The writer's health, explicit (store-commit-pipeline): a failed commit is a state the
 /// store stays in until `Store::sync_index` has reconciled the shards and resubmitted
 /// them. It is not a one-shot string that the next reader may take.
@@ -177,7 +204,7 @@ pub(crate) struct Shared {
     cv: Condvar,
     /// The tag-page classification as of the last committed job (SB-2). Published here,
     /// off the UI thread, so an index update never runs the whole-graph query.
-    tag_pages: Mutex<Option<HashSet<PageId>>>,
+    tag_pages: Mutex<TagPages>,
     /// How many whole-graph classifications this writer has run. Only the first commit
     /// needs one; later commits update the pages they can affect (SB-2).
     tag_scans: std::sync::atomic::AtomicU64,
@@ -247,25 +274,40 @@ impl Shared {
         self.cv.notify_all();
     }
 
+    /// Classify every page (SB-2). This is the one answer for "the index may have moved
+    /// without a commit" as well as the transition out of [`TagPages::Unscanned`].
+    fn scan_tag_pages(&self, conn: &Connection) -> Option<HashSet<PageId>> {
+        self.tag_scans
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match crate::query::hashtag_only_pages(conn) {
+            Ok(pages) => Some(pages),
+            Err(e) => {
+                eprintln!("utopia: tag pages: {e}");
+                None
+            }
+        }
+    }
+
     /// Update the published tag-page classification after a commit (SB-2). Only the pages
     /// the commit wrote and the destinations whose reference edges it changed can flip:
     /// losing the last reference to a page removes that edge, so it is one of
     /// `changed_refs`. Everything else keeps its entry, so no commit walks the whole graph.
     /// The first commit (before there is a set) classifies once. A failure leaves the
-    /// previous set in place.
+    /// previous set in place: it still describes the index that is on disk.
     fn publish_tag_pages(&self, conn: &Connection, job: &Job, changed_refs: &HashSet<PageId>) {
         let mut slot = match self.tag_pages.lock() {
             Ok(slot) => slot,
             Err(_) => return,
         };
-        let Some(mut set) = slot.clone() else {
-            self.tag_scans
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            match crate::query::hashtag_only_pages(conn) {
-                Ok(pages) => *slot = Some(pages),
-                Err(e) => eprintln!("utopia: tag pages: {e}"),
-            }
-            return;
+        let mut set = match slot.as_set() {
+            Some(previous) => previous.clone(),
+            None => match self.scan_tag_pages(conn) {
+                Some(pages) => {
+                    *slot = TagPages::Published(pages);
+                    return;
+                }
+                None => return,
+            },
         };
         let written: Vec<PageId> = job.pages.iter().map(|p| p.page.clone()).collect();
         let mut affected: HashSet<PageId> = written.iter().cloned().collect();
@@ -290,7 +332,16 @@ impl Shared {
                 }
             }
         }
-        *slot = Some(set);
+        *slot = TagPages::Published(set);
+    }
+
+    /// Make an already classified set the published one (SB-2). A write that bypasses the
+    /// writer moved the index without a commit, so the set it implies has to be published
+    /// from outside too.
+    fn republish_tag_pages(&self, set: HashSet<PageId>) {
+        if let Ok(mut slot) = self.tag_pages.lock() {
+            *slot = TagPages::Published(set);
+        }
     }
 }
 
@@ -484,13 +535,18 @@ impl Persister {
         self.shared().clear_failure(through);
     }
 
+    /// Make a classification computed on the store's connection the published set (SB-2).
+    pub fn republish_tag_pages(&self, set: HashSet<PageId>) {
+        self.shared().republish_tag_pages(set);
+    }
+
     /// The tag-page classification published by the last commit, if any (SB-2).
     pub fn tag_pages(&self) -> Option<HashSet<PageId>> {
         self.shared()
             .tag_pages
             .lock()
             .ok()
-            .and_then(|slot| slot.clone())
+            .and_then(|slot| slot.as_set().cloned())
     }
 
     /// How many per-page tag classifications the incremental path has run (tests, SB-2).

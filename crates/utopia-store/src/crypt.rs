@@ -2,11 +2,150 @@
 //! database. The passphrase never touches the file or the sync relay; the app reads it
 //! from the macOS keychain or asks for it.
 
+use std::io::Read;
 use std::path::Path;
 
 use rusqlite::{Connection, ErrorCode};
 
 use crate::{Result, StoreError};
+
+/// SQLite's fixed file header. A plain database starts with it; SQLCipher replaces the
+/// header with a random salt, so a file that still starts with it is never ciphertext
+/// (`docs/state-machines/encryption-at-rest-state.md`).
+const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+/// What a graph file is before a passphrase is applied: an ordinary SQLite database, an
+/// encrypted one, or damage. `Corrupt` is the state that used to be reported as
+/// `Encrypted`: a file that still carries SQLite's header cannot be unlocked by a
+/// passphrase, so the UI must not show it as locked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// Missing, empty, or a readable/unreadable SQLite file.
+    Plain,
+    /// No SQLite header, and SQLite cannot read it without a key.
+    Encrypted,
+    /// Carries the SQLite header but does not open as a database.
+    Corrupt,
+}
+
+impl FileKind {
+    /// Classify a file SQLite refused to read (`SQLITE_NOTADB`) from its header alone.
+    fn after_not_a_database(path: &Path) -> Self {
+        if has_sqlite_header(path) {
+            Self::Corrupt
+        } else {
+            Self::Encrypted
+        }
+    }
+}
+
+/// Whether `path` starts with SQLite's header. A missing or empty file counts as plain:
+/// SQLite creates a fresh database there.
+fn has_sqlite_header(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return true;
+    };
+    let mut header = [0u8; 16];
+    match file.read_exact(&mut header) {
+        Ok(()) => header == *SQLITE_HEADER,
+        // Shorter than the header: an empty file is a new plain database, and anything
+        // else is too short to be SQLCipher's 16-byte salt.
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => true,
+        Err(_) => true,
+    }
+}
+
+/// Classify a graph without a passphrase. A headerless file that SQLite refuses is
+/// `Encrypted`: ciphertext and damage are indistinguishable there, so the safe reading is
+/// the one a passphrase can still resolve.
+pub fn file_kind(path: &Path) -> FileKind {
+    if !path.metadata().is_ok_and(|m| m.len() > 0) {
+        return FileKind::Plain;
+    }
+    match open_keyed(path, None) {
+        Ok(_) => FileKind::Plain,
+        Err(StoreError::Encrypted) => FileKind::after_not_a_database(path),
+        Err(StoreError::Corrupt) => FileKind::Corrupt,
+        // Permissions or another I/O error: not a graph we can show; still not a lock.
+        Err(_) => FileKind::Corrupt,
+    }
+}
+
+/// A shared advisory lock on a graph file, held for a `Store`'s lifetime.
+///
+/// `set_encryption` builds a new file and renames it over the old one, so it must not run
+/// while a store has the file open: the store's two connections would keep reading and
+/// writing the unlinked inode (docs/state-machines/encryption-at-rest-state.md issue 2).
+/// `flock` is released by the kernel on drop or process exit, so a crash leaves no stale
+/// lock. Encryption at rest only exists on macOS; elsewhere this is a no-op.
+pub(crate) struct FileLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+impl FileLock {
+    /// The lock lives beside the graph, not on it: macOS implements `flock` with `fcntl`
+    /// locks, which would collide with SQLite's own locking on the database file. The
+    /// sidecar is left behind on purpose; removing it while another process waits would
+    /// let a third process lock a fresh inode and run alongside the waiter.
+    #[cfg(unix)]
+    fn open(path: &Path) -> Result<std::fs::File> {
+        // Append, never replace the extension: a graph explicitly named `x.utopia-lock`
+        // would otherwise lock the database file itself and collide with SQLite.
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let lock = std::path::PathBuf::from(lock);
+        Ok(std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock)?)
+    }
+
+    /// Wait until no re-key is running, then share the file with other open stores.
+    #[cfg(unix)]
+    pub(crate) fn shared(path: &Path) -> Result<Self> {
+        let file = Self::open(path)?;
+        // SAFETY: `file` is a live descriptor and `LOCK_SH` is a valid flock operation.
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Self { _file: file })
+    }
+
+    /// Take the exclusive side without waiting. `None` means an open store holds the
+    /// shared side.
+    #[cfg(unix)]
+    pub(crate) fn try_exclusive(path: &Path) -> Result<Option<Self>> {
+        let file = Self::open(path)?;
+        // SAFETY: `file` is a live descriptor and these are valid flock flags.
+        let r = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+        if r != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+        Ok(Some(Self { _file: file }))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn shared(_path: &Path) -> Result<Self> {
+        Ok(Self {})
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn try_exclusive(_path: &Path) -> Result<Option<Self>> {
+        Ok(Some(Self {}))
+    }
+}
 
 /// Open a connection, applying the key first (SQLCipher requires it before any read)
 /// and checking it can read the schema.
@@ -28,7 +167,10 @@ pub(crate) fn open_keyed(path: &Path, key: Option<&str>) -> Result<Connection> {
     }) {
         Ok(_) => Ok(conn),
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::NotADatabase => {
-            Err(StoreError::Encrypted)
+            Err(match FileKind::after_not_a_database(path) {
+                FileKind::Corrupt => StoreError::Corrupt,
+                FileKind::Plain | FileKind::Encrypted => StoreError::Encrypted,
+            })
         }
         Err(e) => Err(e.into()),
     }
@@ -43,8 +185,7 @@ pub fn encryption_available() -> bool {
 
 /// Whether the file at `path` is an encrypted graph (unreadable without a key).
 pub fn is_encrypted(path: &Path) -> bool {
-    path.metadata().is_ok_and(|m| m.len() > 0)
-        && matches!(open_keyed(path, None), Err(StoreError::Encrypted))
+    file_kind(path) == FileKind::Encrypted
 }
 
 /// Encrypt, re-key or decrypt a graph file that no process has open. `from` is the
@@ -54,6 +195,10 @@ pub fn set_encryption(path: &Path, from: Option<&str>, to: Option<&str>) -> Resu
     if to.is_some_and(str::is_empty) {
         return Err(StoreError::Invalid("the passphrase is empty".into()));
     }
+    let _lock = match FileLock::try_exclusive(path)? {
+        Some(lock) => lock,
+        None => return Err(StoreError::Busy),
+    };
     let conn = open_keyed(path, from)?;
     // Fold the WAL in so the export sees everything.
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;

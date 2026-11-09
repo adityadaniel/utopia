@@ -57,6 +57,12 @@ pub struct AppState {
     /// Pages that exist only because of a `#tag` (SB-2), cached from the index. Views read
     /// this; the classification query runs at startup and on [`IndexUpdated`], never in a
     /// render (rule 10).
+    ///
+    /// The copy follows the store's published set on [`IndexUpdated`] only. The three writes
+    /// that republish without a commit (`Store::set_date_format`, `Store::empty_trash`,
+    /// `Store::rebuild_index`) do not emit it, so a view that calls one of them has to
+    /// refresh this from `store.tag_pages()` (`docs/state-machines/tag-pages-publication.md`,
+    /// "Left as is").
     pub tag_pages: HashSet<PageId>,
     dirty_since: Option<Instant>,
     flush_task: Option<Task<()>>,
@@ -75,9 +81,17 @@ impl AppState {
         if let Err(e) = store.set_debounced(true) {
             eprintln!("utopia: {e}");
         }
-        // Classify once at startup; each commit publishes the new set with the job (SB-2),
-        // so neither the sidebar's render nor an index update runs the query (rule 10).
-        let tag_pages = store.hashtag_only_pages().unwrap_or_default();
+        // Classify once at startup and *publish* the answer (SB-2): the copy the UI starts
+        // with is then the set the first commit updates, not a second classification living
+        // beside that slot. Each commit publishes the new set with the job, so neither the
+        // sidebar's render nor an index update runs the query (rule 10).
+        let tag_pages = match store.republish_tag_pages() {
+            Ok(pages) => pages,
+            Err(e) => {
+                eprintln!("utopia: {e}");
+                HashSet::new()
+            }
+        };
         Self {
             store,
             version: 0,
@@ -313,6 +327,47 @@ mod tests {
                 app.dirty_since.is_none(),
                 "the dirty clock follows the pending set"
             );
+        });
+    }
+
+    /// SB-2: one copy of the classification. A session that opens an existing graph has
+    /// published nothing yet (the slot is `Unscanned`) while the index already has the tag
+    /// pages, so the copy the UI starts with has to *be* the published set — otherwise two
+    /// pieces of code classify the same index and only one of them is updated by commits.
+    #[gpui::test]
+    fn the_startup_tag_set_is_the_published_one(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.utopia");
+        {
+            let mut store = Store::open(&path).unwrap();
+            store.set_today(Some(today()));
+            let (day, block) = store.open_daily(today()).unwrap();
+            store
+                .set_block_text(&day, &block, "wrote about #atlas", None, None)
+                .unwrap();
+            store.commit_block(&day, &block).unwrap();
+            store.sync_index().unwrap();
+        }
+
+        // A fresh session: the index has the tag page, no commit here has published a set.
+        let store = Store::open(&path).unwrap();
+        assert!(
+            store.tag_pages().is_none(),
+            "nothing has published a set in this session"
+        );
+        let app = cx.new(|_| AppState::new(store));
+        app.update(cx, |app, _| {
+            let atlas = app
+                .store
+                .find_page("atlas")
+                .unwrap()
+                .expect("the hashtag made the page");
+            assert_eq!(
+                app.store.tag_pages().as_ref(),
+                Some(&app.tag_pages),
+                "the startup copy is the published set"
+            );
+            assert!(app.tag_pages.contains(&atlas));
         });
     }
 

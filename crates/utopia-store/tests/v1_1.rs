@@ -805,3 +805,174 @@ fn unrelated_edits_do_not_reclassify_a_busy_tag() {
         "only the written page is classified; the tag's graph-wide refs are not rescanned"
     );
 }
+
+/// SB-2 + AC-1.8: switching the date format re-renders daily titles and re-resolves every
+/// reference on the store's own connection, so no commit runs and nothing publishes. The
+/// published set classifies that index, so it has to be republished with it.
+#[test]
+fn sb_2_date_format_change_republishes_tag_pages() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    // Not a date under the default format, so this is a hashtag into an ordinary page;
+    // under "do MMM yyyy" the same text parses as 2026-06-01 (§10.3.1) and stops being one.
+    write(&mut s, &notes, "#[[1st Jun 2026]]");
+    s.sync_index().unwrap();
+    let tag = s
+        .find_page("1st Jun 2026")
+        .unwrap()
+        .expect("the hashtag made the page");
+    assert!(
+        s.tag_pages().unwrap().contains(&tag),
+        "reached only through a hashtag: {:?}",
+        s.tag_pages()
+    );
+
+    s.set_date_format("do MMM yyyy").unwrap();
+    s.sync_index().unwrap();
+    assert_eq!(
+        s.tag_pages().unwrap(),
+        s.hashtag_only_pages().unwrap(),
+        "the published set follows the index the new format produced"
+    );
+    assert!(
+        !s.tag_pages().unwrap().contains(&tag),
+        "the hashtag now names a day, not the page"
+    );
+}
+
+/// SB-2 + §10.4: `rebuild_index` is the repair for a projection that disagrees with the
+/// shards. A classification taken from the damaged index must not survive the repair.
+#[test]
+fn sb_2_rebuild_index_republishes_tag_pages() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    let source = write(&mut s, &notes, "about #alpha");
+    let alpha = s.find_page("alpha").unwrap().expect("the hashtag made it");
+    s.sync_index().unwrap();
+    // Alpha is an ordinary page because it has words of its own.
+    write(&mut s, &alpha, "the atlas, in its own words");
+    s.sync_index().unwrap();
+    assert!(!s.tag_pages().unwrap().contains(&alpha));
+
+    // The projection loses Alpha's block rows: exactly the drift `rebuild_index` repairs.
+    s.conn()
+        .execute("DELETE FROM block WHERE page_id=?1", [alpha.as_str()])
+        .unwrap();
+    // A commit that changes the tag's edges classifies Alpha from that damaged index …
+    s.set_block_text(&notes, &source, "about nothing", None, None)
+        .unwrap();
+    s.commit_block(&notes, &source).unwrap();
+    s.set_block_text(&notes, &source, "about #alpha", None, None)
+        .unwrap();
+    s.commit_block(&notes, &source).unwrap();
+    assert!(
+        s.tag_pages().unwrap().contains(&alpha),
+        "classified from the index that lost its blocks"
+    );
+
+    s.rebuild_index().unwrap();
+    assert_eq!(
+        s.tag_pages().unwrap(),
+        s.hashtag_only_pages().unwrap(),
+        "the repaired index reclassifies the page"
+    );
+    assert!(
+        !s.tag_pages().unwrap().contains(&alpha),
+        "the page has blocks again, so it is not a tag page"
+    );
+}
+
+/// SB-2: emptying the trash removes rows the classification reads (the purged page and
+/// everything that pointed at it) outside any commit, so the set has to be republished
+/// from the index that is left.
+#[test]
+fn sb_2_empty_trash_republishes_tag_pages() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    write(&mut s, &notes, "a note about #alpha");
+    s.sync_index().unwrap();
+    let alpha = s.find_page("alpha").unwrap().expect("the hashtag made it");
+    assert!(s.tag_pages().unwrap().contains(&alpha));
+    s.delete_page(&alpha).unwrap();
+    let scans = s.tag_page_scans();
+
+    assert_eq!(s.empty_trash(None).unwrap(), 1, "the page is purged");
+    assert!(
+        s.tag_page_scans() > scans,
+        "the purge republishes the set from the index it left behind"
+    );
+    assert!(
+        !s.tag_pages().unwrap().contains(&alpha),
+        "a purged page cannot stay in the set"
+    );
+    assert_eq!(s.tag_pages().unwrap(), s.hashtag_only_pages().unwrap());
+}
+
+/// SB-2: the published set classifies the index, so a republish must not scan while a
+/// commit it was handed is still in flight. The set it would publish is stale, and because
+/// the slot is then `Published`, every later commit edits it incrementally — the wrong
+/// classification survives the session instead of being fixed by the next full scan.
+#[test]
+fn sb_2_republish_waits_for_a_submitted_commit() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    let block = write(&mut s, &notes, "about #alpha");
+    s.sync_index().unwrap();
+    let alpha = s
+        .find_page("alpha")
+        .unwrap()
+        .expect("the tag made the page");
+    assert!(s.tag_pages().unwrap().contains(&alpha));
+
+    // Debounced is the UI's mode (rule 10): index reads never wait for the writer, and
+    // `AppState::new` publishes the startup classification in exactly this state.
+    s.set_debounced(true).unwrap();
+    // Hold the write lock, so the next commit can be submitted but cannot land: the index
+    // (and a scan of it) still says "tag page" while the job is in flight.
+    let holder = rusqlite::Connection::open(s.path().unwrap()).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    s.set_block_text(&notes, &block, "about [[alpha]]", None, None)
+        .unwrap();
+    s.flush().unwrap();
+    // Release the lock shortly, so a republish that waits can finish.
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(400));
+        holder.execute_batch("COMMIT").unwrap();
+    });
+
+    let published = s.republish_tag_pages().unwrap();
+    assert!(
+        published.is_empty(),
+        "the set published the index the commit left, not the one it found: {published:?}"
+    );
+    assert_eq!(
+        s.tag_pages().unwrap(),
+        s.hashtag_only_pages().unwrap(),
+        "and that is what the slot holds"
+    );
+}
+
+/// SB-2 + rule 11: the purge has already committed when the set is republished. A failure
+/// to classify must not turn a purge that happened into an error: the caller would see
+/// "failed" and a retry would purge nothing. Log it and keep the purge's own answer.
+#[test]
+fn sb_2_empty_trash_reports_the_purge_when_the_scan_fails() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    // `beta` stays and is still blockless, so the classification really runs its queries
+    // (it returns early when no page can be a tag page at all).
+    write(&mut s, &notes, "a note about #alpha and #beta");
+    s.sync_index().unwrap();
+    let alpha = s.find_page("alpha").unwrap().expect("the hashtag made it");
+    s.find_page("beta").unwrap().expect("and so did this one");
+    s.delete_page(&alpha).unwrap();
+
+    // The classification reads `alias`; the purge does not, so breaking it fails only the
+    // republish that follows the committed delete.
+    s.conn().execute_batch("DROP TABLE alias").unwrap();
+    assert_eq!(
+        s.empty_trash(None).unwrap(),
+        1,
+        "the purge reports what it purged"
+    );
+}

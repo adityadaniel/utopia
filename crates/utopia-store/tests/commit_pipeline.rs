@@ -371,3 +371,48 @@ fn ac_13_3_repair_does_not_echo_remote_updates() {
         .count();
     assert_eq!(echoed, 0, "a repair must not enqueue imported ops");
 }
+
+/// SB-2 with issue 2 of this machine: a failed commit publishes nothing, because the set it
+/// would publish describes an index the failed job never reached; the repair that rewrites
+/// the shards then publishes the set that index implies.
+#[test]
+fn sb_2_a_failed_commit_keeps_the_set_and_the_repair_republishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let mut s = Store::open(&path).unwrap();
+    s.set_today(Some(date(2026, 11, 2)));
+    let notes = s.create_page("Notes").unwrap();
+    let block = s.ensure_first_block(&notes).unwrap();
+    s.set_block_text(&notes, &block, "about #alpha", None, None)
+        .unwrap();
+    s.commit_block(&notes, &block).unwrap();
+    s.sync_index().unwrap();
+    let alpha = s
+        .find_page("alpha")
+        .unwrap()
+        .expect("the tag made the page");
+    assert!(s.tag_pages().unwrap().contains(&alpha));
+
+    // The edit turns the hashtag into a plain link, so the page stops being a tag page.
+    fail_commits(&s);
+    s.set_block_text(&notes, &block, "about [[alpha]]", None, None)
+        .unwrap();
+    let _ = s.flush();
+    assert!(s.write_ticket().wait().is_err(), "the commit failed");
+    assert!(
+        s.tag_pages().unwrap().contains(&alpha),
+        "a failed commit leaves the set that describes the index on disk: {:?}",
+        s.tag_pages()
+    );
+
+    allow_commits(&s);
+    // The repair reports the failure it recovered from, then answers normally.
+    let _ = s.sync_index();
+    s.sync_index().unwrap();
+    assert!(
+        !s.tag_pages().unwrap().contains(&alpha),
+        "the repair republishes: {:?}",
+        s.tag_pages()
+    );
+    assert_eq!(s.tag_pages().unwrap(), s.hashtag_only_pages().unwrap());
+}

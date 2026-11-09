@@ -22,5 +22,10 @@ ulid.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 rusqlite = { workspace = true, features = ["bundled-sqlcipher"] }
 
+# A shared/exclusive advisory lock keeps `set_encryption` from renaming the graph out from
+# under an open store (docs/state-machines/encryption-at-rest-state.md issue 2).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

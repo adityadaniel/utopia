@@ -33,19 +33,20 @@ use chrono::NaiveDate;
 use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 use utopia_core::outline::Plan;
-use utopia_core::undo::{Caret, UndoGroup, UndoStack, UndoStep};
+use utopia_core::undo::{Caret, Coalesce, Direction, UndoGroup, UndoStack, UndoStep};
 use utopia_core::{BlockId, Command, DateFormat, DocDelta, DomainError, PageId, PageState};
 use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
 pub use attach::{sha256_hex, Attachment, BlobState, PdfHighlight, MAX_BLOB_BYTES};
 pub use blockquery::{QueryHit, QueryResult};
-pub use crypt::{encryption_available, is_encrypted, set_encryption};
+pub use crypt::{encryption_available, file_kind, is_encrypted, set_encryption, FileKind};
 pub use doctor::DoctorReport;
 pub use extras::{ImportReport, Mention, TEMPLATE_PREFIX};
 pub use pagegraph::{GraphNode, GraphOptions, PageGraph};
 pub use pages::PageFate;
 pub use project::{display_title, resolve_page_key};
 pub use query::*;
+pub use schema::SCHEMA_VERSION;
 pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
@@ -75,6 +76,17 @@ pub enum StoreError {
     /// The graph is encrypted at rest and the passphrase is missing or wrong.
     #[error("this graph is encrypted; the passphrase is missing or wrong")]
     Encrypted,
+    /// The file is not a database: damaged, not encrypted (the header is still SQLite's).
+    #[error("this graph file is damaged; it is not a database")]
+    Corrupt,
+    /// Another process has the graph open (or is changing its encryption).
+    #[error("this graph is open; close it before changing its encryption")]
+    Busy,
+    /// The file was written by a build with a newer schema; opening it would drop data.
+    #[error(
+        "this graph uses schema v{found}, but this build supports up to v{supported}; open it with the build that wrote it"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -188,6 +200,9 @@ pub struct Store {
     /// Unlinked-reference scans this store has run (LR-5). The count is cached per index
     /// version; tests read this to check the scan happens off the paint path.
     unlinked_scans: std::sync::atomic::AtomicU64,
+    /// Shared advisory lock on the graph file; `set_encryption` takes the exclusive side
+    /// (docs/state-machines/encryption-at-rest-state.md issue 2).
+    _lock: Option<crypt::FileLock>,
 }
 
 impl Store {
@@ -204,8 +219,10 @@ impl Store {
                 std::fs::create_dir_all(dir)?;
             }
         }
+        let lock = crypt::FileLock::shared(path)?;
         let conn = crypt::open_keyed(path, key)?;
         let mut store = Self::init(conn, Some(path.to_path_buf()))?;
+        store._lock = Some(lock);
         store.persister = Persister::spawn(path, key)?;
         Ok(store)
     }
@@ -265,6 +282,7 @@ impl Store {
             mem_blobs: HashMap::new(),
             tag_page_scans: std::sync::atomic::AtomicU64::new(0),
             unlinked_scans: std::sync::atomic::AtomicU64::new(0),
+            _lock: None,
         })
     }
 
@@ -299,9 +317,41 @@ impl Store {
     }
 
     /// The tag-page classification as the last commit published it (SB-2). `None` until
-    /// the first commit; [`Store::hashtag_only_pages`] computes and returns it directly.
+    /// something has published a set; [`Store::hashtag_only_pages`] computes and returns it
+    /// directly, and [`Store::republish_tag_pages`] publishes what it computes.
     pub fn tag_pages(&self) -> Option<HashSet<PageId>> {
         self.persister.tag_pages()
+    }
+
+    /// Classify every page and publish that as the current set (SB-2).
+    ///
+    /// Every write that moves the index through the writer publishes the set with its
+    /// commit. The three writes that bypass the writer — [`Store::set_date_format`]
+    /// re-resolving references, [`Store::empty_trash`] removing rows, and
+    /// [`Store::rebuild_index`] reprojecting from the shards — have to publish it
+    /// themselves, or the UI keeps reading a classification of an index that is gone. They
+    /// call this after their own `sync_index`, so the index it classifies has no pending
+    /// edits.
+    ///
+    /// The wait is part of the contract, not the caller's: `hashtag_only_pages`' own read
+    /// barrier is a no-op in debounced mode (rule 10), which is the mode the UI publishes
+    /// its startup copy in. Without it a scan taken before an in-flight commit landed would
+    /// become `Published`, and every later commit would edit that stale base incrementally.
+    pub fn republish_tag_pages(&self) -> Result<HashSet<PageId>> {
+        self.persister.wait()?;
+        let set = self.hashtag_only_pages()?;
+        self.persister.republish_tag_pages(set.clone());
+        Ok(set)
+    }
+
+    /// Republish after a write that has already committed. A classification failure cannot
+    /// undo that write (rule 11): report it and let the caller keep the answer it earned,
+    /// rather than reporting "failed" for a purge, format change or repair that happened.
+    /// The slot keeps the previous set, which then describes an index one write behind.
+    fn republish_tag_pages_after_commit(&self) {
+        if let Err(e) = self.republish_tag_pages() {
+            eprintln!("utopia: tag pages: {e}");
+        }
     }
 
     /// How many whole-graph tag classifications the commit path has run (tests, SB-2). One
@@ -772,6 +822,9 @@ impl Store {
         })?;
         tx.commit()?;
         self.date_format = fmt;
+        // Re-resolving moved reference edges on this connection without a commit, so the
+        // published set classifies an index that no longer exists (SB-2).
+        self.republish_tag_pages_after_commit();
         Ok(())
     }
 
@@ -998,8 +1051,10 @@ impl Store {
             .map(|(page, cmds)| (self.redirect(&page).unwrap_or(page), cmds))
             .collect();
         let now = self.now();
-        let mut group = UndoGroup::new(now);
-        group.coalesce = opts.coalesce.clone();
+        let mut group = UndoGroup::new();
+        if let Some(block) = opts.coalesce.clone() {
+            group.coalesce = Coalesce::open(block, now);
+        }
         group.caret_before = opts.caret_before.clone();
         group.caret_after = opts.caret_after.clone();
         let mut deltas: Vec<(PageId, DocDelta)> = Vec::new();
@@ -1032,12 +1087,18 @@ impl Store {
             .iter()
             .map(|(p, d)| (p.clone(), Some(d.clone())))
             .collect();
-        self.queue(&pages, true)?;
+        // A failed commit does not take the edit back (rule 5): the shard keeps it and the
+        // repair ships it later, so the group is recorded either way. Holding the error
+        // until after `push` is what makes "in memory but not on the stack" impossible
+        // (docs/state-machines/undo-group-coalescing.md, issue 3).
+        let queued = self.queue(&pages, true);
         // Only plain text edits are debounced; structure and identity reach the writer
         // at once so resolution and autocomplete see them.
-        if deltas.iter().any(|(_, d)| d.structural || d.meta_changed) {
-            self.flush()?;
-        }
+        let committed = if deltas.iter().any(|(_, d)| d.structural || d.meta_changed) {
+            queued.and_then(|()| self.flush())
+        } else {
+            queued
+        };
         // A draft that promotion merged into the day (see `resolve_promotion`) has this
         // group's commands in the survivor's shard now. Point the undo step *and the two
         // saved carets* there too: undo/redo restore the caret into the page it names, and a
@@ -1056,6 +1117,7 @@ impl Store {
         if !opts.no_undo {
             self.undo.push(group);
         }
+        committed?;
         Ok(deltas)
     }
 
@@ -1138,17 +1200,67 @@ impl Store {
         self.undo.can_redo()
     }
 
+    /// How many groups the undo stack holds (tests: a transition records, moves or restores
+    /// exactly one).
+    pub fn undo_depth(&self) -> usize {
+        self.undo.len()
+    }
+
     /// Cmd+Z. Returns the caret to restore.
     pub fn undo(&mut self) -> Result<Option<Caret>> {
-        let Some(group) = self.undo.pop_undo() else {
+        self.history(Direction::Undo)
+    }
+
+    /// Cmd+Shift+Z.
+    pub fn redo(&mut self) -> Result<Option<Caret>> {
+        self.history(Direction::Redo)
+    }
+
+    /// One history transition (FR-2.12). The group is taken out of the history first and
+    /// handed back on every path — applied and moved to the other stack, or restored
+    /// untouched when the graph cannot be read (docs/state-machines/
+    /// undo-group-coalescing.md, issue 1).
+    fn history(&mut self, dir: Direction) -> Result<Option<Caret>> {
+        let Some(group) = self.undo.begin(dir) else {
             return Ok(None);
         };
         let now = self.now();
+        // Everything that reads the graph happens before the first command, so a failed
+        // read leaves the history and every shard as they were. A page Empty Trash removed
+        // (§6.5) has no shard left to undo into: its steps are skipped, never fatal, so the
+        // rest of the group still comes off.
+        let mut gone: HashSet<PageId> = HashSet::new();
+        for page in group.pages() {
+            match self.load_doc(&page) {
+                Ok(_) => {}
+                Err(StoreError::NotFound(_)) => {
+                    gone.insert(page);
+                }
+                Err(e) => {
+                    self.undo.abort(dir, group);
+                    return Err(e);
+                }
+            }
+        }
+        let steps: Vec<&UndoStep> = match dir {
+            Direction::Undo => group.steps.iter().rev().collect(),
+            Direction::Redo => group.steps.iter().collect(),
+        };
         let mut touched: Vec<(PageId, Option<DocDelta>)> = Vec::new();
-        for step in group.steps.iter().rev() {
-            let entry = self.load_doc(&step.page)?;
+        for step in steps {
+            if gone.contains(&step.page) {
+                continue;
+            }
+            let cmds = match dir {
+                Direction::Undo => &step.inverse,
+                Direction::Redo => &step.forward,
+            };
+            // The pre-flight above loaded every page that still exists.
+            let entry = self
+                .load_doc(&step.page)
+                .expect("pre-flight loaded every page");
             let mut delta = DocDelta::default();
-            for cmd in &step.inverse {
+            for cmd in cmds {
                 // A remote edit can make an inverse inapplicable; skip it rather than
                 // abort the whole undo (never lose a character, §2.3).
                 if let Ok(d) = entry.doc.apply(cmd, now) {
@@ -1157,32 +1269,16 @@ impl Store {
             }
             push_delta(&mut touched, &step.page, delta);
         }
-        self.queue(&touched, true)?;
-        let caret = group.caret_before.clone();
-        self.undo.push_redo(group);
-        Ok(caret)
-    }
-
-    /// Cmd+Shift+Z.
-    pub fn redo(&mut self) -> Result<Option<Caret>> {
-        let Some(group) = self.undo.pop_redo() else {
-            return Ok(None);
+        let caret = match dir {
+            Direction::Undo => group.caret_before.clone(),
+            Direction::Redo => group.caret_after.clone(),
         };
-        let now = self.now();
-        let mut touched: Vec<(PageId, Option<DocDelta>)> = Vec::new();
-        for step in &group.steps {
-            let entry = self.load_doc(&step.page)?;
-            let mut delta = DocDelta::default();
-            for cmd in &step.forward {
-                if let Ok(d) = entry.doc.apply(cmd, now) {
-                    delta.merge(d);
-                }
-            }
-            push_delta(&mut touched, &step.page, delta);
-        }
+        // The shards have the transition now, so the history must too — even when the commit
+        // below fails. A failed writer is repaired from the shards
+        // (docs/state-machines/store-commit-pipeline.md), so moving the group here is what
+        // keeps the stack and the graph agreeing.
+        self.undo.finish(dir, group);
         self.queue(&touched, true)?;
-        let caret = group.caret_after.clone();
-        self.undo.push_undone(group);
         Ok(caret)
     }
 

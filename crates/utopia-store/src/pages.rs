@@ -806,6 +806,9 @@ impl Store {
             // The page is gone: it can own no trash row again (its id is never reissued).
             self.own_trash.remove(id);
         }
+        // The purge removed rows the classification reads, without a commit to publish the
+        // set the remaining index implies (SB-2).
+        self.republish_tag_pages_after_commit();
         Ok(ids.len())
     }
 

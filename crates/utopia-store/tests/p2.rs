@@ -726,3 +726,114 @@ fn encryption_at_rest_round_trip() {
         "empty passphrase"
     );
 }
+
+/// Issue 1 (docs/state-machines/encryption-at-rest-state.md): `SQLITE_NOTADB` is not
+/// always encryption. A plain graph whose SQLite header survives but whose pages are
+/// damaged is corrupt, not locked: a passphrase cannot open it, so the UI must show the
+/// error instead of the unlock screen.
+#[test]
+fn ac_15_6_a_damaged_plain_graph_is_not_a_lock() {
+    use utopia_store::{is_encrypted, FileKind, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    {
+        let mut s = Store::open(&path).unwrap();
+        let p = s.create_page("Damaged").unwrap();
+        write(&mut s, &p, "still not ciphertext");
+        s.flush().unwrap();
+    }
+    for ext in ["utopia-wal", "utopia-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(ext));
+    }
+    // Keep SQLite's 16-byte header, destroy the first page: `SQLITE_NOTADB`, exactly what
+    // a missing passphrase also reports.
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.truncate(16);
+    bytes.resize(4096, 0);
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert!(
+        !is_encrypted(&path),
+        "a file that still starts with SQLite's header is not ciphertext"
+    );
+    assert_eq!(utopia_store::file_kind(&path), FileKind::Corrupt);
+    assert!(
+        matches!(Store::open(&path), Err(StoreError::Corrupt)),
+        "opening a damaged plain graph reports damage, not a missing passphrase"
+    );
+}
+
+/// Issue 2 (docs/state-machines/encryption-at-rest-state.md): `set_encryption` renames a
+/// new file over the graph, which would strand the two connections of a running `Store` on
+/// the old inode. An open store holds a shared file lock, so a re-key is refused until it
+/// is closed.
+#[test]
+fn ac_15_6_encrypting_refuses_while_the_graph_is_open() {
+    if !utopia_store::encryption_available() {
+        eprintln!("SQLCipher not linked on this platform; skipping");
+        return;
+    }
+    use utopia_store::{is_encrypted, set_encryption, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let mut s = Store::open(&path).unwrap();
+    let p = s.create_page("Open").unwrap();
+    write(&mut s, &p, "do not re-key under me");
+    s.flush().unwrap();
+
+    assert!(
+        matches!(
+            set_encryption(&path, None, Some("hunter2 horse")),
+            Err(StoreError::Busy)
+        ),
+        "an open graph must not be re-keyed: its connections would keep the old inode"
+    );
+    drop(s);
+    set_encryption(&path, None, Some("hunter2 horse")).unwrap();
+    assert!(is_encrypted(&path));
+}
+
+/// Issue 4 (docs/state-machines/encryption-at-rest-state.md, rule 14): an older build
+/// must not open a file written by a newer schema, where columns it does not know about
+/// would be silently ignored (or written as NULL).
+#[test]
+fn ac_14_4_a_graph_from_a_newer_build_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    {
+        let _s = Store::open(&path).unwrap();
+    }
+    let c = rusqlite::Connection::open(&path).unwrap();
+    c.pragma_update(None, "user_version", 99).unwrap();
+    drop(c);
+
+    let err = match Store::open(&path) {
+        Ok(_) => panic!("a graph stamped with a newer schema must not open"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(
+            err,
+            utopia_store::StoreError::SchemaTooNew {
+                found: 99,
+                supported: utopia_store::SCHEMA_VERSION
+            }
+        ),
+        "{err}"
+    );
+}
+
+/// The other half of issue 4: each migration stamps the version it builds. A graph that
+/// reaches the newest block must carry `SCHEMA_VERSION`, so a future bump without a
+/// migration fails here instead of shipping a file that claims a schema it lacks.
+#[test]
+fn ac_14_4_a_new_graph_is_stamped_with_the_builds_schema_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let s = Store::open(&path).unwrap();
+    let version: i64 = s
+        .conn()
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(version, utopia_store::SCHEMA_VERSION);
+}
