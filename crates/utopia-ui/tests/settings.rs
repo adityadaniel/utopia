@@ -1679,6 +1679,46 @@ fn ac_12_7_sync_setup_selects_transports_and_opens_pairing(cx: &mut TestAppConte
     assert!(cx.debug_bounds("sync-pairing").is_some());
 }
 
+/// §12.7: the graph id is a field while the graph has never synced — so a copy of a graph
+/// file can pick its own — and the id in force once it names synced data.
+#[gpui::test]
+fn ac_12_7_sync_setup_shows_the_graph_id_until_the_graph_syncs(cx: &mut TestAppContext) {
+    use utopia_sync::setup::Preferences;
+    use utopia_ui::sync_setup::SyncSetup;
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| {
+        let mut v = SyncSetup::new("Demo".into(), true, cx);
+        v.loaded(Preferences::default(), vec![], None, cx);
+        v.finish("Ready".into(), cx);
+        v
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("sync-graph").is_some(),
+        "an unsynced graph has a graph-id field"
+    );
+    // Apply would carry this id; freezing it replaces the field with the id in force.
+    view.update(cx, |v, cx| {
+        v.graph_input
+            .update(cx, |input, cx| input.fill("notes-second", cx));
+        v.request(false, cx);
+    });
+    cx.run_until_parked();
+    view.update(cx, |v, _| {
+        assert!(v.busy, "the request went out");
+        assert_eq!(v.graph, "Demo", "only a successful Apply freezes the id");
+        assert!(v.graph_editable);
+    });
+    view.update(cx, |v, cx| v.freeze_graph("notes-second".into(), cx));
+    view.update(cx, |v, _| {
+        assert_eq!(v.graph, "notes-second");
+        assert!(!v.graph_editable, "a synced graph's id is frozen");
+    });
+}
+
 /// §12.5: environment configuration cannot accidentally be overwritten by Apply.
 #[gpui::test]
 fn ac_12_5_sync_setup_blocks_apply_during_an_environment_override(cx: &mut TestAppContext) {
