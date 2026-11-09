@@ -268,7 +268,7 @@ impl SettingsView {
         // Without an observer of its own, Settings froze on the last theme when the main
         // window closed first (issue 6).
         subs.push(cx.observe_window_appearance(window, |_, window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(Theme::for_window(window.appearance()));
             cx.notify();
         }));
         let focus = cx.focus_handle();
