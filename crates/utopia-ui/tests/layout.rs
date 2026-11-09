@@ -8,7 +8,10 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
-use utopia_ui::theme::{Theme, CHILD_INDENT, SIDEBAR_WIDTH};
+use utopia_ui::theme::{
+    Theme, CHILD_INDENT, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP,
+    SIDEBAR_WIDTH,
+};
 use utopia_ui::workspace::Workspace;
 
 const W: f32 = 1280.;
@@ -1261,6 +1264,10 @@ fn references_panel_is_a_bordered_well(cx: &mut TestAppContext) {
         title.origin.x >= header.origin.x && title.right() <= header.right(),
         "the heading sits inside the header: {title:?} {header:?}"
     );
+    assert!(
+        approx(title.origin.x - header.origin.x, 16.),
+        "12 x 16 header padding: 16 px on the left: {title:?} {header:?}"
+    );
     let filter = bounds(cx, "refs-filter");
     assert!(
         filter.right() <= header.right() + px(0.5),
@@ -1294,7 +1301,6 @@ fn references_panel_is_a_bordered_well(cx: &mut TestAppContext) {
 #[gpui::test]
 fn a_feed_day_collapses_its_references(cx: &mut TestAppContext) {
     let (cx, _, _) = setup_refs(cx, true);
-    let before = bounds(cx, "refs-end");
     let header = bounds(cx, "refs-header");
     // The feed has no Filter button; its header is the collapse control.
     assert!(
@@ -1313,14 +1319,22 @@ fn a_feed_day_collapses_its_references(cx: &mut TestAppContext) {
         cx.debug_bounds("refs-state-2026-11-02-closed").is_some(),
         "the day's references folded"
     );
-    let after = bounds(cx, "refs-end");
+    // The collapsed header is the whole panel: the next day follows it at the day gap. An
+    // extra RefsEnd strip would push it down by that strip's height (a shadow-like edge,
+    // DESIGN.md §2.4).
+    let next = bounds(cx, "empty-day-2026-11-01");
+    let gap =
+        f32::from(next.origin.y) - (f32::from(header.origin.y) + f32::from(header.size.height));
+    let expected = DAY_GAP + 1. + DAY_HEADER_PAD_TOP;
     assert!(
-        after.origin.y < before.origin.y,
-        "the panel is now just its header: {before:?} {after:?}"
+        gap <= expected + 1.,
+        "the next day follows the collapsed card directly: {gap} vs {expected} ({header:?} {next:?})"
     );
+    // The header's 12 px top and bottom padding (§3.7). With 16 px it measured 63 px; the
+    // extra 3 px come from the count chip, which is taller than the heading.
     assert!(
-        after.origin.y >= header.origin.y + header.size.height - px(1.),
-        "and ends right under it: {header:?} {after:?}"
+        header.size.height < px(58.),
+        "the header keeps 12 px of padding, not 16: {header:?}"
     );
 }
 
@@ -2988,6 +3002,368 @@ fn backspace_at_the_first_body_block_does_not_merge_the_bar(cx: &mut TestAppCont
     assert_eq!(block_text(cx, &ids[2]), "An ordinary note");
     assert_eq!(block_text(cx, &ids[1]), "owner:: [[Ana Lovelace]]");
     assert_eq!(block_text(cx, &ids[0]), "status:: dogfooding");
+}
+
+/// DESIGN.md §3.8 rules 1-3, read so no data is hidden: a leading property that has live
+/// children cannot be a bar row (the bar draws a row, not a subtree), so it ends the bar and
+/// its subtree stays in the outline, reachable and editable.
+#[gpui::test]
+fn a_property_with_children_ends_the_bar(cx: &mut TestAppContext) {
+    use utopia_core::{BlockId, BlockKind, Command};
+    use utopia_store::EditOpts;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        utopia_ui::appearance::install(cx, &path);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Trellis").unwrap();
+    let attr = BlockId::new();
+    let child = BlockId::new();
+    store
+        .execute(
+            &page,
+            vec![
+                Command::InsertBlock {
+                    id: attr.clone(),
+                    parent: None,
+                    after: None,
+                    text: "status:: x".into(),
+                    kind: BlockKind::Bullet,
+                },
+                Command::InsertBlock {
+                    id: child.clone(),
+                    parent: Some(attr.clone()),
+                    after: None,
+                    text: "hidden child".into(),
+                    kind: BlockKind::Bullet,
+                },
+            ],
+            EditOpts {
+                no_undo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("property-status").is_none(),
+        "a property with children is not a bar row"
+    );
+    let parent = bounds(cx, "content-1");
+    let row = bounds(cx, "content-2");
+    assert!(
+        row.origin.x > parent.origin.x,
+        "the child stays indented under its parent: {row:?}"
+    );
+    cx.simulate_click(
+        gpui::point(row.origin.x + px(1.), row.origin.y + px(8.)),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    cx.simulate_keystrokes("end");
+    cx.simulate_input("!");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        block_text(cx, &child),
+        "hidden child!",
+        "the child is editable"
+    );
+}
+
+/// DESIGN.md §3.8: Tab/Shift-Tab and moving a row restructure the outline, not the bar. A
+/// property that became a child of another property would fall out of the bar and turn into
+/// a bullet; the editor refuses before the store sees it.
+#[gpui::test]
+fn tab_does_not_indent_a_property_into_the_bar(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let row = bounds(cx, "property-1");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(editor_target(cx), Some(ids[1].clone()));
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "status:: dogfooding".to_string(),
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "Tab did not indent the owner under the status"
+    );
+    bounds(cx, "property-1");
+    cx.simulate_keystrokes("shift-tab alt-up");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx)[1],
+        "owner:: [[Ana Lovelace]]",
+        "and nothing moved it"
+    );
+}
+
+/// DESIGN.md §3.8: leaving the bar by clicking a body row commits the property and cleans up
+/// the row being left. The editor switches targets without emitting `Blurred`, so this is
+/// where an empty "Add property" row is removed instead of lingering as a second editor.
+#[gpui::test]
+fn leaving_an_empty_added_property_by_click_removes_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let add = bounds(cx, "add-property");
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(root_texts(cx).len(), 4, "a new empty root is being edited");
+
+    let note = bounds(cx, "content-1");
+    cx.simulate_click(
+        gpui::point(note.origin.x + px(1.), note.origin.y + px(8.)),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(editor_target(cx), Some(ids[2].clone()));
+    let texts = root_texts(cx);
+    assert_eq!(
+        texts,
+        vec![
+            "status:: dogfooding".to_string(),
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "the empty pending row is removed when the edit moves to the body"
+    );
+    cx.simulate_input("!");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(block_text(cx, &ids[2]), "!An ordinary note");
+}
+
+/// DESIGN.md §3.8: Enter on an empty "Add property" row also cleans it up before focusing
+/// the body (the deferred `Blurred` arrives after focus already moved).
+#[gpui::test]
+fn enter_on_an_empty_added_property_removes_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let add = bounds(cx, "add-property");
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        editor_target(cx),
+        Some(ids[2].clone()),
+        "Enter left the bar for the first body block"
+    );
+    assert_eq!(
+        root_texts(cx).len(),
+        3,
+        "the empty row was removed on the way out"
+    );
+}
+
+/// Opening a block through the public focus path (search, query, backlink) works for a
+/// leading property: the bar row is the one that takes the keystrokes.
+#[gpui::test]
+fn opening_a_property_target_focuses_its_bar_row(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    ws.update_in(cx, |w, window, cx| {
+        w.open(
+            w.main_page(cx).expect("a page"),
+            None,
+            Some(ids[0].clone()),
+            false,
+            window,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    bounds(cx, "property-edit");
+    assert_eq!(editor_target(cx), Some(ids[0].clone()));
+    cx.simulate_input("!");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        block_text(cx, &ids[0]),
+        "status:: dogfooding!",
+        "the bar row was focused and took the keystroke"
+    );
+}
+
+/// A block hidden under a collapsed ancestor is revealed and focused when opened through the
+/// public path, instead of the editor ending on a row that is not drawn.
+#[gpui::test]
+fn opening_a_hidden_descendant_reveals_and_focuses_it(cx: &mut TestAppContext) {
+    use utopia_core::{BlockId, BlockKind, Command};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        utopia_ui::appearance::install(cx, &path);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Trellis").unwrap();
+    let parent = BlockId::new();
+    let child = BlockId::new();
+    store
+        .execute(
+            &page,
+            vec![
+                Command::InsertBlock {
+                    id: parent.clone(),
+                    parent: None,
+                    after: None,
+                    text: "A folding note".into(),
+                    kind: BlockKind::Bullet,
+                },
+                Command::InsertBlock {
+                    id: child.clone(),
+                    parent: Some(parent.clone()),
+                    after: None,
+                    text: "hidden child".into(),
+                    kind: BlockKind::Bullet,
+                },
+            ],
+            EditOpts {
+                no_undo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store.set_collapsed(&parent, true).unwrap();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, Some(child.clone()), false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(editor_target(cx), Some(child.clone()));
+    cx.simulate_input(">");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        block_text(cx, &child),
+        "hidden child>",
+        "the descendant under a collapsed block is reachable"
+    );
+}
+
+/// PG-1's classification still excludes code: a leading code block whose text looks like
+/// `key:: value` is code, not a property, so it stays a normal block.
+#[gpui::test]
+fn code_blocks_are_not_properties(cx: &mut TestAppContext) {
+    use utopia_core::{BlockId, BlockKind, Command};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        utopia_ui::appearance::install(cx, &path);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Trellis").unwrap();
+    store
+        .execute(
+            &page,
+            vec![Command::InsertBlock {
+                id: BlockId::new(),
+                parent: None,
+                after: None,
+                text: "status:: not a property".into(),
+                kind: BlockKind::Code,
+            }],
+            EditOpts {
+                no_undo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("property-status").is_none(),
+        "a code block is never a property"
+    );
+    bounds(cx, "properties-bar");
+    bounds(cx, "content-1");
+}
+
+/// On a page whose only blocks are properties, "Click to start writing" appends a body
+/// block; it must not type into a property's key.
+#[gpui::test]
+fn starting_a_note_on_a_properties_only_page_appends_a_block(cx: &mut TestAppContext) {
+    use utopia_core::{BlockId, BlockKind, Command};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        utopia_ui::appearance::install(cx, &path);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+    let page = store.create_page("Trellis").unwrap();
+    store
+        .execute(
+            &page,
+            vec![Command::InsertBlock {
+                id: BlockId::new(),
+                parent: None,
+                after: None,
+                text: "status:: x".into(),
+                kind: BlockKind::Bullet,
+            }],
+            EditOpts {
+                no_undo: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page.clone(), None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let prompt = bounds(cx, "empty");
+    cx.simulate_click(prompt.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_input("note");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec!["status:: x".to_string(), "note".to_string()],
+        "a new block holds the note; the property is untouched"
+    );
 }
 
 /// DESIGN.md §4.2: an empty body is the muted placeholder with a `line_strong` bullet.

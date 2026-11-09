@@ -744,6 +744,39 @@ mod tests {
         assert_eq!(v["version"], 1);
     }
 
+    /// DESIGN.md §3.8 removed the "attribute blocks" choice. A settings file written by the
+    /// previous build still loads without a warning, keeps its other preferences, and keeps
+    /// the unknown key when it is saved again (rule 11: no user data lost).
+    #[test]
+    fn a_removed_attribute_blocks_key_survives_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(FILE),
+            r#"{"version": 1, "font": "system", "density": "compact",
+                "attribute-blocks": "blocks", "ref_children": 2, "pinned": []}"#,
+        )
+        .unwrap();
+        let (p, warnings) = Prefs::load(dir.path());
+        assert!(
+            warnings.is_empty(),
+            "the removed key is kept silently: {warnings:?}"
+        );
+        assert_eq!(p.density, Density::Compact);
+
+        // Saving after another change keeps the key and the rest of the file.
+        let p = Prefs {
+            font: UiFont::IbmPlexSans,
+            ..p
+        };
+        p.save(dir.path()).unwrap();
+        let v: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.path().join(FILE)).unwrap()).unwrap();
+        assert_eq!(v["attribute-blocks"], "blocks", "the unknown key survives");
+        assert_eq!(v["font"], "ibm-plex-sans");
+        assert_eq!(v["density"], "compact");
+        assert_eq!(v["ref_children"], 2);
+    }
+
     #[test]
     fn save_is_atomic_and_load_reads_it_back() {
         let dir = tempfile::tempdir().unwrap();
