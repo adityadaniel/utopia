@@ -1300,7 +1300,12 @@ fn help_shots() -> Result<()> {
     ]
     .join("; ");
 
-    let status = Proc::new(root.join("target/debug/utopia"))
+    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|p| if p.is_absolute() { p } else { root.join(p) })
+        .unwrap_or_else(|| root.join("target"));
+    let status = Proc::new(target.join("debug/utopia"))
         .current_dir(&root)
         .arg("--graph")
         .arg(&graph)
