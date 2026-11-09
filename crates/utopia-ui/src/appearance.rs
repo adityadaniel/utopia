@@ -13,7 +13,6 @@
 //!   "density": "comfortable",
 //!   "ref_children": 2,
 //!   "pinned": [],
-//!   "attribute-blocks": "compact",
 //!   "right_sidebar_width": 380.0
 //! }
 //! ```
@@ -23,10 +22,8 @@
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
-//! Pinned group (SB-3) and the right sidebar's Pinned tab (RS-3); `attribute-blocks` is
-//! `"compact"` (the default) or `"blocks"` (PG-1); `right_sidebar_width` is the width that
-//! sidebar was dragged to (RS-4). A missing file
-//! means defaults; an
+//! Pinned group (SB-3) and the right sidebar's Pinned tab (RS-3); `right_sidebar_width`
+//! is the width that sidebar was dragged to (RS-4). A missing file means defaults; an
 //! unreadable file, an unknown value or a newer version is logged and read as far as it can
 //! be, never a panic (rule 11). Keys this version does not know are kept when the file is
 //! rewritten, so a newer release's preferences survive a round trip through an older one.
@@ -158,49 +155,6 @@ pub fn clamp_sidebar_width(width: f32) -> f32 {
     }
 }
 
-/// How a page draws its `Key:: value` root blocks (PG-1). The metadata header always keeps
-/// the projection; this only decides whether the blocks are also drawn in full.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum AttributeBlocks {
-    /// One compact "key · value" row per attribute, in the muted colour (the default).
-    #[default]
-    Compact,
-    /// The ordinary outline blocks, as before the setting existed.
-    Blocks,
-}
-
-impl AttributeBlocks {
-    pub const ALL: &'static [AttributeBlocks] =
-        &[AttributeBlocks::Compact, AttributeBlocks::Blocks];
-
-    pub fn key(self) -> &'static str {
-        match self {
-            AttributeBlocks::Compact => "compact",
-            AttributeBlocks::Blocks => "blocks",
-        }
-    }
-
-    pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|a| a.key() == key)
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            AttributeBlocks::Compact => "Compact rows",
-            AttributeBlocks::Blocks => "As blocks",
-        }
-    }
-
-    pub fn hint(self) -> &'static str {
-        match self {
-            AttributeBlocks::Compact => {
-                "One muted \"key · value\" row per attribute, under the metadata header."
-            }
-            AttributeBlocks::Blocks => "The attribute blocks themselves, as before.",
-        }
-    }
-}
-
 /// What `settings.json` holds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prefs {
@@ -208,8 +162,6 @@ pub struct Prefs {
     pub density: Density,
     /// Children shown inline under a referencing block (LR-4); 0 folds them all.
     pub ref_children: usize,
-    /// How a page draws its `key:: value` blocks (PG-1).
-    pub attribute_blocks: AttributeBlocks,
     /// Page ids kept at the top of the sidebar, in the order they were pinned (SB-3), and
     /// listed in the right sidebar's Pinned tab (RS-3). Local state: a pin is a pointer to
     /// a page, not a property of the page, so it never goes into a CRDT shard (rule 9).
@@ -227,7 +179,6 @@ impl Default for Prefs {
             font: UiFont::default(),
             density: Density::default(),
             ref_children: DEFAULT_REF_CHILDREN,
-            attribute_blocks: AttributeBlocks::default(),
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             rest: Map::new(),
@@ -326,21 +277,6 @@ impl Prefs {
                 DEFAULT_REF_CHILDREN
             }
         };
-        let attribute_blocks = match rest.remove("attribute-blocks") {
-            None => AttributeBlocks::default(),
-            Some(Value::String(s)) => AttributeBlocks::from_key(&s).unwrap_or_else(|| {
-                warnings.push(format!(
-                    "{FILE}: unknown attribute-blocks {s:?}; using compact rows"
-                ));
-                AttributeBlocks::default()
-            }),
-            Some(v) => {
-                warnings.push(format!(
-                    "{FILE}: attribute-blocks should be a string, not {v}; using compact rows"
-                ));
-                AttributeBlocks::default()
-            }
-        };
         let pinned = match rest.remove("pinned") {
             None => Vec::new(),
             Some(Value::Array(items)) => {
@@ -397,7 +333,6 @@ impl Prefs {
                 font,
                 density,
                 ref_children,
-                attribute_blocks,
                 pinned,
                 right_sidebar_width,
                 rest,
@@ -417,10 +352,6 @@ impl Prefs {
                 .map_or(Value::Null, Value::Number),
         );
         m.insert("ref_children".into(), self.ref_children.into());
-        m.insert(
-            "attribute-blocks".into(),
-            self.attribute_blocks.key().into(),
-        );
         m.insert(
             "pinned".into(),
             Value::Array(
@@ -534,12 +465,6 @@ pub fn ref_children(cx: &App) -> usize {
         .min(REF_CHILDREN_MAX)
 }
 
-/// How pages draw their attribute blocks (PG-1). Compact rows when nothing was installed.
-pub fn attribute_blocks(cx: &App) -> AttributeBlocks {
-    cx.try_global::<Appearance>()
-        .map_or(AttributeBlocks::default(), |a| a.prefs.attribute_blocks)
-}
-
 /// Pages pinned to the top of the sidebar, in pin order (SB-3). Empty when nothing was
 /// installed (tests, early startup).
 pub fn pinned(cx: &App) -> Vec<PageId> {
@@ -613,16 +538,6 @@ pub fn set_ref_children(cx: &mut App, count: usize, config_dir: &Path) -> std::i
     cx.global::<Appearance>().prefs.save(config_dir)
 }
 
-/// Switch attribute blocks in every open window now and remember it (PG-1). Unlike the font
-/// and density this can be set from the page itself, so the save goes through the config
-/// dir `install` recorded; a test that never installed one stays in memory.
-pub fn set_attribute_blocks(cx: &mut App, value: AttributeBlocks) -> std::io::Result<()> {
-    cx.default_global::<Appearance>().prefs.attribute_blocks = value;
-    let saved = remember(cx);
-    cx.refresh_windows();
-    saved
-}
-
 /// Make `font` drawable: the bundled faces are handed to gpui the first time they are
 /// needed (the setting, or Settings showing a sample of each choice), not at every launch.
 /// IBM Plex Mono is registered whatever the UI font is: labels, counts and shortcuts use
@@ -661,7 +576,6 @@ mod tests {
             font: UiFont::IbmPlexSans,
             density: Density::Compact,
             ref_children: 0,
-            attribute_blocks: AttributeBlocks::Blocks,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
             right_sidebar_width: 420.0,
             ..Default::default()
@@ -675,7 +589,6 @@ mod tests {
                 "font": "ibm-plex-sans",
                 "density": "compact",
                 "ref_children": 0,
-                "attribute-blocks": "blocks",
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,
             })
@@ -713,20 +626,6 @@ mod tests {
         let (p, warnings) = Prefs::from_json(r#"{"version": 1, "pinned_pages": "a"}"#);
         assert!(p.pinned.is_empty());
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-    }
-
-    /// PG-1: attribute blocks default to compact rows, and a value this version does not
-    /// know is the default with a warning, not a crash (rule 11).
-    #[test]
-    fn attribute_blocks_default_to_compact() {
-        let (p, warnings) = Prefs::from_json("{}");
-        assert_eq!(p.attribute_blocks, AttributeBlocks::Compact);
-        assert!(warnings.is_empty(), "{warnings:?}");
-        let (p, _) = Prefs::from_json(r#"{"version": 1, "attribute-blocks": "blocks"}"#);
-        assert_eq!(p.attribute_blocks, AttributeBlocks::Blocks);
-        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "attribute-blocks": "hidden"}"#);
-        assert_eq!(p.attribute_blocks, AttributeBlocks::Compact);
-        assert!(warnings[0].contains("hidden"), "{warnings:?}");
     }
 
     /// SB-3: pins are page ids in `settings.json`, in pin order; a repeated id counts once

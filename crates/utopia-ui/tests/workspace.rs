@@ -3190,13 +3190,12 @@ fn ending_an_edit_drops_the_rows_focus_registration(cx: &mut TestAppContext) {
     );
 }
 
-/// Rule 9 / PG-1: both appearance mirrors are resynced in one place. Only
-/// `rebuild_if_dirty` used to notice an `attribute_blocks` change, so a rebuild triggered
-/// by something else (an index update, the observer itself) built rows with the old
-/// setting and the next frame corrected them (rebuild-cycle issue 3).
+/// Rule 9: appearance preferences this view mirrors are resynced in one place, so an
+/// index-triggered rebuild cannot build rows with the old setting and leave the next frame
+/// to correct them (rebuild-cycle issue 3).
 #[gpui::test]
 fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
-    use utopia_ui::appearance::{self, AttributeBlocks};
+    use utopia_ui::appearance;
     let (app, ws, cx) = setup(cx);
     let page = app.update(cx, |app, _| {
         let page = app.store.create_page("Project").unwrap();
@@ -3214,9 +3213,10 @@ fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
     let view = ws.read_with(cx, |w, _| w.main_view());
     let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
 
-    // Settings → Appearance → "As blocks", applied to this open page.
+    // Settings → Appearance → "Children shown in references", applied while open.
+    let dir = tempfile::tempdir().unwrap();
     cx.update(|_, cx| {
-        appearance::set_attribute_blocks(cx, AttributeBlocks::Blocks).unwrap();
+        appearance::set_ref_children(cx, 3, dir.path()).unwrap();
     });
 
     let (after_set, frames_after_set) =
@@ -3296,11 +3296,12 @@ fn unlinked_references_link_button(cx: &mut TestAppContext) {
         .expect("section rendered");
     cx.simulate_click(header.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    let link = cx
-        .debug_bounds("link-4")
-        .or_else(|| cx.debug_bounds("link-5"))
-        .or_else(|| cx.debug_bounds("link-6"));
-    let link = link.expect("a Link button per mention");
+    let link = (0..32)
+        .find_map(|i| {
+            let name: &'static str = Box::leak(format!("link-{i}").into_boxed_str());
+            cx.debug_bounds(name)
+        })
+        .expect("a Link button per mention");
     cx.simulate_click(link.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(
@@ -5860,6 +5861,7 @@ fn ac_13_5_focus_leaving_commits_the_ime_composition(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second.clone(),
+                property: false,
             },
             None,
             None,
@@ -5903,6 +5905,7 @@ fn ac_13_5_a_later_request_supersedes_a_queued_begin(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second,
+                property: false,
             },
             None,
             None,
@@ -6086,6 +6089,7 @@ fn ac_13_5_begin_on_another_block_waits_for_the_ime(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second.clone(),
+                property: false,
             },
             None,
             None,
@@ -6571,10 +6575,7 @@ fn unlinked_is_searched_only_while_expanded(cx: &mut TestAppContext) {
     );
 
     let add_mention = |app: &mut AppState, cx: &mut gpui::Context<AppState>| {
-        let plan = utopia_core::outline::append_block(
-            app.store.page_state(&source).unwrap(),
-            None,
-        );
+        let plan = utopia_core::outline::append_block(app.store.page_state(&source).unwrap(), None);
         let b = app
             .store
             .execute_plan(&source, plan, None)

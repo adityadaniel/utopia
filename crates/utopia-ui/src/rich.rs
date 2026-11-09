@@ -81,7 +81,7 @@ struct Builder<'a> {
 impl Builder<'_> {
     fn is_self(&self, title: &str) -> bool {
         let key = utopia_core::title::normalize_title(title);
-        self.self_titles.iter().any(|t| *t == key)
+        self.self_titles.contains(&key)
     }
 
     fn style(&self, m: Marks) -> HighlightStyle {

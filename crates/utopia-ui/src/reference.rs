@@ -101,14 +101,13 @@ struct Body {
     rendered: rich::Rendered,
 }
 
-fn body(
-    text: &str,
-    block: &BlockId,
-    theme: &Theme,
-    store: &Store,
-    self_titles: &[String],
-) -> Body {
-    let rendered = rich::render_self(text, theme, &mut |uid| chip_state(store, uid, block), self_titles);
+fn body(text: &str, block: &BlockId, theme: &Theme, store: &Store, self_titles: &[String]) -> Body {
+    let rendered = rich::render_self(
+        text,
+        theme,
+        &mut |uid| chip_state(store, uid, block),
+        self_titles,
+    );
     let styled =
         StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
     let layout = styled.layout().clone();
@@ -129,6 +128,7 @@ fn body(
 /// its bounds) and the row itself as `{prefix}-row-{ix}`; `pad_x` is the row's inset from
 /// the panel edge, so the two call sites can keep their own measure without a second
 /// renderer.
+#[allow(clippy::too_many_arguments)]
 pub fn reference_row<H: RefRowHost + 'static>(
     prefix: &'static str,
     ix: usize,
