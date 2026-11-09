@@ -46,6 +46,7 @@ pub use pagegraph::{GraphNode, GraphOptions, PageGraph};
 pub use pages::PageFate;
 pub use project::{display_title, resolve_page_key};
 pub use query::*;
+pub use schema::SCHEMA_VERSION;
 pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
@@ -81,6 +82,11 @@ pub enum StoreError {
     /// Another process has the graph open (or is changing its encryption).
     #[error("this graph is open; close it before changing its encryption")]
     Busy,
+    /// The file was written by a build with a newer schema; opening it would drop data.
+    #[error(
+        "this graph uses schema v{found}, but this build supports up to v{supported}; open it with the build that wrote it"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
