@@ -116,7 +116,11 @@ impl Store {
             }
         })();
         self.conn = conn;
-        result
+        result?;
+        // The repair replaced the projections the last publish classified, so the set it
+        // left describes an index that no longer exists (§10.4, SB-2).
+        self.republish_tag_pages_after_commit();
+        Ok(())
     }
 
     /// Check the §10.4 invariants. Read-only: the rebuild-equality check runs in a

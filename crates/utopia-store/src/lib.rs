@@ -317,9 +317,41 @@ impl Store {
     }
 
     /// The tag-page classification as the last commit published it (SB-2). `None` until
-    /// the first commit; [`Store::hashtag_only_pages`] computes and returns it directly.
+    /// something has published a set; [`Store::hashtag_only_pages`] computes and returns it
+    /// directly, and [`Store::republish_tag_pages`] publishes what it computes.
     pub fn tag_pages(&self) -> Option<HashSet<PageId>> {
         self.persister.tag_pages()
+    }
+
+    /// Classify every page and publish that as the current set (SB-2).
+    ///
+    /// Every write that moves the index through the writer publishes the set with its
+    /// commit. The three writes that bypass the writer — [`Store::set_date_format`]
+    /// re-resolving references, [`Store::empty_trash`] removing rows, and
+    /// [`Store::rebuild_index`] reprojecting from the shards — have to publish it
+    /// themselves, or the UI keeps reading a classification of an index that is gone. They
+    /// call this after their own `sync_index`, so the index it classifies has no pending
+    /// edits.
+    ///
+    /// The wait is part of the contract, not the caller's: `hashtag_only_pages`' own read
+    /// barrier is a no-op in debounced mode (rule 10), which is the mode the UI publishes
+    /// its startup copy in. Without it a scan taken before an in-flight commit landed would
+    /// become `Published`, and every later commit would edit that stale base incrementally.
+    pub fn republish_tag_pages(&self) -> Result<HashSet<PageId>> {
+        self.persister.wait()?;
+        let set = self.hashtag_only_pages()?;
+        self.persister.republish_tag_pages(set.clone());
+        Ok(set)
+    }
+
+    /// Republish after a write that has already committed. A classification failure cannot
+    /// undo that write (rule 11): report it and let the caller keep the answer it earned,
+    /// rather than reporting "failed" for a purge, format change or repair that happened.
+    /// The slot keeps the previous set, which then describes an index one write behind.
+    fn republish_tag_pages_after_commit(&self) {
+        if let Err(e) = self.republish_tag_pages() {
+            eprintln!("utopia: tag pages: {e}");
+        }
     }
 
     /// How many whole-graph tag classifications the commit path has run (tests, SB-2). One
@@ -790,6 +822,9 @@ impl Store {
         })?;
         tx.commit()?;
         self.date_format = fmt;
+        // Re-resolving moved reference edges on this connection without a commit, so the
+        // published set classifies an index that no longer exists (SB-2).
+        self.republish_tag_pages_after_commit();
         Ok(())
     }
 
