@@ -835,7 +835,7 @@ fn seed_help_graph(path: &Path) -> Result<()> {
     let today = chrono::Local::now().date_naive();
 
     let atlas = s.create_page("Atlas Launch")?;
-    insert_tree(
+    let atlas_ids = insert_tree(
         &mut s,
         &atlas,
         &[
@@ -858,8 +858,25 @@ fn seed_help_graph(path: &Path) -> Result<()> {
                 "The beta date depends on [[Ana Lovelace]]'s review",
             ),
             (1, Quote, "Ship the small thing that works."),
+            // A property lower in the outline stays a normal bullet (§3.8 rule 3).
+            (0, Bullet, "priority:: high"),
+            // A nested block that starts collapsed, to show the ring and the caret.
+            (0, Bullet, "Open questions for the beta"),
+            (1, Bullet, "Do we invite by hand or by form?"),
+            (1, Todo, "Ask [[Ana Lovelace]] about the form"),
         ],
     )?;
+
+    // The alias lives in the properties bar's aliases row (§3.8). It must not collide with
+    // a hashtag's key, or `#atlas` would resolve to the project page instead of a tag.
+    s.add_alias(&atlas, "the board")?;
+    // Blockless pages referenced only by `#atlas` / `#beta`: the sidebar's TAGS section
+    // (§3.2) lists tag-only pages, not unresolved hashtags.
+    s.create_page("atlas")?;
+    s.create_page("beta")?;
+    // A done to-do (muted, struck through, checked box) and a collapsed parent.
+    s.set_block_kind(&atlas, &atlas_ids[6], BlockKind::Todo, true)?;
+    s.set_collapsed(&atlas_ids[12], true)?;
 
     let ana = s.create_page("Ana Lovelace")?;
     insert_tree(
@@ -883,6 +900,8 @@ fn seed_help_graph(path: &Path) -> Result<()> {
                 Bullet,
                 "The merge is the interesting part, not the transport",
             ),
+            // An unlinked mention, so Ana's Unlinked references has something to find.
+            (0, Bullet, "Ana Lovelace keeps the migration notes"),
         ],
     )?;
 
@@ -923,6 +942,33 @@ fn seed_help_graph(path: &Path) -> Result<()> {
         let page = s.ensure_daily_page(date)?;
         insert_tree(&mut s, &page, rows)?;
     }
+
+    // A short page with no linked references but an unlinked mention ("the import plan"), so
+    // the Unlinked references row sits high enough to open without scrolling the panel.
+    let import = s.create_page("Import plan")?;
+    insert_tree(
+        &mut s,
+        &import,
+        &[(0, Bullet, "The old import path stays readable")],
+    )?;
+
+    // A resolved date link (dates are pages, §3.1) a few days out.
+    let target = today + chrono::Duration::days(11);
+    let link = s.date_format().format(target);
+    let today_page = s.ensure_daily_page(today)?;
+    let plan = outline::append_block(s.page_state(&today_page)?, None);
+    let id = s
+        .execute_plan(&today_page, plan, None)?
+        .context("new block")?
+        .block;
+    s.set_block_text(
+        &today_page,
+        &id,
+        &format!("Plan the demo for [[{link}]]"),
+        None,
+        None,
+    )?;
+    s.commit_block(&today_page, &id)?;
 
     s.sync_index()?;
     Ok(())
@@ -989,6 +1035,7 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
             (1, Todo, "Draft the release notes"),
         ],
     )?;
+
     let ana = s.create_page("Ana Lovelace")?;
     insert_tree(
         &mut s,
