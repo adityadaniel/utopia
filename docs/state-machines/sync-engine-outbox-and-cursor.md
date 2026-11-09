@@ -10,16 +10,24 @@ pending for the new destination. These bookkeeping changes and the destination i
 commit in one `BEGIN IMMEDIATE` transaction, after flushing pending store writes.
 
 These are ordinary updates, not truncating relay snapshots. Cursor/revision tags remain
-intact; compaction still requires a cursor measured in the current relay's space. Setup
-asks for the manifest before selecting its identity, so a reachable relay is identified
-by its store id rather than only its URL. An unavailable relay starts normal background
-retries using its URL identity, and when its manifest later reveals the store id the
-cursor space changes, which `VerifiedTarget` treats as a new target: it pulls one existing
-shard to prove the selected encryption can read it before any push, so a wrong passphrase
-on a second device cannot mix ciphertexts into an existing graph
-(`ac_12_6_pairing_validates_existing_payloads_before_pushing`). Repeating Apply for the
-same identity does not enqueue the graph again; switching back can re-send updates, but
-CRDT import remains idempotent.
+intact; compaction still requires a cursor measured in the current relay's space.
+
+The destination is recorded as `Destination { origin, instance }`
+(`crates/utopia-store/src/sync_destination.rs`): `origin` is the transport's stable address
+(a relay's normalized URL plus the graph id, or a folder's root) and `instance` is the
+relay database's own id from the manifest. Setup asks for the manifest before recording, so
+a reachable relay is identified by its store id as well as its URL. Comparing only the
+identity sampled at launch was wrong: a launch without a network can read no manifest, so
+its identity is the URL alone, and treating that as a different destination exported the
+whole graph into the outbox — and pushed a copy the relay cannot dedupe — on every
+offline/online flip (`ac_12_7_an_offline_launch_does_not_republish_the_graph`). Two known
+store ids decide on their own, so a relay that moved to another lease or LAN port is the
+same destination and a wiped store is not; when either side has no store id, the origin
+decides. A relay discovered later still changes the cursor space, which `VerifiedTarget`
+treats as a new target: it pulls one existing shard to prove the selected encryption can
+read it before any push (`ac_12_6_pairing_validates_existing_payloads_before_pushing`).
+Repeating Apply for the same destination does not enqueue the graph again; switching back
+can re-send updates, but CRDT import remains idempotent.
 
 `ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates` covers two
 stores, a fresh relay, and switching back without lost or duplicate blocks. The existing

@@ -21,13 +21,47 @@ impl Connection {
         }
     }
 }
-pub fn test_connection(t: &mut dyn Transport) -> Connection {
-    match t.manifest(None) {
-        Ok(Some(m)) if m.protocol_version == PROTOCOL_VERSION => Connection::Reachable,
-        Ok(Some(_)) | Err(SyncError::ProtocolVersion(_)) => Connection::VersionMismatch,
-        Err(SyncError::Unauthorized) => Connection::Unauthorized,
-        _ => Connection::Unreachable,
+
+/// What one read-only manifest request said about the target (§12.6): whether it can be
+/// reached, the relay store id it named, and whether it held pages at all.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Probe {
+    pub connection: Option<Connection>,
+    /// The relay database's id (`Manifest.instance`). `None` when the target could not be
+    /// read, or when it is a folder (a folder is its path).
+    pub instance: Option<String>,
+    /// The manifest listed a payload. An empty target has nothing to read back, so it
+    /// cannot prove an encryption key (`setup::verified_target`).
+    pub holds_pages: bool,
+}
+impl Probe {
+    pub fn connection(&self) -> Connection {
+        // Unreachable is the only answer that leaves nothing read.
+        self.connection.unwrap_or(Connection::Unreachable)
     }
+}
+
+pub fn probe(t: &mut dyn Transport) -> Probe {
+    match t.manifest(None) {
+        Ok(Some(m)) if m.protocol_version == PROTOCOL_VERSION => Probe {
+            connection: Some(Connection::Reachable),
+            instance: (!m.instance.is_empty()).then(|| m.instance.clone()),
+            holds_pages: !m.pages.is_empty(),
+        },
+        Ok(Some(_)) | Err(SyncError::ProtocolVersion(_)) => Probe {
+            connection: Some(Connection::VersionMismatch),
+            ..Default::default()
+        },
+        Err(SyncError::Unauthorized) => Probe {
+            connection: Some(Connection::Unauthorized),
+            ..Default::default()
+        },
+        _ => Probe::default(),
+    }
+}
+
+pub fn test_connection(t: &mut dyn Transport) -> Connection {
+    probe(t).connection()
 }
 #[cfg(test)]
 mod tests {

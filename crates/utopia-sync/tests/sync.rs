@@ -1330,23 +1330,31 @@ fn ac_12_3_a_round_picks_up_an_edit_queued_while_it_was_on_the_wire() {
 /// §12.7: a new target needs acknowledged and imported content, not only pending edits.
 #[test]
 fn ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates() {
+    use utopia_store::Destination;
     let old = Relay::new();
     let (mut a, mut ca) = device(&old);
     let (mut b, mut cb) = device(&old);
     let page = a.create_page("Keep every block").unwrap();
     write(&mut a, &page, "written on A");
+    // Setup records the destination this graph publishes to, before it is switched.
+    let old_space = utopia_sync::Transport::cursor_space(ca.transport_mut()).transport;
+    a.prepare_sync_destination(&Destination::new(&old_space, None))
+        .unwrap();
     settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
     write(&mut b, &page, "written on B");
     settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
     let before = texts(&mut a, &page);
     let new = Relay::new();
     let mut moved = SyncClient::new(RelayTransport::new(new.clone(), "g1"), &a).unwrap();
-    a.prepare_sync_destination("new-relay").unwrap();
+    let new_space = utopia_sync::Transport::cursor_space(moved.transport_mut()).transport;
+    a.prepare_sync_destination(&Destination::new(new_space, None))
+        .unwrap();
     moved.sync_once(&mut a).unwrap();
     let (mut c, mut cc) = device(&new);
     cc.sync_once(&mut c).unwrap();
     assert_eq!(texts(&mut c, &page), before);
-    a.prepare_sync_destination("old-relay").unwrap();
+    a.prepare_sync_destination(&Destination::new(&old_space, None))
+        .unwrap();
     settle(&mut [(&mut a, &mut ca), (&mut b, &mut cb)]);
     assert_eq!(texts(&mut b, &page), before);
     assert_eq!(texts(&mut a, &page), before);
@@ -1408,9 +1416,11 @@ fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {
         Some(utopia_store::BlobState::Uploaded)
     );
     let folder = tempfile::tempdir().unwrap();
-    a.prepare_sync_destination("shared-folder").unwrap();
+    let shared =
+        utopia_store::Destination::new(format!("folder:{}", folder.path().display()), None);
+    a.prepare_sync_destination(&shared).unwrap();
     let queued = a.outbox_count().unwrap();
-    a.prepare_sync_destination("shared-folder").unwrap();
+    a.prepare_sync_destination(&shared).unwrap();
     assert_eq!(
         a.outbox_count().unwrap(),
         queued,
@@ -1428,3 +1438,26 @@ fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {
         Some(bytes.as_slice())
     );
 }
+
+/// §12.7: the identity a launch observes is not the same online and offline. A relay is
+/// only identified by its own store id once its manifest has been read; an offline launch
+/// knows just the URL, and that difference must not look like a new destination — every
+/// flip would export the whole graph into the outbox again.
+#[test]
+fn ac_12_7_an_offline_launch_does_not_republish_the_graph() {
+    let mut a = Store::open_in_memory().unwrap();
+    let page = a.create_page("Offline launches").unwrap();
+    write(&mut a, &page, "one block");
+    let origin = utopia_sync::http::destination_origin("http://relay.example", "g1");
+    let online = utopia_store::Destination::new(origin.clone(), Some("store-1".into()));
+    let offline = utopia_store::Destination::new(origin, None);
+    a.prepare_sync_destination(&online).unwrap();
+    let queued = a.outbox_pending(usize::MAX >> 1).unwrap().len();
+    a.prepare_sync_destination(&offline).unwrap();
+    assert_eq!(
+        a.outbox_pending(usize::MAX >> 1).unwrap().len(),
+        queued,
+        "the URL-only identity of an offline launch republished the whole graph"
+    );
+}
+

@@ -4,13 +4,72 @@ use rusqlite::{params, TransactionBehavior};
 use utopia_core::PageId;
 use utopia_doc::Frontier;
 
+/// Where a graph's updates go (§12.7), in the two parts a launch can learn.
+///
+/// `origin` is the transport's stable address: a relay's normalized URL plus the graph id
+/// (`relay:https://host#graph`), or a folder's root (`folder:/path`). It is all an offline
+/// launch knows. `instance` is the relay database's own id (`Manifest.instance`), which is
+/// the finer identity: it survives a changed DHCP lease or LAN port, and it changes when
+/// the store is wiped.
+///
+/// Comparing only the identity sampled at launch made an offline launch look like a new
+/// destination: the probe could not read a manifest, so the origin stood in for the store
+/// id and the whole graph was exported again (`sync-engine-outbox-and-cursor.md`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Destination {
+    pub origin: String,
+    pub instance: Option<String>,
+}
+
+impl Destination {
+    pub fn new(origin: impl Into<String>, instance: Option<String>) -> Self {
+        Self {
+            origin: origin.into(),
+            instance,
+        }
+    }
+
+    /// Whether the destination just observed is the one `stored` was recorded for.
+    ///
+    /// Two known store ids decide on their own: the address may move (a lease, a LAN
+    /// port, a host rename) without the data changing, and a wiped store keeps its address
+    /// while its sequence restarts. When either side has no store id — it was recorded or
+    /// observed before a manifest was read — the origin has to stand in, so an offline
+    /// launch compares as the same destination it was recorded as.
+    fn matches(&self, stored: &Destination) -> bool {
+        match (&stored.instance, &self.instance) {
+            (Some(stored), Some(observed)) => stored == observed,
+            _ => stored.origin == self.origin,
+        }
+    }
+}
+
+/// The `sync_state` keys a destination is recorded under; two plain strings keep the row
+/// readable in `doctor` output and in a hand-inspected database.
+const ORIGIN: &str = "setup_destination";
+const INSTANCE: &str = "setup_destination_instance";
+
 impl Store {
     /// Queue full CRDT updates, never a truncating relay snapshot. Existing cursor spaces
     /// remain tagged; only a pull from the new relay may authorize its compaction (§12.6).
-    pub fn prepare_sync_destination(&mut self, identity: &str) -> Result<()> {
+    pub fn prepare_sync_destination(&mut self, destination: &Destination) -> Result<()> {
         self.sync_index()?;
-        if self.sync_get("setup_destination")?.as_deref() == Some(identity) {
-            return Ok(());
+        let stored = self.sync_get(ORIGIN)?.map(|origin| Destination {
+            origin,
+            instance: self.sync_get(INSTANCE).ok().flatten(),
+        });
+        if let Some(stored) = &stored {
+            if destination.matches(stored) {
+                // A launch that reached the manifest learned the relay's own id; keep it,
+                // so the next launch's URL-only identity cannot be mistaken for a change
+                // and a wiped relay can be told apart from the same relay on a new port.
+                if stored.instance.is_none() && destination.instance.is_some() {
+                    if let Some(instance) = &destination.instance {
+                        self.sync_set(INSTANCE, instance)?;
+                    }
+                }
+                return Ok(());
+            }
         }
         let ids = {
             let mut stmt = self
@@ -38,9 +97,16 @@ impl Store {
             [],
         )?;
         tx.execute(
-            "INSERT OR REPLACE INTO sync_state(key,value) VALUES ('setup_destination',?1)",
-            [identity],
+            "INSERT OR REPLACE INTO sync_state(key,value) VALUES (?1,?2)",
+            params![ORIGIN, destination.origin],
         )?;
+        match &destination.instance {
+            Some(instance) => tx.execute(
+                "INSERT OR REPLACE INTO sync_state(key,value) VALUES (?1,?2)",
+                params![INSTANCE, instance],
+            )?,
+            None => tx.execute("DELETE FROM sync_state WHERE key=?1", [INSTANCE])?,
+        };
         tx.commit()?;
         Ok(())
     }

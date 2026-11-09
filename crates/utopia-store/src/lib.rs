@@ -23,6 +23,7 @@ mod project;
 mod query;
 mod schema;
 mod sync_destination;
+pub use sync_destination::Destination;
 mod writer;
 
 use std::collections::{HashMap, HashSet};

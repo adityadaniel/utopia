@@ -5,11 +5,13 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use utopia_sync::setup::probe::{test_connection, Connection};
+use utopia_store::Destination;
+use utopia_sync::setup::probe::{probe, Connection};
 use utopia_sync::setup::{
     save_secrets, Environment, Keychain, Mode, Preferences, Secrets, PASSPHRASE_SERVICE,
     TOKEN_SERVICE,
 };
+use utopia_sync::Transport;
 use utopia_ui::{
     sync_runner::{build_transport, BoxTransport, SyncConfig, SyncTarget},
     sync_setup::{Request, SetupHandle, SyncSetup},
@@ -36,6 +38,8 @@ struct Prepared {
     transport: BoxTransport,
     key_check: Option<String>,
     lan: Option<utopia_syncd::lan::LanRelay>,
+    /// Where this run publishes (§12.7), as the probe observed it.
+    destination: Destination,
 }
 
 impl Coordinator {
@@ -162,7 +166,7 @@ impl Coordinator {
                 if let Some(listener) = old_listener { listener.stop(); }
                 drop(old_lan);
                 if test_only {
-                    return probe(&request, &graph, &env, secrets.as_ref(), active_url).map(|message| (None, message));
+                    return test_target(&request, &graph, &env, secrets.as_ref(), active_url).map(|message| (None, message));
                 }
                 request.preferences.validate()?;
                 if request.preferences.mode == Mode::Off {
@@ -196,7 +200,8 @@ impl Coordinator {
                 let mut transport = utopia_sync::setup::verified_target::VerifiedTarget::new(transport);
                 // Learn relay identity before choosing a destination; an unavailable relay
                 // still starts the normal retry loop, preserving offline-first editing.
-                let connection = test_connection(&mut transport);
+                let connected = probe(&mut transport);
+                let connection = connected.connection();
                 if transport.unreadable { return Err(utopia_sync::setup::verified_target::UNREADABLE.into()); }
                 // The first E2E use freezes the key (marker + Keychain), so Apply insists on a
                 // target that was reached and read with it. A launch with saved or environment
@@ -217,16 +222,16 @@ impl Coordinator {
                     request.preferences.save(&file)?;
                 }
                 let transport: BoxTransport = Box::new(transport);
-                Ok((Some(Prepared { cfg, transport, lan, key_check }), "Sync is on. The sidebar shows connection status.".into()))
+                let destination = destination(&cfg, transport.cursor_space(), connected.instance);
+                Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on. The sidebar shows connection status.".into()))
             }).await;
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok((prepared, message)) => {
                         if let Some(prepared) = prepared {
-                            let identity = prepared.transport.cursor_space().transport;
                             let ready = this.ws.read(cx).app().clone().update(cx, |app, _| {
                                 if let Some(marker) = &prepared.key_check { app.store.sync_set("setup_e2e_check", marker)?; }
-                                app.store.prepare_sync_destination(&identity)
+                                app.store.prepare_sync_destination(&prepared.destination)
                             });
                             match ready {
                                 Ok(()) => {
@@ -258,6 +263,25 @@ impl Coordinator {
     }
 }
 
+/// The destination this run publishes to (§12.7): the transport's stable address plus the
+/// relay store id, when the probe could read one. Sampling it *after* the probe is the
+/// point — before that, a relay is only its URL, and a launch without a network must not
+/// look like a different destination (`sync-engine-outbox-and-cursor.md`).
+fn destination(
+    cfg: &SyncConfig,
+    space: utopia_sync::CursorSpace,
+    instance: Option<String>,
+) -> Destination {
+    let origin = match &cfg.target {
+        // The cursor space of a relay is `relay:<store-or-url>#<graph>`; the origin is the
+        // same string spelled with the URL, which is what an offline launch knows.
+        SyncTarget::Relay { url, .. } => utopia_sync::http::destination_origin(url, &cfg.graph),
+        // A folder is identified by its root, and has no store id to learn.
+        SyncTarget::Folder(_) => space.transport,
+    };
+    Destination::new(origin, instance)
+}
+
 fn credentials(
     request: &Request,
     graph: &str,
@@ -285,7 +309,7 @@ fn credentials(
     }
     Ok((token, passphrase))
 }
-fn probe(
+fn test_target(
     request: &Request,
     graph: &str,
     env: &Environment,
@@ -311,13 +335,13 @@ fn probe(
             }
             let mut transport = utopia_sync::folder::FolderTransport::new(path, "connection-test")
                 .map_err(|_| "Could not open the shared folder.")?;
-            return Ok(test_connection(&mut transport).message().into());
+            return Ok(probe(&mut transport).connection().message().into());
         }
         Mode::Off => return Err("Choose a transport first.".into()),
     };
     let mut transport = utopia_sync::http::HttpTransport::new(&url, graph, token)
         .map_err(|_| Connection::Unreachable.message())?;
-    Ok(test_connection(&mut transport).message().into())
+    Ok(probe(&mut transport).connection().message().into())
 }
 
 #[cfg(test)]
