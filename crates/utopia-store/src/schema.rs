@@ -8,6 +8,8 @@
 
 use rusqlite::Connection;
 
+use crate::{Result, StoreError};
+
 pub const SCHEMA_VERSION: i64 = 9;
 
 const V1: &str = r#"
@@ -280,8 +282,17 @@ pub fn configure(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+pub fn migrate(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version > SCHEMA_VERSION {
+        // Rule 14: older builds must keep opening old graphs, but a newer graph has
+        // columns and constraints this build does not know, so opening it would write
+        // through a schema it cannot maintain. Refuse instead of silently downgrading.
+        return Err(StoreError::SchemaTooNew {
+            found: version,
+            supported: SCHEMA_VERSION,
+        });
+    }
     if version < 1 {
         let tx = conn.transaction()?;
         tx.execute_batch(V1)?;
@@ -343,7 +354,10 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     if version < 9 {
         let tx = conn.transaction()?;
         tx.execute_batch(V9)?;
-        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+        // Stamp the version this block builds, not the newest constant: bumping
+        // `SCHEMA_VERSION` without adding a migration must not make an old file claim
+        // the new schema.
+        tx.execute_batch("PRAGMA user_version = 9")?;
         tx.commit()?;
     }
     Ok(())

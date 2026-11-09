@@ -39,13 +39,14 @@ use utopia_doc::{DocError, LoroPageDoc, PageDoc};
 
 pub use attach::{sha256_hex, Attachment, BlobState, PdfHighlight, MAX_BLOB_BYTES};
 pub use blockquery::{QueryHit, QueryResult};
-pub use crypt::{encryption_available, is_encrypted, set_encryption};
+pub use crypt::{encryption_available, file_kind, is_encrypted, set_encryption, FileKind};
 pub use doctor::DoctorReport;
 pub use extras::{ImportReport, Mention, TEMPLATE_PREFIX};
 pub use pagegraph::{GraphNode, GraphOptions, PageGraph};
 pub use pages::PageFate;
 pub use project::{display_title, resolve_page_key};
 pub use query::*;
+pub use schema::SCHEMA_VERSION;
 pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
@@ -75,6 +76,17 @@ pub enum StoreError {
     /// The graph is encrypted at rest and the passphrase is missing or wrong.
     #[error("this graph is encrypted; the passphrase is missing or wrong")]
     Encrypted,
+    /// The file is not a database: damaged, not encrypted (the header is still SQLite's).
+    #[error("this graph file is damaged; it is not a database")]
+    Corrupt,
+    /// Another process has the graph open (or is changing its encryption).
+    #[error("this graph is open; close it before changing its encryption")]
+    Busy,
+    /// The file was written by a build with a newer schema; opening it would drop data.
+    #[error(
+        "this graph uses schema v{found}, but this build supports up to v{supported}; open it with the build that wrote it"
+    )]
+    SchemaTooNew { found: i64, supported: i64 },
 }
 
 pub type Result<T, E = StoreError> = std::result::Result<T, E>;
@@ -188,6 +200,9 @@ pub struct Store {
     /// Unlinked-reference scans this store has run (LR-5). The count is cached per index
     /// version; tests read this to check the scan happens off the paint path.
     unlinked_scans: std::sync::atomic::AtomicU64,
+    /// Shared advisory lock on the graph file; `set_encryption` takes the exclusive side
+    /// (docs/state-machines/encryption-at-rest-state.md issue 2).
+    _lock: Option<crypt::FileLock>,
 }
 
 impl Store {
@@ -204,8 +219,10 @@ impl Store {
                 std::fs::create_dir_all(dir)?;
             }
         }
+        let lock = crypt::FileLock::shared(path)?;
         let conn = crypt::open_keyed(path, key)?;
         let mut store = Self::init(conn, Some(path.to_path_buf()))?;
+        store._lock = Some(lock);
         store.persister = Persister::spawn(path, key)?;
         Ok(store)
     }
@@ -265,6 +282,7 @@ impl Store {
             mem_blobs: HashMap::new(),
             tag_page_scans: std::sync::atomic::AtomicU64::new(0),
             unlinked_scans: std::sync::atomic::AtomicU64::new(0),
+            _lock: None,
         })
     }
 
