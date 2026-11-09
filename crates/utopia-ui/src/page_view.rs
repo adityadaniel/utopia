@@ -22,7 +22,8 @@ use crate::line_input::{LineInput, LineInputEvent};
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
     quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill, BULLET_SIZE,
-    BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT, COLLAPSED_RING, CONTENT_MAX_WIDTH,
+    BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT, COLLAPSED_RING, COMPACT_INDENT,
+    CONTENT_MAX_WIDTH,
     CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X,
     DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE, EMPTY_DAY_GAP,
     EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH, THREAD_OFFSET,
@@ -2780,8 +2781,15 @@ impl PageView {
         let editing = self.editor.read(cx).is_editing(host, &r.page, &r.block);
         // DESIGN.md §3.1: children step right by 31 + 13 + the 1 px thread line; the row's
         // caret/bullet gutter hangs in the content column's side padding so block text
-        // lines up with the page or day title.
-        let step = r.depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT;
+        // lines up with the page or day title. A compact pane is too narrow for 45 px a
+        // level (the right sidebar is 380 px, a split less), so it indents less and its
+        // thread lines follow that same step.
+        let indent = if self.compact {
+            COMPACT_INDENT
+        } else {
+            CHILD_INDENT
+        };
+        let step = r.depth.min(MAX_VISUAL_DEPTH) as f32 * indent;
         // PG-3: a heading's own line box, so H3 is not padded out to the body's 24 px.
         let line = match r.kind {
             BlockKind::Heading(level) => crate::theme::heading_metrics(level).1,
@@ -2917,7 +2925,7 @@ impl PageView {
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(k as f32 * CHILD_INDENT + THREAD_OFFSET))
+                    .left(px(k as f32 * indent + THREAD_OFFSET))
                     .w(px(1.))
                     .bg(th.line)
             }))

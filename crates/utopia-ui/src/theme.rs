@@ -179,6 +179,10 @@ pub const LINE_GRID: f32 = 28.;
 pub const CARET_SLOT: f32 = 20.;
 pub const BULLET_SLOT: f32 = 24.;
 pub const CHILD_INDENT: f32 = 45.;
+/// The step a compact pane (the 380 px right sidebar, a split) uses instead. §3.1's 45 px
+/// is measured for the 760 px column; at depth 8 it would start the text past the edge of
+/// a narrow pane, so a compact row keeps the previous, narrower step and its thread lines.
+pub const COMPACT_INDENT: f32 = 22.;
 /// Where a thread line sits from the row it belongs to, under the parent bullet's centre.
 pub const THREAD_OFFSET: f32 = 31.;
 pub const BULLET_SIZE: f32 = 6.;
@@ -762,6 +766,10 @@ mod tests {
         assert_eq!(
             LINE_GRID, BODY.line,
             "a block row follows the 28 px line grid"
+        );
+        assert!(
+            COMPACT_INDENT < CHILD_INDENT,
+            "a narrow pane indents less than the 760 px column"
         );
     }
 

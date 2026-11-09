@@ -1206,6 +1206,60 @@ fn feed_linked_reference_wraps_at_readable_width(cx: &mut TestAppContext) {
     assert_wraps_within(hit, left, right);
 }
 
+/// Seed a page whose blocks nest `depth` levels deep (0..=depth), returning its id.
+fn seed_nested_page(store: &mut Store, depth: usize) -> PageId {
+    let page = store.create_page("Deep").unwrap();
+    let mut parent = store.ensure_first_block(&page).unwrap();
+    store
+        .set_block_text(&page, &parent, "level 0", None, None)
+        .unwrap();
+    store.commit_block(&page, &parent).unwrap();
+    for level in 1..=depth {
+        let st = store.page_state(&page).unwrap().clone();
+        let plan = outline::append_block(&st, Some(&parent));
+        let block = store.execute_plan(&page, plan, None).unwrap().unwrap().block;
+        store
+            .set_block_text(&page, &block, &format!("level {level}"), None, None)
+            .unwrap();
+        store.commit_block(&page, &block).unwrap();
+        parent = block;
+    }
+    store.sync_index().unwrap();
+    page
+}
+
+/// DESIGN.md §3.1 indents children 45 px, which a 380 px right sidebar cannot afford: the
+/// pane's rows use its own narrower step, so a deep block still starts inside the pane.
+#[gpui::test]
+fn deep_blocks_stay_inside_a_narrow_sidebar_pane(cx: &mut TestAppContext) {
+    let page = std::cell::RefCell::new(None);
+    let cx = setup_seeded(cx, |store| *page.borrow_mut() = Some(seed_nested_page(store, 8)));
+    let page = page.borrow_mut().take().expect("seeded page");
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, true, window, cx)
+    });
+    cx.run_until_parked();
+    let side = bounds(cx, "right-sidebar");
+    // Items: 0 header, 1..=9 the nine blocks; content-9 is depth 8.
+    let deep = bounds(cx, "content-9");
+    assert!(
+        deep.origin.x >= side.origin.x,
+        "a deeply nested row starts inside the pane: {deep:?} {side:?}"
+    );
+    assert!(
+        deep.origin.x + deep.size.width <= side.origin.x + side.size.width + px(0.5),
+        "a deeply nested row stays inside the pane: {deep:?} {side:?}"
+    );
+    assert!(
+        deep.size.width >= px(80.),
+        "the deepest row still has readable width: {deep:?}"
+    );
+}
+
 /// §9.2: a page shift-opened in the right sidebar wraps its references at the sidebar's edge.
 #[gpui::test]
 fn sidebar_linked_reference_wraps(cx: &mut TestAppContext) {
