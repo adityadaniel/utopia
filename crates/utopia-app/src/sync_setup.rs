@@ -22,6 +22,10 @@ use utopia_ui::{
 /// network. Injected so the discovery retry can be driven in a test without multicast.
 type Discover = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 
+/// How often a Nearby client looks for its host again (§12.7): the runner's slow cadence,
+/// because a host that is asleep now may wake at any point during the day.
+const DISCOVERY_RETRY: Duration = utopia_ui::sync_runner::SLOW;
+
 fn lan_discovery() -> Discover {
     Arc::new(|graph: &str| utopia_syncd::lan::discover(graph, Duration::from_secs(5)))
 }
@@ -191,9 +195,21 @@ impl Coordinator {
         self.task = Some(cx.spawn(async move |this, cx| {
             let prefs = request.preferences.clone();
             let mut old_lan = old_lan;
+            loop {
             // The relay database sits next to the settings file; the background task owns
             // this copy, the UI thread owns the other.
-            let relay_file = file.clone();
+            let (request, graph, env, secrets, discover, active_url, client, relay_file, marker, old_lan) = (
+                request.clone(),
+                graph.clone(),
+                env.clone(),
+                secrets.clone(),
+                discover.clone(),
+                active_url.clone(),
+                client.clone(),
+                file.clone(),
+                marker.clone(),
+                old_lan.take(),
+            );
             let result = cx.background_executor().spawn(async move {
                 if test_only {
                     return test_target(&request, &graph, &env, secrets.as_ref(), active_url, discover.as_ref()).map(|message| (None, message));
@@ -215,12 +231,14 @@ impl Coordinator {
                             let db = relay_file.with_extension("relay.db");
                             let cfg = utopia_syncd::Config { tokens: token.clone().into_iter().collect(), ..Default::default() };
                             // The old host holds the listen address until it is dropped.
-                            drop(old_lan.take());
+                            drop(old_lan);
                             let relay = utopia_syncd::lan::serve_lan(&db, bind, &graph, cfg, true).map_err(|_| "Could not host the relay. Check the listen address and whether its port is in use.")?;
                             let url = format!("http://127.0.0.1:{}", relay.addr.port());
                             lan = Some(relay); url
                         } else {
-                            discover(&graph).ok_or("No Nearby Mac found for this graph. Enable hosting on the other Mac, then Apply again.")?
+                            // A host that is asleep is normal: the caller looks again on the
+                            // runner's slow cadence instead of leaving sync off all day.
+                            discover(&graph).ok_or("No Nearby Mac found for this graph. Enable hosting on the other Mac and leave both Macs awake.")?
                         };
                         SyncTarget::Relay { url, token }
                     }
@@ -261,7 +279,7 @@ impl Coordinator {
                 let destination = destination(&cfg, transport.cursor_space(), connected.instance);
                 Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on. The sidebar shows connection status.".into()))
             }).await;
-            let update = this.update(cx, |this, cx| {
+            let update = this.update(cx, |this, cx| -> (Option<utopia_sync::realtime::Listener>, bool) {
                 match result {
                     Ok((None, message)) => {
                         // Off (or a connection test): only stopping sync touches the runner.
@@ -272,7 +290,7 @@ impl Coordinator {
                             if save {
                                 if let Err(error) = prefs.save(&file) {
                                     this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
-                                    return old;
+                                    return (old, false);
                                 }
                             }
                         }
@@ -280,7 +298,7 @@ impl Coordinator {
                             if !test_only { view.preferences = prefs.clone(); if save { view.notice = None; } }
                             view.finish(message, cx);
                         });
-                        old
+                        (old, false)
                     }
                     Ok((Some(prepared), message)) => {
                         // The old runner is stopped only now, and before the destination is
@@ -293,14 +311,14 @@ impl Coordinator {
                         });
                         if ready.is_err() {
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination. Local data is unchanged.".into(), cx));
-                            return old;
+                            return (old, false);
                         }
                         // The settings describe what is running, so they are written after
                         // the destination record, never before a target is known to work.
                         if save {
                             if let Err(error) = prefs.save(&file) {
                                 this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
-                                return old;
+                                return (old, false);
                             }
                         }
                         this.view.update(cx, |view, _| {
@@ -309,7 +327,7 @@ impl Coordinator {
                         let started = this.ws.update(cx, |ws, cx| ws.start_prepared_sync(&prepared.cfg, prepared.transport, cx));
                         if !started {
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: the runner could not start. Local editing is still available.".into(), cx));
-                            return old;
+                            return (old, false);
                         }
                         this.lan = prepared.lan;
                         this.view.update(cx, |view, cx| {
@@ -317,23 +335,41 @@ impl Coordinator {
                             if save { view.notice = None; }
                             view.finish(message, cx);
                         });
-                        old
+                        (old, false)
                     }
                     Err(message) => {
-                        // The previous target, if any, keeps running: nothing was torn down.
-                        this.view.update(cx, |view, cx| view.finish(if test_only { message } else { format!("Sync is Off: {message}") }, cx));
-                        if hosting {
+                        // A Nearby Mac that is asleep is the one failure worth waiting out:
+                        // look again on the slow cadence (§12.7). The previous target, if
+                        // any, keeps running meanwhile: nothing was torn down.
+                        let retry = !test_only && prefs.mode == Mode::Nearby && prefs.host.is_none();
+                        let message = if retry {
+                            format!("Sync is Off: {message} Looking again every minute.")
+                        } else {
+                            format!("Sync is Off: {message}")
+                        };
+                        this.view.update(cx, |view, cx| view.finish(message, cx));
+                        let old = if hosting {
                             // Its listen socket is gone with the old host, so it cannot work.
                             this.ws.update(cx, |ws, cx| ws.stop_sync(cx))
                         } else {
                             None
-                        }
+                        };
+                        (old, retry)
                     }
                 }
             });
             // Joining a listener blocks, so it never runs on the UI thread.
-            if let Ok(Some(listener)) = update {
+            let (listener, retry) = match update {
+                Ok(update) => update,
+                Err(_) => break,
+            };
+            if let Some(listener) = listener {
                 cx.background_executor().spawn(async move { listener.stop() }).await;
+            }
+            if !retry {
+                break;
+            }
+            cx.background_executor().timer(DISCOVERY_RETRY).await;
             }
         }));
     }
@@ -576,6 +612,52 @@ mod tests {
             panic!("resolving an environment override must not write credentials")
         }
     }
+    /// §12.7: a Nearby Mac can be asleep when the laptop starts. Discovery is retried on the
+    /// runner's slow cadence instead of leaving sync off until someone opens Settings again.
+    #[gpui::test]
+    fn ac_12_7_a_nearby_client_keeps_looking_for_its_host(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = Preferences {
+            mode: Mode::Nearby,
+            ..Default::default()
+        };
+        // The host is up, but only visible to the second look: exactly the laptop that
+        // wakes before the Mac in the study.
+        let relay = utopia_syncd::lan::serve_lan(
+            &dir.path().join("lan.db"),
+            "127.0.0.1:0",
+            "Demo",
+            utopia_syncd::Config::default(),
+            false,
+        )
+        .unwrap();
+        let url = format!("http://{}", relay.addr);
+        let looks = Arc::new(Mutex::new(0usize));
+        let discover: Discover = {
+            let looks = looks.clone();
+            Arc::new(move |_graph: &str| {
+                let mut n = looks.lock().unwrap();
+                *n += 1;
+                (*n > 1).then(|| url.clone())
+            })
+        };
+        let h = harness(cx, dir.path(), Some(&saved), discover);
+        cx.run_until_parked();
+        assert!(
+            h.ws.read_with(cx, |ws, _| ws.sync_phase().is_none()),
+            "the first look finds nothing, so sync is off for now"
+        );
+        // The host appears; a minute later the app looks again by itself.
+        cx.background_executor.advance_clock(DISCOVERY_RETRY);
+        cx.run_until_parked();
+        assert_eq!(*looks.lock().unwrap(), 2, "one retry after the slow cadence");
+        assert!(
+            h.ws.read_with(cx, |ws, _| ws.sync_phase().is_some()),
+            "the client never looked again: {}",
+            h.setup.read_with(cx, |view, _| view.status.clone())
+        );
+    }
+
     fn request() -> Request {
         Request {
             preferences: Preferences::default(),
