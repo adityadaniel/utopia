@@ -2,6 +2,29 @@
 
 ## Status
 
+In-app setup update (§12.7): cursor isolation alone did not publish content already
+acknowledged by a previous destination. `Store::prepare_sync_destination` now queues a
+full CRDT update for every persisted shard, including imported/tombstoned pages, when the
+selected destination identity changes. It also makes previously uploaded attachments
+pending for the new destination. These bookkeeping changes and the destination identity
+commit in one `BEGIN IMMEDIATE` transaction, after flushing pending store writes.
+
+These are ordinary updates, not truncating relay snapshots. Cursor/revision tags remain
+intact; compaction still requires a cursor measured in the current relay's space. Setup
+asks for the manifest before selecting its identity, so a reachable relay is identified
+by its store id rather than only its URL. An unavailable relay starts normal background
+retries using its URL identity, and when its manifest later reveals the store id the
+cursor space changes, which `VerifiedTarget` treats as a new target: it pulls one existing
+shard to prove the selected encryption can read it before any push, so a wrong passphrase
+on a second device cannot mix ciphertexts into an existing graph
+(`ac_12_6_pairing_validates_existing_payloads_before_pushing`). Repeating Apply for the
+same identity does not enqueue the graph again; switching back can re-send updates, but
+CRDT import remains idempotent.
+
+`ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates` covers two
+stores, a fresh relay, and switching back without lost or duplicate blocks. The existing
+cursor-space and compaction tests remain the guards against truncating unseen remote data.
+
 Made explicit on `fix/sync-engine-outbox` (`crates/utopia-sync`, plus the relay's push path
 in `crates/utopia-syncd`):
 
