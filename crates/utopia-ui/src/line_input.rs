@@ -413,6 +413,11 @@ impl LineInput {
         if self.field.composing() {
             return;
         }
+        // A masked field shows no text, so a yank would put something there the user
+        // cannot see, and a passphrase typed that way would be a stranger's.
+        if self.masked {
+            return;
+        }
         let text = crate::kill::last();
         if text.is_empty() {
             return;

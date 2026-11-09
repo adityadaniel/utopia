@@ -103,10 +103,16 @@ fn macos_text_keys_work_in_a_single_line_input(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-a alt-delete");
     assert_eq!(text(&input, cx), "");
 
-    // What a masked field (a passphrase) kills is not kept for Ctrl+Y.
+    // A masked field (a passphrase) neither feeds the kill buffer nor takes from it: a
+    // yank would put text there that the user cannot see.
     input.update(cx, |i, cx| i.set_masked(true, cx));
     cx.simulate_input("secret");
-    cx.simulate_keystrokes("ctrl-a ctrl-k ctrl-y");
+    cx.simulate_keystrokes("ctrl-a ctrl-k");
+    assert_eq!(text(&input, cx), "");
+    cx.simulate_keystrokes("ctrl-y");
+    assert_eq!(text(&input, cx), "", "nothing yanked into a masked field");
+    input.update(cx, |i, cx| i.set_masked(false, cx));
+    cx.simulate_keystrokes("ctrl-y");
     assert_eq!(
         text(&input, cx),
         "Z",
