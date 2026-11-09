@@ -7010,3 +7010,564 @@ fn fr_2_17_an_expanded_relative_date_moves_the_open_menu_with_it(cx: &mut TestAp
         format!("see [[November 3rd, 2026]] and (({target}))")
     );
 }
+
+// ---------------------------------------------------------------------------------------
+// macOS text editing shortcuts (§9.1, §13.5). "Line" is the wrapped line, as in TextEdit;
+// every deletion is one edit through the normal command path, so one undo step.
+// ---------------------------------------------------------------------------------------
+
+/// The block the editor owns and the text in it, before the block commits.
+fn editing_block(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<(String, String)> {
+    ws.update(cx, |w, cx| {
+        let e = w.editor().read(cx);
+        Some((e.target()?.block.0.clone(), e.field_text().to_string()))
+    })
+}
+
+/// The caret within the field (before the block commits).
+fn caret(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> usize {
+    ws.update(cx, |w, cx| w.editor().read(cx).cursor())
+}
+
+/// Let the 300 ms idle commit and the 500 ms undo coalescing window pass, so what was typed
+/// so far is one sealed undo step and the next edit is another.
+fn settle_typing(cx: &mut VisualTestContext) {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(600));
+    cx.run_until_parked();
+}
+
+/// Alt+Shift+Left/Right extend the selection by a word (macOS' word-wise selection).
+#[gpui::test]
+fn alt_shift_arrows_select_by_the_word(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("hello big world");
+    cx.simulate_keystrokes("alt-shift-left");
+    assert_eq!(selected_text(&ws, cx), "world");
+    cx.simulate_keystrokes("alt-shift-left");
+    assert_eq!(selected_text(&ws, cx), "big world");
+    settle_typing(cx);
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        "hello big world",
+        "selecting is not an edit"
+    );
+
+    // The other direction, from the start of the block.
+    cx.simulate_keystrokes("right home alt-shift-right");
+    assert_eq!(selected_text(&ws, cx), "hello");
+    cx.simulate_keystrokes("alt-shift-right");
+    assert_eq!(selected_text(&ws, cx), "hello big");
+}
+
+/// A plain word move starts from the edge the move heads towards: with a selection,
+/// Option+Left goes to the word before its left edge and Option+Right one past its right
+/// edge, rather than travelling from whichever end the caret happens to be at.
+#[gpui::test]
+fn word_moves_start_from_the_edge_they_move_towards(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let _page = today_page(&app, cx);
+    cx.simulate_input("one two three four");
+    cx.simulate_keystrokes("alt-shift-left alt-shift-left");
+    assert_eq!(selected_text(&ws, cx), "three four");
+    // Rightward from the far edge: the caret ends after `four`.
+    cx.simulate_keystrokes("alt-right");
+    assert_eq!(caret(&ws, cx), "one two three four".len());
+    // Leftward from the near edge: the start of `two`, one word before the selection.
+    cx.simulate_keystrokes("alt-shift-left alt-shift-left");
+    assert_eq!(selected_text(&ws, cx), "three four");
+    cx.simulate_keystrokes("alt-left");
+    assert_eq!(text_and_caret(&ws, cx).1, "one ".len());
+    assert_eq!(selected_text(&ws, cx), "");
+}
+
+/// Long enough to wrap in the test window, so the first visual line is not the whole block.
+const WRAPPED: &str = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo \
+                       lima mike november oscar papa quebec romeo sierra tango uniform victor";
+
+/// Cmd+Shift+Left/Right extend the selection to the ends of the *wrapped* line, which is
+/// what TextEdit means by a line; a soft break inside the block is a line end too. Pressed
+/// again at a wrap they stay on that line, and one after the other they select the line.
+#[gpui::test]
+fn cmd_shift_arrows_select_to_the_ends_of_the_wrapped_line(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let _page = today_page(&app, cx);
+    cx.simulate_resize(size(px(620.), px(700.)));
+    cx.simulate_input(WRAPPED);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("home cmd-shift-right");
+    let first_line = selected_text(&ws, cx);
+    assert!(
+        !first_line.is_empty() && first_line.len() < WRAPPED.len(),
+        "the paragraph wrapped: {first_line:?}"
+    );
+    assert!(WRAPPED.starts_with(&first_line), "{first_line:?}");
+    cx.simulate_keystrokes("cmd-shift-right");
+    assert_eq!(
+        selected_text(&ws, cx),
+        first_line,
+        "again: stays on the first line"
+    );
+    // Cmd+Right stops on the line, before its last character, not on the next line.
+    cx.simulate_keystrokes("home cmd-right");
+    let mut line = first_line.clone();
+    line.pop();
+    assert_eq!(&WRAPPED[..caret(&ws, cx)], line);
+    // From the middle of the line: Cmd+Shift+Left, then Cmd+Shift+Right, is the line.
+    cx.simulate_keystrokes("left left cmd-shift-left");
+    assert_eq!(selected_text(&ws, cx), &first_line[..first_line.len() - 3]);
+    cx.simulate_keystrokes("cmd-shift-right");
+    assert_eq!(selected_text(&ws, cx), first_line);
+    // A soft break inside the block is a line end as well.
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("one");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("two");
+    cx.simulate_keystrokes("home cmd-shift-right");
+    assert_eq!(selected_text(&ws, cx), "one");
+}
+
+/// Shift+Home and Shift+End extend the selection to where Home and End go in a block:
+/// its start and end, across wrapped lines.
+#[gpui::test]
+fn shift_home_and_shift_end_select_to_the_ends_of_the_block(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let _page = today_page(&app, cx);
+    cx.simulate_resize(size(px(620.), px(700.)));
+    cx.simulate_input(WRAPPED);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("home right shift-end");
+    assert_eq!(selected_text(&ws, cx), &WRAPPED[1..]);
+    cx.simulate_keystrokes("end left shift-home");
+    assert_eq!(selected_text(&ws, cx), &WRAPPED[..WRAPPED.len() - 1]);
+}
+
+/// Option+Delete deletes back to the previous word start as one edit, in one grapheme-aware
+/// step, and one undo brings the word back. At the very start of a block it does nothing:
+/// only plain Backspace joins two blocks (rule 5).
+#[gpui::test]
+fn alt_backspace_deletes_to_the_previous_word_start(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("日本語 テスト done");
+    settle_typing(cx);
+    cx.simulate_keystrokes("alt-backspace");
+    assert_eq!(text_and_caret(&ws, cx), ("日本語 テスト ".into(), 20));
+    settle_typing(cx);
+    cx.simulate_keystrokes("alt-backspace");
+    assert_eq!(text_and_caret(&ws, cx), ("日本語 ".into(), 10));
+    settle_typing(cx);
+    // One undo per deletion, not one per character.
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx).0, "日本語 テスト ");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx).0, "日本語 テスト done");
+
+    // At offset 0 of a block with one above it: nothing is deleted and nothing merges.
+    cx.simulate_keystrokes("cmd-down enter");
+    cx.simulate_input("second");
+    cx.simulate_keystrokes("home alt-backspace");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("日本語 テスト done", 0), ("second", 0)],
+        "Option+Delete never joins blocks"
+    );
+}
+
+/// Option+Fn+Delete deletes forward to the next word end, grapheme by grapheme.
+#[gpui::test]
+fn alt_delete_deletes_to_the_next_word_end(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("ハロー wörld ok");
+    settle_typing(cx);
+    cx.simulate_keystrokes("home right alt-delete");
+    assert_eq!(text_and_caret(&ws, cx), ("ハ wörld ok".into(), "ハ".len()));
+    cx.simulate_keystrokes("alt-delete");
+    assert_eq!(text_and_caret(&ws, cx).0, "ハ ok");
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(
+        text_and_caret(&ws, cx).0,
+        "ハ wörld ok",
+        "one undo per word"
+    );
+    cx.simulate_keystrokes("escape");
+    assert_eq!(
+        rows(&app, &page, cx).len(),
+        1,
+        "inside one block throughout"
+    );
+}
+
+/// Cmd+Backspace deletes to the start of the wrapped line and stops there: at the line's
+/// start it deletes nothing, so it cannot merge blocks either.
+#[gpui::test]
+fn cmd_backspace_deletes_to_the_start_of_the_wrapped_line(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("one two");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("three");
+    settle_typing(cx);
+    cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(text_and_caret(&ws, cx), ("one two\n".into(), 8));
+    // Already at the line start: nothing to delete, and no merge with anything.
+    cx.simulate_keystrokes("cmd-backspace");
+    assert_eq!(text_and_caret(&ws, cx), ("one two\n".into(), 8));
+    settle_typing(cx);
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx).0, "one two\nthree");
+    cx.simulate_keystrokes("escape");
+    assert_eq!(rows(&app, &page, cx).len(), 1, "one block, never merged");
+}
+
+/// Option+Up/Down go to the ends of this block's text first, and only from there carry on
+/// into the block above or below (Utopia's paragraph is the block).
+#[gpui::test]
+fn alt_up_and_down_move_to_the_block_edges_and_cross_blocks(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("alpha");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("beta gamma");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("delta");
+    cx.run_until_parked();
+    // Caret at the end of `delta`; Option+Up goes to the start of `delta`…
+    cx.simulate_keystrokes("alt-up");
+    assert_eq!(
+        editing_block(&ws, cx).map(|(_, text)| text),
+        Some("delta".into()),
+        "still in the same block"
+    );
+    assert_eq!(caret(&ws, cx), 0);
+    // …and once there, to the start of the block above.
+    cx.simulate_keystrokes("alt-up");
+    cx.run_until_parked();
+    assert_eq!(
+        editing_block(&ws, cx).map(|(_, text)| text),
+        Some("beta gamma".into())
+    );
+    assert_eq!(caret(&ws, cx), 0);
+    // Option+Down walks back out: end of this block, then end of the one below.
+    cx.simulate_keystrokes("alt-down");
+    assert_eq!(caret(&ws, cx), "beta gamma".len());
+    cx.simulate_keystrokes("alt-down");
+    cx.run_until_parked();
+    assert_eq!(
+        editing_block(&ws, cx).map(|(_, text)| text),
+        Some("delta".into())
+    );
+    assert_eq!(caret(&ws, cx), "delta".len());
+
+    // A selection collapses to the edge the move heads towards before crossing anything.
+    cx.simulate_keystrokes("alt-shift-left");
+    assert_eq!(selected_text(&ws, cx), "delta");
+    cx.simulate_keystrokes("alt-up");
+    assert_eq!(caret(&ws, cx), 0);
+    assert_eq!(selected_text(&ws, cx), "");
+    assert_eq!(rows(&app, &page, cx).len(), 3);
+}
+
+/// Option+Shift+Up/Down extend the selection to the ends of the block's text and, as the
+/// macOS "select to the end" keys do, grow it on that side rather than shrink it.
+#[gpui::test]
+fn alt_shift_up_and_down_select_to_the_block_edges(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_input("one two three");
+    cx.simulate_keystrokes("alt-left alt-shift-up");
+    assert_eq!(selected_text(&ws, cx), "one two ");
+    cx.simulate_keystrokes("alt-shift-up");
+    assert_eq!(selected_text(&ws, cx), "one two ", "clamped at the start");
+    cx.simulate_keystrokes("alt-shift-down");
+    assert_eq!(
+        selected_text(&ws, cx),
+        "one two three",
+        "grows, never collapses"
+    );
+    cx.simulate_keystrokes("right shift-home");
+    assert_eq!(
+        selected_text(&ws, cx),
+        "one two three",
+        "Shift+Home: to where Home goes"
+    );
+    cx.simulate_keystrokes("left shift-end");
+    assert_eq!(
+        selected_text(&ws, cx),
+        "one two three",
+        "Shift+End: to where End goes"
+    );
+}
+
+/// Cmd+Up/Down are the ends of the block's text, even when it holds several lines.
+#[gpui::test]
+fn cmd_up_and_down_move_to_the_block_edges(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_input("first");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("second");
+    assert_eq!(caret(&ws, cx), "first\nsecond".len());
+    cx.simulate_keystrokes("cmd-up");
+    assert_eq!(caret(&ws, cx), 0);
+    cx.simulate_keystrokes("cmd-down");
+    assert_eq!(caret(&ws, cx), "first\nsecond".len());
+    // Cmd+Shift+Up/Down still move the block: they are a different binding.
+    cx.simulate_keystrokes("cmd-shift-up");
+    assert_eq!(
+        ws.update(cx, |w, cx| w.editor().read(cx).field_text().to_string()),
+        "first\nsecond"
+    );
+}
+
+/// Ctrl+A/E go to the ends of the paragraph (Cocoa's `moveToBeginningOfParagraph:`),
+/// Ctrl+B/F step one grapheme, and a selection collapses to the edge the move heads for.
+#[gpui::test]
+fn ctrl_a_e_b_f_move_around_the_line(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_input("hello world");
+    cx.simulate_keystrokes("home ctrl-f ctrl-f");
+    assert_eq!(caret(&ws, cx), 2);
+    cx.simulate_keystrokes("ctrl-b");
+    assert_eq!(caret(&ws, cx), 1);
+    cx.simulate_keystrokes("ctrl-e");
+    assert_eq!(caret(&ws, cx), "hello world".len());
+    cx.simulate_keystrokes("ctrl-a");
+    assert_eq!(caret(&ws, cx), 0);
+    // A soft break ends the paragraph.
+    cx.simulate_keystrokes("ctrl-e shift-enter");
+    cx.simulate_input("next");
+    cx.simulate_keystrokes("ctrl-a");
+    assert_eq!(caret(&ws, cx), "hello world\n".len());
+    cx.simulate_keystrokes("left ctrl-a");
+    assert_eq!(caret(&ws, cx), 0);
+
+    // Grapheme-aware: `日` is one step, and so is a family emoji.
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("日👩‍👩‍👧x");
+    cx.simulate_keystrokes("ctrl-a ctrl-f");
+    assert_eq!(caret(&ws, cx), "日".len());
+    cx.simulate_keystrokes("ctrl-f");
+    assert_eq!(caret(&ws, cx), "日👩‍👩‍👧".len());
+    cx.simulate_keystrokes("ctrl-b");
+    assert_eq!(caret(&ws, cx), "日".len());
+
+    // With a selection, Ctrl+F lands on its right edge and Ctrl+B on its left.
+    cx.simulate_keystrokes("ctrl-a shift-right shift-right");
+    cx.simulate_keystrokes("ctrl-f");
+    assert_eq!(caret(&ws, cx), "日👩‍👩‍👧".len());
+    assert_eq!(selected_text(&ws, cx), "");
+    cx.simulate_keystrokes("shift-left ctrl-b");
+    assert_eq!(caret(&ws, cx), "日".len());
+    assert_eq!(selected_text(&ws, cx), "");
+}
+
+/// On a wrapped paragraph Cmd+Left/Right stop at the wrap and Ctrl+A/E do not: the same
+/// split as TextEdit.
+#[gpui::test]
+fn cmd_arrows_stop_at_the_wrap_and_ctrl_a_e_at_the_paragraph(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_resize(size(px(620.), px(700.)));
+    cx.simulate_input(WRAPPED);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("home cmd-right");
+    let wrap = caret(&ws, cx);
+    assert!(
+        wrap > 0 && wrap < WRAPPED.len(),
+        "Cmd+Right stops at the end of the first wrapped line: {wrap}"
+    );
+    cx.simulate_keystrokes("cmd-right");
+    assert_eq!(caret(&ws, cx), wrap, "and stays there");
+    cx.simulate_keystrokes("cmd-left");
+    assert_eq!(caret(&ws, cx), 0);
+    cx.simulate_keystrokes("ctrl-e");
+    assert_eq!(caret(&ws, cx), WRAPPED.len());
+    // From the last line Cmd+Left goes to that line's start, not the block's.
+    cx.simulate_keystrokes("cmd-left");
+    let last_line = caret(&ws, cx);
+    assert!(last_line > wrap, "{last_line} > {wrap}");
+    cx.simulate_keystrokes("ctrl-a");
+    assert_eq!(caret(&ws, cx), 0);
+}
+
+/// Ctrl+P/N are Up/Down, including the step into the block above or below.
+#[gpui::test]
+fn ctrl_p_and_ctrl_n_move_a_line_and_cross_blocks(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("above");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("below");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("ctrl-p");
+    cx.run_until_parked();
+    assert_eq!(
+        editing_block(&ws, cx).map(|(_, text)| text),
+        Some("above".into()),
+        "Ctrl+P crosses into the block above"
+    );
+    cx.simulate_keystrokes("ctrl-n");
+    cx.run_until_parked();
+    assert_eq!(
+        editing_block(&ws, cx).map(|(_, text)| text),
+        Some("below".into())
+    );
+    cx.simulate_keystrokes("escape");
+    assert_eq!(rows(&app, &page, cx).len(), 2);
+}
+
+/// Ctrl+K kills to the end of the paragraph and Ctrl+Y puts it back at the caret. At a
+/// line break it kills the break; at the end of the block nothing, so it never joins
+/// blocks, and an empty kill keeps the buffer. Each kill and yank is one undo step.
+#[gpui::test]
+fn ctrl_k_kills_to_the_end_of_the_line_and_ctrl_y_yanks_it_back(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("first line");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("second");
+    settle_typing(cx);
+    cx.simulate_keystrokes("home right right right ctrl-k");
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        ("fir\nsecond".into(), 3),
+        "to the end of the paragraph, not the block"
+    );
+    cx.simulate_keystrokes("ctrl-y");
+    assert_eq!(text_and_caret(&ws, cx), ("first line\nsecond".into(), 10));
+    // At the line break: the break goes, the two lines join inside the block.
+    cx.simulate_keystrokes("ctrl-k");
+    assert_eq!(text_and_caret(&ws, cx), ("first linesecond".into(), 10));
+    // At the end of the block: nothing to kill, no merge, and the buffer keeps "\n".
+    cx.simulate_keystrokes("cmd-down ctrl-k");
+    assert_eq!(text_and_caret(&ws, cx).0, "first linesecond");
+    cx.simulate_keystrokes("ctrl-y");
+    assert_eq!(text_and_caret(&ws, cx).0, "first linesecond\n");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx).len(), 1, "Ctrl+K never merges blocks");
+
+    // One undo per kill and per yank, although they came within the coalescing window.
+    let undo = |cx: &mut VisualTestContext| {
+        cx.simulate_keystrokes("cmd-z");
+        cx.run_until_parked();
+        rows(&app, &page, cx)[0].0.clone()
+    };
+    assert_eq!(undo(cx), "first linesecond", "the yank");
+    assert_eq!(undo(cx), "first line\nsecond", "the kill of the break");
+    assert_eq!(undo(cx), "fir\nsecond", "the first yank");
+    assert_eq!(undo(cx), "first line\nsecond", "the first kill");
+}
+
+/// Ctrl+D and Ctrl+H are Delete and Backspace, including Backspace joining two blocks.
+#[gpui::test]
+fn ctrl_d_and_ctrl_h_delete_characters(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("above");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("abc");
+    cx.simulate_keystrokes("home ctrl-d");
+    assert_eq!(text_and_caret(&ws, cx), ("bc".into(), 0));
+    cx.simulate_keystrokes("cmd-down ctrl-h");
+    assert_eq!(text_and_caret(&ws, cx), ("b".into(), 1));
+    cx.simulate_keystrokes("home ctrl-h");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("aboveb", 0)],
+        "Ctrl+H at the start of a block is Backspace: it joins with the block above"
+    );
+}
+
+/// Ctrl+T swaps the graphemes either side of the caret; at the end of the line the two
+/// before it swap instead, a cluster is never split, and each swap is one undo step.
+#[gpui::test]
+fn ctrl_t_transposes_graphemes(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("abcd");
+    settle_typing(cx);
+    cx.simulate_keystrokes("home right ctrl-t");
+    assert_eq!(text_and_caret(&ws, cx), ("bacd".into(), 2));
+    cx.simulate_keystrokes("cmd-down ctrl-t");
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        ("badc".into(), 4),
+        "at the end: the two before"
+    );
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "bacd", "one undo per swap");
+
+    // A family emoji is one grapheme and swaps whole.
+    cx.simulate_keystrokes("cmd-down enter");
+    cx.run_until_parked();
+    cx.simulate_input("日👩‍👩‍👧");
+    cx.simulate_keystrokes("ctrl-t");
+    assert_eq!(text_and_caret(&ws, cx), ("👩‍👩‍👧日".into(), "日👩‍👩‍👧".len()));
+}
+
+/// Ctrl+O breaks the line after the caret and leaves the caret where it was.
+#[gpui::test]
+fn ctrl_o_opens_a_line_after_the_caret(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("onetwo");
+    settle_typing(cx);
+    cx.simulate_keystrokes("home right right right ctrl-o");
+    assert_eq!(text_and_caret(&ws, cx), ("one\ntwo".into(), 3));
+    cx.simulate_input("!");
+    assert_eq!(text_and_caret(&ws, cx), ("one!\ntwo".into(), 4));
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx).len(),
+        1,
+        "a line break, not a new block"
+    );
+}
+
+/// While an input method composes, none of the new editing keys touches the buffer: the
+/// glyphs belong to the IME until it commits (§13.5).
+#[gpui::test]
+fn editing_shortcuts_wait_for_the_input_method(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_input("ab cd");
+    settle_typing(cx);
+    cx.simulate_keystrokes("ctrl-a ctrl-k ctrl-y");
+    let editor = ws.update(cx, |w, _| w.editor());
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    cx.run_until_parked();
+    for keys in [
+        "alt-backspace",
+        "alt-delete",
+        "cmd-backspace",
+        "ctrl-k",
+        "ctrl-y",
+        "ctrl-t",
+        "ctrl-o",
+        "ctrl-d",
+        "ctrl-h",
+    ] {
+        cx.simulate_keystrokes(keys);
+        assert_eq!(
+            text_and_caret(&ws, cx).0,
+            "ab cdにほ",
+            "{keys} during composition"
+        );
+    }
+}

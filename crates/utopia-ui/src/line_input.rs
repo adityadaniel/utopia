@@ -190,15 +190,242 @@ impl LineInput {
     }
 
     fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        let to = utopia_core::text::prev_word_start(&self.field.text, self.field.cursor());
+        let to = utopia_core::text::prev_word_start(&self.field.text, self.move_origin(true));
         self.field.move_to(to);
         cx.notify();
     }
 
     fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
-        let to = utopia_core::text::next_word_end(&self.field.text, self.field.cursor());
+        let to = utopia_core::text::next_word_end(&self.field.text, self.move_origin(false));
         self.field.move_to(to);
         cx.notify();
+    }
+
+    /// Where a plain move starts from, macOS style: with a selection it collapses to the
+    /// edge the move heads towards instead of travelling from the far end (§9.1).
+    fn move_origin(&self, leftward: bool) -> usize {
+        if self.field.sel.is_empty() {
+            self.field.cursor()
+        } else if leftward {
+            self.field.sel.start
+        } else {
+            self.field.sel.end
+        }
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let to = utopia_core::text::prev_word_start(&self.field.text, self.field.cursor());
+        self.field.select_to(to);
+        cx.notify();
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let to = utopia_core::text::next_word_end(&self.field.text, self.field.cursor());
+        self.field.select_to(to);
+        cx.notify();
+    }
+
+    /// The whole text is one line here, so Cmd+Shift+Left / Shift+Home extend the
+    /// selection to the start of the field and Cmd+Shift+Right / Shift+End to its end.
+    fn select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to_edge(false, cx);
+    }
+
+    fn select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to_edge(true, cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to_edge(false, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to_edge(true, cx);
+    }
+
+    /// Grow the selection to the start or end of the field, never shrinking it (the
+    /// macOS "select to the end of the line" behaviour, see `BlockEditor::extend_to`).
+    fn select_to_edge(&mut self, end: bool, cx: &mut Context<Self>) {
+        let sel = self.field.sel.clone();
+        if end {
+            self.field.move_to(sel.start);
+            self.field.select_to(self.field.text.len());
+        } else {
+            self.field.move_to(sel.end);
+            self.field.select_to(0);
+        }
+        cx.notify();
+    }
+
+    /// Remove `range` as one edit, replacing the selection the caret came from.
+    fn delete_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.field.composing() || range.is_empty() {
+            return;
+        }
+        self.edit(range, "", window, cx);
+    }
+
+    /// Option+Backspace: back to the start of the previous word; at the start, nothing.
+    fn delete_word_backward(
+        &mut self,
+        _: &DeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let c = self.field.cursor();
+            utopia_core::text::prev_word_start(&self.field.text, c)..c
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    /// Option+Fn+Delete: forward to the end of the next word.
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let c = self.field.cursor();
+            c..utopia_core::text::next_word_end(&self.field.text, c)
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    /// Cmd+Backspace: the text before the caret, which in a single-line field is the whole
+    /// line.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            0..self.field.cursor()
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    fn emacs_start_of_line(
+        &mut self,
+        _: &EmacsStartOfLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.field.move_to(0);
+        cx.notify();
+    }
+
+    fn emacs_end_of_line(&mut self, _: &EmacsEndOfLine, _: &mut Window, cx: &mut Context<Self>) {
+        let len = self.field.text.len();
+        self.field.move_to(len);
+        cx.notify();
+    }
+
+    fn emacs_back_char(&mut self, _: &EmacsBackChar, _: &mut Window, cx: &mut Context<Self>) {
+        let to = if self.field.sel.is_empty() {
+            self.field.prev_boundary()
+        } else {
+            self.field.sel.start
+        };
+        self.field.move_to(to);
+        cx.notify();
+    }
+
+    fn emacs_forward_char(&mut self, _: &EmacsForwardChar, _: &mut Window, cx: &mut Context<Self>) {
+        let to = if self.field.sel.is_empty() {
+            self.field.next_boundary()
+        } else {
+            self.field.sel.end
+        };
+        self.field.move_to(to);
+        cx.notify();
+    }
+
+    /// Ctrl+P / Ctrl+N: the input's own up and down, which in the palette and the
+    /// reference menus move through the list.
+    fn emacs_prev_line(&mut self, _: &EmacsPrevLine, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(LineInputEvent::Up);
+    }
+
+    fn emacs_next_line(&mut self, _: &EmacsNextLine, _: &mut Window, cx: &mut Context<Self>) {
+        cx.emit(LineInputEvent::Down);
+    }
+
+    /// Ctrl+K: kill from the caret to the end of the text and remember it for Ctrl+Y.
+    fn emacs_kill_line(&mut self, _: &EmacsKillLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            self.field.cursor()..self.field.text.len()
+        } else {
+            sel
+        };
+        if range.is_empty() {
+            return;
+        }
+        // A passphrase field is masked for a reason: what it kills is not kept in a buffer
+        // that outlives the field (masking is a local UI choice, rule 9).
+        if !self.masked {
+            crate::kill::remember(&self.field.text[range.clone()]);
+        }
+        self.delete_range(range, window, cx);
+    }
+
+    fn emacs_yank(&mut self, _: &EmacsYank, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let text = crate::kill::last();
+        if text.is_empty() {
+            return;
+        }
+        let sel = self.field.sel.clone();
+        self.edit(sel, &text.replace('\n', " "), window, cx);
+    }
+
+    fn emacs_delete_char(
+        &mut self,
+        _: &EmacsDeleteChar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.delete(&Delete, window, cx);
+    }
+
+    fn emacs_backspace(&mut self, _: &EmacsBackspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.backspace(&Backspace, window, cx);
+    }
+
+    /// Ctrl+T: swap the graphemes around the caret (see [`utopia_core::text::transpose`]).
+    fn emacs_transpose(&mut self, _: &EmacsTranspose, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let caret = self.field.cursor();
+        let Some((range, swapped, caret)) = utopia_core::text::transpose(&self.field.text, caret)
+        else {
+            return;
+        };
+        self.edit(range, &swapped, window, cx);
+        self.field.move_to(caret);
     }
 
     fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
@@ -329,6 +556,26 @@ impl Render for LineInput {
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_line_start))
+            .on_action(cx.listener(Self::select_line_end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::emacs_start_of_line))
+            .on_action(cx.listener(Self::emacs_end_of_line))
+            .on_action(cx.listener(Self::emacs_back_char))
+            .on_action(cx.listener(Self::emacs_forward_char))
+            .on_action(cx.listener(Self::emacs_prev_line))
+            .on_action(cx.listener(Self::emacs_next_line))
+            .on_action(cx.listener(Self::emacs_kill_line))
+            .on_action(cx.listener(Self::emacs_yank))
+            .on_action(cx.listener(Self::emacs_delete_char))
+            .on_action(cx.listener(Self::emacs_backspace))
+            .on_action(cx.listener(Self::emacs_transpose))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_action(cx.listener(Self::paste))

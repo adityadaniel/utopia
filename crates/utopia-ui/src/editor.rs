@@ -43,6 +43,12 @@ pub enum EditorEvent {
         up: bool,
         x: Option<Pixels>,
     },
+    /// Option+Up/Down pressed at the edge of a block: carry on at the start of the block
+    /// above (`to_start`) or at the end of the block below. The host knows the visible
+    /// row order, so it is the one that finds the neighbour.
+    BlockEdge {
+        to_start: bool,
+    },
     MoveBlock {
         up: bool,
     },
@@ -1356,6 +1362,10 @@ impl BlockEditor {
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.backspace_char(window, cx);
+    }
+
+    fn backspace_char(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // §13.5: Backspace belongs to the input method while it composes (it backs through
         // the candidate); deleting here would remove glyphs it still addresses by offset.
         if self.field.composing() {
@@ -1386,6 +1396,10 @@ impl BlockEditor {
     }
 
     fn delete(&mut self, _: &Delete, window: &mut Window, cx: &mut Context<Self>) {
+        self.forward_delete(window, cx);
+    }
+
+    fn forward_delete(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // §13.5: see `backspace`.
         if self.field.composing() {
             return;
@@ -1407,23 +1421,29 @@ impl BlockEditor {
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
+        self.char_left(cx);
+    }
+
+    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+        self.char_right(cx);
+    }
+
+    fn char_left(&mut self, cx: &mut Context<Self>) {
         let to = if self.field.sel.is_empty() {
             self.field.prev_boundary()
         } else {
             self.field.sel.start
         };
-        self.field.move_to(to);
-        self.moved(cx);
+        self.move_caret(to, cx);
     }
 
-    fn right(&mut self, _: &Right, _: &mut Window, cx: &mut Context<Self>) {
+    fn char_right(&mut self, cx: &mut Context<Self>) {
         let to = if self.field.sel.is_empty() {
             self.field.next_boundary()
         } else {
             self.field.sel.end
         };
-        self.field.move_to(to);
-        self.moved(cx);
+        self.move_caret(to, cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
@@ -1456,28 +1476,349 @@ impl BlockEditor {
         self.moved(cx);
     }
 
+    /// Cmd+Left / Cmd+Right: the ends of the wrapped line, as in TextEdit.
     fn line_start(&mut self, _: &LineStart, _: &mut Window, cx: &mut Context<Self>) {
-        let to = self.field.line_start();
-        self.field.move_to(to);
-        self.moved(cx);
+        let to = self.field.visual_line().start;
+        self.move_caret(to, cx);
     }
 
     fn line_end(&mut self, _: &LineEnd, _: &mut Window, cx: &mut Context<Self>) {
-        let to = self.field.line_end();
-        self.field.move_to(to);
-        self.moved(cx);
+        let to = self.field.visual_line_end_caret();
+        self.move_caret(to, cx);
     }
 
     fn word_left(&mut self, _: &WordLeft, _: &mut Window, cx: &mut Context<Self>) {
-        let to = utopia_core::text::prev_word_start(&self.field.text, self.field.cursor());
+        let to = utopia_core::text::prev_word_start(&self.field.text, self.move_origin(true));
+        self.move_caret(to, cx);
+    }
+
+    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+        let to = utopia_core::text::next_word_end(&self.field.text, self.move_origin(false));
+        self.move_caret(to, cx);
+    }
+
+    /// Where a plain move starts from, macOS style: with a selection it collapses to the
+    /// edge the move heads towards instead of travelling from the far end (§9.1).
+    fn move_origin(&self, leftward: bool) -> usize {
+        if self.field.sel.is_empty() {
+            self.field.cursor()
+        } else if leftward {
+            self.field.sel.start
+        } else {
+            self.field.sel.end
+        }
+    }
+
+    fn move_caret(&mut self, to: usize, cx: &mut Context<Self>) {
         self.field.move_to(to);
         self.moved(cx);
     }
 
-    fn word_right(&mut self, _: &WordRight, _: &mut Window, cx: &mut Context<Self>) {
+    fn select_caret(&mut self, to: usize, cx: &mut Context<Self>) {
+        self.field.select_to(to);
+        cx.notify();
+    }
+
+    fn select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+        let to = utopia_core::text::prev_word_start(&self.field.text, self.field.cursor());
+        self.select_caret(to, cx);
+    }
+
+    fn select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
         let to = utopia_core::text::next_word_end(&self.field.text, self.field.cursor());
-        self.field.move_to(to);
-        self.moved(cx);
+        self.select_caret(to, cx);
+    }
+
+    /// Extend the selection to `edge`, never shrinking it: the "select to the start /
+    /// end of the line" keys of macOS grow the selection on the side they point at, so
+    /// Cmd+Shift+Left then Cmd+Shift+Right selects the whole line rather than collapsing
+    /// back to where it began.
+    fn extend_to(&mut self, edge: usize, cx: &mut Context<Self>) {
+        let sel = self.field.sel.clone();
+        if edge < sel.start {
+            self.field.move_to(sel.end);
+            self.field.select_to(edge);
+        } else if edge > sel.end {
+            self.field.move_to(sel.start);
+            self.field.select_to(edge);
+        }
+        cx.notify();
+    }
+
+    /// The end of the wrapped line the selection ends on. A selection that already
+    /// reaches a soft wrap belongs to the line before it (the offset where the next line
+    /// starts is drawn there), so pressing the key again does not run on into that line.
+    fn selection_line_end(&self) -> usize {
+        let sel = &self.field.sel;
+        let probe = if sel.is_empty() {
+            sel.end
+        } else {
+            utopia_core::text::prev_grapheme(&self.field.text, sel.end).max(sel.start)
+        };
+        self.field.visual_line_at(probe).end
+    }
+
+    fn select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
+        let to = self.field.visual_line_at(self.field.sel.start).start;
+        self.extend_to(to, cx);
+    }
+
+    fn select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let to = self.selection_line_end();
+        self.extend_to(to, cx);
+    }
+
+    /// Shift+Home / Shift+End extend to where Home and End go: the ends of the block.
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let len = self.field.text.len();
+        self.extend_to(len, cx);
+    }
+
+    fn select_block_start(&mut self, _: &SelectBlockStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.extend_to(0, cx);
+    }
+
+    fn select_block_end(&mut self, _: &SelectBlockEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let len = self.field.text.len();
+        self.extend_to(len, cx);
+    }
+
+    /// Cmd+Up / Cmd+Down: the ends of this block's text, however many lines it has.
+    fn block_start(&mut self, _: &BlockStart, _: &mut Window, cx: &mut Context<Self>) {
+        self.move_caret(0, cx);
+    }
+
+    fn block_end(&mut self, _: &BlockEnd, _: &mut Window, cx: &mut Context<Self>) {
+        let len = self.field.text.len();
+        self.move_caret(len, cx);
+    }
+
+    /// Option+Up: to the start of this block, and from there to the start of the one above.
+    fn paragraph_up(&mut self, _: &ParagraphUp, _: &mut Window, cx: &mut Context<Self>) {
+        let sel = self.field.sel.clone();
+        if !sel.is_empty() {
+            // A selection collapses first: one keystroke never both cancels a selection and
+            // leaves the block.
+            return self.move_caret(sel.start, cx);
+        }
+        if self.field.cursor() > 0 {
+            return self.move_caret(0, cx);
+        }
+        self.emit_after_commit(EditorEvent::BlockEdge { to_start: true }, cx);
+    }
+
+    /// Option+Down: to the end of this block, and from there to the end of the one below.
+    fn paragraph_down(&mut self, _: &ParagraphDown, _: &mut Window, cx: &mut Context<Self>) {
+        let sel = self.field.sel.clone();
+        if !sel.is_empty() {
+            return self.move_caret(sel.end, cx);
+        }
+        let len = self.field.text.len();
+        if self.field.cursor() < len {
+            return self.move_caret(len, cx);
+        }
+        self.emit_after_commit(EditorEvent::BlockEdge { to_start: false }, cx);
+    }
+
+    /// Replace `range` with `new` as an undo step of its own (AC-3.3): the word or line
+    /// it removes comes back with one Cmd+Z, apart from the typing around it, which would
+    /// otherwise coalesce with it. `caret` is where the caret ends up, after the
+    /// insertion when `None`. Nothing happens while the input method owns the buffer
+    /// (§13.5).
+    fn discrete_edit(
+        &mut self,
+        range: std::ops::Range<usize>,
+        new: &str,
+        caret: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.field.composing() {
+            return;
+        }
+        self.app.update(cx, |app, _| app.store.seal_undo());
+        self.field.replace(range, new);
+        if let Some(c) = caret {
+            self.field.move_to(c);
+        }
+        self.after_edit(window, cx);
+        self.app.update(cx, |app, _| app.store.seal_undo());
+        cx.notify();
+    }
+
+    fn delete_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !range.is_empty() {
+            self.discrete_edit(range, "", None, window, cx);
+        }
+    }
+
+    /// Option+Backspace: back to the start of the previous word. At the very start of a
+    /// block it does nothing — only plain Backspace joins two blocks (rule 5).
+    fn delete_word_backward(
+        &mut self,
+        _: &DeleteWordBackward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let c = self.field.cursor();
+            utopia_core::text::prev_word_start(&self.field.text, c)..c
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    /// Option+Fn+Delete: forward to the end of the next word.
+    fn delete_word_forward(
+        &mut self,
+        _: &DeleteWordForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let c = self.field.cursor();
+            c..utopia_core::text::next_word_end(&self.field.text, c)
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    /// Cmd+Backspace: back to the start of the wrapped line, never past it.
+    fn delete_to_line_start(
+        &mut self,
+        _: &DeleteToLineStart,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let line = self.field.visual_line();
+            line.start..self.field.cursor()
+        } else {
+            sel
+        };
+        self.delete_range(range, window, cx);
+    }
+
+    /// Ctrl+A / Ctrl+E: the ends of the paragraph (the text between line breaks), which
+    /// is what Cocoa's `moveToBeginningOfParagraph:` / `moveToEndOfParagraph:` do, unlike
+    /// Cmd+Left/Right, which stop at the wrap.
+    fn emacs_start_of_line(
+        &mut self,
+        _: &EmacsStartOfLine,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let to = self.field.line_start();
+        self.move_caret(to, cx);
+    }
+
+    fn emacs_end_of_line(&mut self, _: &EmacsEndOfLine, _: &mut Window, cx: &mut Context<Self>) {
+        let to = self.field.line_end();
+        self.move_caret(to, cx);
+    }
+
+    fn emacs_back_char(&mut self, _: &EmacsBackChar, _: &mut Window, cx: &mut Context<Self>) {
+        self.char_left(cx);
+    }
+
+    fn emacs_forward_char(&mut self, _: &EmacsForwardChar, _: &mut Window, cx: &mut Context<Self>) {
+        self.char_right(cx);
+    }
+
+    fn emacs_prev_line(&mut self, _: &EmacsPrevLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(true, cx);
+    }
+
+    fn emacs_next_line(&mut self, _: &EmacsNextLine, _: &mut Window, cx: &mut Context<Self>) {
+        self.vertical(false, cx);
+    }
+
+    /// Ctrl+K: kill to the end of the paragraph and keep the text for Ctrl+Y (Cocoa's
+    /// `deleteToEndOfParagraph:`). At a line break inside the block it kills the break; at
+    /// the end of the block it kills nothing, so it never joins two blocks.
+    fn emacs_kill_line(&mut self, _: &EmacsKillLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let sel = self.field.sel.clone();
+        let range = if sel.is_empty() {
+            let c = self.field.cursor();
+            match self.field.line_end() {
+                end if end > c => c..end,
+                end => end..utopia_core::text::next_grapheme(&self.field.text, end),
+            }
+        } else {
+            sel
+        };
+        if range.is_empty() {
+            // Nothing to kill: the buffer keeps the text it already holds.
+            return;
+        }
+        crate::kill::remember(&self.field.text[range.clone()]);
+        self.delete_range(range, window, cx);
+    }
+
+    /// Ctrl+Y: put the last killed text back at the caret, replacing the selection.
+    fn emacs_yank(&mut self, _: &EmacsYank, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let text = crate::kill::last();
+        if text.is_empty() {
+            return;
+        }
+        let sel = self.field.sel.clone();
+        self.discrete_edit(sel, &text, None, window, cx);
+    }
+
+    fn emacs_delete_char(
+        &mut self,
+        _: &EmacsDeleteChar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.forward_delete(window, cx);
+    }
+
+    fn emacs_backspace(&mut self, _: &EmacsBackspace, window: &mut Window, cx: &mut Context<Self>) {
+        self.backspace_char(window, cx);
+    }
+
+    /// Ctrl+T: swap the graphemes around the caret (see [`utopia_core::text::transpose`]).
+    fn emacs_transpose(&mut self, _: &EmacsTranspose, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let caret = self.field.cursor();
+        let Some((range, swapped, caret)) = utopia_core::text::transpose(&self.field.text, caret)
+        else {
+            return;
+        };
+        self.discrete_edit(range, &swapped, Some(caret), window, cx);
+    }
+
+    /// Ctrl+O: a line break after the caret, with the caret left where it was, so typing
+    /// continues on the line above and the rest of the text moves down.
+    fn emacs_open_line(&mut self, _: &EmacsOpenLine, window: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        let sel = self.field.sel.clone();
+        self.discrete_edit(sel.clone(), "\n", Some(sel.start), window, cx);
     }
 
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
@@ -1876,6 +2217,33 @@ impl Render for BlockEditor {
             .on_action(cx.listener(Self::line_end))
             .on_action(cx.listener(Self::word_left))
             .on_action(cx.listener(Self::word_right))
+            .on_action(cx.listener(Self::select_word_left))
+            .on_action(cx.listener(Self::select_word_right))
+            .on_action(cx.listener(Self::select_line_start))
+            .on_action(cx.listener(Self::select_line_end))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
+            .on_action(cx.listener(Self::select_block_start))
+            .on_action(cx.listener(Self::select_block_end))
+            .on_action(cx.listener(Self::delete_word_backward))
+            .on_action(cx.listener(Self::delete_word_forward))
+            .on_action(cx.listener(Self::delete_to_line_start))
+            .on_action(cx.listener(Self::paragraph_up))
+            .on_action(cx.listener(Self::paragraph_down))
+            .on_action(cx.listener(Self::block_start))
+            .on_action(cx.listener(Self::block_end))
+            .on_action(cx.listener(Self::emacs_start_of_line))
+            .on_action(cx.listener(Self::emacs_end_of_line))
+            .on_action(cx.listener(Self::emacs_back_char))
+            .on_action(cx.listener(Self::emacs_forward_char))
+            .on_action(cx.listener(Self::emacs_prev_line))
+            .on_action(cx.listener(Self::emacs_next_line))
+            .on_action(cx.listener(Self::emacs_kill_line))
+            .on_action(cx.listener(Self::emacs_yank))
+            .on_action(cx.listener(Self::emacs_delete_char))
+            .on_action(cx.listener(Self::emacs_backspace))
+            .on_action(cx.listener(Self::emacs_transpose))
+            .on_action(cx.listener(Self::emacs_open_line))
             .on_action(cx.listener(Self::move_up))
             .on_action(cx.listener(Self::move_down))
             .on_action(cx.listener(Self::toggle_collapse))
