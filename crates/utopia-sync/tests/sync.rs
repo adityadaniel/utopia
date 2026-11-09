@@ -1415,6 +1415,10 @@ fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {
         a.attachment_state(&blob.hash).unwrap(),
         Some(utopia_store::BlobState::Uploaded)
     );
+    // The relay is the destination this graph recorded, so the folder is a real switch.
+    let relay_space = utopia_sync::Transport::cursor_space(ca.transport_mut()).transport;
+    a.prepare_sync_destination(&utopia_store::Destination::new(relay_space, None))
+        .unwrap();
     let folder = tempfile::tempdir().unwrap();
     let shared =
         utopia_store::Destination::new(format!("folder:{}", folder.path().display()), None);
@@ -1461,3 +1465,26 @@ fn ac_12_7_an_offline_launch_does_not_republish_the_graph() {
     );
 }
 
+/// §12.7: a graph that was already syncing when this bookkeeping was introduced has no
+/// recorded destination. The first launch must adopt the current one instead of exporting
+/// every shard to the target it is already in sync with.
+#[test]
+fn ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph() {
+    let relay = Relay::new();
+    let (mut a, mut ca) = device(&relay);
+    let page = a.create_page("Already synced").unwrap();
+    write(&mut a, &page, "old content");
+    ca.sync_once(&mut a).unwrap();
+    assert_eq!(a.sync_get("setup_destination").unwrap(), None);
+    let queued = a.outbox_pending(usize::MAX >> 1).unwrap().len();
+    assert_eq!(queued, 0, "the previous round acknowledged everything");
+    let instance = utopia_sync::setup::probe::probe(ca.transport_mut()).instance;
+    let origin = utopia_sync::http::destination_origin("http://relay.example", "g1");
+    a.prepare_sync_destination(&utopia_store::Destination::new(origin, instance))
+        .unwrap();
+    assert_eq!(
+        a.outbox_pending(usize::MAX >> 1).unwrap().len(),
+        queued,
+        "the upgrade republished the whole graph into its existing target"
+    );
+}

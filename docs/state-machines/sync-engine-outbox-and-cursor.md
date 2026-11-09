@@ -26,6 +26,10 @@ same destination and a wiped store is not; when either side has no store id, the
 decides. A relay discovered later still changes the cursor space, which `VerifiedTarget`
 treats as a new target: it pulls one existing shard to prove the selected encryption can
 read it before any push (`ac_12_6_pairing_validates_existing_payloads_before_pushing`).
+A graph with no recorded destination — one that has been syncing through
+`UTOPIA_SYNC_URL`/`UTOPIA_SYNC_FOLDER` since before this bookkeeping existed — adopts the
+destination it opens with instead of exporting every shard into it, so the upgrade costs one
+launch no republish (`ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph`).
 Repeating Apply for the same destination does not enqueue the graph again; switching back
 can re-send updates, but CRDT import remains idempotent.
 

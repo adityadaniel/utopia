@@ -70,6 +70,17 @@ impl Store {
                 }
                 return Ok(());
             }
+        } else {
+            // No destination was ever recorded: graphs that synced through the environment
+            // before Settings → Sync existed have outbox acknowledgements and cursors but
+            // no record. Adopt the destination they are already publishing to instead of
+            // exporting every shard to it on the first launch after the upgrade (§12.7,
+            // `ac_12_7_the_first_recorded_destination_does_not_republish_an_existing_graph`).
+            // A first destination has nothing to republish that its pending outbox does not
+            // already carry, so this costs a destination the user really did switch to one
+            // round of pending edits only.
+            self.record_destination(destination)?;
+            return Ok(());
         }
         let ids = {
             let mut stmt = self
@@ -96,18 +107,36 @@ impl Store {
             "UPDATE attachment SET state='pending', lost_at=NULL WHERE state='uploaded'",
             [],
         )?;
+        Self::write_destination(&tx, destination)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn record_destination(&mut self, destination: &Destination) -> Result<()> {
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        Self::write_destination(&tx, destination)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn write_destination(tx: &rusqlite::Transaction<'_>, destination: &Destination) -> Result<()> {
         tx.execute(
             "INSERT OR REPLACE INTO sync_state(key,value) VALUES (?1,?2)",
             params![ORIGIN, destination.origin],
         )?;
         match &destination.instance {
-            Some(instance) => tx.execute(
-                "INSERT OR REPLACE INTO sync_state(key,value) VALUES (?1,?2)",
-                params![INSTANCE, instance],
-            )?,
-            None => tx.execute("DELETE FROM sync_state WHERE key=?1", [INSTANCE])?,
-        };
-        tx.commit()?;
+            Some(instance) => {
+                tx.execute(
+                    "INSERT OR REPLACE INTO sync_state(key,value) VALUES (?1,?2)",
+                    params![INSTANCE, instance],
+                )?;
+            }
+            None => {
+                tx.execute("DELETE FROM sync_state WHERE key=?1", [INSTANCE])?;
+            }
+        }
         Ok(())
     }
 }
