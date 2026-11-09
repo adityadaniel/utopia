@@ -1637,6 +1637,11 @@ impl PageView {
             if let Some(pending) = &self.pending_property {
                 skip.push(pending.clone());
             }
+            // A row that empty text just dropped from `header.properties` is still being
+            // edited in the bar; it must not jump into the outline mid-edit.
+            if let Some(editing) = &self.property_edit {
+                skip.push(editing.clone());
+            }
             push_page_rows(
                 app,
                 &st,
@@ -3449,6 +3454,15 @@ impl PageView {
                 bar = bar.child(self.render_property_edit(cx));
             }
         }
+        // The same for an existing row whose text is now empty: until the edit ends (and
+        // the block is removed) it stays a bar row instead of reappearing as a bullet.
+        if let Some(editing) = &self.property_edit {
+            if !self.header.properties.iter().any(|p| &p.block == editing)
+                && self.pending_property.as_ref() != Some(editing)
+            {
+                bar = bar.child(self.render_property_edit(cx));
+            }
+        }
         bar = bar.child(self.render_alias_row(key_w, cx));
         bar = bar.child(self.render_add_property(cx));
         bar.into_any_element()
@@ -3750,7 +3764,9 @@ impl PageView {
         })
     }
 
-    /// The bar's blocks in order, with the pending "Add property" row at the end.
+    /// The bar's blocks in the order the bar draws them: the leading properties, then the
+    /// pending "Add property" row, then a row whose empty text just dropped out of the
+    /// leading run but whose edit is still open.
     fn property_blocks(&self) -> Vec<BlockId> {
         let mut out: Vec<BlockId> = self
             .header
@@ -3758,9 +3774,11 @@ impl PageView {
             .iter()
             .map(|p| p.block.clone())
             .collect();
-        if let Some(pending) = &self.pending_property {
-            if !out.contains(pending) {
-                out.push(pending.clone());
+        for extra in [&self.pending_property, &self.property_edit] {
+            if let Some(block) = extra {
+                if !out.contains(block) {
+                    out.push(block.clone());
+                }
             }
         }
         out
@@ -3769,6 +3787,10 @@ impl PageView {
     fn is_property_block(&self, block: &BlockId) -> bool {
         self.header.properties.iter().any(|p| &p.block == block)
             || self.pending_property.as_ref() == Some(block)
+            // Empty text removes the block from `header.properties` immediately, but its
+            // edit is still the bar's row until it ends: keyboard navigation and Split must
+            // keep treating it as one, or the editor is stranded on a block with no row.
+            || self.property_edit.as_ref() == Some(block)
     }
 
     fn is_last_property(&self, block: &BlockId) -> bool {
