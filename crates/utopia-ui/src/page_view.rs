@@ -3774,11 +3774,12 @@ impl PageView {
             .iter()
             .map(|p| p.block.clone())
             .collect();
-        for extra in [&self.pending_property, &self.property_edit] {
-            if let Some(block) = extra {
-                if !out.contains(block) {
-                    out.push(block.clone());
-                }
+        for block in [&self.pending_property, &self.property_edit]
+            .into_iter()
+            .flatten()
+        {
+            if !out.contains(block) {
+                out.push(block.clone());
             }
         }
         out
