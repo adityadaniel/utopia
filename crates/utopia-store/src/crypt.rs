@@ -90,7 +90,11 @@ impl FileLock {
     /// let a third process lock a fresh inode and run alongside the waiter.
     #[cfg(unix)]
     fn open(path: &Path) -> Result<std::fs::File> {
-        let lock = path.with_extension("utopia-lock");
+        // Append, never replace the extension: a graph explicitly named `x.utopia-lock`
+        // would otherwise lock the database file itself and collide with SQLite.
+        let mut lock = path.as_os_str().to_owned();
+        lock.push(".lock");
+        let lock = std::path::PathBuf::from(lock);
         Ok(std::fs::OpenOptions::new()
             .read(true)
             .write(true)
