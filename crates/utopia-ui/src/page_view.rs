@@ -1884,9 +1884,9 @@ impl PageView {
                             date: Some(day.date),
                             collapsed,
                         });
-                        if collapsed {
-                            items.push(Item::RefsEnd);
-                        } else {
+                        // The collapsed header is the whole panel (rounded all round); a
+                        // bottom edge under it would read as a shadow (§2.4).
+                        if !collapsed {
                             self.push_ref_groups(&page, refs, true, &mut items, cx);
                             items.push(Item::RefsEnd);
                         }
