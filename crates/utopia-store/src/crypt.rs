@@ -71,6 +71,78 @@ pub fn file_kind(path: &Path) -> FileKind {
     }
 }
 
+/// A shared advisory lock on a graph file, held for a `Store`'s lifetime.
+///
+/// `set_encryption` builds a new file and renames it over the old one, so it must not run
+/// while a store has the file open: the store's two connections would keep reading and
+/// writing the unlinked inode (docs/state-machines/encryption-at-rest-state.md issue 2).
+/// `flock` is released by the kernel on drop or process exit, so a crash leaves no stale
+/// lock. Encryption at rest only exists on macOS; elsewhere this is a no-op.
+pub(crate) struct FileLock {
+    #[cfg(unix)]
+    _file: std::fs::File,
+}
+
+impl FileLock {
+    /// The lock lives beside the graph, not on it: macOS implements `flock` with `fcntl`
+    /// locks, which would collide with SQLite's own locking on the database file. The
+    /// sidecar is left behind on purpose; removing it while another process waits would
+    /// let a third process lock a fresh inode and run alongside the waiter.
+    #[cfg(unix)]
+    fn open(path: &Path) -> Result<std::fs::File> {
+        let lock = path.with_extension("utopia-lock");
+        Ok(std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock)?)
+    }
+
+    /// Wait until no re-key is running, then share the file with other open stores.
+    #[cfg(unix)]
+    pub(crate) fn shared(path: &Path) -> Result<Self> {
+        let file = Self::open(path)?;
+        // SAFETY: `file` is a live descriptor and `LOCK_SH` is a valid flock operation.
+        if unsafe { libc::flock(std::os::fd::AsRawFd::as_raw_fd(&file), libc::LOCK_SH) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Self { _file: file })
+    }
+
+    /// Take the exclusive side without waiting. `None` means an open store holds the
+    /// shared side.
+    #[cfg(unix)]
+    pub(crate) fn try_exclusive(path: &Path) -> Result<Option<Self>> {
+        let file = Self::open(path)?;
+        // SAFETY: `file` is a live descriptor and these are valid flock flags.
+        let r = unsafe {
+            libc::flock(
+                std::os::fd::AsRawFd::as_raw_fd(&file),
+                libc::LOCK_EX | libc::LOCK_NB,
+            )
+        };
+        if r != 0 {
+            let e = std::io::Error::last_os_error();
+            if e.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(e.into());
+        }
+        Ok(Some(Self { _file: file }))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn shared(_path: &Path) -> Result<Self> {
+        Ok(Self {})
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn try_exclusive(_path: &Path) -> Result<Option<Self>> {
+        Ok(Some(Self {}))
+    }
+}
+
 /// Open a connection, applying the key first (SQLCipher requires it before any read)
 /// and checking it can read the schema.
 pub(crate) fn open_keyed(path: &Path, key: Option<&str>) -> Result<Connection> {
@@ -119,6 +191,10 @@ pub fn set_encryption(path: &Path, from: Option<&str>, to: Option<&str>) -> Resu
     if to.is_some_and(str::is_empty) {
         return Err(StoreError::Invalid("the passphrase is empty".into()));
     }
+    let _lock = match FileLock::try_exclusive(path)? {
+        Some(lock) => lock,
+        None => return Err(StoreError::Busy),
+    };
     let conn = open_keyed(path, from)?;
     // Fold the WAL in so the export sees everything.
     conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;

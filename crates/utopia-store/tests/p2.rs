@@ -762,3 +762,33 @@ fn ac_15_6_a_damaged_plain_graph_is_not_a_lock() {
         "opening a damaged plain graph reports damage, not a missing passphrase"
     );
 }
+
+/// Issue 2 (docs/state-machines/encryption-at-rest-state.md): `set_encryption` renames a
+/// new file over the graph, which would strand the two connections of a running `Store` on
+/// the old inode. An open store holds a shared file lock, so a re-key is refused until it
+/// is closed.
+#[test]
+fn ac_15_6_encrypting_refuses_while_the_graph_is_open() {
+    if !utopia_store::encryption_available() {
+        eprintln!("SQLCipher not linked on this platform; skipping");
+        return;
+    }
+    use utopia_store::{is_encrypted, set_encryption, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let mut s = Store::open(&path).unwrap();
+    let p = s.create_page("Open").unwrap();
+    write(&mut s, &p, "do not re-key under me");
+    s.flush().unwrap();
+
+    assert!(
+        matches!(
+            set_encryption(&path, None, Some("hunter2 horse")),
+            Err(StoreError::Busy)
+        ),
+        "an open graph must not be re-keyed: its connections would keep the old inode"
+    );
+    drop(s);
+    set_encryption(&path, None, Some("hunter2 horse")).unwrap();
+    assert!(is_encrypted(&path));
+}
