@@ -317,9 +317,25 @@ impl Store {
     }
 
     /// The tag-page classification as the last commit published it (SB-2). `None` until
-    /// the first commit; [`Store::hashtag_only_pages`] computes and returns it directly.
+    /// something has published a set; [`Store::hashtag_only_pages`] computes and returns it
+    /// directly, and [`Store::republish_tag_pages`] publishes what it computes.
     pub fn tag_pages(&self) -> Option<HashSet<PageId>> {
         self.persister.tag_pages()
+    }
+
+    /// Classify every page and publish that as the current set (SB-2).
+    ///
+    /// Every write that moves the index through the writer publishes the set with its
+    /// commit. The three writes that bypass the writer — [`Store::set_date_format`]
+    /// re-resolving references, [`Store::empty_trash`] removing rows, and
+    /// [`Store::rebuild_index`] reprojecting from the shards — have to publish it
+    /// themselves, or the UI keeps reading a classification of an index that is gone. They
+    /// call this after their own `sync_index`, so the index it classifies has no pending
+    /// edits.
+    pub fn republish_tag_pages(&self) -> Result<HashSet<PageId>> {
+        let set = self.hashtag_only_pages()?;
+        self.persister.republish_tag_pages(set.clone());
+        Ok(set)
     }
 
     /// How many whole-graph tag classifications the commit path has run (tests, SB-2). One
@@ -790,6 +806,9 @@ impl Store {
         })?;
         tx.commit()?;
         self.date_format = fmt;
+        // Re-resolving moved reference edges on this connection without a commit, so the
+        // published set classifies an index that no longer exists (SB-2).
+        self.republish_tag_pages()?;
         Ok(())
     }
 

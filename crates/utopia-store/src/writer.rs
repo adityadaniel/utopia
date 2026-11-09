@@ -334,6 +334,15 @@ impl Shared {
         }
         *slot = TagPages::Published(set);
     }
+
+    /// Make an already classified set the published one (SB-2). A write that bypasses the
+    /// writer moved the index without a commit, so the set it implies has to be published
+    /// from outside too.
+    fn republish_tag_pages(&self, set: HashSet<PageId>) {
+        if let Ok(mut slot) = self.tag_pages.lock() {
+            *slot = TagPages::Published(set);
+        }
+    }
 }
 
 pub(crate) enum Msg {
@@ -524,6 +533,11 @@ impl Persister {
             Persister::Inline { submitted, .. } | Persister::Thread { submitted, .. } => *submitted,
         };
         self.shared().clear_failure(through);
+    }
+
+    /// Make a classification computed on the store's connection the published set (SB-2).
+    pub fn republish_tag_pages(&self, set: HashSet<PageId>) {
+        self.shared().republish_tag_pages(set);
     }
 
     /// The tag-page classification published by the last commit, if any (SB-2).
