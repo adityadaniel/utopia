@@ -761,7 +761,9 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
     let mode = RunMode::from_env().map_err(|e| anyhow::anyhow!("UTOPIA_SHOT_SCRIPT: {e}"))?;
     let config = paths::config_dir();
     let keymap = std::fs::read_to_string(config.join("keymap.json")).ok();
-    let application = Application::new();
+    // DESIGN.md §2.5's icons are embedded in `utopia-ui`; gpui needs the source to
+    // serve them to `svg()` elements.
+    let application = Application::new().with_assets(utopia_ui::icons::Icons);
     application.on_open_urls(|urls| {
         PENDING_URLS.lock().expect("url queue").extend(urls);
     });
