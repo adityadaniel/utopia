@@ -1207,48 +1207,41 @@ mod appearance {
         (main, settings.into(), target, w)
     }
 
-    /// Settings → Appearance: picking IBM Plex Sans applies it to every open window at once
-    /// and writes it to `settings.json` (not `keymap.json`), versioned.
+    /// Settings → Appearance: DESIGN.md §2.2 makes IBM Plex Sans the default; picking
+    /// System applies it to every open window at once and writes it to `settings.json`
+    /// (not `keymap.json`), versioned, and Plex Sans can be picked back.
     #[gpui::test]
     fn choosing_a_font_applies_everywhere_and_is_saved(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (main, settings) = open_both(cx, dir.path());
-        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::System);
+        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::IbmPlexSans);
         assert!(settings_json(dir.path()).is_none(), "nothing saved yet");
         {
             let mut w = VisualTestContext::from_window(main, cx);
-            assert!(w.debug_bounds("ui-font-system").is_some());
+            assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
         }
 
         let mut s = VisualTestContext::from_window(settings, cx);
         s.run_until_parked();
-        assert!(s.debug_bounds("settings-ui-font-system").is_some());
+        assert!(s.debug_bounds("settings-ui-font-ibm-plex-sans").is_some());
         let option = s
-            .debug_bounds("settings-font-ibm-plex-sans")
-            .expect("the IBM Plex Sans choice is shown");
+            .debug_bounds("settings-font-system")
+            .expect("the System choice is shown");
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
 
-        assert_eq!(
-            s.update(|_, cx| appearance::ui_font(cx)),
-            UiFont::IbmPlexSans
-        );
-        assert_eq!(
-            s.update(|_, cx| appearance::font_family(cx)),
-            "IBM Plex Sans",
-            "the family the bundled faces register under"
-        );
+        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::System);
         // Both windows were drawn again with the new family at their root, unprompted.
-        assert!(s.debug_bounds("settings-ui-font-ibm-plex-sans").is_some());
+        assert!(s.debug_bounds("settings-ui-font-system").is_some());
         let mut w = VisualTestContext::from_window(main, cx);
         w.run_until_parked();
-        assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
+        assert!(w.debug_bounds("ui-font-system").is_some());
 
         assert_eq!(
             settings_json(dir.path()),
             Some(serde_json::json!({
                 "version": 1,
-                "font": "ibm-plex-sans",
+                "font": "system",
                 "density": "comfortable",
                 "ref_children": 2,
                 "attribute-blocks": "compact",
@@ -1261,15 +1254,23 @@ mod appearance {
             "the font is not a keybinding"
         );
 
-        // And back: System is written down too, so the choice is explicit.
+        // And back: IBM Plex Sans is written down too, so the choice is explicit.
         let mut s = VisualTestContext::from_window(settings, cx);
-        let option = s.debug_bounds("settings-font-system").unwrap();
+        let option = s.debug_bounds("settings-font-ibm-plex-sans").unwrap();
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
-        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::System);
+        assert_eq!(
+            s.update(|_, cx| appearance::ui_font(cx)),
+            UiFont::IbmPlexSans
+        );
+        assert_eq!(
+            s.update(|_, cx| appearance::font_family(cx)),
+            "IBM Plex Sans",
+            "the family the bundled faces register under"
+        );
         assert_eq!(
             settings_json(dir.path()).unwrap()["font"],
-            "system",
+            "ibm-plex-sans",
             "switching back is saved"
         );
     }
@@ -1309,7 +1310,7 @@ mod appearance {
         );
         let saved = settings_json(dir.path()).expect("settings.json written");
         assert_eq!(saved["density"], "compact");
-        assert_eq!(saved["font"], "system", "the font is kept");
+        assert_eq!(saved["font"], "ibm-plex-sans", "the font is kept");
 
         // And back: Comfortable is explicit in the file, like System.
         let option = s.debug_bounds("settings-density-comfortable").unwrap();
@@ -1511,9 +1512,10 @@ mod appearance {
         assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
     }
 
-    /// Rule 11: an unknown font in the file comes up as System, says so, and the window opens.
+    /// Rule 11: an unknown font in the file comes up as the default (IBM Plex Sans, §2.2),
+    /// says so, and the window opens.
     #[gpui::test]
-    fn an_unknown_font_falls_back_to_system(cx: &mut TestAppContext) {
+    fn an_unknown_font_falls_back_to_the_default(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
@@ -1522,11 +1524,11 @@ mod appearance {
         .unwrap();
         let warnings = cx.update(|cx| appearance::install(cx, dir.path()));
         assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::System);
+        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::default());
 
         let (main, settings) = open_both(cx, dir.path());
         let mut w = VisualTestContext::from_window(main, cx);
-        assert!(w.debug_bounds("ui-font-system").is_some());
+        assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
         let view = settings.downcast::<SettingsView>().unwrap();
         let warning = cx
             .read(|cx| view.read(cx).map(|v| v.warning().map(str::to_string)))
@@ -1568,7 +1570,10 @@ mod appearance {
         );
         let saved = settings_json(dir.path()).expect("settings.json written");
         assert_eq!(saved["attribute-blocks"], "blocks");
-        assert_eq!(saved["font"], "system", "the other preferences are kept");
+        assert_eq!(
+            saved["font"], "ibm-plex-sans",
+            "the other preferences are kept"
+        );
 
         // The main window follows, without being asked, and can be switched back here.
         let mut w = VisualTestContext::from_window(main, cx);

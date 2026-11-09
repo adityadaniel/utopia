@@ -9,7 +9,7 @@
 //! ```json
 //! {
 //!   "version": 1,
-//!   "font": "system",
+//!   "font": "ibm-plex-sans",
 //!   "density": "comfortable",
 //!   "ref_children": 2,
 //!   "pinned": [],
@@ -36,7 +36,7 @@ use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 use utopia_core::PageId;
 
-use crate::fonts::{register_ibm_plex_sans, IBM_PLEX_SANS};
+use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
 use crate::theme::{BODY_SIZE, LINE_HEIGHT};
 
 pub const FILE: &str = "settings.json";
@@ -46,13 +46,15 @@ pub const DEFAULT_REF_CHILDREN: usize = 2;
 /// The largest "Children shown in references" the Appearance tab offers.
 pub const REF_CHILDREN_MAX: usize = 3;
 
-/// The font the UI and notes are set in. Code blocks stay in Menlo either way.
+/// The font the UI and notes are set in. Code blocks stay in Menlo either way, and mono
+/// labels always use the bundled IBM Plex Mono (DESIGN.md §2.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UiFont {
-    /// The platform's UI font (SF Pro on macOS), as before this setting existed.
-    #[default]
+    /// The platform's UI font (SF Pro on macOS), kept as an option for readers who
+    /// prefer it; not the default.
     System,
-    /// IBM Plex Sans, bundled with the app (`crate::fonts`).
+    /// IBM Plex Sans, bundled with the app (`crate::fonts`). The default (DESIGN.md §2.2).
+    #[default]
     IbmPlexSans,
 }
 
@@ -257,12 +259,16 @@ impl Prefs {
         let font = match rest.remove("font") {
             None => UiFont::default(),
             Some(Value::String(s)) => UiFont::from_key(&s).unwrap_or_else(|| {
-                warnings.push(format!("{FILE}: unknown font {s:?}; using System"));
+                warnings.push(format!(
+                    "{FILE}: unknown font {s:?}; using {}",
+                    UiFont::default().label()
+                ));
                 UiFont::default()
             }),
             Some(v) => {
                 warnings.push(format!(
-                    "{FILE}: font should be a string, not {v}; using System"
+                    "{FILE}: font should be a string, not {v}; using {}",
+                    UiFont::default().label()
                 ));
                 UiFont::default()
             }
@@ -459,6 +465,7 @@ pub struct Appearance {
     /// one, where preferences still apply for the session but are not written.
     config_dir: PathBuf,
     plex_registered: bool,
+    mono_registered: bool,
 }
 
 impl Global for Appearance {}
@@ -474,12 +481,14 @@ pub fn install(cx: &mut App, config_dir: &Path) -> Vec<String> {
         prefs,
         config_dir: config_dir.to_path_buf(),
         plex_registered: false,
+        mono_registered: false,
     });
     apply(cx, font);
     warnings
 }
 
-/// The font in force. System when nothing was installed (tests, early startup).
+/// The font in force. The bundled IBM Plex Sans when nothing was installed (tests, early
+/// startup), matching `settings.json`'s default (DESIGN.md §2.2).
 pub fn ui_font(cx: &App) -> UiFont {
     cx.try_global::<Appearance>()
         .map_or(UiFont::default(), |a| a.prefs.font)
@@ -616,10 +625,21 @@ pub fn set_attribute_blocks(cx: &mut App, value: AttributeBlocks) -> std::io::Re
 
 /// Make `font` drawable: the bundled faces are handed to gpui the first time they are
 /// needed (the setting, or Settings showing a sample of each choice), not at every launch.
+/// IBM Plex Mono is registered whatever the UI font is: labels, counts and shortcuts use
+/// it by DESIGN.md §2.2, not by preference.
 pub fn load_font(cx: &mut App, font: UiFont) {
-    let a = cx.default_global::<Appearance>();
-    if font == UiFont::IbmPlexSans && !a.plex_registered {
-        a.plex_registered = true;
+    let (mono, sans) = {
+        let a = cx.default_global::<Appearance>();
+        let mono = !a.mono_registered;
+        let sans = font == UiFont::IbmPlexSans && !a.plex_registered;
+        a.mono_registered |= mono;
+        a.plex_registered |= sans;
+        (mono, sans)
+    };
+    if mono {
+        register_ibm_plex_mono(cx);
+    }
+    if sans {
         register_ibm_plex_sans(cx);
     }
 }
@@ -732,9 +752,9 @@ mod tests {
         assert_eq!(Prefs::default().pinned, Vec::<PageId>::new());
     }
 
-    /// Rule 11: whatever is in the file, the app comes up, on System, and says why.
+    /// Rule 11: whatever is in the file, the app comes up, on the default font, and says why.
     #[test]
-    fn bad_files_degrade_to_system() {
+    fn bad_files_degrade_to_the_default_font() {
         for bad in [
             "",
             "{ not json",
@@ -743,7 +763,7 @@ mod tests {
             r#"{"version": 1, "font": 3}"#,
         ] {
             let (p, warnings) = Prefs::from_json(bad);
-            assert_eq!(p.font, UiFont::System, "{bad:?}");
+            assert_eq!(p.font, UiFont::default(), "{bad:?}");
             assert_eq!(warnings.len(), 1, "{bad:?}: {warnings:?}");
         }
     }
