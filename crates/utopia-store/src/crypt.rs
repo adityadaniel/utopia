@@ -91,7 +91,10 @@ pub(crate) fn open_keyed(path: &Path, key: Option<&str>) -> Result<Connection> {
     }) {
         Ok(_) => Ok(conn),
         Err(rusqlite::Error::SqliteFailure(e, _)) if e.code == ErrorCode::NotADatabase => {
-            Err(StoreError::Encrypted)
+            Err(match FileKind::after_not_a_database(path) {
+                FileKind::Corrupt => StoreError::Corrupt,
+                FileKind::Plain | FileKind::Encrypted => StoreError::Encrypted,
+            })
         }
         Err(e) => Err(e.into()),
     }
@@ -106,8 +109,7 @@ pub fn encryption_available() -> bool {
 
 /// Whether the file at `path` is an encrypted graph (unreadable without a key).
 pub fn is_encrypted(path: &Path) -> bool {
-    path.metadata().is_ok_and(|m| m.len() > 0)
-        && matches!(open_keyed(path, None), Err(StoreError::Encrypted))
+    file_kind(path) == FileKind::Encrypted
 }
 
 /// Encrypt, re-key or decrypt a graph file that no process has open. `from` is the

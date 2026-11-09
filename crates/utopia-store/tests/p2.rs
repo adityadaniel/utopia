@@ -726,3 +726,39 @@ fn encryption_at_rest_round_trip() {
         "empty passphrase"
     );
 }
+
+/// Issue 1 (docs/state-machines/encryption-at-rest-state.md): `SQLITE_NOTADB` is not
+/// always encryption. A plain graph whose SQLite header survives but whose pages are
+/// damaged is corrupt, not locked: a passphrase cannot open it, so the UI must show the
+/// error instead of the unlock screen.
+#[test]
+fn ac_15_6_a_damaged_plain_graph_is_not_a_lock() {
+    use utopia_store::{is_encrypted, FileKind, StoreError};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    {
+        let mut s = Store::open(&path).unwrap();
+        let p = s.create_page("Damaged").unwrap();
+        write(&mut s, &p, "still not ciphertext");
+        s.flush().unwrap();
+    }
+    for ext in ["utopia-wal", "utopia-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(ext));
+    }
+    // Keep SQLite's 16-byte header, destroy the first page: `SQLITE_NOTADB`, exactly what
+    // a missing passphrase also reports.
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.truncate(16);
+    bytes.resize(4096, 0);
+    std::fs::write(&path, &bytes).unwrap();
+
+    assert!(
+        !is_encrypted(&path),
+        "a file that still starts with SQLite's header is not ciphertext"
+    );
+    assert_eq!(utopia_store::file_kind(&path), FileKind::Corrupt);
+    assert!(
+        matches!(Store::open(&path), Err(StoreError::Corrupt)),
+        "opening a damaged plain graph reports damage, not a missing passphrase"
+    );
+}
