@@ -7227,6 +7227,33 @@ fn cmd_backspace_deletes_to_the_start_of_the_wrapped_line(cx: &mut TestAppContex
     assert_eq!(rows(&app, &page, cx).len(), 1, "one block, never merged");
 }
 
+/// Cmd+Delete pressed twice before the next frame stops at the wrapped line: with the
+/// layout out of date it must not fall back to the whole paragraph and delete the lines
+/// above.
+#[gpui::test]
+fn cmd_backspace_repeated_before_a_frame_stays_on_the_wrapped_line(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup(cx);
+    let _page = today_page(&_app, cx);
+    cx.simulate_resize(size(px(620.), px(700.)));
+    cx.simulate_input(WRAPPED);
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-left");
+    let last_line = caret(&ws, cx);
+    assert!(last_line > 0, "the paragraph wrapped");
+    cx.simulate_keystrokes("end");
+    cx.run_until_parked();
+    let editor = ws.update(cx, |w, _| w.editor());
+    editor.update_in(cx, |_, window, cx| {
+        window.dispatch_action(Box::new(utopia_ui::actions::DeleteToLineStart), cx);
+        window.dispatch_action(Box::new(utopia_ui::actions::DeleteToLineStart), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        (WRAPPED[..last_line].to_string(), last_line)
+    );
+}
+
 /// Option+Up/Down go to the ends of this block's text first, and only from there carry on
 /// into the block above or below (Utopia's paragraph is the block).
 #[gpui::test]

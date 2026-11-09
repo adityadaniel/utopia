@@ -1705,6 +1705,12 @@ impl BlockEditor {
     ) {
         let sel = self.field.sel.clone();
         let range = if sel.is_empty() {
+            // Between an edit and the next frame the wraps are unknown; guessing the whole
+            // paragraph would delete lines the user can see above the caret. Wait for the
+            // frame instead (a repeat lands on the fresh layout).
+            if !self.field.wraps_known() {
+                return;
+            }
             let line = self.field.visual_line();
             line.start..self.field.cursor()
         } else {

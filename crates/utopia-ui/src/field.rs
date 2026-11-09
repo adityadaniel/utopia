@@ -203,6 +203,14 @@ impl TextField {
         start..end
     }
 
+    /// Whether [`Self::visual_line`] reflects the wraps on screen: true once the current
+    /// text has been laid out, or before anything was laid out (nothing has wrapped). False
+    /// between an edit and the next paint, when the old layout no longer applies and the
+    /// paragraph fallback could be several lines longer than the line the user sees.
+    pub fn wraps_known(&self) -> bool {
+        self.layout.is_none() || self.layout().is_some()
+    }
+
     /// Where Cmd+Right puts the caret: the end of the wrapped line. On a soft-wrapped line
     /// that is before the last character (usually the space it broke at), because the
     /// offset where the next line starts is drawn on the next line.
