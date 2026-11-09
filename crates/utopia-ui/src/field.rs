@@ -58,6 +58,9 @@ pub struct TextField {
     pub sel: Range<usize>,
     pub reversed: bool,
     pub composition: Composition,
+    /// The buffer before the current or most recent composition began, so a host can
+    /// tell a commit from a cancellation after [`Self::end_composition`] (§13.5).
+    composition_base: Option<String>,
     pub multiline: bool,
     pub selecting: bool,
     pub goal: Option<Goal>,
@@ -86,8 +89,18 @@ impl TextField {
     }
 
     /// The input method inserted `range` of provisional glyphs (`setMarkedText:`).
+    /// Call before the glyphs land in the buffer, so [`Self::composition_base`] is the
+    /// text they replaced.
     pub fn begin_composition(&mut self, range: Range<usize>) {
+        if !self.composition.is_active() {
+            self.composition_base = Some(self.text.clone());
+        }
         self.composition = Composition::Active { range };
+    }
+
+    /// The buffer as it was when the current or most recent composition started.
+    pub fn composition_base(&self) -> Option<&str> {
+        self.composition_base.as_deref()
     }
 
     /// The input method let go of its text: it committed (`replace_text_in_range`) or
@@ -466,11 +479,14 @@ macro_rules! impl_field_input_handler {
                     .unwrap_or(f.sel.clone());
                 let start = range.start.min(f.text.len());
                 let end = range.end.min(f.text.len()).max(start);
-                f.text.replace_range(start..end, new_text);
                 let composing = !new_text.is_empty();
                 if composing {
+                    // Before the provisional glyphs land: this is the text a cancelled
+                    // composition returns to.
                     f.begin_composition(start..start + new_text.len());
-                } else {
+                }
+                f.text.replace_range(start..end, new_text);
+                if !composing {
                     // The input method emptied its text: the buffer is ours again.
                     f.end_composition();
                 }

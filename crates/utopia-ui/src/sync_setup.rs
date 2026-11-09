@@ -170,6 +170,10 @@ impl SyncSetup {
             passphrase: self.passphrase.read(cx).text().to_string(),
             test_only,
         };
+        // The values just read are the request's; if the user types or composes in a
+        // secret field while it runs, that newer text is not the submitted one (§13.5).
+        self.token.update(cx, |input, _| input.submitted());
+        self.passphrase.update(cx, |input, _| input.submitted());
         self.busy = true;
         self.status = if test_only {
             "Testing connection…"
@@ -183,8 +187,10 @@ impl SyncSetup {
     pub fn finish(&mut self, status: String, cx: &mut Context<Self>) {
         self.busy = false;
         self.status = status;
-        self.token.update(cx, |i, cx| i.set_text("", cx));
-        self.passphrase.update(cx, |i, cx| i.set_text("", cx));
+        // Clear a submitted secret, but leave a live composition or typing done while the
+        // request ran alone: it is newer than what was applied (§13.5, §15.6).
+        self.token.update(cx, |i, cx| i.fill("", cx));
+        self.passphrase.update(cx, |i, cx| i.fill("", cx));
         cx.notify();
     }
     fn pick_folder(&mut self, cx: &mut Context<Self>) {

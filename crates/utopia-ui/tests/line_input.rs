@@ -131,3 +131,110 @@ fn ctrl_h_and_ctrl_d_wait_for_the_input_method(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("ctrl-h ctrl-d");
     assert_eq!(text(&input, cx), "abにほ");
 }
+
+/// §13.5: a stored value arriving from a late load waits for the input method. The
+/// composition is not ended behind the IME's back, and the text the user commits is newer
+/// than the load, so it wins.
+#[gpui::test]
+fn fill_waits_for_an_ime_composition(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::light()));
+    let (input, cx) = cx.add_window_view(|_, cx| LineInput::new("relay", cx));
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    let marked = input.update_in(cx, |i, window, cx| i.marked_text_range(window, cx));
+    assert!(marked.is_some(), "the input method is composing");
+
+    input.update(cx, |i, cx| i.fill("https://saved.example", cx));
+    assert_eq!(
+        text(&input, cx),
+        "にほ",
+        "a fill does not end the composition"
+    );
+    assert_eq!(
+        input.update_in(cx, |i, window, cx| i.marked_text_range(window, cx)),
+        marked,
+        "the marked range is untouched"
+    );
+
+    input.update_in(cx, |i, window, cx| {
+        i.replace_text_in_range(None, "日本", window, cx)
+    });
+    assert_eq!(
+        text(&input, cx),
+        "日本",
+        "the user's commit wins over the stale load"
+    );
+    assert_eq!(
+        input.update_in(cx, |i, window, cx| i.marked_text_range(window, cx)),
+        None
+    );
+}
+
+/// §13.5: a saved value from an async load does not overwrite what the user has typed.
+#[gpui::test]
+fn fill_after_typing_does_not_overwrite(cx: &mut TestAppContext) {
+    let (input, cx) = focused_input(cx);
+    input.update(cx, |i, cx| i.fill("initial", cx));
+    assert_eq!(text(&input, cx), "initial");
+    cx.simulate_input(" typed");
+    assert_eq!(text(&input, cx), "initial typed");
+
+    input.update(cx, |i, cx| i.fill("https://saved.example", cx));
+    assert_eq!(
+        text(&input, cx),
+        "initial typed",
+        "the user's text wins over the late load"
+    );
+}
+
+/// §13.5: a fill deferred during a composition is shown once the input method lets go,
+/// when the user cancelled that composition rather than committing text.
+#[gpui::test]
+fn a_cancelled_composition_lets_a_deferred_fill_through(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::light()));
+    let (input, cx) = cx.add_window_view(|_, cx| LineInput::new("relay", cx));
+    input.update(cx, |i, cx| i.fill("before", cx));
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    input.update(cx, |i, cx| i.fill("https://saved.example", cx));
+    assert_eq!(text(&input, cx), "beforeにほ", "the composition survives");
+
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "", None, window, cx)
+    });
+    assert_eq!(
+        text(&input, cx),
+        "https://saved.example",
+        "nothing the user committed replaced the composition, so the load shows"
+    );
+    assert_eq!(
+        input.update_in(cx, |i, window, cx| i.marked_text_range(window, cx)),
+        None
+    );
+}
+
+/// §13.5: cancelling a composition leaves the committed text exactly as it was, so a
+/// secret the host already submitted must still be clearable when its request finishes.
+#[gpui::test]
+fn a_cancelled_composition_keeps_a_submitted_field_clean(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_global(Theme::light()));
+    let (input, cx) = cx.add_window_view(|_, cx| LineInput::new("secret", cx));
+    input.update(cx, |i, cx| {
+        i.fill("saved-token", cx);
+        i.submitted();
+    });
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    input.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "", None, window, cx)
+    });
+    assert_eq!(text(&input, cx), "saved-token");
+
+    // The request settles: the submitted secret clears even though a composition was
+    // started and cancelled after it was submitted.
+    input.update(cx, |i, cx| i.fill("", cx));
+    assert_eq!(text(&input, cx), "");
+}

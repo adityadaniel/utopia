@@ -1734,3 +1734,85 @@ fn ac_12_5_sync_setup_blocks_apply_during_an_environment_override(cx: &mut TestA
         assert_eq!(view.status, "Ready");
     });
 }
+
+/// §13.5 and §15.6: a load or an Apply completing while the user is composing a relay URL
+/// or a secret waits for the input method instead of rewriting the field. A secret the
+/// user typed before the request still clears when it settles.
+#[gpui::test]
+fn ac_13_5_sync_setup_fields_wait_for_the_input_method(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    use utopia_sync::setup::{Mode, Preferences};
+    use utopia_ui::sync_setup::SyncSetup;
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let (view, cx) = cx.add_window_view(|_, cx| SyncSetup::new("Demo".into(), false, cx));
+    let url = view.read_with(cx, |v, _| v.url.clone());
+    let token = view.read_with(cx, |v, _| v.token.clone());
+    let passphrase = view.read_with(cx, |v, _| v.passphrase.clone());
+
+    // The saved preferences arrive while the user composes a relay URL.
+    url.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    view.update(cx, |v, cx| {
+        v.loaded(
+            Preferences {
+                mode: Mode::Relay,
+                url: "https://saved.example".into(),
+                ..Default::default()
+            },
+            vec![],
+            None,
+            cx,
+        )
+    });
+    assert_eq!(url.read_with(cx, |i, _| i.text().to_string()), "にほ");
+    assert!(
+        url.update_in(cx, |i, window, cx| i.marked_text_range(window, cx))
+            .is_some(),
+        "the load did not end the composition"
+    );
+    url.update_in(cx, |i, window, cx| {
+        i.replace_text_in_range(None, "https://typed.example", window, cx)
+    });
+    assert_eq!(
+        url.read_with(cx, |i, _| i.text().to_string()),
+        "https://typed.example",
+        "the user's commit wins over the stale load"
+    );
+
+    // Apply completes while the passphrase is being composed: it survives.
+    passphrase.update_in(cx, |i, window, cx| {
+        i.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    view.update(cx, |v, cx| v.finish("Ready".into(), cx));
+    assert_eq!(
+        passphrase.read_with(cx, |i, _| i.text().to_string()),
+        "にほ"
+    );
+    assert!(
+        passphrase
+            .update_in(cx, |i, window, cx| i.marked_text_range(window, cx))
+            .is_some(),
+        "finish did not end the composition"
+    );
+    passphrase.update_in(cx, |i, window, cx| {
+        i.replace_text_in_range(None, "秘密", window, cx)
+    });
+    assert_eq!(
+        passphrase.read_with(cx, |i, _| i.text().to_string()),
+        "秘密",
+        "the commit is newer than the request, so it stays for the next Apply"
+    );
+
+    // A secret submitted before the request is still cleared when the request settles.
+    token.update_in(cx, |i, window, cx| {
+        i.replace_text_in_range(None, "saved-token", window, cx)
+    });
+    view.update(cx, |v, cx| v.request(true, cx));
+    view.update(cx, |v, cx| v.finish("Ready".into(), cx));
+    assert_eq!(token.read_with(cx, |i, _| i.text().to_string()), "");
+    assert_eq!(passphrase.read_with(cx, |i, _| i.text().to_string()), "");
+}
