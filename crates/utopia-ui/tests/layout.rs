@@ -653,18 +653,18 @@ fn daily_notes_feed_stacks_days(cx: &mut TestAppContext) {
     );
 }
 
-/// DESIGN.md §3.6: consecutive days with nothing on them are one block — a single divider
-/// above, 44 px rows 4 px apart, a fixed 92 px weekday column, the date title, and a ghost
-/// Write. Clicking Write expands the day with one empty block focused, and nothing is
-/// written until the first keystroke (FR-1.2).
+/// DESIGN.md §3.6: consecutive days with nothing on them read as one block — a single
+/// divider above, 44 px rows 4 px apart, a fixed 92 px weekday column, the date title, and
+/// a ghost Write. They are separate list items, so the list virtualizes each. Clicking
+/// Write expands the day with one empty block focused, and nothing is written until the
+/// first keystroke (FR-1.2).
 #[gpui::test]
-fn empty_days_group_and_write_expands_one(cx: &mut TestAppContext) {
+fn empty_day_rows_stack_and_write_expands_one(cx: &mut TestAppContext) {
     let cx = setup(cx);
     cx.simulate_input("today's note");
     cx.simulate_keystrokes("escape");
     let first = bounds(cx, "empty-day-2026-11-01");
     let second = bounds(cx, "empty-day-2026-10-31");
-    let group = bounds(cx, "empty-days");
     assert!(
         approx(first.size.height, 44.),
         "an empty day is one 44 px row: {first:?}"
@@ -672,10 +672,6 @@ fn empty_days_group_and_write_expands_one(cx: &mut TestAppContext) {
     assert!(
         approx(second.origin.y - (first.origin.y + first.size.height), 4.),
         "4 px between empty rows: {first:?} {second:?}"
-    );
-    assert!(
-        group.size.height >= first.size.height + second.size.height,
-        "both rows are inside one group: {group:?}"
     );
     // The weekday column is fixed, so the date titles line up.
     let weekday = bounds(cx, "empty-weekday-2026-11-01");
@@ -735,13 +731,37 @@ fn empty_days_group_and_write_expands_one(cx: &mut TestAppContext) {
         ["picked up later"],
         "the first keystroke writes the day"
     );
-    // The readable column still holds the group.
+    // The readable column still holds the rows.
     let (left, right) = column(cx);
     let (x0, x1) = (
-        f32::from(group.origin.x),
-        f32::from(group.origin.x + group.size.width),
+        f32::from(first.origin.x),
+        f32::from(first.origin.x + first.size.width),
     );
-    assert!(x0 >= left && x1 <= right + 0.5, "{group:?}");
+    assert!(x0 >= left && x1 <= right + 0.5, "{first:?}");
+}
+
+/// DESIGN.md §3.6 without losing virtualization: each empty day is its own list item, so a
+/// blank stretch costs the list per-row work instead of one item covering all of it.
+#[gpui::test]
+fn empty_days_are_individual_list_items(cx: &mut TestAppContext) {
+    let cx = setup(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    // The first window is JOURNAL_BATCH (10) calendar days: today is open (its draft has
+    // the block the caret goes in) and the other nine are empty rows.
+    let rows = ws.update(cx, |w, cx| w.main_empty_day_rows(cx));
+    assert!(
+        rows >= 8,
+        "one list item per empty day, not one item for the whole run: {rows}"
+    );
+    let first = bounds(cx, "empty-day-2026-11-01");
+    let second = bounds(cx, "empty-day-2026-10-31");
+    assert!(approx(first.size.height, 44.));
+    assert!(approx(second.origin.y - (first.origin.y + first.size.height), 4.));
 }
 
 /// DESIGN.md §3.1: rows follow the 28 px line grid. The caret slot (20 px) sits in the

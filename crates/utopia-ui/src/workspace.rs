@@ -1418,6 +1418,12 @@ impl Workspace {
         self.main.read(cx).open_day_count()
     }
 
+    /// Empty-day rows in the feed as separate list items (DESIGN.md §3.6), for scripts:
+    /// one item per day keeps the list virtualizing a long run of blank days.
+    pub fn main_empty_day_rows(&self, cx: &gpui::App) -> usize {
+        self.main.read(cx).empty_day_rows()
+    }
+
     pub fn open_date(
         &mut self,
         d: NaiveDate,

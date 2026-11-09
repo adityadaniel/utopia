@@ -186,10 +186,16 @@ enum Item {
         today: bool,
         first: bool,
     },
-    /// A run of consecutive days with nothing on them (DESIGN.md §3.6): one block with a
-    /// single divider above it, one 44 px row per day, 4 px apart.
-    EmptyDays {
-        days: Vec<EmptyDay>,
+    /// A day with nothing on it (DESIGN.md §3.6): one 44 px row. Consecutive empty days
+    /// are separate list items so the list still virtualizes them one row at a time; they
+    /// read as one block because only the first of a run carries the 40 px gap and the
+    /// single divider, and the rest sit 4 px apart.
+    EmptyDay {
+        date: NaiveDate,
+        weekday: SharedString,
+        title: SharedString,
+        /// First of a run of empty days.
+        first: bool,
     },
     /// The click-to-start row under an open day that has no blocks yet (a day with
     /// only references, or only attribute rows, keeps its section).
@@ -201,14 +207,6 @@ enum Item {
     /// The end of the feed (FR-1.2): the oldest daily page is loaded, so no older day
     /// can hold anything. Drawn instead of [`Item::JournalEnd`].
     JournalExhausted,
-}
-
-/// One day row inside an [`Item::EmptyDays`] group.
-#[derive(Debug, Clone)]
-struct EmptyDay {
-    date: NaiveDate,
-    weekday: SharedString,
-    title: SharedString,
 }
 
 /// A day heading in the feed, kept so the sticky header can find the day at the top of
@@ -994,6 +992,15 @@ impl PageView {
         cx.notify();
     }
 
+    /// How many empty-day rows the feed carries as separate list items (DESIGN.md §3.6),
+    /// for scripts. One item per day is what lets the list virtualize a long blank run.
+    pub fn empty_day_rows(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| matches!(i, Item::EmptyDay { .. }))
+            .count()
+    }
+
     /// How many days the feed shows open, with a date heading (DN-1), for scripts.
     pub fn open_day_count(&self) -> usize {
         self.items
@@ -1657,9 +1664,7 @@ impl PageView {
         let mut items = Vec::new();
         let mut ids = Vec::new();
         let mut headings = Vec::new();
-        // Consecutive days with nothing on them become one group (DESIGN.md §3.6): the
-        // group is flushed before the next day that has a section, or at the end.
-        let mut empty: Vec<EmptyDay> = Vec::new();
+        let mut previous_empty = false;
         for (i, day) in days.into_iter().enumerate() {
             // Like Roam's feed: Linked References under the day when it has any, and no
             // Unlinked References (those stay on the day's own page). A day with
@@ -1675,12 +1680,8 @@ impl PageView {
             // PG-1: rows can exist and still not be visible — a root attribute block folds
             // to one muted row, so the day keeps its heading but still offers the prompt.
             let open = !day.rows.is_empty() || refs.is_some();
-            if open && !empty.is_empty() {
-                items.push(Item::EmptyDays {
-                    days: std::mem::take(&mut empty),
-                });
-            }
             if open {
+                previous_empty = false;
                 let weekday: SharedString = weekday_label(day.date).into();
                 let heading_ix = headings.len();
                 headings.push(DayHeading {
@@ -1717,15 +1718,14 @@ impl PageView {
                 }
                 headings[heading_ix].end = items.len();
             } else {
-                empty.push(EmptyDay {
+                items.push(Item::EmptyDay {
                     date: day.date,
                     weekday: weekday_label(day.date).into(),
                     title: day.title.into(),
+                    first: !previous_empty,
                 });
+                previous_empty = true;
             }
-        }
-        if !empty.is_empty() {
-            items.push(Item::EmptyDays { days: empty });
         }
         // A rebuild resolves the window it just loaded into a terminal or open state.
         // A read error stays `Idle`, so the next rebuild tries again instead of the feed
@@ -4181,80 +4181,78 @@ impl PageView {
             // column, its date title, and a ghost Write button. Clicking either target
             // expands the day with one empty block focused; nothing is written until the
             // first keystroke (FR-1.2).
-            Item::EmptyDays { days } => {
-                let mut group = div()
-                    .debug_selector(|| "empty-days".into())
-                    .mt(px(DAY_GAP))
-                    .border_t_1()
-                    .border_color(th.line_soft)
-                    .pt(px(DAY_HEADER_PAD_TOP))
+            // DESIGN.md §3.6, one list item per day so a long gap is virtualized: the first
+            // row of a run carries the 40 px gap and the single 1 px divider, the rest sit
+            // 4 px apart. Each row has the fixed weekday column, its date and a ghost Write;
+            // clicking either target expands the day with one empty block focused, and
+            // nothing is written until the first keystroke (FR-1.2).
+            Item::EmptyDay {
+                date,
+                weekday,
+                title,
+                first,
+            } => {
+                let iso = utopia_core::date::iso(date);
+                let write = date;
+                let row_sel = format!("empty-day-{iso}");
+                let title_sel = format!("empty-title-{iso}");
+                let write_sel = format!("empty-write-{iso}");
+                let weekday_sel = format!("empty-weekday-{iso}");
+                div()
+                    .id(gpui::ElementId::Name(format!("empty-day-{iso}").into()))
+                    .debug_selector(move || row_sel.clone())
                     .px(px(CONTENT_PADDING_X))
+                    .when(first, |d| {
+                        d.mt(px(DAY_GAP))
+                            .border_t_1()
+                            .border_color(th.line_soft)
+                            .pt(px(DAY_HEADER_PAD_TOP))
+                    })
+                    .when(!first, |d| d.mt(px(EMPTY_DAY_GAP)))
+                    .h(px(EMPTY_DAY_HEIGHT))
                     .flex()
-                    .flex_col()
-                    .gap(px(EMPTY_DAY_GAP));
-                for day in days {
-                    let date = day.date;
-                    let iso = utopia_core::date::iso(date);
-                    let write = date;
-                    let id = gpui::ElementId::Name(format!("empty-day-{iso}").into());
-                    let row_sel = format!("empty-day-{iso}");
-                    let title_sel = format!("empty-title-{iso}");
-                    let write_sel = format!("empty-write-{iso}");
-                    group = group.child(
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|s| s.bg(th.hover))
+                    .child(
                         div()
-                            .id(id)
-                            .debug_selector(move || row_sel.clone())
-                            .h(px(EMPTY_DAY_HEIGHT))
-                            .flex()
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(th.hover))
-                            .child(
-                                div()
-                                    .debug_selector({
-                                        let sel = format!("empty-weekday-{iso}");
-                                        move || sel.clone()
-                                    })
-                                    .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
-                                    .font_family(LABEL_MONO)
-                                    .text_size(px(LABEL.size))
-                                    .text_color(th.muted)
-                                    .child(day.weekday.clone()),
-                            )
-                            .child(
-                                crate::theme::EMPTY_DAY_TITLE
-                                    .apply(div())
-                                    .debug_selector(move || title_sel.clone())
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(th.ink)
-                                    .child(day.title.clone()),
-                            )
-                            .child(
-                                quiet_control(
-                                    gpui::ElementId::Name(format!("empty-write-{iso}").into()),
-                                    "Write",
-                                    &th,
-                                )
-                                .debug_selector(move || write_sel.clone())
-                                .h(px(28.))
-                                .ml_2()
-                                .flex()
-                                .items_center()
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        cx.stop_propagation();
-                                        this.start_day(write, window, cx);
-                                    },
-                                )),
-                            )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.start_day(date, window, cx)
-                            })),
-                    );
-                }
-                group.into_any_element()
+                            .debug_selector(move || weekday_sel.clone())
+                            .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
+                            .font_family(LABEL_MONO)
+                            .text_size(px(LABEL.size))
+                            .text_color(th.muted)
+                            .child(weekday),
+                    )
+                    .child(
+                        crate::theme::EMPTY_DAY_TITLE
+                            .apply(div())
+                            .debug_selector(move || title_sel.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(th.ink)
+                            .child(title),
+                    )
+                    .child(
+                        quiet_control(
+                            gpui::ElementId::Name(format!("empty-write-{iso}").into()),
+                            "Write",
+                            &th,
+                        )
+                        .debug_selector(move || write_sel.clone())
+                        .h(px(28.))
+                        .ml_2()
+                        .flex()
+                        .items_center()
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.start_day(write, window, cx);
+                        })),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_day(date, window, cx)
+                    }))
+                    .into_any_element()
             }
             Item::DayEmpty { date } => div()
                 .id(("day-empty", ix))
