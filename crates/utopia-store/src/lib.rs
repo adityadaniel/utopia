@@ -344,6 +344,16 @@ impl Store {
         Ok(set)
     }
 
+    /// Republish after a write that has already committed. A classification failure cannot
+    /// undo that write (rule 11): report it and let the caller keep the answer it earned,
+    /// rather than reporting "failed" for a purge, format change or repair that happened.
+    /// The slot keeps the previous set, which then describes an index one write behind.
+    fn republish_tag_pages_after_commit(&self) {
+        if let Err(e) = self.republish_tag_pages() {
+            eprintln!("utopia: tag pages: {e}");
+        }
+    }
+
     /// How many whole-graph tag classifications the commit path has run (tests, SB-2). One
     /// is enough: later commits update only the pages they can affect.
     pub fn tag_page_full_scans(&self) -> u64 {
@@ -814,7 +824,7 @@ impl Store {
         self.date_format = fmt;
         // Re-resolving moved reference edges on this connection without a commit, so the
         // published set classifies an index that no longer exists (SB-2).
-        self.republish_tag_pages()?;
+        self.republish_tag_pages_after_commit();
         Ok(())
     }
 

@@ -932,3 +932,28 @@ fn sb_2_republish_waits_for_a_submitted_commit() {
         "and that is what the slot holds"
     );
 }
+
+/// SB-2 + rule 11: the purge has already committed when the set is republished. A failure
+/// to classify must not turn a purge that happened into an error: the caller would see
+/// "failed" and a retry would purge nothing. Log it and keep the purge's own answer.
+#[test]
+fn sb_2_empty_trash_reports_the_purge_when_the_scan_fails() {
+    let (mut s, _d) = store();
+    let notes = s.create_page("Notes").unwrap();
+    // `beta` stays and is still blockless, so the classification really runs its queries
+    // (it returns early when no page can be a tag page at all).
+    write(&mut s, &notes, "a note about #alpha and #beta");
+    s.sync_index().unwrap();
+    let alpha = s.find_page("alpha").unwrap().expect("the hashtag made it");
+    s.find_page("beta").unwrap().expect("and so did this one");
+    s.delete_page(&alpha).unwrap();
+
+    // The classification reads `alias`; the purge does not, so breaking it fails only the
+    // republish that follows the committed delete.
+    s.conn().execute_batch("DROP TABLE alias").unwrap();
+    assert_eq!(
+        s.empty_trash(None).unwrap(),
+        1,
+        "the purge reports what it purged"
+    );
+}

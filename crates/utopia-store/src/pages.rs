@@ -808,7 +808,7 @@ impl Store {
         }
         // The purge removed rows the classification reads, without a commit to publish the
         // set the remaining index implies (SB-2).
-        self.republish_tag_pages()?;
+        self.republish_tag_pages_after_commit();
         Ok(ids.len())
     }
 
