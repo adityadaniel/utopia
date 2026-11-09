@@ -1348,7 +1348,10 @@ impl PageView {
         // rows left, so the post-rebuild frame could not be measured anyway; scrolling
         // this block below the heading is at worst one heading's worth of motion.
         // DESIGN.md §3.8: a leading property block is edited in the bar (the header item),
-        // not as a row. Any other target leaves the bar's edit state.
+        // not as a row. Any other target leaves the bar's edit state. The row being left is
+        // cleaned up after `begin` commits it: the editor switches targets without emitting
+        // `Blurred`, so waiting for that event would leave an emptied or pending row behind.
+        let previous = self.property_edit.take();
         self.property_edit = self.is_property_block(&block).then(|| block.clone());
         let line = crate::appearance::density(cx).line_height();
         let under_heading = self
@@ -1390,6 +1393,11 @@ impl PageView {
                 cx,
             )
         });
+        if let Some(old) = previous {
+            if self.property_edit.as_ref() != Some(&old) {
+                self.finish_property_block(old, cx);
+            }
+        }
         if !drawn {
             // Rebuild with the edit target set, so the folded attribute opens and this
             // block gets a row that can hold the editor (a focused element that is not
@@ -1621,7 +1629,14 @@ impl PageView {
             // The page view's leading properties are drawn once, in the bar, and skipped in
             // the outline (DESIGN.md §3.8 rule 2). A zoomed view has no bar, so it keeps
             // every block as it is.
-            let skip: Vec<BlockId> = header.properties.iter().map(|p| p.block.clone()).collect();
+            let mut skip: Vec<BlockId> =
+                header.properties.iter().map(|p| p.block.clone()).collect();
+            // The empty row "Add property" created is drawn by the bar; until it becomes a
+            // real `key:: value` it is not a leading property, so it would otherwise also be
+            // a body bullet (and the first row focus_first finds).
+            if let Some(pending) = &self.pending_property {
+                skip.push(pending.clone());
+            }
             push_page_rows(
                 app,
                 &st,
@@ -3772,7 +3787,6 @@ impl PageView {
         cx: &mut Context<Self>,
     ) {
         let Some(page) = self.page() else { return };
-        self.property_edit = Some(block.clone());
         self.edit(page, block, caret, goal, window, cx);
         cx.notify();
     }
@@ -3812,6 +3826,13 @@ impl PageView {
         let Some(block) = self.property_edit.take() else {
             return;
         };
+        self.finish_property_block(block, cx);
+    }
+
+    /// Clean up one property row whose edit is over. Split from `finish_property_edit` so a
+    /// new target can finish the old row after the editor has committed it: `begin` switches
+    /// targets without emitting `Blurred`, so this is the only place that sees both.
+    fn finish_property_block(&mut self, block: BlockId, cx: &mut Context<Self>) {
         if self.pending_property.as_ref() == Some(&block) {
             self.pending_property = None;
         }
