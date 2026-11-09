@@ -56,7 +56,8 @@ pub fn next_word_end(s: &str, offset: usize) -> usize {
 ///
 /// With nothing after the caret on its paragraph (the text ends there, or a newline
 /// follows) the two graphemes *before* it swap instead and the caret stays, as TextEdit
-/// does. Returns the edit as `(range, replacement, caret after)` so callers apply it
+/// does. Nothing swaps across a line break (at the start of a paragraph there is no pair).
+/// Returns the edit as `(range, replacement, caret after)` so callers apply it
 /// through their usual replace path, or `None` when there is no pair to swap.
 pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usize)> {
     let caret = floor_char_boundary(text, caret.min(text.len()));
@@ -71,7 +72,8 @@ pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usiz
             next_grapheme(text, caret),
         )
     };
-    if left == mid || mid == right {
+    // A line break never swaps: that would carry a character onto the other line.
+    if left == mid || mid == right || &text[left..mid] == "\n" || &text[mid..right] == "\n" {
         return None;
     }
     let swapped = format!("{}{}", &text[mid..right], &text[left..mid]);
@@ -398,6 +400,9 @@ mod tests {
         assert_eq!(apply("abcd", 4), Some(("abdc".into(), 4)));
         // End of a paragraph: same, and the newline stays where it was.
         assert_eq!(apply("ab\ncd", 2), Some(("ba\ncd".into(), 2)));
+        // Start of a paragraph: nothing before it on its line, so nothing moves across the
+        // line break.
+        assert_eq!(apply("ab\ncd", 3), None);
         // Nothing to do: empty, at the very start, one grapheme only.
         assert_eq!(apply("", 0), None);
         assert_eq!(apply("a", 0), None);
