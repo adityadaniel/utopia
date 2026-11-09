@@ -3774,7 +3774,9 @@ fn graph_panel_keeps_the_sidebar_pages_origin(cx: &mut TestAppContext) {
         w.open(b.clone(), None, None, true, window, cx)
     });
     cx.run_until_parked();
-    let menu = cx.debug_bounds("page-menu").expect("a page menu");
+    let menu = cx
+        .debug_bounds("pane-page-menu")
+        .expect("the sidebar card's page menu");
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
     let item = cx.debug_bounds("page-menu-graph").expect("Open in graph");
@@ -3821,7 +3823,9 @@ fn reopening_the_sidebar_keeps_the_graph_panels_origin(cx: &mut TestAppContext) 
         w.open(b.clone(), None, None, true, window, cx)
     });
     cx.run_until_parked();
-    let menu = cx.debug_bounds("page-menu").expect("a page menu");
+    let menu = cx
+        .debug_bounds("pane-page-menu")
+        .expect("the sidebar card's page menu");
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
     let item = cx.debug_bounds("page-menu-graph").expect("Open in graph");
@@ -6388,14 +6392,14 @@ fn tag_marks_come_from_the_index_feed_not_from_render(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("tag-glyph-atlas").is_none(),
+        cx.debug_bounds("tag-chip-atlas").is_none(),
         "render must not call hashtag_only_pages (rule 10)"
     );
     // Once the app is told the index moved, the cache refreshes and the mark appears.
     app.update(cx, |app, cx| app.flush_now(cx));
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("tag-glyph-atlas").is_some(),
+        cx.debug_bounds("tag-chip-atlas").is_some(),
         "the index feed refreshed the tag cache"
     );
 }

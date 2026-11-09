@@ -875,12 +875,11 @@ fn day_sections_are_forty_px_apart(cx: &mut TestAppContext) {
     );
 }
 
-/// DESIGN.md §4.1: "Today" resets the feed's scroll position to today. The Today pill in
-/// the pinned day header is the control that does it until the top bar lands.
+/// DESIGN.md §4.1: "Today" resets the feed's scroll position to today. Both the top bar's
+/// Today button and the Today pill in the pinned day header do it.
 #[gpui::test]
 fn today_resets_the_feed_scroll(cx: &mut TestAppContext) {
     let (ws, cx) = setup_feed(cx, &[(0, 40)], H);
-    let main = bounds(cx, "main-pane");
     scroll_main(cx, -600.);
     assert_eq!(
         ws.update(cx, |w, cx| w.main_sticky_day(cx)),
@@ -897,8 +896,8 @@ fn today_resets_the_feed_scroll(cx: &mut TestAppContext) {
     );
     let title = bounds(cx, "today-title");
     assert!(
-        approx(title.origin.y, f32::from(main.origin.y)),
-        "today's section starts at the top of the feed: {title:?} {main:?}"
+        approx(title.origin.y, content_top(cx)),
+        "today's section starts at the top of the feed: {title:?}"
     );
 }
 
@@ -953,6 +952,12 @@ fn setup_feed<'a>(
     (ws, cx)
 }
 
+/// The top of the page content: the bottom of the top bar (DESIGN.md §3.3).
+fn content_top(cx: &mut VisualTestContext) -> f32 {
+    let bar = bounds(cx, "top-bar");
+    f32::from(bar.origin.y + bar.size.height)
+}
+
 /// Scroll the main pane by `dy` pixels (negative scrolls down).
 fn scroll_main(cx: &mut VisualTestContext, dy: f32) {
     let main = bounds(cx, "main-pane");
@@ -983,8 +988,8 @@ fn long_day_keeps_its_date_at_the_top(cx: &mut TestAppContext) {
     );
     let pin = bounds(cx, "sticky-day");
     assert!(
-        approx(pin.origin.y, f32::from(main.origin.y)),
-        "pinned to the top of the column: {pin:?} {main:?}"
+        approx(pin.origin.y, content_top(cx)),
+        "pinned to the top of the column below the top bar: {pin:?} {main:?}"
     );
     assert!(pin.size.height >= px(30.), "a readable heading: {pin:?}");
     let (left, right) = column(cx);
@@ -1054,19 +1059,18 @@ fn a_row_under_the_pinned_date_is_moved_below_it(cx: &mut TestAppContext) {
         "note 22",
         "the caret is on note 22 (item 23)"
     );
-    let main = bounds(cx, "main-pane");
     // Put note 20 (item 21) at the top of the list, so note 21 (item 22) — the row an Up
     // lands on — is the second visible row, inside the height the pinned date covers.
     // A wheel event only reaches what the list has measured so far, so repeat.
     for _ in 0..8 {
-        let delta = f32::from(bounds(cx, "content-21").origin.y - main.origin.y);
+        let delta = f32::from(bounds(cx, "content-21").origin.y) - content_top(cx);
         if delta.abs() <= 1. {
             break;
         }
         scroll_main(cx, -delta);
     }
     assert!(
-        approx(bounds(cx, "content-21").origin.y, f32::from(main.origin.y)),
+        approx(bounds(cx, "content-21").origin.y, content_top(cx)),
         "note 20 sits at the top of the list"
     );
     assert_eq!(
@@ -1100,7 +1104,7 @@ fn a_row_under_the_pinned_date_is_moved_below_it(cx: &mut TestAppContext) {
 #[gpui::test]
 fn an_empty_day_group_does_not_keep_the_previous_day_pinned(cx: &mut TestAppContext) {
     // A short window, so the feed can scroll down to the empty days.
-    let (ws, cx) = setup_feed(cx, &[(0, 1), (1, 1), (4, 12)], 400.);
+    let (ws, cx) = setup_feed(cx, &[(0, 1), (1, 1), (4, 12)], 600.);
     assert_eq!(ws.update(cx, |w, cx| w.main_sticky_day(cx)), None);
     let main = bounds(cx, "main-pane");
     let empty = bounds(cx, "empty-day-2026-10-31");
@@ -1372,9 +1376,6 @@ fn unlinked_mention_wraps_and_keeps_link_in_view(cx: &mut TestAppContext) {
 #[gpui::test]
 fn left_sidebar_collapses_to_a_rail(cx: &mut TestAppContext) {
     let cx = setup(cx);
-    // FR-1.3's date picker is one click away, not always open.
-    assert!(cx.debug_bounds("left-calendar").is_none());
-    // (Debug bounds of elements no longer drawn linger, so check what replaced them.)
     cx.simulate_keystrokes("escape cmd-\\");
     let rail = bounds(cx, "left-rail");
     let main = bounds(cx, "main-pane");
@@ -1386,10 +1387,13 @@ fn left_sidebar_collapses_to_a_rail(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("cmd-\\");
     let main = bounds(cx, "main-pane");
     assert!(approx(main.origin.x, SIDEBAR_WIDTH), "{main:?}");
-    let toggle = bounds(cx, "toggle-calendar");
-    cx.simulate_click(toggle.center(), gpui::Modifiers::none());
-    let cal = bounds(cx, "left-calendar");
-    assert!(cal.origin.y > toggle.origin.y);
+    // The open sidebar is the spec's: a search field, the nav row and the mini calendar.
+    let search = bounds(cx, "sidebar-search");
+    let nav = bounds(cx, "daily-notes");
+    let calendar = bounds(cx, "left-calendar");
+    assert!(approx(search.size.height, 36.), "{search:?}");
+    assert!(approx(nav.size.height, 34.), "{nav:?}");
+    assert!(calendar.origin.y > nav.origin.y, "{calendar:?} {nav:?}");
 }
 
 /// ALL-3: "Delete page" is a danger item inside the page header's menu, not loose text.
@@ -1598,63 +1602,32 @@ fn opening_the_page_menu_does_not_move_the_title(cx: &mut TestAppContext) {
     );
 }
 
-/// SB-1: ten days are ten one-line rows, each with a muted block count. At the old
-/// two-preview height three days took half the sidebar; these ten fit without scrolling.
+/// DESIGN.md §3.2: the old "Recent days" list is gone on purpose — the feed already shows
+/// those days, and the sidebar now starts with the nav and the mini calendar.
 #[gpui::test]
-fn recent_days_are_one_line_each(cx: &mut TestAppContext) {
+fn recent_days_are_gone(cx: &mut TestAppContext) {
     let cx = setup_seeded(cx, |s| seed_days(s, 10));
     cx.simulate_keystrokes("escape");
-    let sidebar = bounds(cx, "left-sidebar");
-    let mut previous: Option<Bounds<Pixels>> = None;
-    for i in 0..10 {
-        let row = bounds_of(cx, format!("recent-day-{i}"));
-        assert!(
-            row.size.height <= px(22.),
-            "row {i} is one line, not a preview block: {row:?}"
-        );
-        let count = bounds_of(cx, format!("recent-day-count-{i}"));
-        assert!(
-            count.origin.x > row.origin.x + row.size.width / 2.
-                && count.origin.x + count.size.width <= row.origin.x + row.size.width + px(0.5),
-            "the count sits at the right edge of row {i}: {count:?} {row:?}"
-        );
-        if let Some(p) = previous {
-            assert!(
-                row.origin.y >= p.origin.y + p.size.height - px(1.),
-                "rows stack: {p:?} {row:?}"
-            );
-        }
-        previous = Some(row);
-    }
-    let last = previous.expect("ten rows");
     assert!(
-        last.origin.y + last.size.height <= sidebar.origin.y + sidebar.size.height,
-        "ten compact days fit in the sidebar without scrolling: {last:?} {sidebar:?}"
+        cx.debug_bounds("recent-days-header").is_none(),
+        "no Recent days heading"
+    );
+    assert!(
+        cx.debug_bounds("recent-day-0").is_none(),
+        "no recent-day rows"
+    );
+    // The room it used is the calendar's: the grid is drawn without a toggle.
+    let calendar = bounds(cx, "left-calendar");
+    let pages = bounds(cx, "pages-header");
+    assert!(
+        calendar.origin.y < pages.origin.y,
+        "the calendar sits above Pages: {calendar:?} {pages:?}"
     );
 }
 
-/// SB-1: a compact row keeps the day's first block one hover away.
+/// DESIGN.md §3.2: tag pages are chips under TAGS, not rows in Pages.
 #[gpui::test]
-fn recent_day_hover_shows_its_first_block(cx: &mut TestAppContext) {
-    let cx = setup_seeded(cx, |s| seed_days(s, 3));
-    cx.simulate_keystrokes("escape");
-    let row = bounds_of(cx, "recent-day-0".into());
-    cx.simulate_mouse_move(row.center(), None, gpui::Modifiers::default());
-    // gpui waits 500 ms before showing a tooltip.
-    cx.executor()
-        .advance_clock(std::time::Duration::from_millis(700));
-    cx.run_until_parked();
-    let tip = bounds_of(cx, "recent-day-preview".into());
-    assert!(
-        tip.size.width > px(40.) && tip.size.height >= px(12.),
-        "the first block is drawn as a tooltip: {tip:?}"
-    );
-}
-
-/// SB-2: a page that only exists because of a `#tag` gets a `#` in the tag colour;
-/// a page reached through a `[[link]]` does not. One list, display only (FR-2.15).
-#[gpui::test]
-fn tag_pages_get_a_hash_glyph(cx: &mut TestAppContext) {
+fn tag_pages_are_chips_not_pages(cx: &mut TestAppContext) {
     let cx = setup_seeded(cx, |s| {
         let (p, b) = s.open_daily(today()).unwrap();
         s.set_block_text(&p, &b, "#atlas and [[Atlas Launch]]", None, None)
@@ -1662,16 +1635,185 @@ fn tag_pages_get_a_hash_glyph(cx: &mut TestAppContext) {
         s.commit_block(&p, &b).unwrap();
     });
     cx.simulate_keystrokes("escape");
-    let glyph = bounds_of(cx, "tag-glyph-atlas".into());
-    let row = bounds_of(cx, "page-row-0".into());
+    let chip = bounds(cx, "tag-chip-atlas");
+    let header = bounds(cx, "tags-header");
     assert!(
-        glyph.origin.x >= row.origin.x
-            && glyph.origin.x + glyph.size.width <= row.origin.x + row.size.width + px(0.5),
-        "the glyph sits inside the page row: {glyph:?} {row:?}"
+        approx(chip.size.height, 22.),
+        "a tag is a 22 px chip: {chip:?}"
     );
     assert!(
-        cx.debug_bounds("tag-glyph-atlas launch").is_none(),
-        "a [[link]] page is not marked as a tag page"
+        chip.origin.y >= header.origin.y,
+        "the chip is under the TAGS label: {chip:?} {header:?}"
+    );
+    // Only "Atlas Launch" is a page row; the tag page is not one.
+    let row = bounds(cx, "page-row-0");
+    assert!(
+        cx.debug_bounds("page-row-1").is_none(),
+        "the tag page is not in Pages: {row:?}"
+    );
+}
+
+/// DESIGN.md §3.2's sidebar metrics: 24 px workspace square, 36 px search field, 34 px nav
+/// row, 32 px page rows, 30 px calendar cells, 8 px footer dot.
+#[gpui::test]
+fn sidebar_matches_the_spec_metrics(cx: &mut TestAppContext) {
+    let cx = setup_seeded(cx, |s| {
+        s.create_page("Alpha").unwrap();
+    });
+    cx.simulate_keystrokes("escape");
+    let sidebar = bounds(cx, "left-sidebar");
+    let square = bounds(cx, "workspace-initial");
+    let search = bounds(cx, "sidebar-search");
+    let nav = bounds(cx, "daily-notes");
+    let row = bounds(cx, "page-row-0");
+    let cell = bounds(cx, "cal-2026-11-02");
+    let dot = bounds(cx, "sync-dot-off");
+    assert!(approx(square.size.width, 24.) && approx(square.size.height, 24.));
+    assert!(approx(search.size.height, 36.), "{search:?}");
+    assert!(approx(nav.size.height, 34.), "{nav:?}");
+    assert!(approx(row.size.height, 32.), "{row:?}");
+    assert!(approx(cell.size.height, 30.), "{cell:?}");
+    assert!(
+        approx(dot.size.width, 8.) && approx(dot.size.height, 8.),
+        "{dot:?}"
+    );
+    // The footer is pinned to the bottom and the settings button is part of it.
+    let footer = bounds(cx, "sidebar-footer");
+    let settings = bounds(cx, "open-settings");
+    assert!(
+        footer.origin.y > sidebar.origin.y + sidebar.size.height / 2.,
+        "the footer sits at the bottom: {footer:?} {sidebar:?}"
+    );
+    assert!(
+        settings.origin.x > footer.origin.x + footer.size.width / 2.
+            && settings.origin.x + settings.size.width <= sidebar.right(),
+        "the settings button is at the footer's right edge: {settings:?}"
+    );
+}
+
+/// DESIGN.md §3.2: the search field is a button that opens the command palette.
+#[gpui::test]
+fn sidebar_search_opens_the_command_palette(cx: &mut TestAppContext) {
+    let cx = setup(cx);
+    cx.simulate_keystrokes("escape");
+    let search = bounds(cx, "sidebar-search");
+    assert!(approx(search.size.height, 36.));
+    cx.simulate_click(search.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let palette = bounds(cx, "jump-palette");
+    assert!(
+        palette.origin.x > search.origin.x,
+        "the palette opens beside the sidebar: {palette:?} {search:?}"
+    );
+}
+
+/// DESIGN.md §3.3: the Daily Notes top bar carries the title and a prev | Today | next
+/// group; prev moves the feed to the older day and Today brings it back.
+#[gpui::test]
+fn top_bar_day_navigation_moves_the_feed(cx: &mut TestAppContext) {
+    let (ws, cx) = setup_feed(cx, &[(0, 5), (1, 5)], H);
+    let bar = bounds(cx, "top-bar");
+    assert!(
+        bar.size.height >= px(52.),
+        "the top bar is at least 52 px: {bar:?}"
+    );
+    let title = bounds(cx, "topbar-title");
+    let nav = bounds(cx, "day-nav");
+    assert!(
+        title.origin.y >= bar.origin.y
+            && title.origin.y + title.size.height <= bar.origin.y + bar.size.height + px(0.5),
+        "the title sits in the top bar: {title:?} {bar:?}"
+    );
+    assert!(
+        approx(nav.size.height, 32.),
+        "the day group is 32 px tall: {nav:?}"
+    );
+    assert!(
+        nav.origin.x + nav.size.width <= bar.origin.x + bar.size.width + px(0.5),
+        "the day group is on the bar's right: {nav:?} {bar:?}"
+    );
+
+    // Prev = the older day, as PrevDay means everywhere else.
+    let prev = bounds(cx, "day-prev").center();
+    cx.simulate_click(prev, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        ws.update(cx, |w, cx| w.main_sticky_day(cx)),
+        None,
+        "yesterday's section is at the top, so nothing is pinned"
+    );
+    let yesterday = bounds(cx, "day-date-2026-11-01");
+    let top = content_top(cx);
+    assert!(
+        yesterday.origin.y > px(top) && yesterday.origin.y < px(top + 90.),
+        "the older day's heading is at the top of the feed: {yesterday:?}"
+    );
+
+    // Today resets the feed to the first day (§4.1).
+    let today = bounds(cx, "day-today").center();
+    cx.simulate_click(today, gpui::Modifiers::default());
+    cx.run_until_parked();
+    let today = bounds(cx, "today-title");
+    assert!(
+        approx(today.origin.y, content_top(cx)),
+        "today is back at the top: {today:?}"
+    );
+}
+
+/// DESIGN.md §3.3: a page view's top bar has the "Pages / title" breadcrumb, the page's ⋯
+/// menu and the right-panel toggle. Back/forward and the star are absent: the app has no
+/// history and no favorite action to bind them to.
+#[gpui::test]
+fn page_top_bar_breadcrumb_and_actions(cx: &mut TestAppContext) {
+    let page = std::cell::RefCell::new(None);
+    let cx = setup_seeded(cx, |store| {
+        *page.borrow_mut() = Some(store.create_page("Atlas Launch").unwrap());
+    });
+    let page = page.borrow_mut().take().expect("seeded page");
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let bar = bounds(cx, "top-bar");
+    let crumb = bounds(cx, "breadcrumb");
+    let menu = bounds(cx, "page-menu");
+    let title = bounds(cx, "page-title");
+    assert!(bar.size.height >= px(52.), "{bar:?}");
+    assert!(
+        crumb.origin.y >= bar.origin.y
+            && crumb.origin.x >= bar.origin.x
+            && crumb.origin.y + crumb.size.height <= bar.origin.y + bar.size.height + px(0.5),
+        "the breadcrumb sits in the bar: {crumb:?} {bar:?}"
+    );
+    assert!(
+        menu.origin.x > crumb.origin.x + crumb.size.width,
+        "the page menu is on the right of the crumb: {menu:?} {crumb:?}"
+    );
+    assert!(
+        title.origin.y >= bar.origin.y + bar.size.height - px(0.5),
+        "the content title stays below the bar: {title:?} {bar:?}"
+    );
+    assert!(
+        cx.debug_bounds("go-back").is_none() && cx.debug_bounds("go-forward").is_none(),
+        "no history actions exist, so no back/forward controls are drawn"
+    );
+    assert!(
+        cx.debug_bounds("favorite").is_none(),
+        "no favorite action exists, so no star is drawn"
+    );
+
+    // The right panel toggle opens the right sidebar.
+    assert!(cx.debug_bounds("right-sidebar").is_none());
+    let toggle = bounds(cx, "toggle-right").center();
+    cx.simulate_click(toggle, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("right-sidebar").is_some(),
+        "the right-panel toggle opens the sidebar"
     );
 }
 
@@ -1767,8 +1909,12 @@ fn footer_opens_the_sync_view_without_moving_the_page(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     let sidebar = bounds(cx, "left-sidebar");
     let footer = bounds(cx, "sidebar-footer");
-    let chip = bounds(cx, "graph-chip");
+    let chip = bounds(cx, "vault-name");
     let dot = bounds(cx, "sync-dot-off");
+    assert!(
+        cx.debug_bounds("local-only").is_some(),
+        "a graph with no sync target says it is local only"
+    );
     assert!(
         footer.origin.y + footer.size.height <= sidebar.origin.y + sidebar.size.height + px(0.5),
         "the footer is inside the sidebar: {footer:?} {sidebar:?}"
@@ -1777,17 +1923,18 @@ fn footer_opens_the_sync_view_without_moving_the_page(cx: &mut TestAppContext) {
         footer.origin.y > sidebar.origin.y + sidebar.size.height / 2.,
         "the footer sits at the bottom: {footer:?} {sidebar:?}"
     );
-    // One row: the chip and the dot share a centre line.
+    // One row: the dot first, then the vault name; the settings button is separate.
     let chip_mid = f32::from(chip.origin.y) + f32::from(chip.size.height) / 2.;
     let dot_mid = f32::from(dot.origin.y) + f32::from(dot.size.height) / 2.;
     assert!(
-        (chip_mid - dot_mid).abs() <= 2.,
-        "the chip and the dot are on one row: {chip:?} {dot:?}"
+        (chip_mid - dot_mid).abs() <= 4.,
+        "the vault name and the dot are on one row: {chip:?} {dot:?}"
     );
     assert!(
-        approx(chip.origin.x, f32::from(footer.origin.x))
-            && f32::from(dot.origin.x + dot.size.width) <= f32::from(footer.right()),
-        "chip left, dot right, both inside the row: {chip:?} {dot:?} {footer:?}"
+        approx(dot.origin.x, f32::from(footer.origin.x))
+            && chip.origin.x >= dot.origin.x + dot.size.width
+            && f32::from(chip.right()) <= f32::from(footer.right()),
+        "dot, then the vault name, both inside the row: {chip:?} {dot:?} {footer:?}"
     );
     assert!(
         cx.debug_bounds("encryption-lock").is_none(),
@@ -1825,46 +1972,39 @@ fn footer_opens_the_sync_view_without_moving_the_page(cx: &mut TestAppContext) {
     );
 }
 
-/// SB-5: under Journal, a quiet 7-column month strip. Days with an entry get a dot, today
-/// is drawn in the accent, a day click opens that day, and the month name folds the grid.
+/// DESIGN.md §3.2: the sidebar's mini calendar is always shown — month label with
+/// prev/next, Sunday-first weeks, mono weekday labels, 30 px cells, today a solid link
+/// cell, a link dot under days with notes, and a day click that opens that daily note.
 #[gpui::test]
-fn month_strip_is_a_quiet_seven_column_grid(cx: &mut TestAppContext) {
+fn mini_calendar_opens_days_and_marks_notes(cx: &mut TestAppContext) {
     let cx = setup_seeded(cx, |s| seed_days(s, 3));
     cx.simulate_keystrokes("escape");
-    assert!(
-        cx.debug_bounds("left-calendar").is_none(),
-        "the strip starts folded, as the calendar did"
-    );
-    let strip = bounds(cx, "toggle-calendar");
-    cx.simulate_click(strip.center(), gpui::Modifiers::default());
+    let month = bounds(cx, "cal-month");
     let grid = bounds(cx, "left-calendar");
     assert!(
-        grid.origin.y >= strip.origin.y + strip.size.height - px(0.5),
-        "the grid is under the month name: {grid:?} {strip:?}"
+        grid.origin.y >= month.origin.y + month.size.height - px(0.5),
+        "the grid is under the month label: {grid:?} {month:?}"
     );
 
-    // November 2026 starts on a Sunday, so the first Monday-first row is Oct 26–Nov 1.
+    // November 2026 starts on a Sunday, so the first row is Nov 1–7 (not Oct 26–Nov 1).
     let row = [
-        "2026-10-26",
-        "2026-10-27",
-        "2026-10-28",
-        "2026-10-29",
-        "2026-10-30",
-        "2026-10-31",
         "2026-11-01",
+        "2026-11-02",
+        "2026-11-03",
+        "2026-11-04",
+        "2026-11-05",
+        "2026-11-06",
+        "2026-11-07",
     ];
     let cells: Vec<Bounds<Pixels>> = row
         .iter()
         .map(|iso| bounds_of(cx, format!("cal-{iso}")))
         .collect();
     for (i, cell) in cells.iter().enumerate() {
+        assert!(approx(cell.size.height, 30.), "a 30 px cell: {cell:?}");
         assert!(
             approx(cell.origin.y, f32::from(cells[0].origin.y)),
             "seven columns share a line: {cell:?}"
-        );
-        assert!(
-            approx(cell.size.width, f32::from(cells[0].size.width)),
-            "columns are equally wide: {cell:?}"
         );
         if i > 0 {
             assert!(
@@ -1879,51 +2019,33 @@ fn month_strip_is_a_quiet_seven_column_grid(cx: &mut TestAppContext) {
         );
     }
 
-    // Seeded days (Nov 2, Nov 1, Oct 31) have dots; an untouched day in the month does not.
-    for iso in ["2026-11-02", "2026-11-01", "2026-10-31"] {
+    // Seeded days (Nov 2, Nov 1, Oct 31) have dots; an untouched day does not.
+    for iso in ["2026-11-02", "2026-11-01"] {
         bounds_of(cx, format!("cal-dot-{iso}"));
     }
     assert!(
         cx.debug_bounds("cal-dot-2026-11-15").is_none(),
         "a day with no entry has no dot"
     );
-    // Today is inside the grid it belongs to.
-    let today = bounds_of(cx, "cal-2026-11-02".into());
-    assert!(
-        today.origin.x >= grid.origin.x && today.right() <= grid.right() + px(0.5),
-        "today's cell is in the strip: {today:?} {grid:?}"
-    );
 
-    // Folding and unfolding is one click on the month name; the list below moves with it.
+    // A day cell opens that day (a draft until written, FR-1.2).
+    let cell = bounds_of(cx, "cal-2026-11-15".into());
+    cx.simulate_click(cell.center(), gpui::Modifiers::default());
+    let day = NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
     let ws = cx
         .update(|window, _| window.root::<Workspace>())
         .flatten()
         .expect("workspace root");
-    let recent_before = bounds(cx, "recent-days-header");
-    cx.simulate_click(strip.center(), gpui::Modifiers::default());
-    assert!(!ws.update(cx, |w, _| w.calendar_open()));
-    let recent = bounds(cx, "recent-days-header");
-    assert!(
-        recent.origin.y < recent_before.origin.y,
-        "the folded month gives the list its room back: {recent:?} {recent_before:?}"
-    );
-    cx.simulate_click(strip.center(), gpui::Modifiers::default());
-    assert!(ws.update(cx, |w, _| w.calendar_open()));
-
-    // A day cell opens that day (a draft until written, FR-1.2).
-    let cell = bounds_of(cx, "cal-2026-10-30".into());
-    cx.simulate_click(cell.center(), gpui::Modifiers::default());
-    let day = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
     assert_eq!(
         ws.update(cx, |w, cx| w.main_page(cx)),
         Some(PageId::for_date(day))
     );
 }
 
-/// ALL-5 in the sidebar: Compact density tightens the journal and page rows too, so the
-/// redesign does not leave one list at the comfortable size.
+/// DESIGN.md §3.2 fixes the sidebar's page rows at 32 px; the density setting tightens
+/// blocks, not this chrome.
 #[gpui::test]
-fn compact_density_tightens_sidebar_rows(cx: &mut TestAppContext) {
+fn sidebar_rows_keep_the_spec_height_in_compact(cx: &mut TestAppContext) {
     let cx = setup_seeded(cx, |s| {
         s.create_page("Alpha").unwrap();
     });
@@ -1945,8 +2067,8 @@ fn compact_density_tightens_sidebar_rows(cx: &mut TestAppContext) {
     );
     let after = bounds_of(cx, "page-row-0".into());
     assert!(
-        after.size.height < before.size.height,
-        "a page row is shorter in Compact: {before:?} {after:?}"
+        approx(before.size.height, 32.) && approx(after.size.height, 32.),
+        "a page row keeps its spec height: {before:?} {after:?}"
     );
 }
 
@@ -2193,16 +2315,23 @@ fn page_toolbar_sits_under_the_title(cx: &mut TestAppContext) {
         "the toolbar follows the title: {title:?} {toolbar:?}"
     );
     assert!(
-        alias.origin.x < add.origin.x && add.origin.x < menu.origin.x,
-        "chips, then + alias, then the menu: {alias:?} {add:?} {menu:?}"
+        alias.origin.x < add.origin.x && add.origin.x < toolbar.right(),
+        "chips, then + alias, in the toolbar: {alias:?} {add:?} {toolbar:?}"
     );
-    for (what, b) in [("alias", alias), ("+ alias", add), ("menu", menu)] {
+    for (what, b) in [("alias", alias), ("+ alias", add)] {
         assert!(
             b.origin.y >= toolbar.origin.y - px(1.)
                 && b.origin.y + b.size.height <= toolbar.bottom() + px(1.),
             "{what} sits in the toolbar row: {b:?} {toolbar:?}"
         );
     }
+    // DESIGN.md §3.3: the page actions moved to the top bar's ⋯ button.
+    let bar = bounds(cx, "top-bar");
+    assert!(
+        menu.origin.y >= bar.origin.y
+            && menu.origin.y + menu.size.height <= bar.origin.y + bar.size.height + px(0.5),
+        "the page menu sits in the top bar: {menu:?} {bar:?}"
+    );
 
     cx.simulate_click(menu.center(), gpui::Modifiers::default());
     cx.run_until_parked();

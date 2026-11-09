@@ -610,8 +610,10 @@ pub struct PageView {
     calendar_month: NaiveDate,
     /// The feed's day headings, in item order, for the sticky header (DN-3).
     day_headings: Vec<DayHeading>,
-    /// The page header's "···" menu is open (ALL-3).
+    /// The compact pane's own page menu (a right-sidebar or split card). The main pane's
+    /// page actions live in the workspace top bar instead (DESIGN.md §3.3).
     page_menu: bool,
+    /// The page header's "···" menu is open (ALL-3).
     /// The row the pointer is over, so its bullet can read as a drag handle and its
     /// collapse arrow can appear (PG-4). Local UI state, never persisted (rule 9).
     hovered_row: Option<BlockId>,
@@ -977,6 +979,36 @@ impl PageView {
         self.sticky_heading().map(|h| h.date)
     }
 
+    /// The top bar's day navigation in the Daily Notes feed (DESIGN.md §3.3): move the
+    /// column to the day section above or below. `delta < 0` is the previous (older) day,
+    /// matching `PrevDay`, and `delta > 0` the next (newer) one. Feed days are newest
+    /// first, so the older day is the next heading in the list.
+    pub fn scroll_to_adjacent_day(&mut self, delta: i32, cx: &mut Context<Self>) {
+        if self.journal().is_none() {
+            return;
+        }
+        let top = self.list.logical_scroll_top().item_ix;
+        let Some(current) = self
+            .day_headings
+            .partition_point(|h| h.ix <= top)
+            .checked_sub(1)
+        else {
+            return;
+        };
+        let target = if delta < 0 {
+            (current + 1 < self.day_headings.len()).then_some(current + 1)
+        } else {
+            current.checked_sub(1)
+        };
+        if let Some(i) = target {
+            self.list.scroll_to(ListOffset {
+                item_ix: self.day_headings[i].ix,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        }
+    }
+
     /// DESIGN.md §4.1: "Today" resets the feed's scroll position to today. Today's day
     /// is the feed's first item, so this scrolls the list to its top; the top bar's Today
     /// button (DESIGN.md §3.3) and the Today pill both call it.
@@ -1029,8 +1061,6 @@ impl PageView {
             self.rename = None;
             self.show_calendar = false;
         }
-        // Menus are transient by definition: any navigation closes them.
-        self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
         // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
@@ -2542,7 +2572,36 @@ impl PageView {
         cx.notify();
     }
 
-    fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    /// What the top bar's breadcrumb shows (DESIGN.md §3.3): the page's display title.
+    pub(crate) fn page_title(&self) -> SharedString {
+        self.header.title.clone().into()
+    }
+
+    /// The page kind, so the top bar can hide Rename for a daily title (rule 6).
+    pub(crate) fn page_kind(&self) -> PageKind {
+        self.header.kind
+    }
+
+    /// Whether the top bar offers "Rewrite references" (only with an alias to rewrite).
+    pub(crate) fn has_aliases(&self) -> bool {
+        !self.header.aliases.is_empty()
+    }
+
+    /// A day that has not been written yet has no page actions to offer (FR-1.2).
+    pub(crate) fn is_draft(&self) -> bool {
+        self.header.draft
+    }
+
+    /// "Open in graph" from the top bar's menu: the workspace owns the graph view, so the
+    /// view only asks for it.
+    pub(crate) fn request_open_graph(&mut self, cx: &mut Context<Self>) {
+        if let Some(page) = self.page() {
+            self.editor.update(cx, |e, cx| e.end(cx));
+            cx.emit(PageViewEvent::OpenGraph { page });
+        }
+    }
+
+    pub(crate) fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.header.kind == PageKind::Daily || self.zoom().is_some() {
             self.show_calendar = !self.show_calendar;
             if let Some(d) = self.header.date {
@@ -2627,7 +2686,7 @@ impl PageView {
         cx.notify();
     }
 
-    fn page_action(&mut self, action: &str, cx: &mut Context<Self>) {
+    pub(crate) fn page_action(&mut self, action: &str, cx: &mut Context<Self>) {
         let Some(page) = self.page() else {
             return;
         };
@@ -2652,7 +2711,7 @@ impl PageView {
     /// Only the snapshot is taken here, on the UI thread; serializing three formats and
     /// copying the files (attachments included) runs on a worker, so a large graph does not
     /// freeze every window while it is written (rule 10).
-    fn export_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn export_graph(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             directories: true,
@@ -3071,19 +3130,17 @@ impl PageView {
         quiet_control(id, label, &th)
     }
 
-    /// The page actions menu. It is drawn deferred and anchored, so opening it floats over
-    /// the page instead of taking a row in the column (ALL-3). Order per PG-2: the two
-    /// navigation/export actions, then the two that change the page, then the danger item.
+    /// The page actions for a compact pane's card (RS-5): the same items the top bar's menu
+    /// offers for the main page. The main pane does not draw this — its menu is in the top
+    /// bar (DESIGN.md §3.3).
     fn page_menu_popup(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
         let graph = quiet_control("page-menu-graph", "Open in graph", &th)
             .debug_selector(|| "page-menu-graph".into())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.page_menu = false;
-                if let Some(page) = this.page() {
-                    this.editor.update(cx, |e, cx| e.end(cx));
-                    cx.emit(PageViewEvent::OpenGraph { page });
-                }
+                this.request_open_graph(cx);
+                cx.notify();
             }));
         let export = quiet_control("page-menu-export", "Export", &th)
             .debug_selector(|| "page-menu-export".into())
@@ -3352,12 +3409,14 @@ impl PageView {
                         .on_click(cx.listener(|this, _, window, cx| this.start_alias(window, cx))),
                 ),
             };
-            let menu = (!h.draft).then(|| {
+            // A compact card keeps its own page actions; the main pane's live in the
+            // workspace top bar (DESIGN.md §3.3).
+            let menu = (!h.draft && self.compact).then(|| {
                 div()
                     .relative()
                     .child(
-                        self.button("page-menu", "···", cx)
-                            .debug_selector(|| "page-menu".into())
+                        self.button("pane-page-menu", "···", cx)
+                            .debug_selector(|| "pane-page-menu".into())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.page_menu = !this.page_menu;
                                 cx.notify();

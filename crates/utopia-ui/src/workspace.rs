@@ -2,7 +2,7 @@
 //! the main page, the right sidebar of stacked pages plus the reference inspector, quick
 //! jump, and the new-day banner (FR-1.7).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -14,19 +14,25 @@ use gpui::{
 use utopia_core::inline::{extract_refs, plain_text};
 use utopia_core::title::normalize_title;
 use utopia_core::{BlockId, PageId};
-use utopia_store::{JournalEntry, OutgoingRef, PageRow, RefTarget};
+use utopia_store::{OutgoingRef, PageRow, RefTarget};
 
 use crate::actions::*;
 use crate::app_state::{AppState, IndexUpdated};
 use crate::editor::{BlockEditor, EditorEvent};
 use crate::graph_view::{GraphEvent, GraphView};
+use crate::icons::{icon, Icon, ICON_SIZE};
 use crate::page_view::{PageView, PageViewEvent};
 use crate::pdf_view::{PdfEvent, PdfView};
 use crate::quick_jump::{JumpPalette, PaletteMode, QuickJumpEvent};
 use crate::sync_runner::{
     exchange_owned, status_line, sync_dot, BoxTransport, SyncDot, SyncPhase, SyncRunner,
 };
-use crate::theme::{quiet_control, theme};
+use crate::theme::{
+    ghost_icon, ghost_text, kbd, nav_row, quiet_control, quiet_danger, theme, BUTTON_HEIGHT, COUNT,
+    FOOTER_DOT, LABEL_MONO, PAGE_ROW_HEIGHT, RADIUS_CHIP, RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG,
+    SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT, TAG_PADDING_X, TOP_BAR_MIN_HEIGHT,
+    TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI, WORKSPACE_NAME, WORKSPACE_SQUARE,
+};
 
 /// The reference panel's sub-tabs: which way the edges are looked at (FR-4.6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -85,15 +91,17 @@ struct SidePane {
 
 #[derive(Default)]
 struct SidebarData {
-    journal: Vec<JournalEntry>,
     /// Every live page, daily ones included: pins resolve against this (§5.5).
     all: Vec<PageRow>,
-    /// The ordinary Pages list: `all` without daily pages (they have their own lists).
+    /// The Pages list: `all` without daily pages and without tag pages (DESIGN.md §3.2:
+    /// tags live in their own section).
     pages: Vec<PageRow>,
+    /// Pages that exist only because of a `#tag` (FR-2.15), drawn as chips under TAGS.
+    tag_rows: Vec<PageRow>,
     days: HashSet<NaiveDate>,
-    /// Pages that exist only because of a `#tag` (SB-2). Display only: the list gets a
-    /// `#` glyph, the store and the resolver are untouched (FR-2.15).
-    tags: HashSet<PageId>,
+    /// How many live blocks reference each page (DESIGN.md §3.2), read in one grouped
+    /// query per index update, never one query per row.
+    ref_counts: HashMap<PageId, usize>,
 }
 
 #[derive(Default)]
@@ -114,17 +122,24 @@ const RECENT_KEY: &str = "recent_pages";
 /// deleted since the list was written are skipped, so a few spares are kept.
 const RECENT_KEEP: usize = 24;
 
-/// A recent day's first block, shown as a tooltip on its one-line row (SB-1). A real view
+/// The label an icon-only button can carry: gpui 0.2 has no accessibility tree, so a
+/// tooltip is the nearest thing to the accessible name DESIGN.md §2.5 asks for. A real view
 /// rather than a styled div because gpui tooltips are views.
-struct SidebarTooltip {
+struct Tip {
     text: SharedString,
 }
 
-impl Render for SidebarTooltip {
+impl Tip {
+    fn new(text: impl Into<SharedString>) -> Self {
+        Self { text: text.into() }
+    }
+}
+
+impl Render for Tip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
         div()
-            .debug_selector(|| "recent-day-preview".into())
+            .debug_selector(|| "tip".into())
             .max_w(px(240.))
             .px_2()
             .py_1()
@@ -136,6 +151,10 @@ impl Render for SidebarTooltip {
             .text_color(th.ink)
             .child(self.text.clone())
     }
+}
+
+fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    move |_, cx| cx.new(|_| Tip::new(text)).into()
 }
 
 /// What the main column shows (P2): one thing at a time. Before this the full-screen graph
@@ -163,9 +182,8 @@ pub struct Workspace {
     right_width: f32,
     /// A drag of the sidebar's left edge: where it started and the width then.
     resize_from: Option<(f32, f32)>,
-    /// Left sidebar and its month grid; local UI state (rule 9), kept in `local_state`.
+    /// Left sidebar; local UI state (rule 9), kept in `local_state`.
     left_open: bool,
-    calendar_open: bool,
     inspector_open: bool,
     tab: InspectorTab,
     /// Which of the sidebar's own tabs is showing (RS-3).
@@ -186,6 +204,8 @@ pub struct Workspace {
     hidden_main_page: Option<Option<PageId>>,
     sidebar: SidebarData,
     sidebar_seen: Option<u64>,
+    /// The top bar's page menu is open (DESIGN.md §3.3). Local view state.
+    page_menu: bool,
     inspector: InspectorData,
     inspector_seen: Option<(PageId, u64)>,
     /// Pages opened last, newest first, for the Quick jump empty state (QJ-1). Read from
@@ -298,7 +318,7 @@ impl Workspace {
                 .flatten()
                 .map_or(default, |v| v == "1")
         };
-        let (left_open, calendar_open) = (flag("left_sidebar", true), flag("calendar", false));
+        let left_open = flag("left_sidebar", true);
         let recent = app
             .read(cx)
             .store
@@ -331,7 +351,6 @@ impl Workspace {
             right_width: crate::appearance::right_sidebar_width(cx),
             resize_from: None,
             left_open,
-            calendar_open,
             inspector_open: true,
             tab: InspectorTab::Incoming,
             panel_tab: PanelTab::References,
@@ -343,6 +362,7 @@ impl Workspace {
             hidden_main_page: None,
             sidebar: SidebarData::default(),
             sidebar_seen: None,
+            page_menu: false,
             inspector: InspectorData::default(),
             inspector_seen: None,
             recent,
@@ -1580,18 +1600,8 @@ impl Workspace {
         cx.notify();
     }
 
-    fn toggle_calendar(&mut self, cx: &mut Context<Self>) {
-        self.calendar_open = !self.calendar_open;
-        let _ = (self.app.read(cx).store).local_set("calendar", flag(self.calendar_open));
-        cx.notify();
-    }
-
     pub fn left_sidebar_open(&self) -> bool {
         self.left_open
-    }
-
-    pub fn calendar_open(&self) -> bool {
-        self.calendar_open
     }
 
     /// Whether the footer's sync view is open (SB-4).
@@ -1689,11 +1699,22 @@ impl Workspace {
             // The tag classification is cached by `AppState` on the index feed, never
             // computed from a frame (SB-2, rule 10).
             let tags = self.app.read(cx).tag_pages.clone();
+            let ref_counts = store.page_backlink_counts().unwrap_or_default();
+            let pages = all
+                .iter()
+                .filter(|p| !p.is_daily() && !tags.contains(&p.id))
+                .cloned()
+                .collect();
+            let tag_rows = all
+                .iter()
+                .filter(|p| tags.contains(&p.id))
+                .cloned()
+                .collect();
             self.sidebar = SidebarData {
-                journal: store.journal(14).unwrap_or_default(),
                 days: all.iter().filter_map(|p| p.daily_date).collect(),
-                tags,
-                pages: all.iter().filter(|p| !p.is_daily()).cloned().collect(),
+                pages,
+                tag_rows,
+                ref_counts,
                 all,
             };
             // Card headers name their page (RS-5); a rename must reach them.
@@ -1790,6 +1811,21 @@ impl Workspace {
 
     // ---------------------------------------------------------------- rendering
 
+    /// The graph file's name without its extension: the workspace row and the footer both
+    /// call the vault by it (DESIGN.md §3.2).
+    fn vault_name(&self, cx: &gpui::App) -> String {
+        self.app
+            .read(cx)
+            .store
+            .path()
+            .and_then(|p| p.file_stem())
+            .map(|s| s.to_string_lossy().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Utopia".into())
+    }
+
+    /// One clickable line in the right sidebar's reference lists (RS-2): an outgoing link
+    /// or an unresolved title. The left sidebar's own rows are [`Self::sidebar_page_row`].
     fn nav_item(
         &self,
         id: impl Into<gpui::ElementId>,
@@ -1798,17 +1834,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let density = crate::appearance::density(cx);
         let main = self.main.read(cx);
         let active = page.is_some() && !main.is_journal() && main.page() == page;
         div()
             .id(id)
             .px_2()
             .py_0p5()
-            .rounded(px(crate::theme::RADIUS_CHIP))
+            .rounded(px(RADIUS_CHIP))
             .cursor_pointer()
-            .text_size(px(density.text_size()))
-            .line_height(px(density.line_height()))
+            .text_size(px(SMALL.size))
+            .line_height(px(SMALL.line))
             .text_color(if active { th.link } else { th.ink })
             .when(active, |d| d.bg(th.hover))
             .hover(|s| s.bg(th.hover))
@@ -1823,49 +1858,45 @@ impl Workspace {
             })
     }
 
-    /// A page in the sidebar: one list for ordinary pages and tag pages (SB-2), the only
-    /// difference being the `#` glyph in the tag colour. `unpin` builds the row for the
-    /// Pinned group, which carries a control to take the page out of it again (SB-3).
+    /// A page row in the sidebar (DESIGN.md §3.2): 32 px tall, the page icon, the name and
+    /// the reference count in mono 12 muted on the right. Tags are not in this list — they
+    /// are chips under TAGS. `unpin` builds the Pinned group's row, which carries the
+    /// control that takes a page out of it (SB-3).
     fn sidebar_page_row(
         &self,
         index: usize,
         page: &PageRow,
-        tagged: bool,
         unpin: bool,
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let density = crate::appearance::density(cx);
         let main = self.main.read(cx);
         let active = !main.is_journal() && main.page().as_ref() == Some(&page.id);
+        let count = self.sidebar.ref_counts.get(&page.id).copied().unwrap_or(0);
         let id = page.id.clone();
-        let key = page.title_key.clone();
         let group = if unpin { "pinned" } else { "page" };
         div()
             .id((group, index))
             .debug_selector(move || format!("{group}-row-{index}"))
+            .h(px(PAGE_ROW_HEIGHT))
             .flex()
             .items_center()
-            .gap_1()
+            .gap_2()
             .px_2()
-            .py_0p5()
-            .rounded(px(crate::theme::RADIUS_CHIP))
+            .rounded(px(RADIUS_CONTROL))
             .cursor_pointer()
-            .text_size(px(density.text_size()))
-            .line_height(px(density.line_height()))
-            .text_color(if active { th.link } else { th.ink })
-            .when(active, |d| d.bg(th.hover))
-            .hover(|s| s.bg(th.hover))
-            .when(tagged, |d| {
-                d.child(
-                    div()
-                        .debug_selector(move || format!("tag-glyph-{key}"))
-                        .flex_none()
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.tag_ink)
-                        .child("#"),
-                )
+            .text_size(px(UI.size))
+            .line_height(px(UI.line))
+            .text_color(if active { th.ink } else { th.ink_2 })
+            .when(active, |d| {
+                d.bg(th.selected).font_weight(gpui::FontWeight::MEDIUM)
             })
+            .hover(|d| d.bg(th.nav_hover))
+            .child(icon(
+                Icon::Page,
+                ICON_SIZE,
+                if active { th.link } else { th.ink_3 },
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1881,8 +1912,8 @@ impl Workspace {
                         .debug_selector(move || format!("unpin-{index}"))
                         .flex_none()
                         .px_1()
-                        .rounded(px(crate::theme::RADIUS_CHIP))
-                        .text_size(px(crate::theme::CAPTION_SIZE))
+                        .rounded(px(RADIUS_CHIP))
+                        .text_size(px(SMALL.size))
                         .text_color(th.muted)
                         .cursor_pointer()
                         .hover(|s| s.bg(th.line).text_color(th.ink))
@@ -1896,6 +1927,15 @@ impl Workspace {
                         ),
                 )
             })
+            .child(
+                div()
+                    .debug_selector(move || format!("{group}-count-{index}"))
+                    .flex_none()
+                    .font_family(LABEL_MONO)
+                    .text_size(px(COUNT.size))
+                    .text_color(th.muted)
+                    .child(count.to_string()),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -1918,93 +1958,206 @@ impl Workspace {
         }
     }
 
-    /// One line per day (SB-1): the date, then a muted count of its blocks. Two preview
-    /// lines used to make three days take the space ten now do; the first block is still
-    /// reachable, as a tooltip, so a compact row does not lose what the day is about.
-    fn recent_day_row(
-        &self,
-        index: usize,
-        entry: &JournalEntry,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn render_left(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let main = self.main.read(cx);
-        let active = !main.is_journal() && main.page().as_ref() == Some(&entry.page.id);
-        let page = entry.page.id.clone();
-        let title = entry.page.title.clone();
-        let blocks = entry.blocks;
-        let first: SharedString = entry
-            .preview
-            .first()
-            .map(|p| p.chars().take(160).collect::<String>())
-            .unwrap_or_default()
-            .into();
-        // The list stays compact at either density: that is the point of SB-1.
-        let compact = crate::appearance::Density::Compact;
-        div()
-            .id(("recent-day", index))
-            .debug_selector(move || format!("recent-day-{index}"))
+        let today = self.today;
+        let journal = self.main.read(cx).is_journal();
+        let vault = self.vault_name(cx);
+        let initial: String = vault
+            .chars()
+            .next()
+            .map(|c| c.to_uppercase().to_string())
+            .unwrap_or_else(|| "U".into());
+        let pages = self.sidebar.pages.clone();
+        let tag_rows = self.sidebar.tag_rows.clone();
+        // SB-3: pinned pages first, in pin order, above the ordinary list. A pin may point
+        // at a daily page, which is not in `pages` but is in `all`.
+        let pinned: Vec<PageRow> = crate::appearance::pinned(cx)
+            .iter()
+            .filter_map(|id| self.sidebar.all.iter().find(|p| &p.id == id).cloned())
+            .collect();
+        let label = |text: &'static str, id: &'static str| {
+            div()
+                .debug_selector(move || id.into())
+                .mt_3()
+                .px_2()
+                .font_family(LABEL_MONO)
+                .text_size(px(SIDEBAR_LABEL.size))
+                .font_weight(SIDEBAR_LABEL.weight)
+                .text_color(th.muted)
+                .child(text)
+        };
+
+        // 1. Workspace row: the initial in an ink square, the name, and the collapse
+        // button. No workspace switcher: this app has one graph at a time.
+        let workspace = div()
+            .debug_selector(|| "workspace-row".into())
             .flex()
             .items_center()
             .gap_2()
             .px_2()
-            .rounded(px(crate::theme::RADIUS_CHIP))
-            .line_height(px(compact.line_height()))
-            .text_size(px(compact.text_size()))
-            .cursor_pointer()
-            .text_color(if active { th.link } else { th.ink })
-            .when(active, |d| d.bg(th.hover))
-            .hover(|s| s.bg(th.hover))
-            .child(div().flex_1().min_w_0().truncate().child(title))
             .child(
                 div()
-                    .debug_selector(move || format!("recent-day-count-{index}"))
+                    .debug_selector(|| "workspace-initial".into())
+                    .size(px(WORKSPACE_SQUARE))
                     .flex_none()
-                    .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.muted)
-                    .child(blocks.to_string()),
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(RADIUS_CONTROL))
+                    .bg(th.ink)
+                    .text_color(th.paper)
+                    .text_size(px(SMALL.size))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(initial),
             )
-            .tooltip(move |_, cx| {
-                cx.new(|_| SidebarTooltip {
-                    text: first.clone(),
-                })
-                .into()
-            })
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                    this.new_day = false;
-                    this.open(page.clone(), None, None, e.modifiers.shift, window, cx)
-                }),
+            .child(
+                div()
+                    .debug_selector(|| "workspace-name".into())
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(WORKSPACE_NAME.size))
+                    .line_height(px(WORKSPACE_NAME.line))
+                    .font_weight(WORKSPACE_NAME.weight)
+                    .text_color(th.ink)
+                    .child(vault.clone()),
             )
-    }
+            .child(
+                ghost_icon("collapse-left", Icon::SidebarLeft, &th)
+                    .debug_selector(|| "collapse-left".into())
+                    .tooltip(tip("Collapse sidebar"))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_left(&ToggleLeftSidebar, window, cx)
+                    })),
+            );
 
-    fn render_left(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let th = theme(cx).clone();
-        let today = self.today;
-        let section = |title: &'static str| {
-            div()
-                .mt_3()
-                .px_2()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(th.muted)
-                .child(title)
-        };
-        let day_link = |this: &Self,
-                        id: &'static str,
-                        label: &'static str,
-                        d: NaiveDate,
-                        cx: &mut Context<Self>| {
-            this.nav_item(id, label, None, cx).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                    this.new_day = false;
-                    this.open_date(d, e.modifiers.shift, !e.modifiers.shift, window, cx)
-                }),
+        // 2. The search field is a button that opens the command palette (§3.2).
+        let search = div()
+            .id("open-jump")
+            .debug_selector(|| "sidebar-search".into())
+            .mt_3()
+            .h(px(SEARCH_HEIGHT))
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_2()
+            .rounded(px(RADIUS_INPUT))
+            .bg(th.paper)
+            .border_1()
+            .border_color(th.line_strong)
+            .cursor_pointer()
+            .hover(|d| d.bg(th.hover))
+            .child(icon(Icon::Search, ICON_SIZE, th.ink_3))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(UI.size))
+                    .text_color(th.muted)
+                    .child("Search or jump to"),
             )
-        };
-        let mut col = div()
+            .child(kbd("⌘K", &th))
+            .on_click(
+                cx.listener(|this, _, window, cx| this.start_jump(JumpMode::Open, window, cx)),
+            );
+
+        // 3. Nav. "All pages" has no view in this app, so it is not offered rather than
+        // invented (the report says so).
+        let nav = nav_row(
+            "daily-notes",
+            "Daily Notes",
+            Some(Icon::Calendar),
+            journal,
+            &th,
+        )
+        .debug_selector(|| "daily-notes".into())
+        .mt_3()
+        .on_click(cx.listener(|this, _, window, cx| this.open_journal(window, cx)));
+
+        // 4. The mini calendar, always shown (§3.2).
+        let calendar = div()
+            .mt_3()
+            .px_1()
+            .child(crate::calendar::render_month_strip(
+                cx,
+                self.month,
+                today,
+                &self.sidebar.days,
+                crate::calendar::StripActions {
+                    pick: Self::pick_date,
+                    shift: Self::shift_month,
+                },
+            ));
+
+        let mut scroll = div()
+            .id("left-scroll")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .mt_2();
+        if !pinned.is_empty() {
+            scroll = scroll.child(label("PINNED", "pinned-header"));
+            for (i, page) in pinned.into_iter().enumerate() {
+                scroll = scroll.child(self.sidebar_page_row(i, &page, true, cx));
+            }
+        }
+        // 5. Pages, without tag pages.
+        scroll = scroll.child(label("PAGES", "pages-header"));
+        if pages.is_empty() {
+            scroll = scroll.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_size(px(SMALL.size))
+                    .text_color(th.muted)
+                    .child("Type [[ or # to make a page."),
+            );
+        }
+        for (i, page) in pages.into_iter().enumerate() {
+            scroll = scroll.child(self.sidebar_page_row(i, &page, false, cx));
+        }
+        // 6. Tags, as chips in a wrapping row — never in Pages (§3.2, FR-2.15).
+        if !tag_rows.is_empty() {
+            scroll = scroll.child(label("TAGS", "tags-header"));
+            let mut chips = div()
+                .debug_selector(|| "tags".into())
+                .px_2()
+                .pt_1()
+                .flex()
+                .flex_wrap()
+                .gap_1();
+            for (i, tag) in tag_rows.iter().enumerate() {
+                let page = tag.id.clone();
+                let title = tag.title.clone();
+                let sel = format!("tag-chip-{}", tag.title);
+                chips = chips.child(
+                    div()
+                        .id(("tag-chip", i))
+                        .debug_selector(move || sel.clone())
+                        .h(px(TAG_HEIGHT))
+                        .flex()
+                        .items_center()
+                        .px(px(TAG_PADDING_X))
+                        .rounded(px(RADIUS_TAG))
+                        .bg(th.tag_bg)
+                        .text_color(th.tag_ink)
+                        .text_size(px(TAG.size))
+                        .cursor_pointer()
+                        .child(format!("#{title}"))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, e: &MouseDownEvent, window, cx| {
+                                this.open(page.clone(), None, None, e.modifiers.shift, window, cx)
+                            }),
+                        ),
+                );
+            }
+            scroll = scroll.child(chips);
+        }
+
+        div()
             .debug_selector(|| "left-sidebar".into())
             .w(px(crate::theme::SIDEBAR_WIDTH))
             .h_full()
@@ -2015,126 +2168,23 @@ impl Workspace {
             .border_r_1()
             .border_color(th.line)
             .p(px(crate::theme::SIDEBAR_PADDING))
-            .child(
-                div()
-                    .flex()
-                    .justify_between()
-                    .items_center()
-                    .px_2()
-                    .child(div().font_weight(gpui::FontWeight::BOLD).child("Utopia"))
-                    .child(
-                        div()
-                            .flex()
-                            .gap_1()
-                            .child(quiet_control("open-jump", "⌘K", &th).on_click(cx.listener(
-                                |this, _, window, cx| this.start_jump(JumpMode::Open, window, cx),
-                            )))
-                            .child(
-                                quiet_control("collapse-left", "«", &th)
-                                    .debug_selector(|| "collapse-left".into())
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_left(&ToggleLeftSidebar, window, cx)
-                                    })),
-                            ),
-                    ),
-            )
-            .child(section("JOURNAL"))
-            .child({
-                let active = self.main.read(cx).is_journal();
-                self.nav_item("daily-notes", "Daily Notes", None, cx)
-                    .when(active, |d| d.text_color(th.link).bg(th.hover))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, _, window, cx| this.open_journal(window, cx)),
-                    )
-            })
-            .child(day_link(self, "today", "Today", today, cx))
-            .child(day_link(
-                self,
-                "yesterday",
-                "Yesterday",
-                today.pred_opt().unwrap_or(today),
-                cx,
-            ))
-            .child(day_link(
-                self,
-                "tomorrow",
-                "Tomorrow",
-                today.succ_opt().unwrap_or(today),
-                cx,
-            ))
-            .child(
-                div()
-                    .pt_1()
-                    .px_1()
-                    .child(crate::calendar::render_month_strip(
-                        cx,
-                        self.month,
-                        today,
-                        &self.sidebar.days,
-                        self.calendar_open,
-                        crate::calendar::StripActions {
-                            pick: Self::pick_date,
-                            shift: Self::shift_month,
-                            toggle: Self::toggle_calendar,
-                        },
-                    )),
-            );
-        let mut scroll = div()
-            .id("left-scroll")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll();
-        scroll =
-            scroll.child(section("RECENT DAYS").debug_selector(|| "recent-days-header".into()));
-        for (i, entry) in self.sidebar.journal.iter().enumerate() {
-            scroll = scroll.child(self.recent_day_row(i, entry, cx));
-        }
-        let pages = self.sidebar.pages.clone();
-        let tags = self.sidebar.tags.clone();
-        // SB-3: pinned pages first, in pin order, above the ordinary list. A pin may point
-        // at a daily page, which is not in `pages` but is in `all`.
-        let pinned: Vec<PageRow> = crate::appearance::pinned(cx)
-            .iter()
-            .filter_map(|id| self.sidebar.all.iter().find(|p| &p.id == id).cloned())
-            .collect();
-        if !pinned.is_empty() {
-            scroll = scroll.child(section("PINNED").debug_selector(|| "pinned-header".into()));
-            for (i, page) in pinned.into_iter().enumerate() {
-                let tagged = tags.contains(&page.id);
-                scroll = scroll.child(self.sidebar_page_row(i, &page, tagged, true, cx));
-            }
-        }
-        scroll = scroll.child(section("PAGES").debug_selector(|| "pages-header".into()));
-        if pages.is_empty() {
-            scroll = scroll.child(
-                div()
-                    .px_2()
-                    .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.muted)
-                    .child("Type [[ or # to make a page."),
-            );
-        }
-        for (i, page) in pages.into_iter().enumerate() {
-            let tagged = tags.contains(&page.id);
-            scroll = scroll.child(self.sidebar_page_row(i, &page, tagged, false, cx));
-        }
-        col = col.child(scroll);
-        col.child(self.render_footer(cx)).into_any_element()
+            .child(workspace)
+            .child(search)
+            .child(nav)
+            .child(calendar)
+            .child(scroll)
+            .child(self.render_footer(cx))
+            .into_any_element()
     }
 
-    /// SB-4: one status row — a chip with the graph file's name, the sync dot and, when the
-    /// graph is encrypted at rest, a lock. Clicking it opens the sync view, which floats
-    /// above the footer so opening it never moves the page.
+    /// The sidebar footer (DESIGN.md §3.2): an 8 px status dot (`disabled` while this graph
+    /// is local only), the vault name in `ink` at 500, " · Local only" muted and the
+    /// settings button. The status area still opens the sync view above the footer (SB-4);
+    /// the settings button is a separate target, so clicking it never toggles sync.
     fn render_footer(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let th = theme(cx).clone();
+        let vault = self.vault_name(cx);
         let app = self.app.read(cx);
-        let file = app
-            .store
-            .path()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "in-memory graph".into());
         let (err, notice) = (app.last_error.clone(), app.notice.clone());
         let dot = sync_dot(self.sync.as_ref());
         self.rendered_sync_dot = Some(dot);
@@ -2144,84 +2194,103 @@ impl Workspace {
             SyncDot::Syncing => th.warning,
             SyncDot::Error => th.danger,
         };
+        let local_only = self.sync.is_none();
         let open = self.sync_open;
         div()
             .relative()
             .pt_2()
-            .px_2()
             .border_t_1()
             .border_color(th.line)
-            .text_size(px(crate::theme::CAPTION_SIZE))
-            .text_color(th.muted)
             .child(
                 div()
-                    .id("sidebar-footer")
-                    .debug_selector(|| "sidebar-footer".into())
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .py_0p5()
-                    .cursor_pointer()
-                    .rounded(px(crate::theme::RADIUS_CHIP))
-                    .hover(|d| d.bg(th.hover))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.sync_open = !this.sync_open;
-                        cx.notify();
-                    }))
+                    .gap_1()
                     .child(
                         div()
-                            .debug_selector(|| "graph-chip".into())
+                            .id("sidebar-footer")
+                            .debug_selector(|| "sidebar-footer".into())
+                            .flex()
                             .flex_1()
                             .min_w_0()
-                            .truncate()
-                            .px_1p5()
+                            .items_center()
+                            .gap_1()
                             .py_0p5()
-                            .rounded(px(crate::theme::RADIUS_CONTROL))
-                            .bg(th.line_soft)
-                            .child(file),
+                            .rounded(px(RADIUS_CONTROL))
+                            .cursor_pointer()
+                            .hover(|d| d.bg(th.hover))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.sync_open = !this.sync_open;
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("sync-dot-{}", dot.key()))
+                                    .flex_none()
+                                    .size(px(FOOTER_DOT))
+                                    .rounded_full()
+                                    .bg(dot_color),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "vault-name".into())
+                                    .flex_none()
+                                    .max_w(px(120.))
+                                    .truncate()
+                                    .text_size(px(SMALL.size))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(th.ink)
+                                    .child(vault),
+                            )
+                            .when(local_only, |d| {
+                                d.child(
+                                    div()
+                                        .debug_selector(|| "local-only".into())
+                                        .flex_none()
+                                        .text_size(px(SMALL.size))
+                                        .text_color(th.muted)
+                                        .child("· Local only"),
+                                )
+                            })
+                            .when(self.encrypted, |d| {
+                                d.child(
+                                    div()
+                                        .id("encryption-lock")
+                                        .debug_selector(|| "encryption-lock".into())
+                                        .flex_none()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .tooltip(tip("Encrypted at rest"))
+                                        // A drawn lock: the bundled IBM Plex Sans has no
+                                        // 🔒 glyph.
+                                        .child(
+                                            div()
+                                                .w(px(6.))
+                                                .h(px(4.))
+                                                .border_1()
+                                                .border_b_0()
+                                                .rounded_t_sm()
+                                                .border_color(th.ink_3),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(8.))
+                                                .h(px(6.))
+                                                .rounded(px(RADIUS_CHIP))
+                                                .bg(th.ink_3),
+                                        ),
+                                )
+                            }),
                     )
                     .child(
-                        div()
-                            .debug_selector(move || format!("sync-dot-{}", dot.key()))
-                            .flex_none()
-                            .size(px(7.))
-                            .rounded_full()
-                            .bg(dot_color),
+                        ghost_icon("open-settings", Icon::Settings, &th)
+                            .debug_selector(|| "open-settings".into())
+                            .tooltip(tip("Settings"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenSettings), cx)
+                            }),
                     )
-                    .when(self.encrypted, |d| {
-                        d.child(
-                            div()
-                                .id("encryption-lock")
-                                .debug_selector(|| "encryption-lock".into())
-                                .flex_none()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .tooltip(|_, cx| {
-                                    cx.new(|_| SidebarTooltip {
-                                        text: "Encrypted at rest".into(),
-                                    })
-                                    .into()
-                                })
-                                // A drawn lock: the bundled IBM Plex Sans has no 🔒 glyph.
-                                .child(
-                                    div()
-                                        .w(px(6.))
-                                        .h(px(4.))
-                                        .border_1()
-                                        .border_b_0()
-                                        .rounded_t_sm()
-                                        .border_color(th.ink_3),
-                                )
-                                .child(
-                                    div()
-                                        .w(px(8.))
-                                        .h(px(6.))
-                                        .rounded(px(crate::theme::RADIUS_CHIP))
-                                        .bg(th.ink_3),
-                                ),
-                        )
-                    })
                     .children(open.then(|| {
                         deferred(
                             anchored()
@@ -2809,6 +2878,256 @@ impl Workspace {
         self.pinned_ids = ids;
         self.pinned_version = Some(self.app.read(cx).refs_version);
     }
+
+    /// The main pane's top bar (DESIGN.md §3.3): title or breadcrumb on the left, actions on
+    /// the right, a `line_soft` hairline below. Back/forward are not drawn because the app
+    /// has no navigation history to move through (the report says so).
+    fn render_top_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let (journal, title, page, draft) = {
+            let main = self.main.read(cx);
+            (
+                main.is_journal(),
+                main.page_title(),
+                main.page(),
+                main.is_draft(),
+            )
+        };
+        let mut bar = div()
+            .debug_selector(|| "top-bar".into())
+            .min_h(px(TOP_BAR_MIN_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(px(TOP_BAR_PADDING_X))
+            .py(px(TOP_BAR_PADDING_Y))
+            .bg(th.paper)
+            .border_b_1()
+            .border_color(th.line_soft);
+        if journal {
+            bar = bar
+                .child(
+                    div()
+                        .debug_selector(|| "topbar-title".into())
+                        .text_size(px(UI.size))
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .text_color(th.ink)
+                        .child("Daily Notes"),
+                )
+                .child(div().flex_1())
+                .child(self.day_nav(cx));
+        } else {
+            bar = bar.child(
+                div()
+                    .debug_selector(|| "breadcrumb".into())
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .min_w_0()
+                    .text_size(px(UI.size))
+                    .child(div().flex_none().text_color(th.ink_3).child("Pages"))
+                    .child(div().flex_none().text_color(th.ink_3).child("/"))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(th.ink)
+                            .child(title),
+                    ),
+            );
+            if page.is_some() && !draft {
+                bar = bar.child(div().flex_1()).child(self.page_menu_button(cx));
+            } else {
+                bar = bar.child(div().flex_1());
+            }
+        }
+        let open = self.right_open;
+        bar.child(
+            ghost_icon("toggle-right", Icon::SidebarRight, &th)
+                .debug_selector(|| "toggle-right".into())
+                .tooltip(tip("Toggle right sidebar"))
+                .when(open, |d| d.bg(th.hover))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_right(&ToggleRightSidebar, window, cx)
+                })),
+        )
+        .into_any_element()
+    }
+
+    /// The Daily Notes day navigation group: prev | Today | next (DESIGN.md §3.3). Prev and
+    /// next move between the loaded days in the feed (older left, newer right, the same
+    /// direction as `PrevDay`/`NextDay`); Today resets the feed to today (§4.1).
+    fn day_nav(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let seg = |id: &'static str, glyph: Icon, th: &crate::theme::Theme| {
+            div()
+                .id(id)
+                .debug_selector(move || id.into())
+                .w(px(BUTTON_HEIGHT))
+                .h(px(BUTTON_HEIGHT))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(px(RADIUS_CONTROL))
+                .cursor_pointer()
+                .hover(|d| d.bg(th.hover))
+                .child(icon(glyph, ICON_SIZE, th.ink_3))
+        };
+        let divider = || div().w(px(1.)).h(px(20.)).flex_none().bg(th.line);
+        div()
+            .debug_selector(|| "day-nav".into())
+            .h(px(BUTTON_HEIGHT))
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS_INPUT))
+            .border_1()
+            .border_color(th.line_strong)
+            .child(
+                seg("day-prev", Icon::ChevronLeft, &th).on_click(cx.listener(|this, _, _, cx| {
+                    this.main
+                        .update(cx, |m, cx| m.scroll_to_adjacent_day(-1, cx))
+                })),
+            )
+            .child(divider())
+            .child(
+                ghost_text("day-today", "Today", &th)
+                    .debug_selector(|| "day-today".into())
+                    .h(px(BUTTON_HEIGHT - 2.))
+                    .px_2()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.main.update(cx, |m, cx| m.scroll_to_today(cx))
+                    })),
+            )
+            .child(divider())
+            .child(
+                seg("day-next", Icon::ChevronRight, &th).on_click(cx.listener(|this, _, _, cx| {
+                    this.main
+                        .update(cx, |m, cx| m.scroll_to_adjacent_day(1, cx))
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// The page view's ⋯ button and its menu (DESIGN.md §3.3): the page actions that exist,
+    /// with Delete page last. It floats under the button, so opening it never moves the page.
+    fn page_menu_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let open = self.page_menu;
+        div()
+            .relative()
+            .child(
+                ghost_icon("page-menu", Icon::More, &th)
+                    .debug_selector(|| "page-menu".into())
+                    .tooltip(tip("Page actions"))
+                    .when(open, |d| d.bg(th.hover))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.page_menu = !this.page_menu;
+                        cx.notify();
+                    })),
+            )
+            .children(open.then(|| {
+                deferred(
+                    anchored()
+                        .anchor(gpui::Corner::TopRight)
+                        .offset(gpui::point(px(0.), px(6.)))
+                        .child(self.page_menu_popup(cx)),
+                )
+                .with_priority(1)
+            }))
+            .into_any_element()
+    }
+
+    fn page_menu_popup(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let th = theme(cx).clone();
+        let page = self.main.read(cx).page();
+        let kind = self.main.read(cx).page_kind();
+        let has_aliases = self.main.read(cx).has_aliases();
+        let pinned = page
+            .as_ref()
+            .is_some_and(|p| crate::appearance::is_pinned(cx, p));
+        let graph = quiet_control("page-menu-graph", "Open in graph", &th)
+            .debug_selector(|| "page-menu-graph".into())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.page_menu = false;
+                this.main.update(cx, |m, cx| m.request_open_graph(cx));
+                cx.notify();
+            }));
+        let export = quiet_control("page-menu-export", "Export", &th)
+            .debug_selector(|| "page-menu-export".into())
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.page_menu = false;
+                this.main.update(cx, |m, cx| m.export_graph(window, cx));
+                cx.notify();
+            }));
+        // Daily titles are display-only (rule 6): Rename would open the calendar instead.
+        let rename = (kind != utopia_core::PageKind::Daily).then(|| {
+            quiet_control("page-menu-rename", "Rename", &th)
+                .debug_selector(|| "page-menu-rename".into())
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.page_menu = false;
+                    this.main.update(cx, |m, cx| m.start_rename(window, cx));
+                    cx.notify();
+                }))
+        });
+        let rewrite = (has_aliases && kind == utopia_core::PageKind::Page).then(|| {
+            quiet_control("page-menu-rewrite", "Rewrite references", &th)
+                .debug_selector(|| "page-menu-rewrite".into())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.page_menu = false;
+                    this.main.update(cx, |m, cx| m.page_action("rewrite", cx));
+                    cx.notify();
+                }))
+        });
+        let pin = page.clone().map(|p| {
+            let pin_page = p.clone();
+            quiet_control(
+                "page-menu-pin",
+                if pinned {
+                    "Unpin from sidebar"
+                } else {
+                    "Pin to sidebar"
+                },
+                &th,
+            )
+            .debug_selector(|| "page-menu-pin".into())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.page_menu = false;
+                this.toggle_pin(pin_page.clone(), cx);
+                cx.notify();
+            }))
+        });
+        let delete = quiet_danger("page-menu-delete", "Delete page", &th)
+            .debug_selector(|| "page-menu-delete".into())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.page_menu = false;
+                this.main.update(cx, |m, cx| m.page_action("delete", cx));
+                cx.notify();
+            }));
+        div()
+            .id("page-menu-popup")
+            .debug_selector(|| "page-menu-popup".into())
+            // Without `occlude` the menu is drawn over the page but clicks pass through it,
+            // so its items never fire (found by test).
+            .occlude()
+            .w(px(190.))
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(th.well)
+            .border_1()
+            .border_color(th.line)
+            .rounded(px(RADIUS_CONTROL))
+            .child(graph.w_full().justify_start())
+            .child(export.w_full().justify_start())
+            .children(rename.map(|r| r.w_full().justify_start()))
+            .children(rewrite.map(|r| r.w_full().justify_start()))
+            .children(pin.map(|p| p.w_full().justify_start()))
+            .child(div().h(px(1.)).my_1().bg(th.line))
+            .child(delete.w_full().justify_start())
+    }
 }
 
 impl Render for Workspace {
@@ -2877,6 +3196,9 @@ impl Render for Workspace {
                         .child(text),
                 );
             }
+        }
+        if matches!(self.content, MainContent::Page) {
+            main_col = main_col.child(self.render_top_bar(cx));
         }
         let mut panes_row = div()
             .debug_selector(move || format!("ui-density-{}", density.key()))
