@@ -434,6 +434,13 @@ fn leading_properties(st: &utopia_core::PageState) -> Vec<PropertyBlock> {
         let Some((key, range)) = page_attribute(b.kind, &b.text) else {
             break;
         };
+        // The bar draws a row, not a subtree. A property with live children therefore ends
+        // the bar and stays an outline block, children included: skipping it would hide
+        // content nothing could focus or reveal (DESIGN.md §3.8 rule 1, read to preserve
+        // data rather than to orphan a child).
+        if st.has_live_children(&root) {
+            break;
+        }
         let value = b.text[range].to_string();
         let kind = if key.eq_ignore_ascii_case("status") {
             PropertyKind::Status
@@ -2185,10 +2192,16 @@ impl PageView {
                 );
             }
             EditorEvent::Indent => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 self.run_plan_keep(&t, caret, |st| outline::indent(st, &t.block), window, cx);
             }
             EditorEvent::Outdent => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 let zoom = self.zoom();
                 // Never outdent out of the zoomed subtree.
@@ -2347,6 +2360,9 @@ impl PageView {
                 }
             }
             EditorEvent::MoveBlock { up } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 let caret = editor.read(cx).cursor();
                 let up = *up;
                 self.run_plan_keep(
