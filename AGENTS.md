@@ -5,6 +5,18 @@ a GPUI front end, a SQLite store, and Loro CRDT documents. **`PRD.md` is the spe
 Read the section you are touching before changing behaviour, and cite requirement
 ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 
+## Visual system
+
+**`DESIGN.md` is the visual spec ("Quiet paper").** Read it before changing anything on
+screen. Every colour, type role, spacing and radius is a named token in
+`crates/utopia-ui/src/theme.rs`; components use the tokens and never raw colours, sizes or
+shadows (§2.4). The dark theme defines the same token names with contrast-checked values and
+follows the system appearance. **IBM Plex Sans is the default UI and body font; IBM Plex Mono
+is the label/count font** (the Appearance setting still offers System and Plex Sans). Geometry
+is pinned by `crates/utopia-ui/tests/layout.rs`; the visual result is checked by the
+`UTOPIA_SHOT_SCRIPT` screenshots described under "Verifying a change". `UTOPIA_APPEARANCE=light|dark`
+pins the theme when both schemes are needed from a machine set to one.
+
 ## Environment setup (macOS)
 
 ```bash

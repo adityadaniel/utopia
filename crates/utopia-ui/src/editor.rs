@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use gpui::{
     anchored, deferred, div, prelude::*, px, ClipboardItem, Context, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, HighlightStyle, MouseButton, MouseDownEvent,
+    EventEmitter, FocusHandle, Focusable, FontWeight, HighlightStyle, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, Pixels, SharedString, StyledText, Subscription, Task,
     UnderlineStyle, Window,
 };
@@ -28,6 +28,8 @@ pub struct EditTarget {
     pub host: EntityId,
     pub page: PageId,
     pub block: BlockId,
+    /// The block is a properties-bar row (DESIGN.md §3.8): its `key:` is drawn semibold.
+    pub property: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +66,11 @@ pub enum EditorEvent {
     InsertTemplate(PageId),
     /// After undo/redo: where the caret should go.
     Restore(Caret),
+    /// A deferred `begin` finally switched away from `from` after an IME composition
+    /// ended, so the host can finish the row it left (§13.5).
+    Switched {
+        from: BlockId,
+    },
     Blurred,
 }
 
@@ -377,6 +384,13 @@ impl EventEmitter<EditorEvent> for BlockEditor {}
 impl Focusable for BlockEditor {
     fn focus_handle(&self, _: &gpui::App) -> FocusHandle {
         self.focus.clone()
+    }
+}
+
+impl BlockEditor {
+    /// Whether an input method composition currently owns the buffer (§13.5).
+    pub fn composing(&self) -> bool {
+        self.field.composing()
     }
 }
 
@@ -851,7 +865,15 @@ impl BlockEditor {
                 target,
                 caret,
                 goal,
-            }) => self.begin(target, caret, goal, window, cx),
+            }) => {
+                let from = self.target().map(|t| t.block.clone());
+                self.begin(target, caret, goal, window, cx);
+                if let Some(from) = from {
+                    if self.target().map(|t| &t.block) != Some(&from) {
+                        cx.emit(EditorEvent::Switched { from });
+                    }
+                }
+            }
         }
     }
 
@@ -2112,10 +2134,10 @@ impl BlockEditor {
                 .id(("ac", i))
                 .px_2()
                 .py_1()
-                .rounded_sm()
+                .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
                 .when(i == ac.selected, |d| d.bg(th.hover))
-                .child(div().text_color(th.text).child(label))
+                .child(div().text_color(th.ink).child(label))
                 .when_some(detail, |d, s| {
                     d.child(
                         div()
@@ -2140,11 +2162,10 @@ impl BlockEditor {
                         .mt_1()
                         .w(px(340.))
                         .p_1()
-                        .bg(th.surface)
+                        .bg(th.well)
                         .border_1()
                         .border_color(th.line)
-                        .rounded_md()
-                        .shadow_md()
+                        .rounded(px(crate::theme::RADIUS_CONTROL))
                         .children(rows),
                 ),
             )
@@ -2163,7 +2184,7 @@ impl Render for BlockEditor {
                 StyledText::new(hint).with_highlights([(
                     0..hint.len(),
                     HighlightStyle {
-                        color: Some(th.faint),
+                        color: Some(th.muted),
                         ..Default::default()
                     },
                 )]),
@@ -2171,6 +2192,19 @@ impl Render for BlockEditor {
             )
         } else {
             let mut hl = source_highlights(&text, &th);
+            if self.target().is_some_and(|t| t.property) {
+                if let Some((key, _)) = utopia_core::inline::attribute(&text) {
+                    hl.push((
+                        0..key.len(),
+                        HighlightStyle {
+                            font_weight: Some(FontWeight::BOLD),
+                            color: Some(th.ink),
+                            ..Default::default()
+                        },
+                    ));
+                    hl.sort_by_key(|(r, _)| r.start);
+                }
+            }
             if let Some(m) = self.field.marked() {
                 hl.retain(|(r, _)| r.end <= m.start || r.start >= m.end);
                 hl.push((
@@ -2178,7 +2212,7 @@ impl Render for BlockEditor {
                     HighlightStyle {
                         underline: Some(UnderlineStyle {
                             thickness: px(1.),
-                            color: Some(th.text),
+                            color: Some(th.ink),
                             wavy: false,
                         }),
                         ..Default::default()

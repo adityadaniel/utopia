@@ -11,7 +11,7 @@ use utopia_core::{BlockId, PageId};
 use utopia_store::{BlockRefStatus, RefHit, Store};
 
 use crate::rich::{self, ChipState, LinkTarget};
-use crate::theme::{Theme, CAPTION_SIZE};
+use crate::theme::{Theme, CAPTION_SIZE, REFERENCE};
 
 /// How a `((uid))` chip should look in a row of `store` (FR-4.3, FR-4.7, AC-4.5).
 pub fn chip_state(store: &Store, uid: &str, row_block: &BlockId) -> ChipState {
@@ -101,17 +101,23 @@ struct Body {
     rendered: rich::Rendered,
 }
 
-fn body(text: &str, block: &BlockId, theme: &Theme, store: &Store) -> Body {
-    let rendered = rich::render(text, theme, &mut |uid| chip_state(store, uid, block));
+fn body(text: &str, block: &BlockId, theme: &Theme, store: &Store, self_titles: &[String]) -> Body {
+    let rendered = rich::render_self(
+        text,
+        theme,
+        &mut |uid| chip_state(store, uid, block),
+        self_titles,
+    );
     let styled =
         StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
     let layout = styled.layout().clone();
     let links: Vec<Range<usize>> = rendered.links.iter().map(|(r, _)| r.clone()).collect();
+    let chips = rendered.chips.clone();
     Body {
         element: div()
             .flex_1()
             .min_w_0()
-            .child(rich::LinkText::new(styled, links))
+            .child(rich::LinkText::new(styled, links).with_chips(chips, theme.tag_bg))
             .into_any_element(),
         layout,
         rendered,
@@ -122,12 +128,15 @@ fn body(text: &str, block: &BlockId, theme: &Theme, store: &Store) -> Body {
 /// its bounds) and the row itself as `{prefix}-row-{ix}`; `pad_x` is the row's inset from
 /// the panel edge, so the two call sites can keep their own measure without a second
 /// renderer.
+#[allow(clippy::too_many_arguments)]
 pub fn reference_row<H: RefRowHost + 'static>(
     prefix: &'static str,
     ix: usize,
     row: RefRow<'_>,
     theme: &Theme,
     store: &Store,
+    // Normalized titles of the page being read (DESIGN.md §3.7): its own name is bold ink.
+    self_titles: &[String],
     pad_x: f32,
     host: Entity<H>,
 ) -> AnyElement {
@@ -146,7 +155,8 @@ pub fn reference_row<H: RefRowHost + 'static>(
         .items_center()
         .gap_1()
         .text_size(px(CAPTION_SIZE))
-        .text_color(th.faint);
+        .line_height(px(crate::theme::SMALL_TIGHT.line))
+        .text_color(th.muted);
     if !hit.breadcrumb.is_empty() {
         let target = page.clone();
         let part_host = host.clone();
@@ -156,7 +166,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
                 .id(("path-page", ix))
                 .debug_selector(|| format!("hit-path-part-{ix}-0"))
                 .cursor_pointer()
-                .hover(|s| s.text_color(th.accent))
+                .hover(|s| s.text_color(th.link))
                 .child(page_title)
                 .on_mouse_down(MouseButton::Left, move |e, window, cx| {
                     // The row under the path opens the block; the page part opens the page.
@@ -187,7 +197,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
                     .id(("path-part", ix * 100 + i))
                     .debug_selector(|| format!("hit-path-part-{ix}-{}", i + 1))
                     .cursor_pointer()
-                    .hover(|s| s.text_color(th.accent))
+                    .hover(|s| s.text_color(th.link))
                     .child(label)
                     .on_mouse_down(MouseButton::Left, move |e, window, cx| {
                         cx.stop_propagation();
@@ -205,7 +215,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
         }
     }
 
-    let main_body = body(&hit.text, &hit.block, &th, store);
+    let main_body = body(&hit.text, &hit.block, &th, store, self_titles);
     let (row_host, body_host) = (host.clone(), host.clone());
 
     // LR-4: the first children inline, then a chip that opens the rest. Each child is its
@@ -213,13 +223,16 @@ pub fn reference_row<H: RefRowHost + 'static>(
     // click on anything else falls through to the row, which opens the referencing block.
     let mut kids = div().flex().flex_col();
     for (i, (child, child_text)) in row.children.iter().enumerate() {
-        let child_body = body(child_text, child, &th, store);
+        let child_body = body(child_text, child, &th, store, self_titles);
         let child_host = host.clone();
         kids = kids.child(
             div()
                 .debug_selector(|| format!("hit-child-{ix}-{i}"))
                 .flex()
                 .ml(px(14.))
+                .pl_1()
+                .border_l_1()
+                .border_color(th.line)
                 .child(bullet())
                 .child(child_body.element)
                 .on_mouse_down(MouseButton::Left, move |e, window, cx| {
@@ -243,9 +256,9 @@ pub fn reference_row<H: RefRowHost + 'static>(
             .debug_selector(|| format!("hit-more-{ix}-{}", row.hidden))
             .ml(px(28.))
             .px_2()
-            .rounded_md()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
             .text_size(px(CAPTION_SIZE))
-            .text_color(th.accent)
+            .text_color(th.link)
             .cursor_pointer()
             .hover(|s| s.bg(th.hover))
             .child(format!("+{} more", row.hidden))
@@ -261,9 +274,12 @@ pub fn reference_row<H: RefRowHost + 'static>(
     div()
         .id(("reference", ix))
         .debug_selector(move || format!("{prefix}-row-{ix}"))
+        // DESIGN.md §2.2/§3.7: a referenced block is one step below body text.
+        .text_size(px(REFERENCE.size))
+        .line_height(px(REFERENCE.line))
         .px(px(pad_x))
         .py_0p5()
-        .rounded_sm()
+        .rounded(px(crate::theme::RADIUS_CHIP))
         .flex()
         .flex_col()
         .cursor_pointer()

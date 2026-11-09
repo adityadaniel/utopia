@@ -256,7 +256,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> Self {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(Theme::for_window(window.appearance()));
             cx.notify();
         });
         // The first state is decided before the root exists, so the placeholder
@@ -523,8 +523,8 @@ impl Render for Root {
         let density = utopia_ui::appearance::density(cx);
         let shell = div()
             .size_full()
-            .bg(th.bg)
-            .text_color(th.text)
+            .bg(th.paper)
+            .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
             .font_family(utopia_ui::appearance::font_family(cx));
@@ -539,8 +539,8 @@ impl Render for Root {
                         .gap_2()
                         .child(
                             div()
-                                .text_size(px(utopia_ui::theme::H1_SIZE))
-                                .font_weight(gpui::FontWeight::BOLD)
+                                .text_size(px(utopia_ui::theme::SECTION.size))
+                                .font_weight(utopia_ui::theme::SECTION.weight)
                                 .child("Welcome to Utopia"),
                         )
                         .child(
@@ -553,11 +553,11 @@ impl Render for Root {
                                 .px_2()
                                 .py_1()
                                 .border_1()
-                                .border_color(th.accent)
-                                .rounded_md()
+                                .border_color(th.link)
+                                .rounded(px(utopia_ui::theme::RADIUS_CONTROL))
                                 .child(input.clone()),
                         )
-                        .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.faint).child(format!(
+                        .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.muted).child(format!(
                             "Creates {}/<name>.utopia",
                             paths::graphs_dir().display()
                         )))
@@ -579,8 +579,8 @@ impl Render for Root {
                     .gap_2()
                     .child(
                         div()
-                            .text_size(px(utopia_ui::theme::H1_SIZE))
-                            .font_weight(gpui::FontWeight::BOLD)
+                            .text_size(px(utopia_ui::theme::SECTION.size))
+                            .font_weight(utopia_ui::theme::SECTION.weight)
                             .child("This graph is locked"),
                     )
                     .child(div().text_color(th.muted).child(format!(
@@ -594,11 +594,11 @@ impl Render for Root {
                             .px_2()
                             .py_1()
                             .border_1()
-                            .border_color(th.accent)
-                            .rounded_md()
+                            .border_color(th.link)
+                            .rounded(px(utopia_ui::theme::RADIUS_CONTROL))
                             .child(input.clone()),
                     )
-                    .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.faint).child(
+                    .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.muted).child(
                         "Tip: store it in the keychain (service utopia-db) to unlock automatically.",
                     ))
                     .children(
@@ -755,13 +755,23 @@ fn quit_app(cx: &mut App) {
     cx.quit();
 }
 
+/// The app, with the bundled icons installed as its asset source.
+///
+/// DESIGN.md §2.5's icons are embedded in `utopia-ui`; gpui only paints an `svg()` element
+/// when the application's asset source serves it. Without `with_assets` every icon is an
+/// empty box and the layout tests (which run without an asset source) still pass, so the
+/// wiring has its own guard in the tests below.
+fn application() -> Application {
+    Application::new().with_assets(utopia_ui::icons::Icons)
+}
+
 fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
     // Decided once, before a window exists: a malformed `UTOPIA_SHOT_SCRIPT` is reported
     // and the run exits, so a scripted run can never look like a normal launch (issue 1).
     let mode = RunMode::from_env().map_err(|e| anyhow::anyhow!("UTOPIA_SHOT_SCRIPT: {e}"))?;
     let config = paths::config_dir();
     let keymap = std::fs::read_to_string(config.join("keymap.json")).ok();
-    let application = Application::new();
+    let application = application();
     application.on_open_urls(|urls| {
         PENDING_URLS.lock().expect("url queue").extend(urls);
     });
@@ -795,11 +805,11 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
                 title: Some("Utopia".into()),
                 ..Default::default()
             }),
-            window_min_size: Some(size(px(720.), px(480.))),
+            window_min_size: Some(size(px(960.), px(480.))),
             ..Default::default()
         };
         let opened = cx.open_window(options, move |window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(Theme::for_window(window.appearance()));
             cx.new(|cx| Root::new(graph, config, mode, window, cx))
         });
         if let Err(e) = opened {
@@ -901,6 +911,36 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// DESIGN.md §2.5: without `with_assets(Icons)` every icon paints as an empty box and
+    /// the layout tests cannot see it (they run without an asset source). A built
+    /// `Application` does not expose its source, so this guards the constructor's one
+    /// wiring line and checks the source really serves an icon.
+    #[test]
+    fn the_app_installs_the_icon_assets() {
+        use gpui::AssetSource as _;
+        let src = include_str!("main.rs");
+        // Only the production half: the test's own text mentions the constructor too.
+        let production = src.split("#[cfg(test)]").next().expect("production source");
+        let start = production
+            .find("/// The app, with the bundled icons")
+            .expect("the application constructor");
+        let end = production[start..]
+            .find("\n}\n")
+            .map_or(production.len(), |i| start + i);
+        let body = &production[start..end];
+        assert!(
+            body.contains(".with_assets(utopia_ui::icons::Icons)"),
+            "the app must install the bundled icon assets:\n{body}"
+        );
+        assert!(
+            utopia_ui::icons::Icons
+                .load("icons/search.svg")
+                .expect("asset source")
+                .is_some(),
+            "the search icon is served"
+        );
+    }
 
     /// Issue 1: a script that does not parse used to be logged and dropped while the
     /// hotkey registration was skipped anyway — a normal window that no step drove and

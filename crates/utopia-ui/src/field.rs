@@ -645,7 +645,7 @@ impl<V: FieldHost> Element for FieldElement<V> {
             }
         }
         let cursor = if f.sel.is_empty() {
-            pos(f.cursor()).map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.cursor))
+            pos(f.cursor()).map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.link))
         } else {
             None
         };

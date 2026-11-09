@@ -6,7 +6,35 @@ use std::collections::HashSet;
 use chrono::{Datelike, Months, NaiveDate};
 use gpui::{div, prelude::*, px, Context, Div, MouseButton, MouseDownEvent, Window};
 
-use crate::theme::theme;
+use crate::icons::Icon;
+use crate::theme::{
+    ghost_icon, theme, CALENDAR_CELL_HEIGHT, CALENDAR_DOT, LABEL_MONO, SIDEBAR_LABEL,
+};
+
+/// The nearest thing to an accessible label for an icon-only button: gpui 0.2 has no
+/// accessibility tree, so the calendar's arrows label themselves with a tooltip.
+struct CalTip(&'static str);
+
+impl Render for CalTip {
+    fn render(&mut self, _: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let th = theme(cx).clone();
+        div()
+            .debug_selector(|| "tip".into())
+            .px_2()
+            .py_1()
+            .rounded(px(crate::theme::RADIUS_CONTROL))
+            .bg(th.well)
+            .border_1()
+            .border_color(th.line)
+            .text_size(px(crate::theme::CAPTION_SIZE))
+            .text_color(th.ink)
+            .child(self.0)
+    }
+}
+
+fn cal_tip(text: &'static str) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView {
+    move |_, cx| cx.new(|_| CalTip(text)).into()
+}
 
 pub fn first_of_month(d: NaiveDate) -> NaiveDate {
     d.with_day(1).expect("day 1 exists")
@@ -21,10 +49,10 @@ pub fn shift_month(d: NaiveDate, delta: i32) -> NaiveDate {
     }
 }
 
-/// The 6×7 grid of dates shown for `month` (Monday first).
+/// The 6×7 grid of dates shown for `month`. Weeks start on Sunday (DESIGN.md §3.2).
 pub fn grid(month: NaiveDate) -> Vec<NaiveDate> {
     let first = first_of_month(month);
-    let lead = first.weekday().num_days_from_monday() as u64;
+    let lead = first.weekday().num_days_from_sunday() as u64;
     let start = first - chrono::Days::new(lead);
     (0..42).map(|i| start + chrono::Days::new(i)).collect()
 }
@@ -70,7 +98,7 @@ pub fn render<V: 'static>(
             div()
                 .w(px(26.))
                 .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.faint)
+                .text_color(th.muted)
                 .flex()
                 .justify_center()
                 .child(*n)
@@ -90,11 +118,11 @@ pub fn render<V: 'static>(
             .justify_center()
             .items_center()
             .text_size(px(crate::theme::CAPTION_SIZE))
-            .rounded_sm()
+            .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
-            .text_color(if in_month { th.text } else { th.faint })
+            .text_color(if in_month { th.ink } else { th.muted })
             .when(has, |c| c.font_weight(gpui::FontWeight::BOLD))
-            .when(is_today, |c| c.bg(th.chip_bg).text_color(th.accent))
+            .when(is_today, |c| c.bg(th.line_soft).text_color(th.link))
             .hover(|s| s.bg(th.hover))
             .child(d.day().to_string())
             .on_mouse_down(
@@ -119,12 +147,11 @@ pub fn render<V: 'static>(
         .children(rows)
 }
 
-/// The callbacks the sidebar's month strip needs, bundled so the render signature stays
-/// readable (pick a day, move a month, fold the strip).
+/// The callbacks the sidebar's mini calendar needs, bundled so the render signature stays
+/// readable: open a day, move a month.
 pub struct StripActions<V> {
     pub pick: fn(&mut V, NaiveDate, bool, &mut Window, &mut Context<V>),
     pub shift: fn(&mut V, i32, &mut Context<V>),
-    pub toggle: fn(&mut V, &mut Context<V>),
 }
 
 // Function pointers are `Copy` whatever `V` is, so each listener can take its own copy.
@@ -136,70 +163,51 @@ impl<V> Clone for StripActions<V> {
 
 impl<V> Copy for StripActions<V> {}
 
-/// The left sidebar's month strip (SB-5): a quiet 7-column grid under Journal. The month
-/// name is the collapse control — one click folds the grid away; the arrows still move
-/// between months either way. Days with an entry get a small dot under the number, and
-/// today is drawn in the accent colour. Display only: the days are existing daily pages
-/// (§5.5, rule 6), nothing is created by looking at the month.
+/// The sidebar's mini calendar (DESIGN.md §3.2): month label with prev/next buttons, a
+/// Sunday-first 7-column grid, mono weekday labels, 30 px day cells. Today is a solid
+/// `link` cell with white text; a day with an entry carries a 4 px `link` dot under its
+/// number. Clicking a day opens that daily note. Display only: the days are existing daily
+/// pages (§5.5, rule 6), nothing is created by looking at the month.
 pub fn render_month_strip<V: 'static>(
     cx: &mut Context<V>,
     month: NaiveDate,
     today: NaiveDate,
     existing: &HashSet<NaiveDate>,
-    open: bool,
     actions: StripActions<V>,
 ) -> Div {
     let th = theme(cx).clone();
-    let arrow = |id: &'static str, glyph: &'static str, delta: i32| {
-        div()
-            .id(id)
-            .px_1()
-            .rounded_sm()
-            .cursor_pointer()
-            .text_size(px(crate::theme::CAPTION_SIZE))
-            .text_color(th.faint)
-            .hover(|d| d.bg(th.hover).text_color(th.text))
-            .child(glyph)
-            .on_click(cx.listener(move |v, _, _, cx| (actions.shift)(v, delta, cx)))
-    };
     let header = div()
         .flex()
         .items_center()
         .justify_between()
-        .child(arrow("cal-prev", "‹", -1))
+        .child(
+            ghost_icon("cal-prev", Icon::ChevronLeft, &th)
+                .tooltip(cal_tip("Previous month"))
+                .on_click(cx.listener(move |v, _, _, cx| (actions.shift)(v, -1, cx))),
+        )
         .child(
             div()
-                .id("toggle-calendar")
-                .debug_selector(|| "toggle-calendar".into())
-                .flex()
-                .items_center()
-                .gap_1()
-                .px_2()
-                .py_0p5()
-                .rounded_sm()
-                .cursor_pointer()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.muted)
-                .hover(|d| d.bg(th.hover).text_color(th.text))
-                .child(if open { "▾" } else { "▸" })
-                .child(month.format("%B %Y").to_string())
-                .on_click(cx.listener(move |v, _, _, cx| (actions.toggle)(v, cx))),
+                .debug_selector(|| "cal-month".into())
+                .text_size(px(crate::theme::SMALL.size))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(th.ink)
+                .child(month.format("%B %Y").to_string()),
         )
-        .child(arrow("cal-next", "›", 1));
-    let mut strip = div().flex().flex_col().gap_0p5().child(header);
-    if !open {
-        return strip;
-    }
+        .child(
+            ghost_icon("cal-next", Icon::ChevronRight, &th)
+                .tooltip(cal_tip("Next month"))
+                .on_click(cx.listener(move |v, _, _, cx| (actions.shift)(v, 1, cx))),
+        );
     let names = div()
         .flex()
-        .pt_1()
-        .children(["M", "T", "W", "T", "F", "S", "S"].iter().map(|n| {
+        .children(["S", "M", "T", "W", "T", "F", "S"].iter().map(|n| {
             div()
                 .flex_1()
                 .flex()
                 .justify_center()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.faint)
+                .font_family(LABEL_MONO)
+                .text_size(px(SIDEBAR_LABEL.size))
+                .text_color(th.muted)
                 .child(*n)
         }));
     let cells: Vec<_> = grid(month)
@@ -214,32 +222,42 @@ pub fn render_month_strip<V: 'static>(
                 .id(gpui::ElementId::Name(iso.clone().into()))
                 .debug_selector(move || format!("cal-{iso}"))
                 .flex_1()
+                .h(px(CALENDAR_CELL_HEIGHT))
                 .flex()
                 .flex_col()
                 .items_center()
-                .rounded_sm()
+                .justify_center()
+                .rounded(px(crate::theme::RADIUS_CONTROL))
                 .cursor_pointer()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .line_height(px(15.))
+                .text_size(px(crate::theme::SMALL.size))
+                .line_height(px(crate::theme::SMALL_TIGHT.line))
                 .text_color(if is_today {
-                    th.accent
+                    th.paper
                 } else if in_month {
-                    th.muted
+                    th.ink
                 } else {
-                    th.faint
+                    th.muted
                 })
-                .when(is_today, |d| d.font_weight(gpui::FontWeight::MEDIUM))
-                .hover(|d| d.bg(th.hover))
+                .when(is_today, |d| {
+                    d.bg(th.link).font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .when(!is_today, |d| d.hover(|s| s.bg(th.hover)))
                 .child(d.day().to_string())
-                .child(div().h(px(5.)).flex().items_center().when(has, |d| {
-                    d.child(
-                        div()
-                            .debug_selector(move || format!("cal-dot-{dot_iso}"))
-                            .size(px(3.))
-                            .rounded_full()
-                            .bg(if is_today { th.accent } else { th.faint }),
-                    )
-                }))
+                .child(
+                    div()
+                        .h(px(CALENDAR_DOT + 2.))
+                        .flex()
+                        .items_center()
+                        .when(has, |d| {
+                            d.child(
+                                div()
+                                    .debug_selector(move || format!("cal-dot-{dot_iso}"))
+                                    .size(px(CALENDAR_DOT))
+                                    .rounded_full()
+                                    .bg(if is_today { th.paper } else { th.link }),
+                            )
+                        }),
+                )
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |v, e: &MouseDownEvent, w, cx| {
@@ -253,17 +271,15 @@ pub fn render_month_strip<V: 'static>(
     for _ in 0..6 {
         rows.push(div().flex().children(it.by_ref().take(7)));
     }
-    strip = strip.child(
+    div().flex().flex_col().gap_0p5().child(header).child(
         div()
             .debug_selector(|| "left-calendar".into())
-            .px_1()
             .flex()
             .flex_col()
             .gap_0p5()
             .child(names)
             .children(rows),
-    );
-    strip
+    )
 }
 
 #[cfg(test)]
@@ -271,11 +287,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn grid_starts_on_monday_and_covers_month() {
+    fn grid_starts_on_sunday_and_covers_month() {
         let nov = NaiveDate::from_ymd_opt(2026, 11, 15).unwrap();
         let g = grid(nov);
         assert_eq!(g.len(), 42);
-        assert_eq!(g[0].weekday(), chrono::Weekday::Mon);
+        assert_eq!(g[0].weekday(), chrono::Weekday::Sun);
         assert!(g.contains(&NaiveDate::from_ymd_opt(2026, 11, 1).unwrap()));
         assert!(g.contains(&NaiveDate::from_ymd_opt(2026, 11, 30).unwrap()));
         assert_eq!(

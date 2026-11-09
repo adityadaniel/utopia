@@ -227,12 +227,12 @@ fn control(
         .debug_selector(move || id.into())
         .px_3()
         .py_2()
-        .rounded_md()
+        .rounded(px(crate::theme::RADIUS_CONTROL))
         // Always a border, so selecting a mode colours it instead of moving its neighbours.
         .border_1()
         .border_color(gpui::transparent_black())
-        .bg(th.chip_bg)
-        .text_color(th.accent)
+        .bg(th.line_soft)
+        .text_color(th.link)
         .cursor_pointer()
         .child(label.into())
 }
@@ -255,7 +255,7 @@ fn field(
                 .py_2()
                 .border_1()
                 .border_color(th.line)
-                .rounded_md()
+                .rounded(px(crate::theme::RADIUS_CONTROL))
                 .child(input),
         )
 }
@@ -315,10 +315,10 @@ impl Render for SyncSetup {
                 )
             });
         if let Some(notice) = &self.notice {
-            body = body.child(div().text_color(th.accent).child(notice.clone()));
+            body = body.child(div().text_color(th.link).child(notice.clone()));
         }
         if !self.overrides.is_empty() {
-            body = body.child(div().text_color(th.accent).child(format!("Environment override for this run: {}. Relaunch without these variables to apply saved settings.", self.overrides.join(", "))));
+            body = body.child(div().text_color(th.link).child(format!("Environment override for this run: {}. Relaunch without these variables to apply saved settings.", self.overrides.join(", "))));
         }
         let mut modes = div().flex().flex_wrap().gap_2();
         for (value, label, id) in [
@@ -329,7 +329,7 @@ impl Render for SyncSetup {
         ] {
             modes = modes.child(
                 control(id, label, cx)
-                    .when(mode == value, |d| d.border_color(th.accent))
+                    .when(mode == value, |d| d.border_color(th.link))
                     .on_click(cx.listener(move |this, _, _, cx| this.choose(value, cx))),
             );
         }
@@ -425,7 +425,7 @@ impl Render for SyncSetup {
                 Mode::Folder => "Choose the same dedicated shared folder on the other device.".into(),
                 Mode::Off => "Choose and apply a sync transport first.".into(),
             };
-            body = body.child(div().debug_selector(|| "sync-pairing".into()).p_4().rounded_lg().border_1().border_color(th.line).flex().flex_col().gap_2()
+            body = body.child(div().debug_selector(|| "sync-pairing".into()).p_4().rounded(px(crate::theme::RADIUS_INPUT)).border_1().border_color(th.line).flex().flex_col().gap_2()
                 .child("Connect another device")
                 .child(format!("Create or open {}.utopia on the other device. Its Sync graph id must be {}.", self.graph, self.graph))
                 .child(endpoint)

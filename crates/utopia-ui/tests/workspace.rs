@@ -1274,12 +1274,22 @@ fn fr_3_9_leaving_a_zoom_to_reveal_a_block_counts_unlinked_mentions(cx: &mut Tes
         ws.update(cx, |w, cx| w.main_zoom(cx)).is_none(),
         "revealing a block outside the zoom leaves it"
     );
+    assert_eq!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        scans,
+        "DESIGN.md §3.7: a collapsed Unlinked references row is not searched"
+    );
+    let header = cx
+        .debug_bounds("unlinked-header")
+        .expect("the whole page is back, with its Unlinked references row");
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
     assert!(
         app.read_with(cx, |app, _| app.store.unlinked_scans()) > scans,
-        "the count is fetched by the navigation handler, not by a frame"
+        "expanding the row runs the search in the click handler, not in a frame"
     );
     cx.debug_bounds("unlinked-count-1")
-        .expect("the whole page is back, with its unlinked count");
+        .expect("the expanded row shows its count");
 }
 
 /// FR-2.7: zooming changes what the header means — the title is the block's text and
@@ -3023,8 +3033,11 @@ fn a_handler_rebuild_is_not_repeated_by_its_own_change(cx: &mut TestAppContext) 
     // Clicking an empty day starts writing a draft, which reports a change with nothing
     // to flush (FR-1.2) and rebuilds the rows in the click handler. No index update
     // follows, so any second pass is the deferred `Changed` alone.
+    let yesterday = today() - chrono::Duration::days(1);
+    let empty_sel: &'static str =
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(yesterday)).into_boxed_str());
     let empty = cx
-        .debug_bounds("day-empty")
+        .debug_bounds(empty_sel)
         .expect("a blank day offers a row to start writing");
     cx.simulate_click(empty.center(), Modifiers::default());
     cx.run_until_parked();
@@ -3177,13 +3190,12 @@ fn ending_an_edit_drops_the_rows_focus_registration(cx: &mut TestAppContext) {
     );
 }
 
-/// Rule 9 / PG-1: both appearance mirrors are resynced in one place. Only
-/// `rebuild_if_dirty` used to notice an `attribute_blocks` change, so a rebuild triggered
-/// by something else (an index update, the observer itself) built rows with the old
-/// setting and the next frame corrected them (rebuild-cycle issue 3).
+/// Rule 9: appearance preferences this view mirrors are resynced in one place, so an
+/// index-triggered rebuild cannot build rows with the old setting and leave the next frame
+/// to correct them (rebuild-cycle issue 3).
 #[gpui::test]
 fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
-    use utopia_ui::appearance::{self, AttributeBlocks};
+    use utopia_ui::appearance;
     let (app, ws, cx) = setup(cx);
     let page = app.update(cx, |app, _| {
         let page = app.store.create_page("Project").unwrap();
@@ -3201,9 +3213,10 @@ fn an_appearance_change_rebuilds_in_the_observer(cx: &mut TestAppContext) {
     let view = ws.read_with(cx, |w, _| w.main_view());
     let (before, frames_before) = view.read_with(cx, |v, _| (v.rebuilds(), v.frame_rebuilds()));
 
-    // Settings → Appearance → "As blocks", applied to this open page.
+    // Settings → Appearance → "Children shown in references", applied while open.
+    let dir = tempfile::tempdir().unwrap();
     cx.update(|_, cx| {
-        appearance::set_attribute_blocks(cx, AttributeBlocks::Blocks).unwrap();
+        appearance::set_ref_children(cx, 3, dir.path()).unwrap();
     });
 
     let (after_set, frames_after_set) =
@@ -3283,11 +3296,12 @@ fn unlinked_references_link_button(cx: &mut TestAppContext) {
         .expect("section rendered");
     cx.simulate_click(header.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    let link = cx
-        .debug_bounds("link-4")
-        .or_else(|| cx.debug_bounds("link-5"))
-        .or_else(|| cx.debug_bounds("link-6"));
-    let link = link.expect("a Link button per mention");
+    let link = (0..32)
+        .find_map(|i| {
+            let name: &'static str = Box::leak(format!("link-{i}").into_boxed_str());
+            cx.debug_bounds(name)
+        })
+        .expect("a Link button per mention");
     cx.simulate_click(link.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(
@@ -3376,8 +3390,9 @@ fn reference_path_parts_open_their_target(cx: &mut TestAppContext) {
     );
 }
 
-/// LR-5: the Unlinked References header carries the count while closed, "Link all" links
-/// every mention at once, and an empty section says so.
+/// LR-5 with DESIGN.md §3.7: the collapsed row has no count (that would need the search),
+/// expanding searches, "Link all" links every mention at once, and an empty open section
+/// says so.
 #[gpui::test]
 fn unlinked_references_count_and_link_all(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
@@ -3402,12 +3417,19 @@ fn unlinked_references_count_and_link_all(cx: &mut TestAppContext) {
         w.open(m.clone(), None, None, false, window, cx)
     });
     cx.run_until_parked();
-    // The count is there before the section is opened.
+    // A closed row cannot know a count without searching; expanding searches.
+    assert!(
+        cx.debug_bounds("unlinked-count-2").is_none(),
+        "a collapsed row is not searched for a count"
+    );
+    let header = cx.debug_bounds("unlinked-header").expect("header");
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
     cx.debug_bounds("unlinked-count-2")
-        .expect("the closed header shows how many unlinked mentions there are");
+        .expect("the expanded row shows how many unlinked mentions there are");
     let link_all = cx
         .debug_bounds("link-all")
-        .expect("Link all is offered in the header");
+        .expect("Link all is offered while the section is open");
     cx.simulate_click(link_all.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(
@@ -3420,9 +3442,7 @@ fn unlinked_references_count_and_link_all(cx: &mut TestAppContext) {
         assert_eq!(app.store.backlink_count(&m).unwrap(), 1);
         assert!(app.store.unlinked_references(&m).unwrap().is_empty());
     });
-    // Opening the now empty section says so, rather than showing a blank space.
-    let header = cx.debug_bounds("unlinked-header").expect("header");
-    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    // The section stays open; with every mention linked it now says it is empty.
     cx.run_until_parked();
     cx.debug_bounds("unlinked-empty")
         .expect("the empty state names itself");
@@ -3771,7 +3791,9 @@ fn graph_panel_keeps_the_sidebar_pages_origin(cx: &mut TestAppContext) {
         w.open(b.clone(), None, None, true, window, cx)
     });
     cx.run_until_parked();
-    let menu = cx.debug_bounds("page-menu").expect("a page menu");
+    let menu = cx
+        .debug_bounds("pane-page-menu")
+        .expect("the sidebar card's page menu");
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
     let item = cx.debug_bounds("page-menu-graph").expect("Open in graph");
@@ -3818,7 +3840,9 @@ fn reopening_the_sidebar_keeps_the_graph_panels_origin(cx: &mut TestAppContext) 
         w.open(b.clone(), None, None, true, window, cx)
     });
     cx.run_until_parked();
-    let menu = cx.debug_bounds("page-menu").expect("a page menu");
+    let menu = cx
+        .debug_bounds("pane-page-menu")
+        .expect("the sidebar card's page menu");
     cx.simulate_click(menu.center(), Modifiers::default());
     cx.run_until_parked();
     let item = cx.debug_bounds("page-menu-graph").expect("Open in graph");
@@ -4595,7 +4619,7 @@ fn fr_1_1_feed_stops_at_the_oldest_daily_page(cx: &mut TestAppContext) {
     let inside = NaiveDate::from_ymd_opt(2026, 10, 8).unwrap();
     assert_eq!(inside, today() - chrono::Duration::days(25));
     let folded = cx
-        .debug_bounds("day-folded-2026-10-08")
+        .debug_bounds("empty-day-2026-10-08")
         .expect("a blank day inside the window");
     cx.simulate_click(folded.center(), Modifiers::default());
     cx.run_until_parked();
@@ -4723,7 +4747,10 @@ fn scroll_main(cx: &mut VisualTestContext, dy: f32) {
 fn feed_blank_day_is_written_by_typing(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup(cx);
     cx.simulate_keystrokes("escape");
-    let blank = cx.debug_bounds("day-empty").expect("a blank day");
+    let yesterday = today() - chrono::Duration::days(1);
+    let blank_sel: &'static str =
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(yesterday)).into_boxed_str());
+    let blank = cx.debug_bounds(blank_sel).expect("a blank day");
     cx.simulate_click(blank.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(daily_count(&app, cx), 0, "clicking is not writing");
@@ -4743,23 +4770,23 @@ fn feed_blank_day_is_written_by_typing(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, written[0], cx), ["filled in later"]);
 }
 
-/// DN-1: an empty day after today and yesterday is one row; clicking it starts writing
-/// there, and the day opens (with its heading) once it has a block. Clicking alone writes
+/// DESIGN.md §3.6: an empty day is one row in a group; clicking it starts writing there,
+/// and the day opens (with its heading) once it has a block. Clicking alone writes
 /// nothing (FR-1.2).
 #[gpui::test]
-fn folded_empty_day_opens_on_a_click(cx: &mut TestAppContext) {
+fn empty_day_opens_on_a_click(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(
         ws.update(cx, |w, cx| w.open_journal_days(cx)),
-        2,
-        "today and yesterday stay open"
+        1,
+        "only today's draft has a section; yesterday is an empty row"
     );
     let day = today() - chrono::Duration::days(4);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(daily_count(&app, cx), 0, "clicking is not writing");
@@ -4769,8 +4796,8 @@ fn folded_empty_day_opens_on_a_click(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, day, cx), ["picked up later"]);
     assert_eq!(
         ws.update(cx, |w, cx| w.open_journal_days(cx)),
-        3,
-        "the day now shows its date and its block"
+        2,
+        "the day now shows its date and its block, beside today"
     );
 }
 
@@ -4785,8 +4812,8 @@ fn fr_1_2_starting_a_draft_does_not_flush_the_index(cx: &mut TestAppContext) {
     let day = today() - chrono::Duration::days(4);
     let before = app.read_with(cx, |app, _| app.refs_version);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(
@@ -5834,6 +5861,7 @@ fn ac_13_5_focus_leaving_commits_the_ime_composition(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second.clone(),
+                property: false,
             },
             None,
             None,
@@ -5877,6 +5905,7 @@ fn ac_13_5_a_later_request_supersedes_a_queued_begin(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second,
+                property: false,
             },
             None,
             None,
@@ -6060,6 +6089,7 @@ fn ac_13_5_begin_on_another_block_waits_for_the_ime(cx: &mut TestAppContext) {
                 host,
                 page: page.clone(),
                 block: second.clone(),
+                property: false,
             },
             None,
             None,
@@ -6382,14 +6412,14 @@ fn tag_marks_come_from_the_index_feed_not_from_render(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("tag-glyph-atlas").is_none(),
+        cx.debug_bounds("tag-chip-atlas").is_none(),
         "render must not call hashtag_only_pages (rule 10)"
     );
     // Once the app is told the index moved, the cache refreshes and the mark appears.
     app.update(cx, |app, cx| app.flush_now(cx));
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("tag-glyph-atlas").is_some(),
+        cx.debug_bounds("tag-chip-atlas").is_some(),
         "the index feed refreshed the tag cache"
     );
 }
@@ -6517,47 +6547,34 @@ fn an_edit_does_not_classify_tag_pages_on_the_ui_thread(cx: &mut TestAppContext)
     assert_eq!(app.update(cx, |app, _| app.store.tag_page_scans()), scans);
 }
 
-/// LR-5 + rule 10: the unlinked-reference count is refreshed by the index update and by
-/// navigation, not by a frame. A page that is open but not painted (its sidebar pane is
-/// closed) still counts its mentions when the index changes — with the scan in `render`
-/// it would only be counted once something painted it.
+/// DESIGN.md §3.7, rule 10: unlinked references are searched only while their row is
+/// expanded, and the search runs in a handler (expansion or an index update), never in a
+/// frame. A collapsed row costs nothing when the index moves.
 #[gpui::test]
-fn unlinked_count_refreshes_for_a_page_that_is_not_painted(cx: &mut TestAppContext) {
+fn unlinked_is_searched_only_while_expanded(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
-    let (main_page, side_page, source) = app.update(cx, |app, _| {
-        let main_page = app.store.create_page("Ana Lovelace").unwrap();
-        let side_page = app.store.create_page("Ada Lovelace").unwrap();
+    let (page, source) = app.update(cx, |app, _| {
+        let page = app.store.create_page("Atlas Launch").unwrap();
         let source = app.store.create_page("Notes").unwrap();
         let b = app.store.ensure_first_block(&source).unwrap();
         app.store
-            .set_block_text(
-                &source,
-                &b,
-                "Met Ana Lovelace, then Ada Lovelace",
-                None,
-                None,
-            )
+            .set_block_text(&source, &b, "Atlas Launch is the plan", None, None)
             .unwrap();
         app.store.commit_block(&source, &b).unwrap();
-        (main_page, side_page, source)
+        app.store.sync_index().unwrap();
+        (page, source)
     });
-    // One page in the main pane, one in the right sidebar; then close the sidebar so the
-    // second view keeps its state but is not rendered.
     ws.update_in(cx, |w, window, cx| {
-        w.open(main_page.clone(), None, None, false, window, cx);
-        w.open(side_page.clone(), None, None, true, window, cx);
+        w.open(page.clone(), None, None, false, window, cx)
     });
     cx.run_until_parked();
-    cx.simulate_keystrokes("cmd-shift-\\");
-    cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("right-sidebar").is_none(),
-        "the sidebar is closed, so its page is not painted"
+    assert_eq!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        0,
+        "opening a page does not search unlinked references"
     );
 
-    // A durable index change: both open page views hear it and count their mentions.
-    let before = app.update(cx, |app, _| app.store.unlinked_scans());
-    app.update(cx, |app, cx| {
+    let add_mention = |app: &mut AppState, cx: &mut gpui::Context<AppState>| {
         let plan = utopia_core::outline::append_block(app.store.page_state(&source).unwrap(), None);
         let b = app
             .store
@@ -6566,42 +6583,52 @@ fn unlinked_count_refreshes_for_a_page_that_is_not_painted(cx: &mut TestAppConte
             .unwrap()
             .block;
         app.store
-            .set_block_text(&source, &b, "Ada Lovelace again", None, None)
+            .set_block_text(&source, &b, "Atlas Launch again", None, None)
             .unwrap();
         app.store.commit_block(&source, &b).unwrap();
         app.flush_now(cx);
-    });
+    };
+    app.update(cx, |app, cx| add_mention(app, cx));
     cx.run_until_parked();
-    let after = app.update(cx, |app, _| app.store.unlinked_scans());
     assert_eq!(
-        after - before,
-        2,
-        "both open pages refreshed their count, painted or not"
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        0,
+        "an index change does not search a collapsed row"
     );
 
-    // Painting a frame for any reason does not count again, and the painted page is current.
-    assert!(
-        cx.debug_bounds("unlinked-count-1").is_some(),
-        "the painted page shows its count"
+    let header = cx.debug_bounds("unlinked-header").expect("header");
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        1,
+        "expanding the row searches it once"
+    );
+
+    app.update(cx, |app, cx| add_mention(app, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        2,
+        "an expanded row refreshes on the index update"
     );
     ws.update(cx, |_, cx| cx.notify());
     cx.run_until_parked();
     assert_eq!(
-        app.update(cx, |app, _| app.store.unlinked_scans()),
-        after,
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        2,
         "a frame without an index change costs no scan"
     );
-    // Reopening the sidebar shows the second page's fresh count without another scan.
-    cx.simulate_keystrokes("cmd-shift-\\");
+
+    let header = cx.debug_bounds("unlinked-header").expect("header");
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
     cx.run_until_parked();
-    assert!(
-        cx.debug_bounds("right-sidebar").is_some(),
-        "sidebar reopened"
-    );
+    app.update(cx, |app, cx| add_mention(app, cx));
+    cx.run_until_parked();
     assert_eq!(
-        app.update(cx, |app, _| app.store.unlinked_scans()),
-        after,
-        "the reopened pane uses the count it already refreshed"
+        app.read_with(cx, |app, _| app.store.unlinked_scans()),
+        2,
+        "collapsing it again stops the searching"
     );
 }
 
@@ -6624,8 +6651,8 @@ fn template_backed_day_is_not_written_by_a_click(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let day = today() - chrono::Duration::days(4);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(

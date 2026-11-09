@@ -37,6 +37,25 @@ fn doctor_ok(s: &mut Store) {
     assert!(r.is_ok(), "{:#?}", r.problems);
 }
 
+/// DESIGN.md §3.2: the sidebar's PAGES list shows a reference count per page. One grouped
+/// query must agree with [`Store::backlink_count`] for every page, and leave out pages
+/// nothing points at.
+#[test]
+fn page_backlink_counts_group_by_page() {
+    let (mut s, _d) = store();
+    let a = s.create_page("Alpha").unwrap();
+    let b = s.create_page("Beta").unwrap();
+    let c = s.create_page("Gamma").unwrap();
+    write(&mut s, &a, "see [[Beta]] and [[Beta]] again");
+    write(&mut s, &a, "[[Beta]] from another block");
+    write(&mut s, &b, "[[Alpha]]");
+    let counts = s.page_backlink_counts().unwrap();
+    assert_eq!(counts.get(&b), Some(&2), "distinct referring blocks");
+    assert_eq!(counts.get(&a), Some(&1));
+    assert_eq!(counts.get(&c), None, "a page no other page links to");
+    assert_eq!(counts.get(&b), Some(&s.backlink_count(&b).unwrap()));
+}
+
 #[test]
 fn ac_3_7_promote_mention_to_link_and_undo() {
     let (mut s, _d) = store();
