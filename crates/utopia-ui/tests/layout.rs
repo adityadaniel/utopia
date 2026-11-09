@@ -3438,6 +3438,191 @@ fn starting_a_note_on_a_properties_only_page_appends_a_block(cx: &mut TestAppCon
     );
 }
 
+/// DESIGN.md §3.8 / §4.2: leaving a page finishes a property row being edited. The
+/// workspace ends the editor before the page changes, but `Blurred` arrives after the
+/// update, so the bar must finish the row while its page is still current — otherwise the
+/// emptied block stays as an empty root and ends the bar on return.
+#[gpui::test]
+fn navigating_away_finishes_an_emptied_property_row(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, _ids) = setup_properties_page(cx, dir.path());
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    let app = ws.update(cx, |w, _| w.app().clone());
+    let other = app.update(cx, |app, _| app.store.create_page("Elsewhere").unwrap());
+    let page = ws.update(cx, |w, cx| w.main_page(cx)).expect("a page");
+
+    let row = bounds(cx, "property-0");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-a backspace");
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+
+    ws.update_in(cx, |w, window, cx| {
+        w.open(other, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "the emptied row was removed before the page changed"
+    );
+    bounds(cx, "property-0");
+}
+
+/// The same for an abandoned "Add property" row: it is empty from the start, so leaving
+/// the page must remove it instead of leaving a blank root that ends the bar.
+#[gpui::test]
+fn navigating_away_finishes_an_abandoned_add_property_row(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, _ids) = setup_properties_page(cx, dir.path());
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    let app = ws.update(cx, |w, _| w.app().clone());
+    let other = app.update(cx, |app, _| app.store.create_page("Elsewhere").unwrap());
+    let page = ws.update(cx, |w, cx| w.main_page(cx)).expect("a page");
+
+    let add = bounds(cx, "add-property");
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(root_texts(cx).len(), 4, "the empty row is being edited");
+
+    ws.update_in(cx, |w, window, cx| {
+        w.open(other, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    assert_eq!(root_texts(cx).len(), 3, "the empty pending row is gone");
+    bounds(cx, "property-0");
+}
+
+/// DESIGN.md §3.8: Tab on the first body block must not indent it under the last property.
+/// That would give the property a child, end the bar at it and turn every property into a
+/// bullet; the bar is not part of the outline.
+#[gpui::test]
+fn tab_on_the_first_body_block_does_not_indent_under_a_property(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let note = bounds(cx, "content-1");
+    cx.simulate_click(
+        gpui::point(note.origin.x + px(1.), note.origin.y + px(8.)),
+        gpui::Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(editor_target(cx), Some(ids[2].clone()));
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "status:: dogfooding".to_string(),
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "Tab left the first body block as a root"
+    );
+    bounds(cx, "property-1");
+}
+
+/// DESIGN.md §3.8: Cmd+Enter in a bar row would insert a plain block above the leading
+/// properties, ending the bar there. It does nothing instead.
+#[gpui::test]
+fn cmd_enter_in_a_property_row_does_not_insert_a_block(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, ids) = setup_properties_page(cx, dir.path());
+    let row = bounds(cx, "property-0");
+    cx.simulate_click(row.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(editor_target(cx), Some(ids[0].clone()));
+    cx.simulate_keystrokes("cmd-enter");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "status:: dogfooding".to_string(),
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "no block was inserted above the properties"
+    );
+    bounds(cx, "property-0");
+}
+
+/// §13.5 and DESIGN.md §3.8: switching rows while an IME composition owns the editor must
+/// not finish (and delete) the row being composed in before the composition has committed.
+#[gpui::test]
+fn switching_rows_during_a_composition_keeps_the_row(cx: &mut TestAppContext) {
+    use gpui::EntityInputHandler as _;
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, _ids) = setup_properties_page(cx, dir.path());
+    let add = bounds(cx, "add-property");
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    let editor = ws.update(cx, |w, _| w.editor());
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_and_mark_text_in_range(None, "にほ", None, window, cx)
+    });
+    cx.run_until_parked();
+
+    let owner = bounds(cx, "property-1");
+    cx.simulate_click(owner.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let texts = root_texts(cx);
+    assert_eq!(
+        texts.len(),
+        4,
+        "the row being composed in is still live: {texts:?}"
+    );
+    assert!(texts.iter().any(|t| t.is_empty()), "{texts:?}");
+}
+
+/// DESIGN.md §3.8: the insert "Add property" records is undoable, so Cmd+Z removes the row
+/// again instead of stranding an empty root after undoing its text.
+#[gpui::test]
+fn undoing_an_added_property_removes_the_row(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let (cx, _ids) = setup_properties_page(cx, dir.path());
+    let add = bounds(cx, "add-property");
+    cx.simulate_click(add.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    cx.simulate_input("priority:: high");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    assert!(root_texts(cx).iter().any(|t| t == "priority:: high"));
+
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert_eq!(
+        root_texts(cx),
+        vec![
+            "status:: dogfooding".to_string(),
+            "owner:: [[Ana Lovelace]]".to_string(),
+            "An ordinary note".to_string()
+        ],
+        "one undo removed the added row"
+    );
+}
+
 /// DESIGN.md §4.2: an empty body is the muted placeholder with a `line_strong` bullet.
 #[gpui::test]
 fn an_empty_body_gets_a_line_strong_bullet(cx: &mut TestAppContext) {
