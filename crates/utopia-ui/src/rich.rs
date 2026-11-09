@@ -6,13 +6,13 @@ use std::ops::Range;
 
 use gpui::{
     point, px, App, Bounds, CursorStyle, Element, ElementId, FontStyle, FontWeight,
-    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, InspectorElementId, IntoElement,
-    LayoutId, Pixels, SharedString, StrikethroughStyle, StyledText, TextLayout, UnderlineStyle,
-    Window,
+    GlobalElementId, HighlightStyle, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement,
+    LayoutId, Pixels, Point, SharedString, StrikethroughStyle, StyledText, TextLayout,
+    UnderlineStyle, Window,
 };
 use utopia_core::inline::{extract_refs, parse, Inline, Mark, RefKind};
 
-use crate::theme::Theme;
+use crate::theme::{Theme, RADIUS_TAG, TAG_HEIGHT, TAG_PADDING_X};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -36,6 +36,8 @@ pub struct Rendered {
     pub text: SharedString,
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
     pub links: Vec<(Range<usize>, LinkTarget)>,
+    /// `#tag` runs, drawn as chips by [`LinkText`] (DESIGN.md §3.1).
+    pub chips: Vec<Range<usize>>,
 }
 
 impl Rendered {
@@ -70,6 +72,7 @@ struct Builder<'a> {
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, LinkTarget)>,
+    chips: Vec<Range<usize>>,
 }
 
 impl Builder<'_> {
@@ -125,10 +128,15 @@ impl Builder<'_> {
                     self.links.push((r, LinkTarget::Page(title.clone())));
                 }
                 Inline::Tag { title, .. } => {
+                    // A tag is a chip (DESIGN.md §3.1), not just coloured text. A shaped
+                    // text run cannot pad or round its background, so the fill is painted
+                    // under the run by `LinkText`, which knows the glyph boxes.
                     let mut st = self.style(m);
                     st.color = Some(self.theme.tag_ink);
                     let r = self.push(&format!("#{title}"), st);
-                    self.links.push((r, LinkTarget::Page(title.clone())));
+                    self.links
+                        .push((r.clone(), LinkTarget::Page(title.clone())));
+                    self.chips.push(r);
                 }
                 Inline::BlockRef { uid, .. } => {
                     let state = (self.chip)(uid);
@@ -207,6 +215,7 @@ pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState)
         text: String::new(),
         highlights: Vec::new(),
         links: Vec::new(),
+        chips: Vec::new(),
     };
     // `Key:: value` shows the key as a label (P1 attributes).
     let body = match utopia_core::inline::attribute(src) {
@@ -226,6 +235,7 @@ pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState)
         text: b.text.into(),
         highlights: b.highlights,
         links: b.links,
+        chips: b.chips,
     }
 }
 
@@ -238,11 +248,22 @@ pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState)
 pub struct LinkText {
     text: StyledText,
     links: Vec<Range<usize>>,
+    chips: Vec<(Range<usize>, Hsla)>,
 }
 
 impl LinkText {
     pub fn new(text: StyledText, links: Vec<Range<usize>>) -> Self {
-        Self { text, links }
+        Self {
+            text,
+            links,
+            chips: Vec::new(),
+        }
+    }
+
+    /// Draw `chips` (tag runs) as rounded `bg` fills behind the text (DESIGN.md §3.1).
+    pub fn with_chips(mut self, chips: Vec<Range<usize>>, bg: Hsla) -> Self {
+        self.chips = chips.into_iter().map(|r| (r, bg)).collect();
+        self
     }
 }
 
@@ -304,6 +325,24 @@ impl Element for LinkText {
         window: &mut Window,
         cx: &mut App,
     ) {
+        // Chips first, so their fill sits under the glyphs. A run's own background would
+        // fill the whole line box; a tag chip is 22 px high. Its 7 px sides reach into the
+        // whitespace around the tag, because a shaped run cannot move its glyphs; two
+        // adjacent tags share that whitespace and each takes half, leaving a 2 px gap.
+        let layout = self.text.layout().clone();
+        let line_height = layout.line_height();
+        for (range, bg) in &self.chips {
+            let Some(start) = layout.position_for_index(range.start) else {
+                continue;
+            };
+            let Some(end) = layout.position_for_index(range.end) else {
+                continue;
+            };
+            let (left, right) = chip_padding(&layout, &self.chips, range);
+            for rect in chip_line_rects(start, end, line_height, bounds, left, right) {
+                window.paint_quad(gpui::fill(rect, *bg).corner_radii(px(RADIUS_TAG)));
+            }
+        }
         Element::paint(
             &mut self.text,
             id,
@@ -318,6 +357,131 @@ impl Element for LinkText {
             window.set_cursor_style(CursorStyle::PointingHand, h);
         }
     }
+}
+
+/// One chip fill per visual line a tag covers. `link_boxes` gives a link a single tall box
+/// for the lines it crosses in full, but a chip is a fixed 22 px tall, so every line needs
+/// its own rect or the interior lines lose their background.
+fn chip_line_rects(
+    start: Point<Pixels>,
+    end: Point<Pixels>,
+    line_height: Pixels,
+    bounds: Bounds<Pixels>,
+    left_pad: f32,
+    right_pad: f32,
+) -> Vec<Bounds<Pixels>> {
+    let lh = f32::from(line_height);
+    let lines = ((f32::from(end.y) - f32::from(start.y)).max(0.) / lh).round() as usize + 1;
+    let mut out = Vec::with_capacity(lines);
+    for i in 0..lines {
+        let y = px(f32::from(start.y) + lh * i as f32);
+        let x0 = if i == 0 {
+            start.x - px(left_pad)
+        } else {
+            bounds.left()
+        };
+        let x1 = if i + 1 == lines {
+            // Ending exactly at a line break puts the end on the next line's left edge;
+            // that is not a line of its own.
+            if end.x <= bounds.left() && lines > 1 {
+                continue;
+            }
+            end.x + px(right_pad)
+        } else {
+            bounds.right()
+        };
+        let (x0, x1) = (x0.max(bounds.left()), x1.min(bounds.right()));
+        if x1 <= x0 {
+            continue;
+        }
+        let top = y + px((lh - TAG_HEIGHT) / 2.);
+        out.push(Bounds::from_corners(
+            point(x0, top),
+            point(x1, top + px(TAG_HEIGHT)),
+        ));
+    }
+    out
+}
+
+/// How far a tag chip may reach into the whitespace on each side. The spec's 7 px padding
+/// cannot move glyphs inside one shaped run, so it is spent on the spaces that are already
+/// there: a tag followed by a word keeps its side out of the word, and two tags separated
+/// by one space split it, leaving a 2 px gap between their chips.
+fn chip_padding(
+    layout: &TextLayout,
+    chips: &[(Range<usize>, Hsla)],
+    range: &Range<usize>,
+) -> (f32, f32) {
+    let text = layout.text();
+    let side = |edge: usize, back: bool| -> f32 {
+        let Some(space) = (if back {
+            prev_char_boundary(&text, edge)
+        } else {
+            Some(edge)
+        }) else {
+            return 0.;
+        };
+        let Some(next) = next_char_boundary(&text, space) else {
+            return 0.;
+        };
+        let gap = &text[space..next];
+        if !gap.chars().all(char::is_whitespace) || gap.is_empty() {
+            return 0.;
+        }
+        // The width of that whitespace on the line the tag is on.
+        let (Some(a), Some(b)) = (
+            layout.position_for_index(space),
+            layout.position_for_index(next),
+        ) else {
+            return 0.;
+        };
+        if a.y != b.y {
+            return 0.;
+        }
+        let width = f32::from(b.x - a.x);
+        if width <= 0. {
+            return 0.;
+        }
+        // Is the other side of the space another chip's edge? Then the space is shared.
+        let other = if back { space } else { next };
+        let shared = chips.iter().any(|(r, _)| {
+            if back {
+                r.end == other
+            } else {
+                r.start == other
+            }
+        });
+        if shared {
+            ((width - 2.).max(0.)) / 2.
+        } else {
+            width.min(TAG_PADDING_X)
+        }
+    };
+    let left = side(range.start, true);
+    let right = side(range.end, false);
+    (left, right)
+}
+
+fn prev_char_boundary(text: &str, i: usize) -> Option<usize> {
+    if i == 0 {
+        return None;
+    }
+    let mut p = i - 1;
+    while p > 0 && !text.is_char_boundary(p) {
+        p -= 1;
+    }
+    Some(p)
+}
+
+fn next_char_boundary(text: &str, i: usize) -> Option<usize> {
+    if i >= text.len() {
+        return None;
+    }
+    let mut p = i + 1;
+    while p < text.len() && !text.is_char_boundary(p) {
+        p += 1;
+    }
+    Some(p)
 }
 
 /// The boxes a run of text covers: one per visual line it touches.
@@ -395,10 +559,58 @@ mod tests {
         assert_eq!(r.link_at(13), Some(&LinkTarget::Page("proj".into())));
         assert!(matches!(r.link_at(24), Some(LinkTarget::Block(u)) if u == "abc"));
         assert_eq!(r.link_at(0), None);
+        // DESIGN.md §3.1: a tag is a chip, not just coloured text.
+        assert_eq!(r.chips.len(), 1);
+        assert_eq!(&r.text[r.chips[0].clone()], "#proj");
         // Highlights are sorted and non-overlapping (StyledText requirement).
         for w in r.highlights.windows(2) {
             assert!(w[0].0.end <= w[1].0.start);
         }
+    }
+
+    #[test]
+    fn a_long_tag_is_chipped_end_to_end() {
+        let t = Theme::light();
+        let words = "alpha beta gamma delta epsilon zeta eta theta iota kappa lambda mu nu xi \
+            omicron pi rho sigma tau upsilon phi chi psi omega one two three four five six \
+            seven eight nine ten eleven twelve thirteen fourteen fifteen sixteen";
+        let src = format!("#[[{words}]]");
+        let r = render(&src, &t, &mut |_| ChipState::Missing);
+        assert_eq!(r.chips.len(), 1);
+        let chip = r.chips[0].clone();
+        assert_eq!(chip.start, 0);
+        assert_eq!(chip.end, r.text.len(), "the chip covers the whole tag");
+    }
+
+    /// A chip is 22 px tall, so a run that crosses four lines needs four fills; a single
+    /// tall rect would leave the middle two lines blank.
+    #[test]
+    fn a_wrapped_tag_chip_fills_every_visual_line() {
+        let bounds = Bounds::new(point(px(40.), px(100.)), gpui::size(px(600.), px(500.)));
+        let rects = chip_line_rects(
+            point(px(100.), px(100.)),
+            point(px(200.), px(184.)),
+            px(28.),
+            bounds,
+            7.,
+            7.,
+        );
+        assert_eq!(rects.len(), 4, "{rects:?}");
+        for (i, r) in rects.iter().enumerate() {
+            assert!(
+                (f32::from(r.origin.y) - (103. + 28. * i as f32)).abs() < 0.5,
+                "line {i}: {r:?}"
+            );
+            assert!((f32::from(r.size.height) - 22.).abs() < 0.5, "{r:?}");
+        }
+        assert!(
+            (f32::from(rects[0].origin.x) - 93.).abs() < 0.5,
+            "{rects:?}"
+        );
+        assert!(
+            (f32::from(rects[3].size.width) - 167.).abs() < 0.5,
+            "{rects:?}"
+        );
     }
 
     #[test]

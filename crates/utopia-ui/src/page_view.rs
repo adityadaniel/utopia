@@ -21,8 +21,12 @@ use crate::field::Goal;
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
-    quiet_control, quiet_danger, quiet_menu, theme, CONTENT_MAX_WIDTH, DAY_TITLE, INDENT,
-    MAX_VISUAL_DEPTH,
+    quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill, BULLET_SIZE,
+    BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT, COLLAPSED_RING, COMPACT_INDENT,
+    CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE,
+    CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE,
+    EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH,
+    THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -39,9 +43,11 @@ const JOURNAL_BATCH: usize = 10;
 const REF_FILTER_WIDTH: f32 = 240.;
 /// The narrowest the field gets before the pane is too small to show the controls at all.
 const REF_FILTER_MIN_WIDTH: f32 = 90.;
-/// Height of the pinned day heading (DN-3), fixed so that revealing a row can leave room
-/// for it: its padding, the caption line, the date line and the hairline.
-const STICKY_HEIGHT: f32 = 4. + 20. + DAY_TITLE.line + 4. + 1.;
+/// Height of the pinned day heading (DN-3). It is exactly the day header's own height —
+/// its top padding, the caption line, the date line, the gap below the title and the
+/// hairline — so the pinned copy replaces the real one without duplicating it.
+const STICKY_HEIGHT: f32 =
+    DAY_HEADER_PAD_TOP + DAY_CAPTION_LINE + DAY_TITLE.line + DAY_HEADER_GAP + 1.;
 
 #[derive(Debug, Clone)]
 pub enum PageViewEvent {
@@ -173,20 +179,25 @@ enum Item {
         date: NaiveDate,
         page: Option<PageId>,
         title: SharedString,
-        /// "Thursday · Today" above the date (DN-2).
-        caption: SharedString,
-        /// Today's caption is in the link colour (DN-2).
+        /// The weekday label above the date, upper case (DESIGN.md §3.5).
+        weekday: SharedString,
+        /// Today carries a Today pill beside its weekday (§3.5).
         today: bool,
         first: bool,
     },
-    /// A day in the feed with nothing on it, folded to one 36 px row (DN-1).
-    DayFolded {
+    /// A day with nothing on it (DESIGN.md §3.6): one 44 px row. Consecutive empty days
+    /// are separate list items so the list still virtualizes them one row at a time; they
+    /// read as one block because only the first of a run carries the 40 px gap and the
+    /// single divider, and the rest sit 4 px apart.
+    EmptyDay {
         date: NaiveDate,
         weekday: SharedString,
         title: SharedString,
+        /// First of a run of empty days.
+        first: bool,
     },
-    /// The click-to-start row under an open day that has no blocks yet (today and
-    /// yesterday always stay open, DN-1).
+    /// The click-to-start row under an open day that has no blocks yet (a day with
+    /// only references, or only attribute rows, keeps its section).
     DayEmpty {
         date: NaiveDate,
     },
@@ -203,12 +214,12 @@ enum Item {
 struct DayHeading {
     /// Index of the day's [`Item::DayHeader`] in `items`.
     ix: usize,
-    /// One past the day's last item, so a folded day (whose own date is in its row) does
-    /// not pin the previous day's heading over it.
+    /// One past the day's last item, so an empty-day group (whose rows carry their own
+    /// dates) does not pin the previous day's heading over it.
     end: usize,
     date: NaiveDate,
     title: SharedString,
-    caption: SharedString,
+    weekday: SharedString,
     today: bool,
 }
 
@@ -764,6 +775,7 @@ impl PageView {
             }),
         ];
         let today = app.read(cx).store.today();
+        let list = ListState::new(0, ListAlignment::Top, px(400.));
         Self {
             app,
             editor,
@@ -771,7 +783,7 @@ impl PageView {
             compact,
             close,
             items: Vec::new(),
-            list: ListState::new(0, ListAlignment::Top, px(400.)),
+            list,
             header: Header::default(),
             refs: LinkedRefs::default(),
             refs_key: None,
@@ -963,6 +975,29 @@ impl PageView {
     /// The date whose heading is stuck at the top of the feed, for scripts (DN-3).
     pub fn sticky_day(&self) -> Option<NaiveDate> {
         self.sticky_heading().map(|h| h.date)
+    }
+
+    /// DESIGN.md §4.1: "Today" resets the feed's scroll position to today. Today's day
+    /// is the feed's first item, so this scrolls the list to its top; the top bar's Today
+    /// button (DESIGN.md §3.3) and the Today pill both call it.
+    pub fn scroll_to_today(&mut self, cx: &mut Context<Self>) {
+        if self.journal().is_none() {
+            return;
+        }
+        self.list.scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
+    /// How many empty-day rows the feed carries as separate list items (DESIGN.md §3.6),
+    /// for scripts. One item per day is what lets the list virtualize a long blank run.
+    pub fn empty_day_rows(&self) -> usize {
+        self.items
+            .iter()
+            .filter(|i| matches!(i, Item::EmptyDay { .. }))
+            .count()
     }
 
     /// How many days the feed shows open, with a date heading (DN-1), for scripts.
@@ -1238,7 +1273,7 @@ impl PageView {
     /// DN-3: the pinned day heading is drawn *over* the top of the list, so a row the list
     /// counts as visible can still be hidden behind it. True when the row's own top sits
     /// above the heading's bottom edge — the row revealed at the list's top edge, or the
-    /// next short row scrolled up under the 63 px heading. Measured against bounds when the
+    /// next short row scrolled up under the pinned heading. Measured against bounds when the
     /// list has them, so a tall row that merely *follows* the top one does not trigger a
     /// scroll it does not need.
     fn row_overlaps_pinned_day(&self, ix: usize, line_height: f32) -> bool {
@@ -1628,7 +1663,7 @@ impl PageView {
         let mut items = Vec::new();
         let mut ids = Vec::new();
         let mut headings = Vec::new();
-        let yesterday = today_date.pred_opt();
+        let mut previous_empty = false;
         for (i, day) in days.into_iter().enumerate() {
             // Like Roam's feed: Linked References under the day when it has any, and no
             // Unlinked References (those stay on the day's own page). A day with
@@ -1638,59 +1673,57 @@ impl PageView {
                 .as_ref()
                 .and_then(|p| refs_cache.get(p))
                 .filter(|r| !r.groups.is_empty());
-            // DN-1: a day with nothing on it folds to one 36 px row. Today and yesterday
-            // always stay open, so the day the caret starts in always shows its heading;
-            // folding is a view change only, the day is still written on its first key.
+            // DESIGN.md §3.6: a day with no blocks (and no references) is one empty row,
+            // not a section. Today is open from the start only because its draft already
+            // has the block the caret goes in (FR-1.2); the first keystroke writes it.
             // PG-1: rows can exist and still not be visible — a root attribute block folds
             // to one muted row, so the day keeps its heading but still offers the prompt.
-            let open =
-                !day.rows.is_empty() || refs.is_some() || i == 0 || Some(day.date) == yesterday;
-            // The day's heading, for the sticky header, when the day is open.
-            let mut heading = None;
+            let open = !day.rows.is_empty() || refs.is_some();
             if open {
-                let caption: SharedString = day_caption(day.date, today_date).into();
-                heading = Some(headings.len());
+                previous_empty = false;
+                let weekday: SharedString = weekday_label(day.date).into();
+                let heading_ix = headings.len();
                 headings.push(DayHeading {
                     ix: items.len(),
                     end: items.len(),
                     date: day.date,
                     title: day.title.clone().into(),
-                    caption: caption.clone(),
+                    weekday: weekday.clone(),
                     today: day.date == today_date,
                 });
                 items.push(Item::DayHeader {
                     date: day.date,
                     page: day.page.clone(),
                     title: day.title.into(),
-                    caption,
+                    weekday,
                     today: day.date == today_date,
                     first: i == 0,
                 });
                 if !day.rows.iter().any(|i| matches!(i, Item::Row(_))) {
                     items.push(Item::DayEmpty { date: day.date });
                 }
-            } else {
-                items.push(Item::DayFolded {
-                    date: day.date,
-                    weekday: utopia_core::date::weekday_name_of(day.date).into(),
-                    title: day.title.into(),
-                });
-            }
-            items.extend(day.rows);
-            if let Some(page) = day.page {
-                // Like Roam's feed: Linked References under the day when it has any, and no
-                // Unlinked References (those stay on the day's own page).
-                if let Some(refs) = refs {
-                    items.push(Item::RefsHeader {
-                        title: "Linked References".into(),
-                        count: refs.shown(),
-                    });
-                    self.push_ref_groups(&page, refs, true, &mut items, cx);
+                items.extend(day.rows);
+                if let Some(page) = day.page {
+                    // Like Roam's feed: Linked References under the day when it has any, and
+                    // no Unlinked References (those stay on the day's own page).
+                    if let Some(refs) = refs {
+                        items.push(Item::RefsHeader {
+                            title: "Linked References".into(),
+                            count: refs.shown(),
+                        });
+                        self.push_ref_groups(&page, refs, true, &mut items, cx);
+                    }
+                    ids.push(page);
                 }
-                ids.push(page);
-            }
-            if let Some(h) = heading {
-                headings[h].end = items.len();
+                headings[heading_ix].end = items.len();
+            } else {
+                items.push(Item::EmptyDay {
+                    date: day.date,
+                    weekday: weekday_label(day.date).into(),
+                    title: day.title.into(),
+                    first: !previous_empty,
+                });
+                previous_empty = true;
             }
         }
         // A rebuild resolves the window it just loaded into a terminal or open state.
@@ -2697,6 +2730,7 @@ impl PageView {
         let end = prefix + text.len();
         let row2 = row.clone();
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
+        let chips = rendered.chips.clone();
         let text_sel = format!("text-{}", row_block.0);
         div()
             .flex_1()
@@ -2705,7 +2739,7 @@ impl PageView {
             // An editable row shows the I-beam between its links; a read-only one (a query
             // or search hit) is itself clickable, so it keeps its container's pointer.
             .when(row.is_some(), |d| d.cursor_text())
-            .child(rich::LinkText::new(styled, links))
+            .child(rich::LinkText::new(styled, links).with_chips(chips, th.tag_bg))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -2744,7 +2778,17 @@ impl PageView {
         let vpad = density.block_spacing() / 2.;
         let host = cx.entity_id();
         let editing = self.editor.read(cx).is_editing(host, &r.page, &r.block);
-        let indent = r.depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT;
+        // DESIGN.md §3.1: children step right by 31 + 13 + the 1 px thread line; the row's
+        // caret/bullet gutter hangs in the content column's side padding so block text
+        // lines up with the page or day title. A compact pane is too narrow for 45 px a
+        // level (the right sidebar is 380 px, a split less), so it indents less and its
+        // thread lines follow that same step.
+        let indent = if self.compact {
+            COMPACT_INDENT
+        } else {
+            CHILD_INDENT
+        };
+        let step = r.depth.min(MAX_VISUAL_DEPTH) as f32 * indent;
         // PG-3: a heading's own line box, so H3 is not padded out to the body's 24 px.
         let line = match r.kind {
             BlockKind::Heading(level) => crate::theme::heading_metrics(level).1,
@@ -2770,18 +2814,21 @@ impl PageView {
         // block keeps its arrow (it is the only sign that content is hidden); an expanded
         // one shows it only on hover, which leaves the outline quiet to read.
         let hovered = self.hovered_row.as_ref() == Some(&r.block);
+        // DESIGN.md §3.1: a 20 px caret slot in the gutter. The chevron shows on hover (or
+        // while collapsed, the only sign that content is hidden); collapse itself is also
+        // an action (ToggleCollapse), so the pointer is not the only way in.
         let arrow = {
             let block = r.block.clone();
             let shown = r.has_children && (r.collapsed || hovered);
             div()
-                .id(("arrow", ix))
-                .w(px(14.))
+                .id(("arrow-slot", ix))
+                .debug_selector(move || format!("caret-slot-{ix}"))
+                .w(px(CARET_SLOT))
                 .h(px(lh))
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.muted)
                 .when(r.has_children, |d| {
                     d.cursor_pointer().on_click(
                         cx.listener(move |this, _, _, cx| this.toggle_collapse(&block, cx)),
@@ -2791,6 +2838,8 @@ impl PageView {
                     d.child(
                         div()
                             .debug_selector(move || format!("arrow-{ix}"))
+                            .text_size(px(CARET_SIZE))
+                            .text_color(th.bullet)
                             .child(if r.collapsed { "▸" } else { "▾" }),
                     )
                 })
@@ -2805,8 +2854,9 @@ impl PageView {
                 .into();
             div()
                 .id(("bullet", ix))
-                .w(px(18.))
+                .w(px(BULLET_SLOT))
                 .h(px(lh))
+                .flex_none()
                 .flex()
                 .items_center()
                 .justify_center()
@@ -2846,16 +2896,38 @@ impl PageView {
                 }))
         };
         let target = r.clone();
+        // DESIGN.md §2.3/§3.1: in the main pane the gutter hangs in the column's 40 px side
+        // padding, so block text starts exactly where the title does. The right sidebar is
+        // narrower (its design is still open, §6), so its rows keep the gutter inside.
+        let pad_x = if self.compact {
+            crate::theme::SPACING[3]
+        } else {
+            CONTENT_PADDING_X
+        };
+        let row_gutter = if self.compact {
+            0.
+        } else {
+            pad_x - (CARET_SLOT + BULLET_SLOT)
+        };
         div()
             .id(("row", ix))
             .debug_selector(move || format!("row-{ix}"))
             .relative()
-            .flex()
-            .flex_row()
-            .items_start()
-            .pl(px(indent))
-            .pr_2()
+            .ml(px(row_gutter))
+            .mr(px(pad_x))
             .py(px(vpad))
+            // Thread lines for every ancestor: a 1 px `line` segment at 31 px past each
+            // ancestor's row start, which is under that ancestor's bullet centre.
+            .children((0..r.depth.min(MAX_VISUAL_DEPTH)).map(|k| {
+                div()
+                    .debug_selector(move || format!("thread-{ix}-{k}"))
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .left(px(k as f32 * indent + THREAD_OFFSET))
+                    .w(px(1.))
+                    .bg(th.line)
+            }))
             .when(r.embed > 0, |d| {
                 d.bg(th.well).border_l_2().border_color(th.line_soft)
             })
@@ -2881,104 +2953,111 @@ impl PageView {
                     }
                 }
             }))
-            .child(arrow)
-            .child(bullet)
-            .when(r.kind == BlockKind::Todo, |d| {
-                let row = r.clone();
-                // PG-4: a drawn box, not a ☐ glyph from whichever font is in force, with
-                // 3 px corners. A done to-do is a filled link box with a check cut out of
-                // it (the page colour), so its state reads at a glance.
-                d.child(
-                    div()
-                        .id(("todo", ix))
-                        .w(px(20.))
-                        .h(px(lh))
-                        .flex()
-                        .items_center()
-                        .cursor_pointer()
-                        .child(
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_start()
+                    .pl(px(step))
+                    .child(arrow)
+                    .child(bullet)
+                    .when(r.kind == BlockKind::Todo, |d| {
+                        let row = r.clone();
+                        // DESIGN.md §3.1: a 16 px checkbox with the link accent and a 10 px
+                        // gap before the text. A done to-do is the filled link box with a
+                        // check cut out of it (the page colour). gpui has no native
+                        // checkbox, so this is a drawn control with the same behaviour.
+                        d.child(
                             div()
+                                .id(("todo", ix))
                                 .debug_selector(|| format!("todo-{ix}"))
-                                .size(px(13.))
-                                .rounded(px(3.))
+                                .size(px(TODO_SIZE))
+                                .mr(px(TODO_GAP))
+                                .mt(px((lh - TODO_SIZE) / 2.))
+                                .rounded(px(crate::theme::RADIUS_CHIP))
                                 .border_1()
-                                .border_color(if r.checked { th.link } else { th.muted })
+                                .border_color(if r.checked { th.link } else { th.line_strong })
                                 .flex()
                                 .items_center()
                                 .justify_center()
+                                .cursor_pointer()
                                 .font_family(crate::theme::MONO)
-                                .text_size(px(9.))
-                                .when(r.checked, |d| d.bg(th.link).text_color(th.paper).child("✓")),
+                                .text_size(px(TODO_CHECK_SIZE))
+                                .when(r.checked, |d| d.bg(th.link).text_color(th.paper).child("✓"))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.toggle_checked(&row, cx)
+                                    }),
+                                ),
                         )
-                        .on_click(cx.listener(move |this, _, _, cx| this.toggle_checked(&row, cx))),
-                )
-            })
-            .child({
-                // Block types (FR-2.13): headings, quotes, code and done to-dos.
-                let mut c = div()
-                    .flex_1()
-                    .min_w_0()
-                    .debug_selector(|| format!("content-{ix}"));
-                c = match r.kind {
-                    BlockKind::Heading(l) => c
-                        .text_size(px(crate::theme::heading_metrics(l).0))
-                        .line_height(px(crate::theme::heading_metrics(l).1))
-                        // PG-3: semibold, not bold. The title stays 28 px, so an outline
-                        // heading never competes with it (ALL-1).
-                        .font_weight(gpui::FontWeight::SEMIBOLD),
-                    // PG-5: a 2 px link bar and a warm grey italic, not the interface
-                    // muted grey.
-                    BlockKind::Quote => c
-                        .border_l_2()
-                        .border_color(th.link)
-                        .pl_2()
-                        .text_color(th.ink_3)
-                        .italic(),
-                    // PG-5: a surface card in Menlo, 6 px corners, with the language (when
-                    // the block names one) at the top right.
-                    BlockKind::Code => {
-                        let card = c
-                            .bg(th.well)
-                            .border_1()
-                            .border_color(th.line)
-                            .rounded(px(crate::theme::RADIUS_CONTROL))
-                            .px_2()
-                            .py_1()
-                            .font_family(crate::theme::MONO)
-                            .text_size(px(13.));
-                        match &code {
-                            Some((lang, _, _)) => card.child(
-                                div()
-                                    .debug_selector(|| format!("code-language-{ix}"))
-                                    .flex()
-                                    .justify_end()
-                                    .pb_0p5()
-                                    .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
-                                    .child(lang.clone()),
-                            ),
-                            None => card,
-                        }
-                    }
-                    // PG-4: struck through in the muted colour, which still reads (the audit
-                    // measured `faint` under 3:1 on white).
-                    BlockKind::Todo if r.checked => c.text_color(th.muted).line_through(),
-                    _ => c,
-                };
-                c.child(content)
-            })
-            .when(r.depth > MAX_VISUAL_DEPTH, |d| {
-                d.child(
-                    div()
-                        .ml_1()
-                        .px_1()
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.muted)
-                        .bg(th.line_soft)
-                        .rounded(px(crate::theme::RADIUS_CHIP))
-                        .child(format!("depth {}", r.depth)),
-                )
-            })
+                    })
+                    .child({
+                        // Block types (FR-2.13): headings, quotes, code and done to-dos.
+                        let mut c = div()
+                            .flex_1()
+                            .min_w_0()
+                            .debug_selector(|| format!("content-{ix}"));
+                        c = match r.kind {
+                            BlockKind::Heading(l) => c
+                                .text_size(px(crate::theme::heading_metrics(l).0))
+                                .line_height(px(crate::theme::heading_metrics(l).1))
+                                // PG-3: semibold, not bold. The title stays 28 px, so an outline
+                                // heading never competes with it (ALL-1).
+                                .font_weight(gpui::FontWeight::SEMIBOLD),
+                            // PG-5: a 2 px link bar and a warm grey italic, not the interface
+                            // muted grey.
+                            BlockKind::Quote => c
+                                .border_l_2()
+                                .border_color(th.link)
+                                .pl_2()
+                                .text_color(th.ink_3)
+                                .italic(),
+                            // PG-5: a surface card in Menlo, 6 px corners, with the language (when
+                            // the block names one) at the top right.
+                            BlockKind::Code => {
+                                let card = c
+                                    .bg(th.well)
+                                    .border_1()
+                                    .border_color(th.line)
+                                    .rounded(px(crate::theme::RADIUS_CONTROL))
+                                    .px_2()
+                                    .py_1()
+                                    .font_family(crate::theme::MONO)
+                                    .text_size(px(13.));
+                                match &code {
+                                    Some((lang, _, _)) => card.child(
+                                        div()
+                                            .debug_selector(|| format!("code-language-{ix}"))
+                                            .flex()
+                                            .justify_end()
+                                            .pb_0p5()
+                                            .text_size(px(crate::theme::CAPTION_SIZE))
+                                            .text_color(th.muted)
+                                            .child(lang.clone()),
+                                    ),
+                                    None => card,
+                                }
+                            }
+                            // PG-4: struck through in the muted colour, which still reads (the audit
+                            // measured `faint` under 3:1 on white).
+                            BlockKind::Todo if r.checked => c.text_color(th.muted).line_through(),
+                            _ => c,
+                        };
+                        c.child(content)
+                    })
+                    .when(r.depth > MAX_VISUAL_DEPTH, |d| {
+                        d.child(
+                            div()
+                                .ml_1()
+                                .px_1()
+                                .text_size(px(crate::theme::CAPTION_SIZE))
+                                .text_color(th.muted)
+                                .bg(th.line_soft)
+                                .rounded(px(crate::theme::RADIUS_CHIP))
+                                .child(format!("depth {}", r.depth)),
+                        )
+                    }),
+            )
             .into_any_element()
     }
 
@@ -3084,7 +3163,21 @@ impl PageView {
     fn render_header(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let h = self.header.clone();
-        let mut col = div().flex().flex_col().gap_1().px_4().pt_4().pb_2();
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .px(px(if self.compact {
+                crate::theme::SPACING[3]
+            } else {
+                CONTENT_PADDING_X
+            }))
+            .pt(px(if self.compact {
+                crate::theme::SPACING[3]
+            } else {
+                CONTENT_PADDING_TOP_PAGE
+            }))
+            .pb_2();
         if h.missing {
             return col
                 .child(
@@ -3813,7 +3906,9 @@ impl PageView {
                 div()
                     .id(("attr", ix))
                     .debug_selector(|| format!("attr-{ix}"))
-                    .pl(px(depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT + 32.))
+                    .pl(px(
+                        depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
+                    ))
                     .pr_2()
                     .py_0p5()
                     .flex()
@@ -3837,14 +3932,18 @@ impl PageView {
                     .into_any_element()
             }
             Item::Notice { depth, text } => div()
-                .pl(px(depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT + 32.))
+                .pl(px(
+                    depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
+                ))
                 .text_size(px(crate::theme::BODY_SIZE))
                 .text_color(th.muted)
                 .child(text)
                 .into_any_element(),
             Item::QueryHeader { depth, label } => div()
                 .debug_selector(|| "query-header".into())
-                .pl(px(depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT + 32.))
+                .pl(px(
+                    depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
+                ))
                 .pt_1()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
@@ -3863,7 +3962,9 @@ impl PageView {
                 );
                 div()
                     .id(("query-hit", ix))
-                    .pl(px(depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT + 32.))
+                    .pl(px(
+                        depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
+                    ))
                     .pr_4()
                     .py_0p5()
                     .flex()
@@ -3900,7 +4001,7 @@ impl PageView {
                 host,
             } => {
                 use utopia_core::attach::BlobKind;
-                let pad = px(depth.min(MAX_VISUAL_DEPTH) as f32 * INDENT + 32.);
+                let pad = px(depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X);
                 let open_path = path.clone();
                 let kind = blob.kind;
                 match (kind, path.clone()) {
@@ -3981,37 +4082,67 @@ impl PageView {
             Item::Empty => div()
                 .id("empty")
                 .debug_selector(|| "empty".into())
-                .px_4()
+                .px(px(CONTENT_PADDING_X))
                 .py_1()
-                .pl(px(32.))
                 .text_color(th.muted)
                 .cursor_text()
                 .child("Click to start writing")
                 .on_click(cx.listener(|this, _, window, cx| this.focus_first(window, cx)))
                 .into_any_element(),
+            // DESIGN.md §3.5: a mono weekday label above the title, a Today pill on today,
+            // the title exactly as stored, then 16 px before the first block.
             Item::DayHeader {
                 date,
                 page,
                 title,
-                caption,
+                weekday,
                 today,
                 first,
             } => div()
                 .debug_selector(move || if first { "today-title" } else { "day-title" }.into())
-                .when(!first, |d| d.mt_8().border_t_1().border_color(th.line))
-                .px_4()
-                .pt_4()
-                .pb_2()
+                .px(px(CONTENT_PADDING_X))
+                .when(first, |d| d.pt(px(CONTENT_PADDING_TOP)))
+                .when(!first, |d| {
+                    // 40 px between days, then the 1 px divider, then the heading. Keeping
+                    // that gap in the margin means the pinned copy (STICKY_HEIGHT) is
+                    // exactly this header, so the two never double up.
+                    d.mt(px(DAY_GAP))
+                        .border_t_1()
+                        .border_color(th.line_soft)
+                        .pt(px(DAY_HEADER_PAD_TOP))
+                })
+                .pb(px(DAY_HEADER_GAP))
                 .child(
-                    // DN-2: the weekday, plus "Today"/"Yesterday". Titles stay display
-                    // only: identity is still `daily_date` (rule 6).
+                    // Titles stay display only: identity is still `daily_date` (rule 6).
                     div()
                         .debug_selector(move || {
                             format!("day-caption-{}", utopia_core::date::iso(date))
                         })
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(if today { th.link } else { th.muted })
-                        .child(caption),
+                        .h(px(DAY_CAPTION_LINE))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .font_family(LABEL_MONO)
+                        .text_size(px(LABEL.size))
+                        .text_color(th.muted)
+                        .child(
+                            div()
+                                .debug_selector(move || {
+                                    format!("day-weekday-{}", utopia_core::date::iso(date))
+                                })
+                                .child(weekday),
+                        )
+                        .when(today, |d| {
+                            d.child(
+                                today_pill("Today", &th)
+                                    .id("today-pill")
+                                    .debug_selector(|| "today-pill".into())
+                                    .cursor_pointer()
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.scroll_to_today(cx)),
+                                    ),
+                            )
+                        }),
                 )
                 .child(
                     div()
@@ -4044,39 +4175,80 @@ impl PageView {
                         })),
                 )
                 .into_any_element(),
-            // DN-1: a day with nothing on it is one 36 px row. The whole row is the click
-            // target; the hint only shows on hover, and no page is written until the first
-            // keystroke (FR-1.2).
-            Item::DayFolded {
+            // DESIGN.md §3.6: consecutive days with nothing on them stack in one block —
+            // a single divider above, 44 px rows 4 px apart, each with a fixed weekday
+            // column, its date title, and a ghost Write button. Clicking either target
+            // expands the day with one empty block focused; nothing is written until the
+            // first keystroke (FR-1.2).
+            // DESIGN.md §3.6, one list item per day so a long gap is virtualized: the first
+            // row of a run carries the 40 px gap and the single 1 px divider, the rest sit
+            // 4 px apart. Each row has the fixed weekday column, its date and a ghost Write;
+            // clicking either target expands the day with one empty block focused, and
+            // nothing is written until the first keystroke (FR-1.2).
+            Item::EmptyDay {
                 date,
                 weekday,
                 title,
+                first,
             } => {
-                let group: SharedString = format!("day-folded-{ix}").into();
+                let iso = utopia_core::date::iso(date);
+                let write = date;
+                let row_sel = format!("empty-day-{iso}");
+                let title_sel = format!("empty-title-{iso}");
+                let write_sel = format!("empty-write-{iso}");
+                let weekday_sel = format!("empty-weekday-{iso}");
                 div()
-                    .id(("day-folded", ix))
-                    .debug_selector(move || format!("day-folded-{}", utopia_core::date::iso(date)))
-                    .group(group.clone())
-                    .h(px(36.))
-                    .px_4()
-                    .pl(px(32.))
+                    .id(gpui::ElementId::Name(format!("empty-day-{iso}").into()))
+                    .debug_selector(move || row_sel.clone())
+                    .px(px(CONTENT_PADDING_X))
+                    .when(first, |d| {
+                        d.mt(px(DAY_GAP))
+                            .border_t_1()
+                            .border_color(th.line_soft)
+                            .pt(px(DAY_HEADER_PAD_TOP))
+                    })
+                    .when(!first, |d| d.mt(px(EMPTY_DAY_GAP)))
+                    .h(px(EMPTY_DAY_HEIGHT))
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .text_size(px(crate::theme::BODY_SIZE))
-                    .text_color(th.muted)
                     .cursor_pointer()
                     .hover(|s| s.bg(th.hover))
-                    .child(weekday)
-                    .child(title)
-                    .child(div().flex_1())
                     .child(
                         div()
-                            .text_size(px(crate::theme::CAPTION_SIZE))
+                            .debug_selector(move || weekday_sel.clone())
+                            .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
+                            .font_family(LABEL_MONO)
+                            .text_size(px(LABEL.size))
                             .text_color(th.muted)
-                            .opacity(0.)
-                            .group_hover(group, |s| s.opacity(1.))
-                            .child("Click to start writing"),
+                            .child(weekday),
+                    )
+                    .child(
+                        crate::theme::EMPTY_DAY_TITLE
+                            .apply(div())
+                            .debug_selector(move || title_sel.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_color(th.ink)
+                            .child(title),
+                    )
+                    .child(
+                        quiet_control(
+                            gpui::ElementId::Name(format!("empty-write-{iso}").into()),
+                            "Write",
+                            &th,
+                        )
+                        .debug_selector(move || write_sel.clone())
+                        .h(px(28.))
+                        .ml_2()
+                        .flex()
+                        .items_center()
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.start_day(write, window, cx);
+                            },
+                        )),
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.start_day(date, window, cx)),
@@ -4086,9 +4258,8 @@ impl PageView {
             Item::DayEmpty { date } => div()
                 .id(("day-empty", ix))
                 .debug_selector(|| "day-empty".into())
-                .px_4()
+                .px(px(CONTENT_PADDING_X))
                 .py_1()
-                .pl(px(32.))
                 .text_color(th.muted)
                 .cursor_text()
                 .child("Click to start writing")
@@ -4103,9 +4274,9 @@ impl PageView {
                 });
                 div()
                     .debug_selector(|| "journal-end".into())
-                    .px_4()
+                    .px(px(CONTENT_PADDING_X))
                     .pt_8()
-                    .pb(px(120.))
+                    .pb(px(CONTENT_PADDING_BOTTOM))
                     .text_size(px(crate::theme::BODY_SIZE))
                     .text_color(th.muted)
                     .child("Loading older days…")
@@ -4113,9 +4284,9 @@ impl PageView {
             }
             Item::JournalExhausted => div()
                 .debug_selector(|| "feed-end".into())
-                .px_4()
+                .px(px(CONTENT_PADDING_X))
                 .pt_8()
-                .pb_6()
+                .pb(px(CONTENT_PADDING_BOTTOM))
                 .text_size(px(crate::theme::BODY_SIZE))
                 .text_color(th.muted)
                 .child("No earlier notes.")
@@ -4123,7 +4294,11 @@ impl PageView {
             Item::RefsHeader { title, count } => div()
                 .debug_selector(|| "refs-header".into())
                 .mt_6()
-                .mx_4()
+                .mx(px(if self.compact {
+                    crate::theme::SPACING[3]
+                } else {
+                    CONTENT_PADDING_X
+                }))
                 .pt_2()
                 .pb_1()
                 .border_t_1()
@@ -4176,10 +4351,8 @@ impl PageView {
                             )
                             .when(scheduled, |d| {
                                 d.child(
-                                    div()
-                                        .text_size(px(crate::theme::CAPTION_SIZE))
-                                        .text_color(th.tag_ink)
-                                        .child("Scheduled for this day"),
+                                    ref_type_label("Scheduled for this day", &th)
+                                        .debug_selector(|| "ref-type-label".into()),
                                 )
                             }),
                     )
@@ -4515,7 +4688,7 @@ fn drag_handle(
     lh: f32,
 ) -> AnyElement {
     let cell = div()
-        .w(px(18.))
+        .w(px(BULLET_SLOT))
         .h(px(lh))
         .flex()
         .items_center()
@@ -4538,15 +4711,36 @@ fn drag_handle(
         }
         return cell.child(grip).into_any_element();
     }
+    // DESIGN.md §3.1: a 6 px `bullet` dot; a collapsed block puts a 12 px `line_strong`
+    // ring around a 6 px `ink_3` dot so it reads as "there is more in here".
+    if r.collapsed && r.has_children {
+        return cell
+            .child(
+                div()
+                    .debug_selector(move || format!("ring-{ix}"))
+                    .size(px(COLLAPSED_RING))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(th.line_strong)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .debug_selector(move || format!("dot-{ix}"))
+                            .size(px(BULLET_SIZE))
+                            .rounded_full()
+                            .bg(th.ink_3),
+                    ),
+            )
+            .into_any_element();
+    }
     cell.child(
         div()
             .debug_selector(move || format!("dot-{ix}"))
-            .size(px(6.))
+            .size(px(BULLET_SIZE))
             .rounded_full()
-            .bg(th.bullet)
-            .when(r.collapsed && r.has_children, |d| {
-                d.size(px(8.)).border_2().border_color(th.line_strong)
-            }),
+            .bg(th.bullet),
     )
     .into_any_element()
 }
@@ -4792,6 +4986,11 @@ impl Render for PageView {
             .size_full()
             .bg(th.paper)
             .relative()
+            // DN-3: the pinned day heading is drawn by this view from the list's scroll
+            // offset, and scrolling the list does not re-render its parent. Ask for a frame;
+            // the listener cannot read the list here (its state is borrowed during the
+            // scroll), so `render` reads the new offset.
+            .on_scroll_wheel(cx.listener(|_, _: &gpui::ScrollWheelEvent, _, cx| cx.notify()))
             .child(
                 list(self.list.clone(), move |ix, window, cx| {
                     // List items are laid out as roots, which shrink to their content; a
@@ -4827,18 +5026,33 @@ impl Render for PageView {
                                 .w_full()
                                 .max_w(px(CONTENT_MAX_WIDTH))
                                 .h(px(STICKY_HEIGHT))
-                                .px_4()
-                                .pt_1()
-                                .pb_1()
+                                .px(px(CONTENT_PADDING_X))
+                                .pt(px(DAY_HEADER_PAD_TOP))
+                                .pb(px(DAY_HEADER_GAP))
                                 .bg(th.paper)
                                 .border_b_1()
                                 .border_color(th.line)
                                 .child(
                                     div()
-                                        .text_size(px(crate::theme::CAPTION_SIZE))
-                                        .line_height(px(20.))
-                                        .text_color(if h.today { th.link } else { th.muted })
-                                        .child(h.caption.clone()),
+                                        .h(px(DAY_CAPTION_LINE))
+                                        .flex()
+                                        .items_center()
+                                        .gap_1()
+                                        .font_family(LABEL_MONO)
+                                        .text_size(px(LABEL.size))
+                                        .text_color(th.muted)
+                                        .child(h.weekday.clone())
+                                        .when(h.today, |d| {
+                                            d.child(
+                                                today_pill("Today", &th)
+                                                    .id("sticky-today-pill")
+                                                    .debug_selector(|| "sticky-today-pill".into())
+                                                    .cursor_pointer()
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.scroll_to_today(cx)
+                                                    })),
+                                            )
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -4853,15 +5067,10 @@ impl Render for PageView {
     }
 }
 
-/// DN-2: the caption above a day in the feed: "Thursday · Today", "Wednesday ·
-/// Yesterday", or just "Monday". Display only (§10.3: a day's identity is its date).
-fn day_caption(date: NaiveDate, today: NaiveDate) -> String {
-    let weekday = utopia_core::date::weekday_name_of(date);
-    match (today - date).num_days() {
-        0 => format!("{weekday} · Today"),
-        1 => format!("{weekday} · Yesterday"),
-        _ => weekday.to_string(),
-    }
+/// DESIGN.md §3.5: the mono weekday label above a day's title, in upper case.
+/// Display only (§10.3: a day's identity is its date).
+fn weekday_label(date: NaiveDate) -> String {
+    utopia_core::date::weekday_name_of(date).to_uppercase()
 }
 
 fn human_size(n: u64) -> String {
@@ -5031,25 +5240,14 @@ mod tests {
         assert!(!CODE_LANGUAGES.is_empty());
     }
 
-    /// DN-2: "Thursday · Today", "Wednesday · Yesterday", "Monday".
+    /// DESIGN.md §3.5: the label is the weekday alone, upper case (the Today pill says
+    /// "today", so the label never repeats it).
     #[test]
-    fn day_captions_name_the_weekday_and_the_neighbours() {
+    fn weekday_labels_are_upper_case_weekdays() {
         // Thursday, November 5th, 2026.
         let today = NaiveDate::from_ymd_opt(2026, 11, 5).unwrap();
-        assert_eq!(day_caption(today, today), "Thursday · Today");
-        assert_eq!(
-            day_caption(today.pred_opt().unwrap(), today),
-            "Wednesday · Yesterday"
-        );
-        assert_eq!(
-            day_caption(today - chrono::Duration::days(3), today),
-            "Monday"
-        );
-        // Days further back get the weekday alone; the feed never shows a future day.
-        assert_eq!(
-            day_caption(today - chrono::Duration::days(30), today),
-            "Tuesday"
-        );
-        assert_eq!(day_caption(today.succ_opt().unwrap(), today), "Friday");
+        assert_eq!(weekday_label(today), "THURSDAY");
+        assert_eq!(weekday_label(today.pred_opt().unwrap()), "WEDNESDAY");
+        assert_eq!(weekday_label(today - chrono::Duration::days(3)), "MONDAY");
     }
 }

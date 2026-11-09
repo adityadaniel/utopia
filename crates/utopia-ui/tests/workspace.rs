@@ -3023,8 +3023,11 @@ fn a_handler_rebuild_is_not_repeated_by_its_own_change(cx: &mut TestAppContext) 
     // Clicking an empty day starts writing a draft, which reports a change with nothing
     // to flush (FR-1.2) and rebuilds the rows in the click handler. No index update
     // follows, so any second pass is the deferred `Changed` alone.
+    let yesterday = today() - chrono::Duration::days(1);
+    let empty_sel: &'static str =
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(yesterday)).into_boxed_str());
     let empty = cx
-        .debug_bounds("day-empty")
+        .debug_bounds(empty_sel)
         .expect("a blank day offers a row to start writing");
     cx.simulate_click(empty.center(), Modifiers::default());
     cx.run_until_parked();
@@ -4595,7 +4598,7 @@ fn fr_1_1_feed_stops_at_the_oldest_daily_page(cx: &mut TestAppContext) {
     let inside = NaiveDate::from_ymd_opt(2026, 10, 8).unwrap();
     assert_eq!(inside, today() - chrono::Duration::days(25));
     let folded = cx
-        .debug_bounds("day-folded-2026-10-08")
+        .debug_bounds("empty-day-2026-10-08")
         .expect("a blank day inside the window");
     cx.simulate_click(folded.center(), Modifiers::default());
     cx.run_until_parked();
@@ -4723,7 +4726,10 @@ fn scroll_main(cx: &mut VisualTestContext, dy: f32) {
 fn feed_blank_day_is_written_by_typing(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup(cx);
     cx.simulate_keystrokes("escape");
-    let blank = cx.debug_bounds("day-empty").expect("a blank day");
+    let yesterday = today() - chrono::Duration::days(1);
+    let blank_sel: &'static str =
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(yesterday)).into_boxed_str());
+    let blank = cx.debug_bounds(blank_sel).expect("a blank day");
     cx.simulate_click(blank.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(daily_count(&app, cx), 0, "clicking is not writing");
@@ -4743,23 +4749,23 @@ fn feed_blank_day_is_written_by_typing(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, written[0], cx), ["filled in later"]);
 }
 
-/// DN-1: an empty day after today and yesterday is one row; clicking it starts writing
-/// there, and the day opens (with its heading) once it has a block. Clicking alone writes
+/// DESIGN.md §3.6: an empty day is one row in a group; clicking it starts writing there,
+/// and the day opens (with its heading) once it has a block. Clicking alone writes
 /// nothing (FR-1.2).
 #[gpui::test]
-fn folded_empty_day_opens_on_a_click(cx: &mut TestAppContext) {
+fn empty_day_opens_on_a_click(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(
         ws.update(cx, |w, cx| w.open_journal_days(cx)),
-        2,
-        "today and yesterday stay open"
+        1,
+        "only today's draft has a section; yesterday is an empty row"
     );
     let day = today() - chrono::Duration::days(4);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(daily_count(&app, cx), 0, "clicking is not writing");
@@ -4769,8 +4775,8 @@ fn folded_empty_day_opens_on_a_click(cx: &mut TestAppContext) {
     assert_eq!(day_texts(&app, day, cx), ["picked up later"]);
     assert_eq!(
         ws.update(cx, |w, cx| w.open_journal_days(cx)),
-        3,
-        "the day now shows its date and its block"
+        2,
+        "the day now shows its date and its block, beside today"
     );
 }
 
@@ -4785,8 +4791,8 @@ fn fr_1_2_starting_a_draft_does_not_flush_the_index(cx: &mut TestAppContext) {
     let day = today() - chrono::Duration::days(4);
     let before = app.read_with(cx, |app, _| app.refs_version);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert!(
@@ -6624,8 +6630,8 @@ fn template_backed_day_is_not_written_by_a_click(cx: &mut TestAppContext) {
     cx.run_until_parked();
     let day = today() - chrono::Duration::days(4);
     let selector: &'static str =
-        Box::leak(format!("day-folded-{}", utopia_core::date::iso(day)).into_boxed_str());
-    let row = cx.debug_bounds(selector).expect("a folded empty day");
+        Box::leak(format!("empty-day-{}", utopia_core::date::iso(day)).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("an empty day row");
     cx.simulate_click(row.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(

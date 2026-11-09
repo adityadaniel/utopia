@@ -8,7 +8,7 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
-use utopia_ui::theme::{Theme, INDENT, SIDEBAR_WIDTH};
+use utopia_ui::theme::{Theme, CHILD_INDENT, SIDEBAR_WIDTH};
 use utopia_ui::workspace::Workspace;
 
 const W: f32 = 1280.;
@@ -173,10 +173,10 @@ fn outline_rows_indent_and_stack(cx: &mut TestAppContext) {
         "rows stack downward"
     );
     assert!(
-        approx(r2.origin.x - r1.origin.x, INDENT),
+        approx(r2.origin.x - r1.origin.x, CHILD_INDENT),
         "one indent per level: {r1:?} {r2:?}"
     );
-    assert!(approx(r3.origin.x - r2.origin.x, INDENT));
+    assert!(approx(r3.origin.x - r2.origin.x, CHILD_INDENT));
     let main = bounds(cx, "main-pane");
     for r in [r1, r2, r3] {
         assert!(
@@ -194,12 +194,12 @@ fn outline_rows_indent_and_stack(cx: &mut TestAppContext) {
         "Linked References sit below the outline"
     );
     // List items shrink to their content unless wrapped; the header's rule and count
-    // must span the column inside its 16px margins (found by screenshot). The column is
-    // a readable width, centred in the pane.
+    // must span the column inside its 40 px margins (DESIGN.md §2.3). The column is a
+    // readable width, centred in the pane.
     let column = f32::from(main.size.width).min(760.);
     let left = (f32::from(main.size.width) - column) / 2.;
     assert!(
-        approx(refs.origin.x - main.origin.x, left + 16.) && approx(refs.size.width, column - 32.),
+        approx(refs.origin.x - main.origin.x, left + 40.) && approx(refs.size.width, column - 80.),
         "refs header spans the column: {refs:?} {main:?}"
     );
 }
@@ -628,66 +628,282 @@ fn daily_notes_feed_stacks_days(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("escape");
     let title = bounds(cx, "today-title");
     let row = bounds(cx, "content-1");
-    let older = bounds(cx, "day-title");
+    // An older day with nothing on it is an empty row (§3.6), not a section.
+    let older = bounds(cx, "empty-day-2026-11-01");
     assert!(older.origin.y > row.origin.y, "older days follow today");
     assert!(title.origin.y + title.size.height <= row.origin.y + px(0.5));
-    // DN-2: the weekday caption sits above the date, on today and on older open days,
-    // and is smaller than the date it captions.
+    // §3.5: a mono weekday label sits above today's date, and is not a second title.
     let today_caption = bounds(cx, "day-caption-2026-11-02");
     let today_date = bounds(cx, "day-date-2026-11-02");
-    let older_caption = bounds(cx, "day-caption-2026-11-01");
-    let older_date = bounds(cx, "day-date-2026-11-01");
-    for (caption, date) in [(today_caption, today_date), (older_caption, older_date)] {
-        assert!(
-            caption.origin.y + caption.size.height <= date.origin.y + px(0.5),
-            "the caption is above its date: {caption:?} {date:?}"
-        );
-        assert!(
-            caption.size.height < date.size.height,
-            "a caption, not a second title: {caption:?} {date:?}"
-        );
-    }
+    assert!(
+        today_caption.origin.y + today_caption.size.height <= today_date.origin.y + px(0.5),
+        "the weekday is above its date: {today_caption:?} {today_date:?}"
+    );
+    assert!(
+        today_caption.size.height < today_date.size.height,
+        "a label, not a second title: {today_caption:?} {today_date:?}"
+    );
+    assert!(
+        cx.debug_bounds("empty-weekday-2026-11-01").is_some(),
+        "the empty row names its weekday"
+    );
     assert!(
         cx.debug_bounds("refs-header").is_none(),
         "no references inside the feed"
     );
 }
 
-/// DN-1: after today and yesterday (which always stay open), an empty day is one 36 px
-/// row, and those rows stack.
+/// DESIGN.md §3.6: consecutive days with nothing on them read as one block — a single
+/// divider above, 44 px rows 4 px apart, a fixed 92 px weekday column, the date title, and
+/// a ghost Write. They are separate list items, so the list virtualizes each. Clicking
+/// Write expands the day with one empty block focused, and nothing is written until the
+/// first keystroke (FR-1.2).
 #[gpui::test]
-fn feed_folds_empty_days_to_one_row(cx: &mut TestAppContext) {
+fn empty_day_rows_stack_and_write_expands_one(cx: &mut TestAppContext) {
     let cx = setup(cx);
+    cx.simulate_input("today's note");
     cx.simulate_keystrokes("escape");
-    // Yesterday is empty but open (DN-1).
-    let yesterday = bounds(cx, "day-title");
+    let first = bounds(cx, "empty-day-2026-11-01");
+    let second = bounds(cx, "empty-day-2026-10-31");
     assert!(
-        cx.debug_bounds("day-empty").is_some(),
-        "yesterday's hint row"
-    );
-    // Two days back is the first folded row: one 36 px row per empty day.
-    let folded = bounds(cx, "day-folded-2026-10-31");
-    let next = bounds(cx, "day-folded-2026-10-30");
-    assert!(approx(folded.size.height, 36.), "one row: {folded:?}");
-    assert!(
-        folded.origin.y > yesterday.origin.y,
-        "{folded:?} {yesterday:?}"
+        approx(first.size.height, 44.),
+        "an empty day is one 44 px row: {first:?}"
     );
     assert!(
-        approx(next.origin.y - folded.origin.y, 36.),
-        "folded days stack: {folded:?} {next:?}"
+        approx(second.origin.y - (first.origin.y + first.size.height), 4.),
+        "4 px between empty rows: {first:?} {second:?}"
     );
-    // The row stays inside the readable column, like the days above it.
+    // The weekday column is fixed, so the date titles line up.
+    let weekday = bounds(cx, "empty-weekday-2026-11-01");
+    let title = bounds(cx, "empty-title-2026-11-01");
+    assert!(approx(weekday.size.width, 92.), "{weekday:?}");
+    assert!(
+        approx(title.origin.x - weekday.origin.x, 92.),
+        "the date starts after the fixed weekday column: {weekday:?} {title:?}"
+    );
+    assert!(
+        approx(title.size.height, 26.),
+        "the date is the 17/26 empty-day title: {title:?}"
+    );
+    let write = bounds(cx, "empty-write-2026-10-31");
+    assert!(
+        write.size.height >= px(28.) && write.size.height <= px(32.) + px(0.5),
+        "a ghost Write button: {write:?}"
+    );
+
+    // Write opens that day with one empty block focused; the click alone writes nothing.
+    cx.simulate_click(write.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let opened = bounds(cx, "day-date-2026-10-31");
+    let below = bounds(cx, "empty-day-2026-10-30");
+    assert!(
+        opened.origin.y < below.origin.y,
+        "the opened day has its heading above the rows that are still empty: \
+         {opened:?} {below:?}"
+    );
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    let app = ws.update(cx, |w, _| w.app().clone());
+    assert_eq!(
+        ws.update(cx, |w, cx| w.editor().read(cx).field_text().to_string()),
+        "",
+        "the caret is in a fresh, empty block"
+    );
+    let day = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+    assert!(
+        app.read_with(cx, |app, _| app.store.is_draft(&PageId::for_date(day))),
+        "a click starts a draft, not a write"
+    );
+    cx.simulate_input("picked up later");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let texts: Vec<String> = app.update(cx, |app, _| {
+        let st = app.store.page_state(&PageId::for_date(day)).unwrap();
+        st.live_roots()
+            .into_iter()
+            .filter_map(|b| st.block(&b).map(|b| b.text.clone()))
+            .collect()
+    });
+    assert_eq!(
+        texts,
+        ["picked up later"],
+        "the first keystroke writes the day"
+    );
+    // The readable column still holds the rows.
     let (left, right) = column(cx);
     let (x0, x1) = (
-        f32::from(folded.origin.x),
-        f32::from(folded.origin.x + folded.size.width),
+        f32::from(first.origin.x),
+        f32::from(first.origin.x + first.size.width),
     );
-    assert!(x0 >= left && x1 <= right + 0.5, "{folded:?}");
+    assert!(x0 >= left && x1 <= right + 0.5, "{first:?}");
+}
+
+/// DESIGN.md §3.6 without losing virtualization: each empty day is its own list item, so a
+/// blank stretch costs the list per-row work instead of one item covering all of it.
+#[gpui::test]
+fn empty_days_are_individual_list_items(cx: &mut TestAppContext) {
+    let cx = setup(cx);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    // The first window is JOURNAL_BATCH (10) calendar days: today is open (its draft has
+    // the block the caret goes in) and the other nine are empty rows.
+    let rows = ws.update(cx, |w, cx| w.main_empty_day_rows(cx));
+    assert!(
+        rows >= 8,
+        "one list item per empty day, not one item for the whole run: {rows}"
+    );
+    let first = bounds(cx, "empty-day-2026-11-01");
+    let second = bounds(cx, "empty-day-2026-10-31");
+    assert!(approx(first.size.height, 44.));
+    assert!(approx(
+        second.origin.y - (first.origin.y + first.size.height),
+        4.
+    ));
+}
+
+/// DESIGN.md §3.1: rows follow the 28 px line grid. The caret slot (20 px) sits in the
+/// gutter, the bullet slot is 24 px, a 6 px bullet is centred in the first line, block
+/// text lines up with the page title, and children step 45 px with a thread line under
+/// each ancestor's bullet.
+#[gpui::test]
+fn block_rows_follow_the_line_grid_and_the_thread(cx: &mut TestAppContext) {
+    let cx = setup_page(cx);
+    cx.simulate_input("parent");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("child");
+    cx.simulate_keystrokes("tab enter");
+    cx.simulate_input("grandchild");
+    cx.simulate_keystrokes("tab escape");
+    cx.run_until_parked();
+
+    let row1 = bounds(cx, "row-1");
+    let content1 = bounds(cx, "content-1");
+    let content2 = bounds(cx, "content-2");
+    let content3 = bounds(cx, "content-3");
+    assert!(
+        approx(row1.size.height, 28.),
+        "a one-line row is one 28 px line: {row1:?}"
+    );
+    assert!(approx(content1.size.height, 28.), "{content1:?}");
+    // The caret slot is 20 px and the bullet slot 24; the bullet sits 20 + 12 px in.
+    let caret = bounds(cx, "caret-slot-1");
+    let dot = bounds(cx, "dot-1");
+    assert!(approx(caret.size.width, 20.), "{caret:?}");
+    assert!(
+        approx(dot.size.width, 6.) && approx(dot.size.height, 6.),
+        "a 6 px bullet: {dot:?}"
+    );
+    assert!(
+        approx(dot.origin.x + dot.size.width / 2. - row1.origin.x, 32.),
+        "bullet centre after the 20 px caret slot and half the 24 px bullet slot: \
+         {dot:?} {row1:?}"
+    );
+    // The gutter hangs in the column's padding, so the text starts where the title does.
+    let title = bounds(cx, "page-title");
+    assert!(
+        approx(content1.origin.x, f32::from(title.origin.x)),
+        "block text aligns with the title: {content1:?} {title:?}"
+    );
+    // Children step 45 px (31 margin + 13 padding + the 1 px line).
+    assert!(approx(content2.origin.x - content1.origin.x, CHILD_INDENT));
+    assert!(approx(content3.origin.x - content2.origin.x, CHILD_INDENT));
+    // The grandchild draws a thread line for each ancestor, under its bullet centre.
+    for (k, parent) in [(0, "dot-1"), (1, "dot-2")] {
+        let thread = bounds_of(cx, format!("thread-3-{k}"));
+        let centre = bounds(cx, parent).origin.x + bounds(cx, parent).size.width / 2.;
+        assert!(approx(thread.size.width, 1.), "{thread:?}");
+        assert!(
+            (f32::from(thread.origin.x + thread.size.width) - f32::from(centre)).abs() <= 1.,
+            "thread {k} lines up under the parent bullet: {thread:?} {centre:?}"
+        );
+    }
+}
+
+/// DESIGN.md §3.5: a mono weekday label above the day's title, a Today pill on today, and
+/// 16 px between the title and the first block.
+#[gpui::test]
+fn day_header_has_a_weekday_label_pill_and_sixteen_px_gap(cx: &mut TestAppContext) {
+    let cx = setup(cx);
+    cx.simulate_input("today's note");
+    cx.simulate_keystrokes("escape");
+    let caption = bounds(cx, "day-caption-2026-11-02");
+    let date = bounds(cx, "day-date-2026-11-02");
+    let row = bounds(cx, "content-1");
+    assert!(
+        approx(caption.size.height, 20.),
+        "the weekday line is the pill's 20 px: {caption:?}"
+    );
+    assert!(
+        caption.origin.y + caption.size.height <= date.origin.y + px(0.5),
+        "the label is above the title: {caption:?} {date:?}"
+    );
+    let pill = bounds(cx, "today-pill");
+    let weekday = bounds(cx, "day-weekday-2026-11-02");
+    assert!(
+        approx(pill.size.height, 20.),
+        "the Today pill is 20 px: {pill:?}"
+    );
+    assert!(
+        pill.origin.x >= weekday.origin.x + weekday.size.width - px(0.5),
+        "the pill follows the weekday label: {pill:?} {weekday:?}"
+    );
+    assert!(
+        approx(row.origin.y - (date.origin.y + date.size.height), 16.),
+        "16 px below the title before the first block: {date:?} {row:?}"
+    );
+}
+
+/// DESIGN.md §2.3/§4.1: day sections are 40 px apart, with the divider between them.
+#[gpui::test]
+fn day_sections_are_forty_px_apart(cx: &mut TestAppContext) {
+    let (_ws, cx) = setup_feed(cx, &[(0, 1), (1, 1)], H);
+    let today_row = bounds(cx, "content-2");
+    let yesterday = bounds(cx, "day-title");
+    assert!(
+        approx(
+            yesterday.origin.y - (today_row.origin.y + today_row.size.height),
+            40.
+        ),
+        "40 px between the last block of a day and the next day's divider: \
+         {today_row:?} {yesterday:?}"
+    );
+}
+
+/// DESIGN.md §4.1: "Today" resets the feed's scroll position to today. The Today pill in
+/// the pinned day header is the control that does it until the top bar lands.
+#[gpui::test]
+fn today_resets_the_feed_scroll(cx: &mut TestAppContext) {
+    let (ws, cx) = setup_feed(cx, &[(0, 40)], H);
+    let main = bounds(cx, "main-pane");
+    scroll_main(cx, -600.);
+    assert_eq!(
+        ws.update(cx, |w, cx| w.main_sticky_day(cx)),
+        Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()),
+        "scrolled deep into today, today is the pinned day"
+    );
+    let pill = bounds(cx, "sticky-today-pill");
+    cx.simulate_click(pill.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        ws.update(cx, |w, cx| w.main_sticky_day(cx)),
+        None,
+        "the feed is back at the top, so nothing is pinned"
+    );
+    let title = bounds(cx, "today-title");
+    assert!(
+        approx(title.origin.y, f32::from(main.origin.y)),
+        "today's section starts at the top of the feed: {title:?} {main:?}"
+    );
 }
 
 /// A feed whose days hold `blocks` blocks each (`(days ago, blocks)`), in a window `h`
-/// tall; every other day is left unwritten so the feed folds it (DN-1).
+/// tall; every other day is left unwritten so the feed groups it into an empty-day row.
 fn setup_feed<'a>(
     cx: &'a mut TestAppContext,
     blocks: &[(i64, usize)],
@@ -821,7 +1037,7 @@ fn revealing_a_row_keeps_the_caret_below_the_pinned_date(cx: &mut TestAppContext
 }
 
 /// DN-3: a row that the list considers visible can still be drawn *under* the pinned
-/// date (its heading is 63 px tall). Navigating up to such a row must move it below the
+/// date (its heading is `STICKY_HEIGHT` tall). Navigating up to such a row must move it below the
 /// heading, or the caret and the text being edited disappear behind it.
 #[gpui::test]
 fn a_row_under_the_pinned_date_is_moved_below_it(cx: &mut TestAppContext) {
@@ -840,7 +1056,7 @@ fn a_row_under_the_pinned_date_is_moved_below_it(cx: &mut TestAppContext) {
     );
     let main = bounds(cx, "main-pane");
     // Put note 20 (item 21) at the top of the list, so note 21 (item 22) — the row an Up
-    // lands on — is the second visible row, inside the 63 px the pinned date covers.
+    // lands on — is the second visible row, inside the height the pinned date covers.
     // A wheel event only reaches what the list has measured so far, so repeat.
     for _ in 0..8 {
         let delta = f32::from(bounds(cx, "content-21").origin.y - main.origin.y);
@@ -879,17 +1095,17 @@ fn a_row_under_the_pinned_date_is_moved_below_it(cx: &mut TestAppContext) {
     );
 }
 
-/// DN-3 with DN-1: a folded day carries its own date in its 36 px row, so the previous
-/// day's heading is not pinned over it.
+/// DN-3 with DESIGN.md §3.6: an empty day group carries its own dates in its rows, so the
+/// previous day's heading is not pinned over it.
 #[gpui::test]
-fn a_folded_day_does_not_keep_the_previous_day_pinned(cx: &mut TestAppContext) {
-    // A short window, so the feed can scroll down to the folded days.
+fn an_empty_day_group_does_not_keep_the_previous_day_pinned(cx: &mut TestAppContext) {
+    // A short window, so the feed can scroll down to the empty days.
     let (ws, cx) = setup_feed(cx, &[(0, 1), (1, 1), (4, 12)], 400.);
     assert_eq!(ws.update(cx, |w, cx| w.main_sticky_day(cx)), None);
     let main = bounds(cx, "main-pane");
-    let folded = bounds(cx, "day-folded-2026-10-31");
-    // Slide the first folded row to the top of the column, a few pixels past its edge.
-    let delta = f32::from(folded.origin.y - main.origin.y) + 4.;
+    let empty = bounds(cx, "empty-day-2026-10-31");
+    // Slide the first empty row to the top of the column, a few pixels past its edge.
+    let delta = f32::from(empty.origin.y - main.origin.y) + 4.;
     assert!(delta > 0.);
     assert_eq!(
         ws.update(cx, |w, cx| w.main_sticky_day(cx)),
@@ -900,7 +1116,7 @@ fn a_folded_day_does_not_keep_the_previous_day_pinned(cx: &mut TestAppContext) {
     assert_eq!(
         ws.update(cx, |w, cx| w.main_sticky_day(cx)),
         None,
-        "a folded day's own row is its heading: nothing is pinned above it"
+        "the empty rows carry their own dates: nothing is pinned above them"
     );
 }
 
@@ -1011,6 +1227,66 @@ fn feed_linked_reference_wraps_at_readable_width(cx: &mut TestAppContext) {
     let hit = first_hit(cx);
     let (left, right) = column(cx);
     assert_wraps_within(hit, left, right);
+}
+
+/// Seed a page whose blocks nest `depth` levels deep (0..=depth), returning its id.
+fn seed_nested_page(store: &mut Store, depth: usize) -> PageId {
+    let page = store.create_page("Deep").unwrap();
+    let mut parent = store.ensure_first_block(&page).unwrap();
+    store
+        .set_block_text(&page, &parent, "level 0", None, None)
+        .unwrap();
+    store.commit_block(&page, &parent).unwrap();
+    for level in 1..=depth {
+        let st = store.page_state(&page).unwrap().clone();
+        let plan = outline::append_block(&st, Some(&parent));
+        let block = store
+            .execute_plan(&page, plan, None)
+            .unwrap()
+            .unwrap()
+            .block;
+        store
+            .set_block_text(&page, &block, &format!("level {level}"), None, None)
+            .unwrap();
+        store.commit_block(&page, &block).unwrap();
+        parent = block;
+    }
+    store.sync_index().unwrap();
+    page
+}
+
+/// DESIGN.md §3.1 indents children 45 px, which a 380 px right sidebar cannot afford: the
+/// pane's rows use its own narrower step, so a deep block still starts inside the pane.
+#[gpui::test]
+fn deep_blocks_stay_inside_a_narrow_sidebar_pane(cx: &mut TestAppContext) {
+    let page = std::cell::RefCell::new(None);
+    let cx = setup_seeded(cx, |store| {
+        *page.borrow_mut() = Some(seed_nested_page(store, 8))
+    });
+    let page = page.borrow_mut().take().expect("seeded page");
+    let ws = cx
+        .update(|window, _| window.root::<Workspace>())
+        .flatten()
+        .expect("workspace root");
+    ws.update_in(cx, |w, window, cx| {
+        w.open(page, None, None, true, window, cx)
+    });
+    cx.run_until_parked();
+    let side = bounds(cx, "right-sidebar");
+    // Items: 0 header, 1..=9 the nine blocks; content-9 is depth 8.
+    let deep = bounds(cx, "content-9");
+    assert!(
+        deep.origin.x >= side.origin.x,
+        "a deeply nested row starts inside the pane: {deep:?} {side:?}"
+    );
+    assert!(
+        deep.origin.x + deep.size.width <= side.origin.x + side.size.width + px(0.5),
+        "a deeply nested row stays inside the pane: {deep:?} {side:?}"
+    );
+    assert!(
+        deep.size.width >= px(80.),
+        "the deepest row still has readable width: {deep:?}"
+    );
 }
 
 /// §9.2: a page shift-opened in the right sidebar wraps its references at the sidebar's edge.
@@ -1843,8 +2119,8 @@ fn block_affordances_appear_on_hover(cx: &mut TestAppContext) {
     );
 }
 
-/// PG-4: the to-do box is a drawn 3 px-cornered control, and clicking it checks the to-do
-/// (the box, not the font's ☐ glyph, is the target).
+/// DESIGN.md §3.1: the to-do box is a drawn 16 px control with a 10 px gap before the
+/// text, and clicking it checks the to-do (the box, not the font's ☐ glyph, is the target).
 #[gpui::test]
 fn todo_box_is_a_drawn_control(cx: &mut TestAppContext) {
     let cx = setup_page(cx);
@@ -1854,12 +2130,16 @@ fn todo_box_is_a_drawn_control(cx: &mut TestAppContext) {
     let boxed = bounds(cx, "todo-1");
     let content = bounds(cx, "content-1");
     assert!(
-        approx(boxed.size.width, 13.) && approx(boxed.size.height, 13.),
-        "a 13 px box: {boxed:?}"
+        approx(boxed.size.width, 16.) && approx(boxed.size.height, 16.),
+        "a 16 px box: {boxed:?}"
     );
     assert!(
         boxed.origin.x < content.origin.x,
         "the box sits left of the text: {boxed:?} {content:?}"
+    );
+    assert!(
+        approx(content.origin.x - (boxed.origin.x + boxed.size.width), 10.),
+        "10 px between the box and the text: {boxed:?} {content:?}"
     );
     cx.simulate_click(boxed.center(), gpui::Modifiers::default());
     cx.run_until_parked();
