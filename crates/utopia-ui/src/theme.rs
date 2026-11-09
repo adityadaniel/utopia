@@ -260,7 +260,7 @@ impl Theme {
             highlight_bg: rgb(0xfff1a8).into(),
             danger_bg: rgb(0xfbe4e4).into(),
             danger: rgb(0xb42318).into(),
-            warning: rgb(0xd97706).into(),
+            warning: rgb(0x9a5a00).into(),
             success: rgb(0x1f7a3d).into(),
             scrim: gpui::hsla(0., 0., 0., 0.18),
             pdf_highlight: gpui::hsla(0.14, 0.95, 0.55, 0.35),
@@ -550,6 +550,25 @@ mod tests {
                     "{palette}: {fg_name} on {bg_name} is {ratio:.2}:1, below 4.5:1"
                 );
             }
+            // Roles DESIGN.md does not define yet, but which the app sets text in.
+            for (fg_name, fg) in [
+                ("danger", th.danger),
+                ("warning", th.warning),
+                ("success", th.success),
+            ] {
+                for (bg_name, bg) in surfaces {
+                    let ratio = contrast(fg, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{palette}: {fg_name} on {bg_name} is {ratio:.2}:1, below 4.5:1"
+                    );
+                }
+            }
+            let ratio = contrast(th.danger, th.danger_bg);
+            assert!(
+                ratio >= 4.5,
+                "{palette}: danger on its own fill is {ratio:.2}:1"
+            );
             for (name, c) in [("bullet", th.bullet), ("disabled", th.disabled)] {
                 let ratio = contrast(c, th.paper);
                 assert!(
