@@ -755,15 +755,23 @@ fn quit_app(cx: &mut App) {
     cx.quit();
 }
 
+/// The app, with the bundled icons installed as its asset source.
+///
+/// DESIGN.md §2.5's icons are embedded in `utopia-ui`; gpui only paints an `svg()` element
+/// when the application's asset source serves it. Without `with_assets` every icon is an
+/// empty box and the layout tests (which run without an asset source) still pass, so the
+/// wiring has its own guard in the tests below.
+fn application() -> Application {
+    Application::new().with_assets(utopia_ui::icons::Icons)
+}
+
 fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
     // Decided once, before a window exists: a malformed `UTOPIA_SHOT_SCRIPT` is reported
     // and the run exits, so a scripted run can never look like a normal launch (issue 1).
     let mode = RunMode::from_env().map_err(|e| anyhow::anyhow!("UTOPIA_SHOT_SCRIPT: {e}"))?;
     let config = paths::config_dir();
     let keymap = std::fs::read_to_string(config.join("keymap.json")).ok();
-    // DESIGN.md §2.5's icons are embedded in `utopia-ui`; gpui needs the source to
-    // serve them to `svg()` elements.
-    let application = Application::new().with_assets(utopia_ui::icons::Icons);
+    let application = application();
     application.on_open_urls(|urls| {
         PENDING_URLS.lock().expect("url queue").extend(urls);
     });
@@ -903,6 +911,36 @@ fn main() -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+
+    /// DESIGN.md §2.5: without `with_assets(Icons)` every icon paints as an empty box and
+    /// the layout tests cannot see it (they run without an asset source). A built
+    /// `Application` does not expose its source, so this guards the constructor's one
+    /// wiring line and checks the source really serves an icon.
+    #[test]
+    fn the_app_installs_the_icon_assets() {
+        use gpui::AssetSource as _;
+        let src = include_str!("main.rs");
+        // Only the production half: the test's own text mentions the constructor too.
+        let production = src.split("#[cfg(test)]").next().expect("production source");
+        let start = production
+            .find("/// The app, with the bundled icons")
+            .expect("the application constructor");
+        let end = production[start..]
+            .find("\n}\n")
+            .map_or(production.len(), |i| start + i);
+        let body = &production[start..end];
+        assert!(
+            body.contains(".with_assets(utopia_ui::icons::Icons)"),
+            "the app must install the bundled icon assets:\n{body}"
+        );
+        assert!(
+            utopia_ui::icons::Icons
+                .load("icons/search.svg")
+                .expect("asset source")
+                .is_some(),
+            "the search icon is served"
+        );
+    }
 
     /// Issue 1: a script that does not parse used to be logged and dropped while the
     /// hotkey registration was skipped anyway — a normal window that no step drove and
