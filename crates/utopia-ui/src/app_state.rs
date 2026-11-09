@@ -57,6 +57,12 @@ pub struct AppState {
     /// Pages that exist only because of a `#tag` (SB-2), cached from the index. Views read
     /// this; the classification query runs at startup and on [`IndexUpdated`], never in a
     /// render (rule 10).
+    ///
+    /// The copy follows the store's published set on [`IndexUpdated`] only. The three writes
+    /// that republish without a commit (`Store::set_date_format`, `Store::empty_trash`,
+    /// `Store::rebuild_index`) do not emit it, so a view that calls one of them has to
+    /// refresh this from `store.tag_pages()` (`docs/state-machines/tag-pages-publication.md`,
+    /// "Left as is").
     pub tag_pages: HashSet<PageId>,
     dirty_since: Option<Instant>,
     flush_task: Option<Task<()>>,

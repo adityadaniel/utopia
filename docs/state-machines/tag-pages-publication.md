@@ -58,13 +58,20 @@ Left as is:
 - `Store::tag_page_scans` (the store's own connection) and `Store::tag_page_full_scans` (the
   writer) stay two counters: the first counts republishes and the UI's startup scan, the
   second the commit path's full scans, and the incremental-commit tests assert on the second.
+- A store-level republish does not reach the UI's copy by itself. `set_date_format`,
+  `empty_trash` and `rebuild_index` replace the published set and emit nothing, and
+  `AppState.tag_pages` is replaced in `index_updated` — after a commit or a repair — only.
+  A UI caller of one of those three would keep drawing the old `#` markers until the next
+  commit flush. No UI or API caller exists today (Settings is the obvious future one), so no
+  behaviour is wrong now; whoever adds one has to refresh the copy from `store.tag_pages()`
+  (the refresh lives in a private method, so that caller needs a small addition).
 
 ## Where the state lives
 
 | Piece | Location | Set | Cleared |
 |---|---|---|---|
 | Published set | `crates/utopia-store/src/writer.rs:207` `Shared.tag_pages: Mutex<TagPages>` | first commit does a full scan (`:277-289`); later commits update written pages + changed destinations (`:297-336`); `Store::republish_tag_pages` replaces it after a write that bypassed the writer (`:341-345`, `lib.rs:335-339`) | left untouched on classify error (`:329-332`) and on a failed commit, because it then still describes the index on disk |
-| UI copy | `crates/utopia-ui/src/app_state.rs:60` `tag_pages: HashSet<PageId>` | published at startup by `AppState::new` (`:82`); replaced on `index_updated` only if `store.tag_pages()` is `Some` (`:253-255`) | – |
+| UI copy | `crates/utopia-ui/src/app_state.rs:60` `tag_pages: HashSet<PageId>` | published at startup by `AppState::new` (`:82`); replaced on `index_updated` only if `store.tag_pages()` is `Some` (`:253-255`) — a store-level republish reaches it only through that, see "Left as is" | – |
 | Instrumentation | `writer.rs:208-216` counters; `lib.rs:341-364` | tests | – |
 
 ## States
