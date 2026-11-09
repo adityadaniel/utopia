@@ -301,7 +301,7 @@ pub const EMPTY_DAY_WEEKDAY_WIDTH: f32 = 92.;
 /// Empty day rows in one group sit 4 px apart (§3.6).
 pub const EMPTY_DAY_GAP: f32 = 4.;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
     // ---- DESIGN.md §2.1 ---------------------------------------------------------------
     /// The main writing surface.
@@ -454,6 +454,24 @@ impl Theme {
         match a {
             WindowAppearance::Dark | WindowAppearance::VibrantDark => Self::dark(),
             _ => Self::light(),
+        }
+    }
+
+    /// The theme a window should install. `UTOPIA_APPEARANCE=light|dark` pins it, which is
+    /// how the verification shots capture both schemes on a machine set to one; otherwise
+    /// the window follows the system appearance as before.
+    pub fn for_window(window_appearance: WindowAppearance) -> Self {
+        Self::for_pinned(
+            std::env::var("UTOPIA_APPEARANCE").ok().as_deref(),
+            window_appearance,
+        )
+    }
+
+    fn for_pinned(pin: Option<&str>, window_appearance: WindowAppearance) -> Self {
+        match pin {
+            Some("dark") => Self::dark(),
+            Some("light") => Self::light(),
+            _ => Self::for_appearance(window_appearance),
         }
     }
 }
@@ -713,6 +731,29 @@ pub fn heading_metrics(level: u8) -> (f32, f32) {
 mod tests {
     use super::*;
     use gpui::Rgba;
+
+    /// The verification shots need both schemes from a machine set to one: an environment
+    /// pin decides the theme, and without it the window still follows the system.
+    #[test]
+    fn the_appearance_can_be_pinned_for_verification_shots() {
+        assert_eq!(
+            Theme::for_pinned(Some("dark"), WindowAppearance::Light),
+            Theme::dark()
+        );
+        assert_eq!(
+            Theme::for_pinned(Some("light"), WindowAppearance::Dark),
+            Theme::light()
+        );
+        assert_eq!(
+            Theme::for_pinned(None, WindowAppearance::Dark),
+            Theme::dark()
+        );
+        assert_eq!(
+            Theme::for_pinned(Some("sepia"), WindowAppearance::VibrantLight),
+            Theme::light(),
+            "an unknown value falls back to the system appearance"
+        );
+    }
 
     /// DESIGN.md §2.1: both palettes define every token under the same name, and the two
     /// are not the same colours with different names.

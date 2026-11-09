@@ -256,7 +256,7 @@ impl Root {
         cx: &mut Context<Self>,
     ) -> Self {
         let appearance = cx.observe_window_appearance(window, |_, window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(Theme::for_window(window.appearance()));
             cx.notify();
         });
         // The first state is decided before the root exists, so the placeholder
@@ -805,11 +805,11 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
                 title: Some("Utopia".into()),
                 ..Default::default()
             }),
-            window_min_size: Some(size(px(720.), px(480.))),
+            window_min_size: Some(size(px(960.), px(480.))),
             ..Default::default()
         };
         let opened = cx.open_window(options, move |window, cx| {
-            cx.set_global(Theme::for_appearance(window.appearance()));
+            cx.set_global(Theme::for_window(window.appearance()));
             cx.new(|cx| Root::new(graph, config, mode, window, cx))
         });
         if let Err(e) = opened {
