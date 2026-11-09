@@ -31,6 +31,8 @@ mostly absent; controls are plain text ("Delete page", "Any time", "Close").
 | ALL-4 | **Hover and focus states.** Soft hover fill on sidebar rows, reference groups, palette results and settings rows. The focused block gets a 2 px accent bar at the left. | S |
 | ALL-5 | **A density setting.** "Comfortable" and "Compact" in Settings → Appearance. Compact uses 13.5 px body and 4 px block spacing. Stored in `settings.json` (rule 9). | M |
 
+**ALL-4 update (2026-11-09):** the 2 px focus bar at the left of the block being edited was removed. It had the caret's width, colour and height, so on short or empty blocks it read as a second caret; the caret alone marks the edited block. Hover fills stay.
+
 ## 01 · Left sidebar
 
 What the capture shows: Recent Days shows two preview lines per day, so three

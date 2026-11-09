@@ -2084,6 +2084,36 @@ impl PageView {
                     self.edit(r.page, r.block, Some(caret), Some(goal), window, cx);
                 }
             }
+            // Option+Up/Down ran out of block: carry on at the start of the block above or
+            // the end of the block below, which is what macOS text views do with a
+            // paragraph (`editor.rs` `paragraph_up` / `paragraph_down`).
+            EditorEvent::BlockEdge { to_start } => {
+                let Some(ix) = self.row_index(&t.block) else {
+                    return;
+                };
+                let rows: Vec<(usize, &RowItem)> = self
+                    .items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, it)| match it {
+                        Item::Row(r) => Some((i, r)),
+                        _ => None,
+                    })
+                    .collect();
+                let pos = rows.iter().position(|(i, _)| *i == ix);
+                let next = pos.and_then(|p| {
+                    if *to_start {
+                        p.checked_sub(1)
+                    } else {
+                        Some(p + 1)
+                    }
+                });
+                if let Some(r) = next.and_then(|n| rows.get(n)).map(|(_, r)| (*r).clone()) {
+                    // `None` puts the caret at the end of the block that opens.
+                    let caret = to_start.then_some(0);
+                    self.edit(r.page, r.block, caret, None, window, cx);
+                }
+            }
             EditorEvent::MoveBlock { up } => {
                 let caret = editor.read(cx).cursor();
                 let up = *up;
@@ -2825,21 +2855,6 @@ impl PageView {
             .pl(px(indent))
             .pr_2()
             .py(px(vpad))
-            // ALL-4: the focused block is marked by a 2 px accent bar, not by a heavier
-            // text colour (the caret already moves). Absolutely placed so it costs no
-            // layout shift when editing starts.
-            .when(editing, |d| {
-                d.child(
-                    div()
-                        .debug_selector(move || format!("focus-bar-{ix}"))
-                        .absolute()
-                        .left(px(indent))
-                        .top(px(0.))
-                        .w(px(2.))
-                        .h(px(lh))
-                        .bg(th.accent),
-                )
-            })
             .when(r.embed > 0, |d| {
                 d.bg(th.surface).border_l_2().border_color(th.chip_bg)
             })

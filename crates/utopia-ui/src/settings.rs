@@ -443,7 +443,7 @@ impl SettingsView {
             format!(
                 "{} is back to {}.",
                 d.label,
-                pretty_keys(&crate::actions::platform_keys(d.keys))
+                pretty_keys(&crate::actions::default_keys(d))
             )
             .into(),
         );

@@ -1235,20 +1235,6 @@ fn type_scale_caps_outline_headings_at_h1(cx: &mut TestAppContext) {
     );
 }
 
-/// ALL-4: the block being edited carries a 2 px accent bar at its left edge.
-#[gpui::test]
-fn focused_block_has_an_accent_bar(cx: &mut TestAppContext) {
-    let cx = setup_page(cx);
-    cx.simulate_input("focused");
-    let bar = bounds(cx, "focus-bar-1");
-    let content = bounds(cx, "content-1");
-    assert!(approx(bar.size.width, 2.), "2 px wide: {bar:?}");
-    assert!(
-        bar.origin.x < content.origin.x,
-        "the bar sits left of the block text: {bar:?} {content:?}"
-    );
-}
-
 /// ALL-5: Compact shrinks the body and adds 4 px between blocks; both are measurable, and
 /// the setting applies to the open window without a restart.
 #[gpui::test]
@@ -2107,7 +2093,7 @@ fn a_compact_attribute_row_opens_the_block_for_editing(cx: &mut TestAppContext) 
             == utopia_ui::appearance::AttributeBlocks::Blocks
     );
     assert!(
-        cx.debug_bounds("focus-bar-1").is_some(),
+        cx.debug_bounds("block-editor").is_some(),
         "the block's editor is in its row"
     );
     cx.simulate_input("!");

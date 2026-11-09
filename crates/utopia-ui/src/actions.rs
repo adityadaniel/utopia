@@ -55,8 +55,35 @@ actions!(
         End,
         WordLeft,
         WordRight,
+        SelectWordLeft,
+        SelectWordRight,
         LineStart,
         LineEnd,
+        SelectLineStart,
+        SelectLineEnd,
+        SelectHome,
+        SelectEnd,
+        DeleteWordBackward,
+        DeleteWordForward,
+        DeleteToLineStart,
+        ParagraphUp,
+        ParagraphDown,
+        SelectBlockStart,
+        SelectBlockEnd,
+        BlockStart,
+        BlockEnd,
+        EmacsStartOfLine,
+        EmacsEndOfLine,
+        EmacsBackChar,
+        EmacsForwardChar,
+        EmacsPrevLine,
+        EmacsNextLine,
+        EmacsKillLine,
+        EmacsYank,
+        EmacsDeleteChar,
+        EmacsBackspace,
+        EmacsTranspose,
+        EmacsOpenLine,
         MoveBlockUp,
         MoveBlockDown,
         ToggleCollapse,
@@ -491,7 +518,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-left",
         context: TEXT,
-        help: "Move the caret to the start of the line.",
+        help: "Move the caret to the start of the wrapped line.",
     },
     ActionDoc {
         action: "LineEnd",
@@ -499,7 +526,227 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-right",
         context: TEXT,
-        help: "Move the caret to the end of the line.",
+        help: "Move the caret to the end of the wrapped line.",
+    },
+    // ----- Extending a selection (macOS text fields: Shift with a movement) -----
+    ActionDoc {
+        action: "SelectWordLeft",
+        label: "Select Word Left",
+        category: Category::Editing,
+        keys: "alt-shift-left",
+        context: TEXT,
+        help: "Extend the selection a word to the left.",
+    },
+    ActionDoc {
+        action: "SelectWordRight",
+        label: "Select Word Right",
+        category: Category::Editing,
+        keys: "alt-shift-right",
+        context: TEXT,
+        help: "Extend the selection a word to the right.",
+    },
+    ActionDoc {
+        action: "SelectLineStart",
+        label: "Select To Start Of Line",
+        category: Category::Editing,
+        keys: "cmd-shift-left",
+        context: TEXT,
+        help: "Extend the selection to the start of the wrapped line the caret is on.",
+    },
+    ActionDoc {
+        action: "SelectLineEnd",
+        label: "Select To End Of Line",
+        category: Category::Editing,
+        keys: "cmd-shift-right",
+        context: TEXT,
+        help: "Extend the selection to the end of the wrapped line the caret is on.",
+    },
+    ActionDoc {
+        action: "SelectHome",
+        label: "Select To Start Of Block (Home)",
+        category: Category::Editing,
+        keys: "shift-home",
+        context: TEXT,
+        help: "Extend the selection to the start of the block, where Home goes.",
+    },
+    ActionDoc {
+        action: "SelectEnd",
+        label: "Select To End Of Block (End)",
+        category: Category::Editing,
+        keys: "shift-end",
+        context: TEXT,
+        help: "Extend the selection to the end of the block, where End goes.",
+    },
+    // ----- Deleting by a wider unit (one undo step each) -----
+    ActionDoc {
+        action: "DeleteWordBackward",
+        label: "Delete Word Before",
+        category: Category::Editing,
+        keys: "alt-backspace",
+        context: TEXT,
+        help: "Delete back to the start of the previous word. At the start of a block it does nothing.",
+    },
+    ActionDoc {
+        action: "DeleteWordForward",
+        label: "Delete Word After",
+        category: Category::Editing,
+        keys: "alt-delete",
+        context: TEXT,
+        help: "Delete forward to the end of the next word (Option+Fn+Delete).",
+    },
+    ActionDoc {
+        action: "DeleteToLineStart",
+        label: "Delete To Start Of Line",
+        category: Category::Editing,
+        keys: "cmd-backspace",
+        context: TEXT,
+        help: "Delete back to the start of the wrapped line; at the start it does nothing.",
+    },
+    // ----- Moving by the block (`Option`/`Cmd` with the arrow keys) -----
+    ActionDoc {
+        action: "ParagraphUp",
+        label: "Up To Start Of Block",
+        category: Category::Editing,
+        keys: "alt-up",
+        context: EDITOR,
+        help: "Move the caret to the start of this block; from there, to the start of the block above.",
+    },
+    ActionDoc {
+        action: "ParagraphDown",
+        label: "Down To End Of Block",
+        category: Category::Editing,
+        keys: "alt-down",
+        context: EDITOR,
+        help: "Move the caret to the end of this block; from there, to the end of the block below.",
+    },
+    ActionDoc {
+        action: "SelectBlockStart",
+        label: "Select To Start Of Block",
+        category: Category::Editing,
+        keys: "alt-shift-up",
+        context: EDITOR,
+        help: "Extend the selection to the start of this block's text.",
+    },
+    ActionDoc {
+        action: "SelectBlockEnd",
+        label: "Select To End Of Block",
+        category: Category::Editing,
+        keys: "alt-shift-down",
+        context: EDITOR,
+        help: "Extend the selection to the end of this block's text.",
+    },
+    ActionDoc {
+        action: "BlockStart",
+        label: "Caret To Start Of Block",
+        category: Category::Editing,
+        keys: "cmd-up",
+        context: EDITOR,
+        help: "Move the caret to the start of the block's text, however many lines long it is.",
+    },
+    ActionDoc {
+        action: "BlockEnd",
+        label: "Caret To End Of Block",
+        category: Category::Editing,
+        keys: "cmd-down",
+        context: EDITOR,
+        help: "Move the caret to the end of the block's text, however many lines long it is.",
+    },
+    // ----- The Emacs keys macOS text fields also answer to (Ctrl+K / Ctrl+Y and friends) -----
+    ActionDoc {
+        action: "EmacsStartOfLine",
+        label: "Start Of Paragraph (Ctrl+A)",
+        category: Category::Editing,
+        keys: "ctrl-a",
+        context: TEXT,
+        help: "Move the caret to the start of the paragraph (the text between line breaks).",
+    },
+    ActionDoc {
+        action: "EmacsEndOfLine",
+        label: "End Of Paragraph (Ctrl+E)",
+        category: Category::Editing,
+        keys: "ctrl-e",
+        context: TEXT,
+        help: "Move the caret to the end of the paragraph (the text between line breaks).",
+    },
+    ActionDoc {
+        action: "EmacsBackChar",
+        label: "Back One Character (Ctrl+B)",
+        category: Category::Editing,
+        keys: "ctrl-b",
+        context: TEXT,
+        help: "Move the caret one character left (also Left).",
+    },
+    ActionDoc {
+        action: "EmacsForwardChar",
+        label: "Forward One Character (Ctrl+F)",
+        category: Category::Editing,
+        keys: "ctrl-f",
+        context: TEXT,
+        help: "Move the caret one character right (also Right).",
+    },
+    ActionDoc {
+        action: "EmacsPrevLine",
+        label: "Up One Line (Ctrl+P)",
+        category: Category::Editing,
+        keys: "ctrl-p",
+        context: TEXT,
+        help: "Move the caret up a line, crossing into the block above at the first line.",
+    },
+    ActionDoc {
+        action: "EmacsNextLine",
+        label: "Down One Line (Ctrl+N)",
+        category: Category::Editing,
+        keys: "ctrl-n",
+        context: TEXT,
+        help: "Move the caret down a line, crossing into the block below at the last line.",
+    },
+    ActionDoc {
+        action: "EmacsKillLine",
+        label: "Kill To End Of Paragraph (Ctrl+K)",
+        category: Category::Editing,
+        keys: "ctrl-k",
+        context: TEXT,
+        help: "Delete to the end of the paragraph and keep the text for Ctrl+Y. Never merges blocks.",
+    },
+    ActionDoc {
+        action: "EmacsYank",
+        label: "Yank Killed Text (Ctrl+Y)",
+        category: Category::Editing,
+        keys: "ctrl-y",
+        context: TEXT,
+        help: "Put the last Ctrl+K text back at the caret.",
+    },
+    ActionDoc {
+        action: "EmacsDeleteChar",
+        label: "Delete Character (Ctrl+D)",
+        category: Category::Editing,
+        keys: "ctrl-d",
+        context: TEXT,
+        help: "Delete the character after the caret (also Fn+Delete).",
+    },
+    ActionDoc {
+        action: "EmacsBackspace",
+        label: "Backspace (Ctrl+H)",
+        category: Category::Editing,
+        keys: "ctrl-h",
+        context: TEXT,
+        help: "Delete the character before the caret; at the start of a block it joins with the one above.",
+    },
+    ActionDoc {
+        action: "EmacsTranspose",
+        label: "Transpose Characters (Ctrl+T)",
+        category: Category::Editing,
+        keys: "ctrl-t",
+        context: TEXT,
+        help: "Swap the two characters either side of the caret; at the end of a line, the two before it.",
+    },
+    ActionDoc {
+        action: "EmacsOpenLine",
+        label: "Open Line (Ctrl+O)",
+        category: Category::Editing,
+        keys: "ctrl-o",
+        context: EDITOR,
+        help: "Insert a line break after the caret and leave the caret where it was.",
     },
     ActionDoc {
         action: "Home",
@@ -671,8 +918,35 @@ pub fn action_for(name: &str) -> Option<Box<dyn gpui::Action>> {
         "SelectDown" => Box::new(SelectDown),
         "WordLeft" => Box::new(WordLeft),
         "WordRight" => Box::new(WordRight),
+        "SelectWordLeft" => Box::new(SelectWordLeft),
+        "SelectWordRight" => Box::new(SelectWordRight),
         "LineStart" => Box::new(LineStart),
         "LineEnd" => Box::new(LineEnd),
+        "SelectLineStart" => Box::new(SelectLineStart),
+        "SelectLineEnd" => Box::new(SelectLineEnd),
+        "SelectHome" => Box::new(SelectHome),
+        "SelectEnd" => Box::new(SelectEnd),
+        "DeleteWordBackward" => Box::new(DeleteWordBackward),
+        "DeleteWordForward" => Box::new(DeleteWordForward),
+        "DeleteToLineStart" => Box::new(DeleteToLineStart),
+        "ParagraphUp" => Box::new(ParagraphUp),
+        "ParagraphDown" => Box::new(ParagraphDown),
+        "SelectBlockStart" => Box::new(SelectBlockStart),
+        "SelectBlockEnd" => Box::new(SelectBlockEnd),
+        "BlockStart" => Box::new(BlockStart),
+        "BlockEnd" => Box::new(BlockEnd),
+        "EmacsStartOfLine" => Box::new(EmacsStartOfLine),
+        "EmacsEndOfLine" => Box::new(EmacsEndOfLine),
+        "EmacsBackChar" => Box::new(EmacsBackChar),
+        "EmacsForwardChar" => Box::new(EmacsForwardChar),
+        "EmacsPrevLine" => Box::new(EmacsPrevLine),
+        "EmacsNextLine" => Box::new(EmacsNextLine),
+        "EmacsKillLine" => Box::new(EmacsKillLine),
+        "EmacsYank" => Box::new(EmacsYank),
+        "EmacsDeleteChar" => Box::new(EmacsDeleteChar),
+        "EmacsBackspace" => Box::new(EmacsBackspace),
+        "EmacsTranspose" => Box::new(EmacsTranspose),
+        "EmacsOpenLine" => Box::new(EmacsOpenLine),
         "Home" => Box::new(Home),
         "End" => Box::new(End),
         "Escape" => Box::new(Escape),
@@ -715,11 +989,30 @@ pub fn canonical_keys(keys: &str) -> String {
 }
 
 pub fn platform_keys(keys: &str) -> String {
-    if cfg!(target_os = "macos") {
+    platform_keys_on(keys, cfg!(target_os = "macos"))
+}
+
+fn platform_keys_on(keys: &str, macos: bool) -> String {
+    if macos {
         keys.to_string()
     } else {
         keys.replace("cmd-", "ctrl-")
     }
+}
+
+/// The default keys of `d` on this platform.
+pub fn default_keys(d: &ActionDoc) -> String {
+    default_keys_on(d, cfg!(target_os = "macos"))
+}
+
+/// Cocoa's Ctrl text keys (Ctrl+A, Ctrl+K, …) are a macOS convention. Elsewhere
+/// `cmd-` becomes `ctrl-`, and those chords belong to Select All, Quick Jump and the
+/// rest, so these actions have no default keys there (they can still be bound).
+fn default_keys_on(d: &ActionDoc, macos: bool) -> String {
+    if !macos && d.action.starts_with("Emacs") {
+        return String::new();
+    }
+    platform_keys_on(d.keys, macos)
 }
 
 /// Keystrokes rendered the way a macOS menu would show them (`cmd-shift-d` → `⇧⌘D`).
@@ -863,8 +1156,35 @@ pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBindi
             End,
             WordLeft,
             WordRight,
+            SelectWordLeft,
+            SelectWordRight,
             LineStart,
             LineEnd,
+            SelectLineStart,
+            SelectLineEnd,
+            SelectHome,
+            SelectEnd,
+            DeleteWordBackward,
+            DeleteWordForward,
+            DeleteToLineStart,
+            ParagraphUp,
+            ParagraphDown,
+            SelectBlockStart,
+            SelectBlockEnd,
+            BlockStart,
+            BlockEnd,
+            EmacsStartOfLine,
+            EmacsEndOfLine,
+            EmacsBackChar,
+            EmacsForwardChar,
+            EmacsPrevLine,
+            EmacsNextLine,
+            EmacsKillLine,
+            EmacsYank,
+            EmacsDeleteChar,
+            EmacsBackspace,
+            EmacsTranspose,
+            EmacsOpenLine,
             MoveBlockUp,
             MoveBlockDown,
             ToggleCollapse,
@@ -941,9 +1261,7 @@ impl Override {
     /// Read one entry of `keymap.json`. The verdict is computed here, once, so no reader has
     /// to decide for itself whether the keys are usable or different from the default.
     fn parse(action: &str, raw: &str) -> Self {
-        let default = doc(action)
-            .map(|d| platform_keys(d.keys))
-            .unwrap_or_default();
+        let default = doc(action).map(default_keys).unwrap_or_default();
         if canonical_keys(raw) == canonical_keys(&default) {
             return Override::SameAsDefault;
         }
@@ -1047,11 +1365,15 @@ impl Overrides {
     /// entry gpui cannot bind is not in force, so every reader reports the default — the
     /// three copies used to disagree here (keymap machine doc, issue 1).
     pub fn keys_for(&self, d: &ActionDoc) -> String {
+        self.keys_for_on(d, cfg!(target_os = "macos"))
+    }
+
+    fn keys_for_on(&self, d: &ActionDoc, macos: bool) -> String {
         self.0
             .get(d.action)
             .and_then(|o| o.keys())
             .map(str::to_string)
-            .unwrap_or_else(|| platform_keys(d.keys))
+            .unwrap_or_else(|| default_keys_on(d, macos))
     }
 
     /// Whether the row differs from the catalog: an entry exists in the map only when it
@@ -1100,10 +1422,18 @@ impl Overrides {
     /// binding is live, not how its context string is spelled, so a binding in the editor and
     /// one in the editor-or-line-input are compared (keymap machine doc, issue 3).
     pub fn conflicts(&self) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
+        self.conflicts_on(cfg!(target_os = "macos"))
+    }
+
+    fn conflicts_on(&self, macos: bool) -> Vec<(&'static ActionDoc, &'static ActionDoc)> {
         let mut out = Vec::new();
         for (i, a) in CATALOG.iter().enumerate() {
+            let keys = canonical_keys(&self.keys_for_on(a, macos));
+            if keys.is_empty() {
+                continue;
+            }
             for b in CATALOG.iter().skip(i + 1) {
-                if canonical_keys(&self.keys_for(a)) == canonical_keys(&self.keys_for(b))
+                if keys == canonical_keys(&self.keys_for_on(b, macos))
                     && scopes_touch(a.context, b.context)
                 {
                     out.push((a, b));
@@ -1169,7 +1499,7 @@ fn clauses(context: &str) -> Option<Vec<BTreeSet<String>>> {
 /// catalog default when nothing is bound yet (a test app before `install`).
 pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
     let Some(action) = action_for(d.action) else {
-        return platform_keys(d.keys);
+        return default_keys(d);
     };
     let bindings = cx.key_bindings();
     let map = bindings.borrow();
@@ -1183,7 +1513,7 @@ pub fn active_keys(cx: &App, d: &ActionDoc) -> String {
                 .collect::<Vec<_>>()
                 .join(" ")
         })
-        .unwrap_or_else(|| platform_keys(d.keys))
+        .unwrap_or_else(|| default_keys(d))
 }
 
 /// Install default bindings, then the user's overrides on top. A rebound action loses its
@@ -1211,7 +1541,7 @@ pub fn install(cx: &mut App, overrides: &Overrides) {
     let mut bindings: Vec<KeyBinding> = CATALOG
         .iter()
         .filter(|d| !replaced.contains(d.action))
-        .filter_map(|d| binding(d.action, &platform_keys(d.keys), d.context))
+        .filter_map(|d| binding(d.action, &default_keys(d), d.context))
         .collect();
     // Overrides come last: gpui lets a later binding win for the same keys.
     bindings.extend(user);
@@ -1262,6 +1592,18 @@ mod tests {
     fn defaults_do_not_conflict() {
         let c = Overrides::default().conflicts();
         assert!(c.is_empty(), "conflicting defaults: {c:?}");
+    }
+
+    /// Off macOS `cmd-` becomes `ctrl-`, so Select All, Bold, Inline Code and Quick Jump
+    /// land on Ctrl+A/B/E/K. Cocoa's Ctrl text keys must not take those chords there.
+    #[test]
+    fn defaults_do_not_conflict_off_macos() {
+        let c = Overrides::default().conflicts_on(false);
+        let names: Vec<_> = c.iter().map(|(a, b)| (a.action, b.action)).collect();
+        assert!(
+            names.is_empty(),
+            "conflicting defaults off macOS: {names:?}"
+        );
     }
 
     /// QJ-5: every command the palette can list has an action to run, spelled the way the
