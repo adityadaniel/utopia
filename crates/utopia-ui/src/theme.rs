@@ -208,6 +208,8 @@ pub const CALENDAR_CELL_HEIGHT: f32 = 30.;
 pub const CALENDAR_DOT: f32 = 4.;
 /// The footer's status dot: 8 px.
 pub const FOOTER_DOT: f32 = 8.;
+/// A collapsed "Unlinked references" row (DESIGN.md §3.7): at least 44 px tall.
+pub const UNLINKED_ROW_HEIGHT: f32 = 44.;
 /// A keyboard hint chip: 20 px tall, radius 4.
 pub const KBD_HEIGHT: f32 = 20.;
 /// The focus ring §3.4 asks for: 2 px, offset 2. gpui 0.2 has no outline, so controls draw

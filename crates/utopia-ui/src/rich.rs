@@ -69,6 +69,9 @@ fn chip_label(text: &str) -> String {
 struct Builder<'a> {
     theme: &'a Theme,
     chip: &'a mut dyn FnMut(&str) -> ChipState,
+    /// Normalized titles of the page the text is being read on (DESIGN.md §3.7): its own
+    /// name is bold ink, not a link.
+    self_titles: &'a [String],
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, LinkTarget)>,
@@ -76,6 +79,11 @@ struct Builder<'a> {
 }
 
 impl Builder<'_> {
+    fn is_self(&self, title: &str) -> bool {
+        let key = utopia_core::title::normalize_title(title);
+        self.self_titles.iter().any(|t| *t == key)
+    }
+
     fn style(&self, m: Marks) -> HighlightStyle {
         HighlightStyle {
             font_weight: m.bold.then_some(FontWeight::BOLD),
@@ -122,10 +130,19 @@ impl Builder<'_> {
                     self.push(text, st);
                 }
                 Inline::PageRef { title, .. } => {
-                    let mut st = self.style(m);
-                    st.color = Some(self.theme.link);
-                    let r = self.push(title, st);
-                    self.links.push((r, LinkTarget::Page(title.clone())));
+                    if self.is_self(title) {
+                        // DESIGN.md §3.7: the current page's name inside one of its own
+                        // references is bold ink text, not a link to where you already are.
+                        let mut st = self.style(m);
+                        st.color = Some(self.theme.ink);
+                        st.font_weight = Some(FontWeight::BOLD);
+                        self.push(title, st);
+                    } else {
+                        let mut st = self.style(m);
+                        st.color = Some(self.theme.link);
+                        let r = self.push(title, st);
+                        self.links.push((r, LinkTarget::Page(title.clone())));
+                    }
                 }
                 Inline::Tag { title, .. } => {
                     // A tag is a chip (DESIGN.md §3.1), not just coloured text. A shaped
@@ -209,9 +226,21 @@ impl Builder<'_> {
 
 /// Render a block body for display.
 pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState) -> Rendered {
+    render_self(src, theme, chip, &[])
+}
+
+/// Render a block body for display, with the page's own titles (normalized) drawn as bold
+/// ink rather than links (DESIGN.md §3.7).
+pub fn render_self(
+    src: &str,
+    theme: &Theme,
+    chip: &mut dyn FnMut(&str) -> ChipState,
+    self_titles: &[String],
+) -> Rendered {
     let mut b = Builder {
         theme,
         chip,
+        self_titles,
         text: String::new(),
         highlights: Vec::new(),
         links: Vec::new(),
@@ -611,6 +640,33 @@ mod tests {
             (f32::from(rects[3].size.width) - 167.).abs() < 0.5,
             "{rects:?}"
         );
+    }
+
+    /// DESIGN.md §3.7: the current page's name inside one of its own references is bold
+    /// ink text, not a link; every other page stays a link.
+    #[test]
+    fn the_current_pages_name_is_bold_ink_not_a_link() {
+        let t = Theme::light();
+        let self_titles = vec![utopia_core::title::normalize_title("Atlas Launch")];
+        let r = render_self(
+            "see [[Atlas Launch]] and [[Ana Lovelace]]",
+            &t,
+            &mut |_| ChipState::Missing,
+            &self_titles,
+        );
+        assert_eq!(r.links.len(), 1, "{:?}", r.links);
+        assert_eq!(r.link_at(4), None, "the self reference is not a link");
+        assert!(
+            matches!(r.links[0].1, LinkTarget::Page(ref p) if p == "Ana Lovelace"),
+            "another page stays a link"
+        );
+        let run = r
+            .highlights
+            .iter()
+            .find(|(range, _)| &r.text[range.clone()] == "Atlas Launch")
+            .expect("the self title has a highlight");
+        assert_eq!(run.1.color, Some(t.ink), "bold ink, not the link colour");
+        assert_eq!(run.1.font_weight, Some(FontWeight::BOLD));
     }
 
     #[test]

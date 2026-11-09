@@ -18,6 +18,7 @@ use utopia_store::{LinkedRefs, Mention, PageRow, RefChildren, RefHit, RefQuery, 
 use crate::app_state::{AppState, Changed, IndexUpdated, PageReplaced};
 use crate::editor::{BlockEditor, EditTarget, EditorEvent};
 use crate::field::Goal;
+use crate::icons::icon;
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
@@ -26,6 +27,7 @@ use crate::theme::{
     CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE,
     CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP, DAY_HEADER_PAD_TOP, DAY_TITLE,
     EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL, LABEL_MONO, MAX_VISUAL_DEPTH,
+    UNLINKED_ROW_HEIGHT,
     MENU_OFFSET, PAGE_MENU_WIDTH, THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
 };
 
@@ -610,6 +612,9 @@ pub struct PageView {
     calendar_month: NaiveDate,
     /// The feed's day headings, in item order, for the sticky header (DN-3).
     day_headings: Vec<DayHeading>,
+    /// Normalized title and aliases of this page: a reference to it is bold ink, not a
+    /// link (DESIGN.md §3.7).
+    self_titles: Vec<String>,
     /// The compact pane's own page menu (a right-sidebar or split card). The main pane's
     /// page actions live in the workspace top bar instead (DESIGN.md §3.3).
     page_menu: bool,
@@ -747,9 +752,11 @@ impl PageView {
             cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
                 this.cycle
                     .invalidate(Invalidation::refs() | Invalidation::unlinked());
-                // LR-5: the unlinked count is keyed by the index version, so it is refreshed
-                // here rather than in `render` (rule 10: no database work in a frame).
-                this.refresh_unlinked(cx);
+                // DESIGN.md §3.7: unlinked references are searched only while the row is
+                // expanded. A closed row costs nothing when the index moves.
+                if this.unlinked_open {
+                    this.refresh_unlinked(cx);
+                }
                 // Rebuild now, while the index version is new: reference children are
                 // database reads, and a frame must only read the cache they fill.
                 this.rebuild(cx);
@@ -812,6 +819,7 @@ impl PageView {
             alias_input: None,
             calendar_month: today,
             day_headings: Vec::new(),
+            self_titles: Vec::new(),
             page_menu: false,
             hovered_row: None,
             attribute_blocks: crate::appearance::attribute_blocks(cx),
@@ -1091,8 +1099,6 @@ impl PageView {
         self.page_menu = false;
         self.controls_menu = None;
         self.refs_key = None;
-        // Navigation is a handler, not a frame: count the mentions before painting (LR-5).
-        self.refresh_unlinked(cx);
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::refs() | Invalidation::unlinked());
         self.rebuild(cx);
@@ -1110,6 +1116,7 @@ impl PageView {
         self.query = RefQuery::default();
         self.filter_titles.clear();
         self.unlinked = None;
+        self.unlinked_open = false;
         self.alias_input = None;
         self.filter.update(cx, |f, cx| f.set_text("", cx));
         let saved = self
@@ -1573,6 +1580,11 @@ impl PageView {
             self.refs_key = Some((page.clone(), zoom.clone(), refs_version));
             self.suggestions = self.compute_suggestions(&page, cx);
         }
+        self.self_titles = std::iter::once(self.header.title.clone())
+            .chain(self.header.aliases.iter().cloned())
+            .filter(|t| !t.is_empty())
+            .map(|t| utopia_core::title::normalize_title(&t))
+            .collect();
         self.header = header;
         let mut items = vec![Item::Header];
         if self.header.missing {
@@ -1589,16 +1601,15 @@ impl PageView {
         }
         self.push_refs(&page, &mut items, cx);
         if zoom.is_none() {
-            // Unlinked References (FR-3.9, LR-5): the header always carries the count. It is
-            // read from the cache `refresh_unlinked` fills when the index reports a durable
-            // change or the page opens; the FTS scan behind it is database work and must not
-            // run in a frame (rule 10), so a stale entry shows no number for one frame
-            // rather than scanning here.
-            let current = self.unlinked.as_ref().filter(|(v, _)| *v == refs_version);
-            let count = current.map(|(_, m)| m.len());
-            let mentions = current
-                .map(|(_, m)| m.clone())
+            // Unlinked References (FR-3.9, LR-5, DESIGN.md §3.7): a collapsed row that is
+            // searched only once it is expanded, so a closed row never runs the FTS scan.
+            let current = self
+                .unlinked
+                .as_ref()
+                .filter(|(v, _)| *v == refs_version)
                 .filter(|_| self.unlinked_open);
+            let count = current.map(|(_, m)| m.len());
+            let mentions = current.map(|(_, m)| m.clone());
             items.push(Item::UnlinkedHeader {
                 count,
                 open: self.unlinked_open,
@@ -1624,8 +1635,9 @@ impl PageView {
         let Some(page) = self.page() else {
             return;
         };
-        if !matches!(self.mode, Mode::Page { .. }) {
-            // The section is only on a whole page; `set_mode` refreshes it when it is again.
+        if !matches!(self.mode, Mode::Page { .. }) || !self.unlinked_open {
+            // The section is only on a whole page, and only expanded content is searched
+            // (DESIGN.md §3.7).
             return;
         }
         let version = self.app.read(cx).refs_version;
@@ -3618,6 +3630,9 @@ impl PageView {
             app.changed(vec![m.page.clone(), page.clone()], true, cx);
         });
         self.unlinked = None;
+        if self.unlinked_open {
+            self.refresh_unlinked(cx);
+        }
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
@@ -3637,6 +3652,9 @@ impl PageView {
             app.changed(vec![page.clone()], true, cx);
         });
         self.unlinked = None;
+        if self.unlinked_open {
+            self.refresh_unlinked(cx);
+        }
         self.cycle
             .invalidate(Invalidation::rows() | Invalidation::unlinked());
         cx.notify();
@@ -4478,6 +4496,7 @@ impl PageView {
                     },
                     &th,
                     &self.app.read(cx).store,
+                    &self.self_titles,
                     24.,
                     cx.entity(),
                 )
@@ -4498,28 +4517,42 @@ impl PageView {
                 .text_color(th.muted)
                 .child("No linked references yet.")
                 .into_any_element(),
+            // DESIGN.md §3.7: a collapsed row at least 44 px tall with a top divider and a
+            // chevron-right. The mentions are searched when it is expanded, not before.
             Item::UnlinkedHeader { count, open } => div()
                 .id("unlinked-header")
                 .debug_selector(|| "unlinked-header".into())
                 .mt_4()
                 .mx_4()
-                .pt_2()
-                .pb_1()
+                .h(px(UNLINKED_ROW_HEIGHT))
+                .px_2()
                 .border_t_1()
                 .border_color(th.line)
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(crate::theme::BODY_SIZE))
-                .text_color(th.muted)
+                .text_size(px(crate::theme::SMALL.size))
+                .text_color(th.ink_2)
                 .cursor_pointer()
-                .hover(|s| s.text_color(th.ink))
+                .hover(|s| s.bg(th.hover))
                 .child(
                     div()
                         .debug_selector(move || format!("unlinked-arrow-{open}"))
-                        .child(if open { "▾" } else { "▸" }),
+                        .child(icon(
+                            if open {
+                                crate::icons::Icon::ChevronDown
+                            } else {
+                                crate::icons::Icon::ChevronRight
+                            },
+                            crate::icons::ICON_SIZE,
+                            th.ink_3,
+                        )),
                 )
-                .child(div().child("Unlinked References"))
+                .child(
+                    div()
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .child("Unlinked references"),
+                )
                 .children(count.map(|c| {
                     crate::theme::count_chip(c, &th)
                         .debug_selector(move || format!("unlinked-count-{c}"))
@@ -4536,6 +4569,10 @@ impl PageView {
                 }))
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.unlinked_open = !this.unlinked_open;
+                    if this.unlinked_open {
+                        // The one place the FTS scan runs (DESIGN.md §3.7, rule 10).
+                        this.refresh_unlinked(cx);
+                    }
                     this.cycle.invalidate(Invalidation::rows());
                     cx.notify();
                 }))
