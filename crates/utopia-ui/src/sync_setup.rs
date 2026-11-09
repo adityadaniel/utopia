@@ -8,6 +8,9 @@ impl Global for SetupHandle {}
 
 #[derive(Clone)]
 pub struct Request {
+    /// The graph id this apply publishes under (§12.7): editable until the graph first
+    /// syncs, frozen afterwards.
+    pub graph: String,
     pub preferences: Preferences,
     pub token: String,
     pub passphrase: String,
@@ -16,6 +19,11 @@ pub struct Request {
 
 pub struct SyncSetup {
     pub graph: String,
+    /// The id can still be chosen: the graph has never synced, so no relay path or E2E key
+    /// depends on it yet. A copy of a graph used as a second notebook picks its own id here
+    /// instead of publishing into the first one's relay graph (§12.6, §12.7).
+    pub graph_editable: bool,
+    pub graph_input: Entity<LineInput>,
     pub preferences: Preferences,
     pub overrides: Vec<&'static str>,
     pub notice: Option<String>,
@@ -31,7 +39,12 @@ pub struct SyncSetup {
 }
 impl EventEmitter<Request> for SyncSetup {}
 impl SyncSetup {
-    pub fn new(graph: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(graph: String, graph_editable: bool, cx: &mut Context<Self>) -> Self {
+        let graph_input = cx.new(|cx| {
+            let mut input = LineInput::new("Graph id", cx);
+            input.fill(&graph, cx);
+            input
+        });
         let url = cx.new(|cx| LineInput::new("https://relay.example.com", cx));
         let folder = cx.new(|cx| LineInput::new("Choose a shared folder", cx));
         let bind = cx.new(|cx| {
@@ -51,6 +64,8 @@ impl SyncSetup {
         });
         Self {
             graph,
+            graph_editable,
+            graph_input,
             preferences: Preferences::default(),
             overrides: vec![],
             notice: None,
@@ -91,6 +106,15 @@ impl SyncSetup {
         self.notice = notice;
         cx.notify();
     }
+    /// The id is in use from now on: the relay path and the E2E key both derive from it, so
+    /// a later change would publish this graph into another one (§12.6).
+    pub fn freeze_graph(&mut self, graph: String, cx: &mut Context<Self>) {
+        self.graph_input
+            .update(cx, |input, cx| input.fill(&graph, cx));
+        self.graph = graph;
+        self.graph_editable = false;
+        cx.notify();
+    }
     pub fn choose(&mut self, mode: Mode, cx: &mut Context<Self>) {
         if self.busy {
             return;
@@ -100,6 +124,16 @@ impl SyncSetup {
     }
     pub fn request(&mut self, test_only: bool, cx: &mut Context<Self>) {
         if self.busy || (!test_only && !self.overrides.is_empty()) {
+            return;
+        }
+        let graph = if self.graph_editable {
+            self.graph_input.read(cx).text().trim().to_string()
+        } else {
+            self.graph.clone()
+        };
+        if !utopia_sync::http::valid_graph_id(&graph) {
+            self.status = "Enter a graph id: letters, digits, hyphens and underscores only.".into();
+            cx.notify();
             return;
         }
         let mut preferences = self.preferences.clone();
@@ -130,6 +164,7 @@ impl SyncSetup {
             return;
         }
         let request = Request {
+            graph,
             preferences,
             token: self.token.read(cx).text().to_string(),
             passphrase: self.passphrase.read(cx).text().to_string(),
@@ -234,11 +269,23 @@ impl Render for SyncSetup {
             .flex_col()
             .gap_3()
             .child(div().text_size(px(18.)).child("Sync this graph"))
-            .child(
+            .child(if self.graph_editable {
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(field("Graph id", "sync-graph", self.graph_input.clone(), cx))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(th.muted)
+                            .child("Names this graph on the relay or folder. Choose a different id for a copy of a graph; it cannot be changed once the graph has synced."),
+                    )
+            } else {
                 div()
                     .text_color(th.muted)
-                    .child(format!("Graph id: {}", self.graph)),
-            )
+                    .child(format!("Graph id: {}", self.graph))
+            })
             .child(
                 div()
                     .debug_selector(|| "settings-sync-transport".into())

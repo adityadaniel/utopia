@@ -1653,7 +1653,7 @@ fn ac_12_7_sync_setup_selects_transports_and_opens_pairing(cx: &mut TestAppConte
         install_keymap(cx, None);
     });
     let (view, cx) = cx.add_window_view(|_, cx| {
-        let mut v = SyncSetup::new("Demo".into(), cx);
+        let mut v = SyncSetup::new("Demo".into(), false, cx);
         v.loaded(Preferences::default(), vec![], None, cx);
         v.finish("Ready".into(), cx);
         v
@@ -1685,7 +1685,7 @@ fn ac_12_5_sync_setup_blocks_apply_during_an_environment_override(cx: &mut TestA
     use gpui::AppContext;
     use utopia_sync::setup::Preferences;
     use utopia_ui::sync_setup::SyncSetup;
-    let view = cx.new(|cx| SyncSetup::new("Demo".into(), cx));
+    let view = cx.new(|cx| SyncSetup::new("Demo".into(), false, cx));
     view.update(cx, |view, cx| {
         view.loaded(Preferences::default(), vec!["UTOPIA_SYNC_URL"], None, cx);
         view.finish("Ready".into(), cx);

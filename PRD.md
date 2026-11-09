@@ -875,6 +875,7 @@ GET  /v1/graphs/{gid}/pages/{pid}/updates?since={frontier}
 - Collapse state, sidebar width, scroll position, caret, selection → **local-only** (avoids sync churn and surprise jumps).
 - Search index → rebuilt locally.
 - Window/UI preferences → local-only, except a small `graph_settings` shard (date format, export defaults).
+- The **sync graph id** (the relay path and part of the E2E AAD) is chosen when the graph first syncs and frozen from then on. A copy of a graph file can pick its own id before that, so duplicating `Notes.utopia` starts a second notebook instead of publishing into the original's relay graph.
 
 ### 12.6 Failure handling
 

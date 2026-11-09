@@ -82,18 +82,14 @@ impl Coordinator {
         cx: &mut App,
     ) -> Entity<Self> {
         let default_graph = crate::paths::graph_id(graph_path);
-        let graph = env.graph.clone().unwrap_or_else(|| {
-            ws.read(cx).app().clone().update(cx, |app, _| {
-                app.store
-                    .sync_get("setup_graph")
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| {
-                        let _ = app.store.sync_set("setup_graph", &default_graph);
-                        default_graph
-                    })
-            })
+        // Opening a graph does not freeze its id: a copy of the file is a new notebook and
+        // may pick its own before it first syncs (§12.7). Only a successful Apply writes it.
+        let stored = ws.read(cx).app().clone().update(cx, |app, _| {
+            app.store.sync_get("setup_graph").ok().flatten()
         });
+        // An environment variable owns this run, so its id is not the user's to edit here.
+        let graph_editable = env.graph.is_none() && stored.is_none();
+        let graph = env.graph.clone().or(stored).unwrap_or(default_graph);
         let canonical = graph_path
             .canonicalize()
             .unwrap_or_else(|_| graph_path.to_path_buf());
@@ -103,7 +99,7 @@ impl Coordinator {
             ..Default::default()
         });
         let file = config.join("sync").join(format!("{id}.json"));
-        let view = cx.new(|cx| SyncSetup::new(graph.clone(), cx));
+        let view = cx.new(|cx| SyncSetup::new(graph.clone(), graph_editable, cx));
         cx.set_global(SetupHandle(view.clone()));
         cx.new(|cx| {
             let sub = cx.subscribe(&view, |this: &mut Self, _, request: &Request, cx| {
@@ -140,6 +136,7 @@ impl Coordinator {
                 });
                 this.run(
                     Request {
+                        graph: this.graph.clone(),
                         preferences,
                         token: String::new(),
                         passphrase: String::new(),
@@ -177,7 +174,7 @@ impl Coordinator {
             .sync_get("setup_e2e_check")
             .ok()
             .flatten();
-        let graph = self.graph.clone();
+        let graph = request.graph.clone();
         let file = self.file.clone();
         let secrets = self.secrets.clone();
         let env = self.env.clone();
@@ -305,8 +302,11 @@ impl Coordinator {
                         // queued: a round still in flight must not push the republished rows
                         // to the target being replaced.
                         let old = if test_only { None } else { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)) };
+                        let graph = prepared.cfg.graph.clone();
                         let ready = this.ws.read(cx).app().clone().update(cx, |app, _| {
                             if let Some(marker) = &prepared.key_check { app.store.sync_set("setup_e2e_check", marker)?; }
+                            // From here on the id names data: it is frozen into the graph.
+                            app.store.sync_set("setup_graph", &graph)?;
                             app.store.prepare_sync_destination(&prepared.destination)
                         });
                         if ready.is_err() {
@@ -330,7 +330,9 @@ impl Coordinator {
                             return (old, false);
                         }
                         this.lan = prepared.lan;
+                        this.graph = graph.clone();
                         this.view.update(cx, |view, cx| {
+                            view.freeze_graph(graph, cx);
                             view.preferences = prefs.clone();
                             if save { view.notice = None; }
                             view.finish(message, cx);
@@ -497,6 +499,7 @@ mod tests {
     }
 
     struct Harness {
+        app: Entity<AppState>,
         ws: Entity<Workspace>,
         setup: Entity<SyncSetup>,
         /// Held, as the app's `Ready` holds it: an entity nobody owns is released and its
@@ -528,7 +531,7 @@ mod tests {
         });
         let store = Store::open_in_memory().unwrap();
         let app = cx.new(|_| AppState::new(store));
-        let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+        let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app.clone(), window, cx));
         let secrets: Arc<dyn Secrets> = Arc::new(MemorySecrets::default());
         let coordinator = cx.update(|_, cx| {
             Coordinator::install_with(
@@ -543,6 +546,7 @@ mod tests {
         });
         let setup = coordinator.read_with(cx, |coordinator, _| coordinator.view.clone());
         Harness {
+            app,
             ws,
             setup,
             _coordinator: coordinator,
@@ -612,6 +616,47 @@ mod tests {
             panic!("resolving an environment override must not write credentials")
         }
     }
+    /// §12.7: the graph id names the graph on the relay. Opening a graph must not freeze it:
+    /// a copy of `Notes.utopia` used as a second notebook would otherwise publish into the
+    /// first one's relay graph and merge both. The first Apply records the id and freezes it.
+    #[gpui::test]
+    fn ac_12_7_an_unsynced_graph_id_stays_editable(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        std::fs::create_dir_all(&shared).unwrap();
+        let h = harness(cx, dir.path(), None, lan_discovery());
+        cx.run_until_parked();
+        assert!(
+            h.app
+                .read_with(cx, |app, _| app.store.sync_get("setup_graph").unwrap())
+                .is_none(),
+            "opening a graph wrote its id into the file"
+        );
+        assert!(h.setup.read_with(cx, |view, _| view.graph_editable));
+        h.setup.update(cx, |view, cx| {
+            view.graph_input
+                .update(cx, |input, cx| input.fill("notes-second", cx));
+            view.choose(Mode::Folder, cx);
+            view.folder.update(cx, |input, cx| {
+                input.fill(&shared.display().to_string(), cx)
+            });
+            view.request(false, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            h.app
+                .read_with(cx, |app, _| app.store.sync_get("setup_graph").unwrap())
+                .as_deref(),
+            Some("notes-second"),
+            "the chosen id is the one the graph syncs under"
+        );
+        assert!(
+            !h.setup.read_with(cx, |view, _| view.graph_editable),
+            "the id is frozen once it names synced data"
+        );
+        assert!(h.ws.read_with(cx, |ws, _| ws.sync_phase().is_some()));
+    }
+
     /// §12.7: a Nearby Mac can be asleep when the laptop starts. Discovery is retried on the
     /// runner's slow cadence instead of leaving sync off until someone opens Settings again.
     #[gpui::test]
@@ -650,7 +695,11 @@ mod tests {
         // The host appears; a minute later the app looks again by itself.
         cx.background_executor.advance_clock(DISCOVERY_RETRY);
         cx.run_until_parked();
-        assert_eq!(*looks.lock().unwrap(), 2, "one retry after the slow cadence");
+        assert_eq!(
+            *looks.lock().unwrap(),
+            2,
+            "one retry after the slow cadence"
+        );
         assert!(
             h.ws.read_with(cx, |ws, _| ws.sync_phase().is_some()),
             "the client never looked again: {}",
@@ -660,6 +709,7 @@ mod tests {
 
     fn request() -> Request {
         Request {
+            graph: "g".into(),
             preferences: Preferences::default(),
             token: String::new(),
             passphrase: String::new(),
