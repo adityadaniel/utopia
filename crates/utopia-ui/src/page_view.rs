@@ -2979,6 +2979,23 @@ impl PageView {
         prefix: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        self.render_rich_with(text, row_block, row, min_h, prefix, &[], true, cx)
+    }
+
+    /// [`render_rich`] with extra highlight ranges (an unlinked match) and, for rows whose
+    /// debug selector is already used by the block itself, no `text-<block>` selector.
+    #[allow(clippy::too_many_arguments)]
+    fn render_rich_with(
+        &self,
+        text: &str,
+        row_block: &BlockId,
+        row: Option<RowItem>,
+        min_h: f32,
+        prefix: usize,
+        extra: &[(std::ops::Range<usize>, gpui::HighlightStyle)],
+        named: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let th = theme(cx).clone();
         let rendered = {
             let store = &self.app.read(cx).store;
@@ -2986,8 +3003,14 @@ impl PageView {
                 crate::reference::chip_state(store, uid, row_block)
             })
         };
-        let styled =
-            StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
+        let mut highlights = rendered.highlights.clone();
+        for (range, style) in extra {
+            if range.end <= rendered.text.len() {
+                highlights.push((range.clone(), *style));
+            }
+        }
+        highlights.sort_by_key(|(r, _)| r.start);
+        let styled = StyledText::new(rendered.text.clone()).with_highlights(highlights);
         let layout = styled.layout().clone();
         let same = rendered.text.as_ref() == text;
         let end = prefix + text.len();
@@ -2995,10 +3018,11 @@ impl PageView {
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
         let chips = rendered.chips.clone();
         let text_sel = format!("text-{}", row_block.0);
-        div()
-            .flex_1()
-            .min_h(px(min_h))
-            .debug_selector(move || text_sel.clone())
+        let mut root = div().flex_1().min_h(px(min_h));
+        if named {
+            root = root.debug_selector(move || text_sel.clone());
+        }
+        root
             // An editable row shows the I-beam between its links; a read-only one (a query
             // or search hit) is itself clickable, so it keeps its container's pointer.
             .when(row.is_some(), |d| d.cursor_text())
@@ -5238,24 +5262,12 @@ impl PageView {
                     cx.notify();
                 }))
                 .into_any_element(),
-            Item::NoMentions => div()
-                .debug_selector(|| "unlinked-empty".into())
-                .px_6()
-                .py_0p5()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.muted)
-                .child("No unlinked mentions")
-                .into_any_element(),
             Item::Mention(m) => {
                 let th2 = th.clone();
-                let mut hl = vec![(
-                    m.range.clone(),
-                    gpui::HighlightStyle {
-                        background_color: Some(th2.highlight_bg),
-                        ..Default::default()
-                    },
-                )];
-                hl.retain(|(r, _)| r.end <= m.text.len());
+                let highlight = gpui::HighlightStyle {
+                    background_color: Some(th2.highlight_bg),
+                    ..Default::default()
+                };
                 let m2 = m.clone();
                 div()
                     .id(("mention", ix))
@@ -5271,13 +5283,30 @@ impl PageView {
                             .min_w_0()
                             .flex()
                             .flex_col()
+                            .gap_0p5()
                             .child(
                                 div()
                                     .text_size(px(crate::theme::CAPTION_SIZE))
                                     .text_color(th.link)
                                     .child(m.page_title.clone()),
                             )
-                            .child(StyledText::new(m.text.clone()).with_highlights(hl)),
+                            .child(
+                                div()
+                                    .debug_selector(move || format!("mention-text-{ix}"))
+                                    .text_size(px(crate::theme::REFERENCE.size))
+                                    .line_height(px(crate::theme::REFERENCE.line))
+                                    .text_color(th.ink_2)
+                                    .child(self.render_rich_with(
+                                        &m.text,
+                                        &m.block,
+                                        None,
+                                        crate::theme::REFERENCE.line,
+                                        0,
+                                        &[(m.range.clone(), highlight)],
+                                        false,
+                                        cx,
+                                    )),
+                            ),
                     )
                     .child(
                         div()
@@ -5296,6 +5325,14 @@ impl PageView {
                     )
                     .into_any_element()
             }
+            Item::NoMentions => div()
+                .debug_selector(|| "unlinked-empty".into())
+                .px_6()
+                .py_0p5()
+                .text_size(px(crate::theme::CAPTION_SIZE))
+                .text_color(th.muted)
+                .child("No unlinked mentions")
+                .into_any_element(),
         }
     }
 }

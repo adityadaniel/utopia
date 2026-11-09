@@ -8,7 +8,9 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
-use utopia_ui::theme::{Theme, CHILD_INDENT, DAY_GAP, DAY_HEADER_PAD_TOP, SIDEBAR_WIDTH};
+use utopia_ui::theme::{
+    Theme, CHILD_INDENT, DAY_GAP, DAY_HEADER_PAD_TOP, REFERENCE, SIDEBAR_WIDTH,
+};
 use utopia_ui::workspace::Workspace;
 
 const W: f32 = 1280.;
@@ -276,8 +278,9 @@ fn search_preview_sits_in_the_right_half(cx: &mut TestAppContext) {
     );
 }
 
-/// SR-4/SR-5: the 720 px minimum window must contain the widened palette, input, chips,
-/// list and preview. A fixed 860 px dialog hung off both sides.
+/// SR-4/SR-5: a 720 px window (narrower than the 960 px minimum, e.g. a split pane) must
+/// still contain the widened palette, input, chips, list and preview. A fixed 860 px
+/// dialog hung off both sides.
 #[gpui::test]
 fn search_palette_fits_the_minimum_window(cx: &mut TestAppContext) {
     let cx = setup(cx);
@@ -609,13 +612,14 @@ fn quick_jump_scrolls_the_selection_into_view(cx: &mut TestAppContext) {
 #[gpui::test]
 fn minimum_window_size_still_lays_out(cx: &mut TestAppContext) {
     let cx = setup(cx);
-    cx.simulate_resize(size(px(720.), px(480.)));
+    // DESIGN.md §5: the window's minimum width is 960 px.
+    cx.simulate_resize(size(px(960.), px(480.)));
     cx.simulate_input("still editable at the minimum size");
     let main = bounds(cx, "main-pane");
     let row = bounds(cx, "content-1");
-    assert!(approx(main.size.width, 720. - SIDEBAR_WIDTH), "{main:?}");
+    assert!(approx(main.size.width, 960. - SIDEBAR_WIDTH), "{main:?}");
     assert!(
-        row.origin.x + row.size.width <= px(720.) + px(0.5),
+        row.origin.x + row.size.width <= px(960.) + px(0.5),
         "rows wrap inside the window"
     );
 }
@@ -1482,6 +1486,40 @@ fn unlinked_mention_wraps_and_keeps_link_in_view(cx: &mut TestAppContext) {
         "Link stays inside the column ({left}, {right}): {link:?}"
     );
     assert_wraps_within(row, left, right);
+}
+
+/// DESIGN.md §2.2 and §3.7: an unlinked mention is a referenced block too — Reference block
+/// text, 15/26 — and it is drawn by the rich renderer, so a link in the mentioning block is
+/// a link rather than raw `[[markup]]`.
+#[gpui::test]
+fn unlinked_mentions_use_the_reference_text_style(cx: &mut TestAppContext) {
+    let (cx, ws, target) = setup_refs(cx, false);
+    let app = ws.update(cx, |w, _| w.app().clone());
+    app.update(cx, |app, _| {
+        let p = app.store.create_page("Elsewhere").unwrap();
+        let b = app.store.ensure_first_block(&p).unwrap();
+        app.store
+            .set_block_text(&p, &b, "a short target mention of [[Source]]", None, None)
+            .unwrap();
+        app.store.commit_block(&p, &b).unwrap();
+        app.store.sync_index().unwrap();
+    });
+    ws.update_in(cx, |w, window, cx| {
+        w.open(target, None, None, false, window, cx)
+    });
+    let header = bounds(cx, "unlinked-header");
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let text = (0..40)
+        .find_map(|ix| {
+            let sel: &'static str = Box::leak(format!("mention-text-{ix}").into_boxed_str());
+            cx.debug_bounds(sel)
+        })
+        .expect("a mention was rendered");
+    assert!(
+        approx(text.size.height, REFERENCE.line),
+        "the mention uses the reference line box: {text:?}"
+    );
 }
 
 #[gpui::test]
