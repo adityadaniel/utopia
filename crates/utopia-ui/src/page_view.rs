@@ -2979,11 +2979,12 @@ impl PageView {
         prefix: usize,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        self.render_rich_with(text, row_block, row, min_h, prefix, &[], true, cx)
+        self.render_rich_with(text, row_block, row, min_h, prefix, None, true, cx)
     }
 
-    /// [`render_rich`] with extra highlight ranges (an unlinked match) and, for rows whose
-    /// debug selector is already used by the block itself, no `text-<block>` selector.
+    /// [`render_rich`] with one extra source-range highlight (an unlinked match) and, for
+    /// rows whose debug selector is already used by the block itself, no `text-<block>`
+    /// selector.
     #[allow(clippy::too_many_arguments)]
     fn render_rich_with(
         &self,
@@ -2992,25 +2993,24 @@ impl PageView {
         row: Option<RowItem>,
         min_h: f32,
         prefix: usize,
-        extra: &[(std::ops::Range<usize>, gpui::HighlightStyle)],
+        extra: Option<(std::ops::Range<usize>, gpui::HighlightStyle)>,
         named: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let th = theme(cx).clone();
         let rendered = {
             let store = &self.app.read(cx).store;
-            rich::render(text, &th, &mut |uid| {
-                crate::reference::chip_state(store, uid, row_block)
-            })
-        };
-        let mut highlights = rendered.highlights.clone();
-        for (range, style) in extra {
-            if range.end <= rendered.text.len() {
-                highlights.push((range.clone(), *style));
+            let mut chip = |uid: &str| crate::reference::chip_state(store, uid, row_block);
+            match extra {
+                // The mention range is in the source, not the rendered text (§3.7).
+                Some((range, style)) => {
+                    rich::render_highlighted(text, &th, &mut chip, range, style)
+                }
+                None => rich::render(text, &th, &mut chip),
             }
-        }
-        highlights.sort_by_key(|(r, _)| r.start);
-        let styled = StyledText::new(rendered.text.clone()).with_highlights(highlights);
+        };
+        let styled =
+            StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
         let layout = styled.layout().clone();
         let same = rendered.text.as_ref() == text;
         let end = prefix + text.len();
@@ -5302,7 +5302,7 @@ impl PageView {
                                         None,
                                         crate::theme::REFERENCE.line,
                                         0,
-                                        &[(m.range.clone(), highlight)],
+                                        Some((m.range.clone(), highlight)),
                                         false,
                                         cx,
                                     )),

@@ -1499,7 +1499,7 @@ fn unlinked_mentions_use_the_reference_text_style(cx: &mut TestAppContext) {
         let p = app.store.create_page("Elsewhere").unwrap();
         let b = app.store.ensure_first_block(&p).unwrap();
         app.store
-            .set_block_text(&p, &b, "a short target mention of [[Source]]", None, None)
+            .set_block_text(&p, &b, "in [[Source]], a short target mention", None, None)
             .unwrap();
         app.store.commit_block(&p, &b).unwrap();
         app.store.sync_index().unwrap();
@@ -2796,9 +2796,14 @@ fn properties_bar_draws_the_leading_blocks_once(cx: &mut TestAppContext) {
         status.size.height >= px(36.),
         "a property row is at least 36 px: {status:?}"
     );
+    let pill = bounds(cx, "property-status");
     assert!(
-        approx(bounds(cx, "property-status").size.height, 26.),
+        approx(pill.size.height, 26.),
         "the status value is a 26 px pill"
+    );
+    assert!(
+        pill.size.width < px(200.),
+        "the pill hugs its text instead of filling the value column: {pill:?}"
     );
     assert!(
         approx(bounds(cx, "property-avatar").size.width, 22.),

@@ -229,6 +229,45 @@ pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState)
     render_self(src, theme, chip, &[])
 }
 
+/// Render a block body for display, highlighting one range of the **source** at the same
+/// place in the rendered text. Markup is stripped (`[[Ana]]` → `Ana`, `**x**` → `x`), so a
+/// source offset does not index the rendered string; the range is located by rendering the
+/// source with two private-use markers around it and reading their positions back. The
+/// range must be plain text (an unlinked mention never lies inside a link, tag or code).
+pub fn render_highlighted(
+    src: &str,
+    theme: &Theme,
+    chip: &mut dyn FnMut(&str) -> ChipState,
+    range: Range<usize>,
+    style: HighlightStyle,
+) -> Rendered {
+    let mut out = render(src, theme, chip);
+    if range.start >= range.end
+        || range.end > src.len()
+        || !src.is_char_boundary(range.start)
+        || !src.is_char_boundary(range.end)
+    {
+        return out;
+    }
+    const OPEN: char = '\u{E000}';
+    const CLOSE: char = '\u{E001}';
+    let mut marked = String::with_capacity(src.len() + 6);
+    marked.push_str(&src[..range.start]);
+    marked.push(OPEN);
+    marked.push_str(&src[range.start..range.end]);
+    marked.push(CLOSE);
+    marked.push_str(&src[range.end..]);
+    let probe = render(&marked, theme, chip);
+    let (Some(open), Some(close)) = (probe.text.find(OPEN), probe.text.find(CLOSE)) else {
+        return out;
+    };
+    // The rendered string drops the markers; the end shifts back by the opening marker.
+    out.highlights
+        .push((open..close.saturating_sub(OPEN.len_utf8()), style));
+    out.highlights.sort_by_key(|(r, _)| r.start);
+    out
+}
+
 /// Render a block body for display, with the page's own titles (normalized) drawn as bold
 /// ink rather than links (DESIGN.md §3.7).
 pub fn render_self(
@@ -667,6 +706,65 @@ mod tests {
             .expect("the self title has a highlight");
         assert_eq!(run.1.color, Some(t.ink), "bold ink, not the link colour");
         assert_eq!(run.1.font_weight, Some(FontWeight::BOLD));
+    }
+
+    /// An unlinked mention's range is a source offset. Markup before it is stripped, so the
+    /// highlight must be mapped to the rendered text, not pushed unchanged (§3.7).
+    #[test]
+    fn a_mention_highlight_maps_through_stripped_markup() {
+        let t = Theme::light();
+        let src = "Met [[Ana Lovelace]] about the import plan";
+        let start = src.find("import plan").expect("the mention");
+        let style = HighlightStyle {
+            background_color: Some(t.highlight_bg),
+            ..Default::default()
+        };
+        let r = render_highlighted(
+            src,
+            &t,
+            &mut |_| ChipState::Missing,
+            start..start + "import plan".len(),
+            style,
+        );
+        let run = r
+            .highlights
+            .iter()
+            .find(|(range, _)| &r.text[range.clone()] == "import plan")
+            .unwrap_or_else(|| panic!("the highlight covers the mention: {:?}", r.highlights));
+        // The raw offset is four bytes late once `[[ ]]` is stripped; that was the bug.
+        let rendered_start = r.text.find("import plan").expect("rendered mention");
+        assert_eq!(run.0.start, rendered_start);
+        assert_ne!(
+            rendered_start, start,
+            "source offsets do not index the text"
+        );
+    }
+
+    /// The same mapping at the end of the block: a raw range whose end is past the rendered
+    /// length used to be dropped by a length guard, leaving the mention unhighlighted.
+    #[test]
+    fn a_mention_at_the_end_after_a_link_is_highlighted() {
+        let t = Theme::light();
+        let src = "See [[Ana Lovelace]] about the import plan";
+        let start = src.rfind("import plan").expect("the mention");
+        let style = HighlightStyle {
+            background_color: Some(t.highlight_bg),
+            ..Default::default()
+        };
+        let r = render_highlighted(
+            src,
+            &t,
+            &mut |_| ChipState::Missing,
+            start..src.len(),
+            style,
+        );
+        assert!(
+            r.highlights
+                .iter()
+                .any(|(range, _)| &r.text[range.clone()] == "import plan"),
+            "the highlight still lands on the mention: {:?}",
+            r.highlights
+        );
     }
 
     #[test]
