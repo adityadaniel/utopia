@@ -1353,6 +1353,45 @@ fn ac_12_7_setup_switch_republishes_acked_and_imported_pages_without_duplicates(
     assert!(a.doctor().unwrap().is_ok());
 }
 
+/// §12.6: a second device's wrong key must not mix new ciphertext into an existing graph.
+#[test]
+fn ac_12_6_pairing_validates_existing_payloads_before_pushing() {
+    use utopia_sync::{
+        e2e::{Encrypted, GraphKey},
+        setup::verified_target::VerifiedTarget,
+        Transport,
+    };
+    let relay = Relay::new();
+    let mut a = Store::open_in_memory().unwrap();
+    a.create_page("Encrypted original").unwrap();
+    let transport = || RelayTransport::new(relay.clone(), "g");
+    let key = |pass| GraphKey::derive(pass, "g").unwrap();
+    let mut original =
+        SyncClient::new(Encrypted::new(transport(), key("original"), "g"), &a).unwrap();
+    original.sync_once(&mut a).unwrap();
+    let before = relay.manifest("g").rev;
+    let mut b = Store::open_in_memory().unwrap();
+    b.create_page("Keep this local until paired").unwrap();
+    let mut wrong = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("wrong"), "g")),
+        &b,
+    )
+    .unwrap();
+    assert!(wrong.sync_once(&mut b).is_err());
+    assert_eq!(relay.manifest("g").rev, before);
+    let mut unencrypted = VerifiedTarget::new(transport());
+    assert!(unencrypted.manifest(None).is_err());
+    assert_eq!(relay.manifest("g").rev, before);
+    let mut correct = SyncClient::new(
+        VerifiedTarget::new(Encrypted::new(transport(), key("original"), "g")),
+        &b,
+    )
+    .unwrap();
+    correct.sync_once(&mut b).unwrap();
+    assert!(relay.manifest("g").rev > before);
+    assert!(b.find_page("Encrypted original").unwrap().is_some());
+}
+
 /// §12.7 / rule 12: publication acknowledgements belong to a destination, including blobs.
 #[test]
 fn ac_12_7_setup_switch_republishes_uploaded_blobs_to_a_folder() {

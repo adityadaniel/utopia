@@ -241,8 +241,10 @@ impl Environment {
     }
 }
 
+pub mod probe;
 #[cfg(test)]
 mod tests;
+pub mod verified_target;
 
 /// A non-secret, encrypted fixed marker protects the graph even if its Keychain item is
 /// lost or the graph is copied (§12.6). No passphrase, derived key or token is serialized.
