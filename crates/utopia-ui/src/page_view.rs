@@ -2210,6 +2210,11 @@ impl PageView {
                 );
             }
             EditorEvent::InsertAbove => {
+                // The bar is not part of the outline: inserting above its first row would
+                // put a plain block between the properties and the body and end the bar.
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 self.run_plan(
                     &t.page,
                     |st| outline::insert_above(st, &t.block),
@@ -2218,7 +2223,7 @@ impl PageView {
                 );
             }
             EditorEvent::Indent => {
-                if self.is_property_block(&t.block) {
+                if self.is_property_block(&t.block) || self.indent_reaches_a_property(&t, cx) {
                     return;
                 }
                 let caret = editor.read(cx).cursor();
@@ -3795,6 +3800,33 @@ impl PageView {
                 .ok()
                 .and_then(|st| st.block(block).map(|b| b.text.len()))
                 .unwrap_or(0)
+        })
+    }
+
+    /// True when indenting `t.block` would make a leading property its parent. The row
+    /// above the first body block is the last bar row, and the bar cannot draw a subtree
+    /// (DESIGN.md §3.1/§3.8): Tab there must do nothing rather than demote the properties.
+    fn indent_reaches_a_property(&self, t: &EditTarget, cx: &mut Context<Self>) -> bool {
+        if self.page().as_ref() != Some(&t.page) {
+            return false;
+        }
+        let zoom = self.zoom();
+        let properties: Vec<BlockId> = self
+            .header
+            .properties
+            .iter()
+            .map(|p| p.block.clone())
+            .collect();
+        self.app.update(cx, |app, _| {
+            let collapsed = app.store.collapsed_set().clone();
+            let Ok(st) = app.store.page_state(&t.page) else {
+                return true;
+            };
+            let rows = st.visible_rows(zoom.as_ref(), &|b| collapsed.contains(b));
+            match rows.iter().position(|(r, _)| r == &t.block) {
+                Some(0) | None => true,
+                Some(ix) => properties.contains(&rows[ix - 1].0),
+            }
         })
     }
 
