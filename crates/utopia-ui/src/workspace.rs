@@ -730,6 +730,7 @@ impl Workspace {
     pub fn open_split(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
         // Cmd+Shift+Click opens a split without going through `open`, and it is still a page
         // opened: the Quick jump empty state should offer it next time (QJ-1).
+        self.page_menu = false;
         self.note_opened(&page, cx);
         let v = cx.new(|cx| {
             PageView::new(
