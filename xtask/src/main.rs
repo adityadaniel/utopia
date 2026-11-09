@@ -1195,6 +1195,21 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
             ..Default::default()
         },
     )?;
+    // An unlinked mention that follows a link, so the highlight has to be mapped through
+    // the stripped markup (the verification shot for the mention renderer).
+    let plan = outline::append_block(s.page_state(&day)?, None);
+    let id = s
+        .execute_plan(&day, plan, None)?
+        .context("new block")?
+        .block;
+    s.set_block_text(
+        &day,
+        &id,
+        "For [[Atlas Launch]], the import plan is written up",
+        None,
+        None,
+    )?;
+    s.commit_block(&day, &id)?;
     // Link yesterday, so the feed shows a day with a Linked References section of its own.
     let yesterday = today - chrono::Duration::days(1);
     let link = s.date_format().format(yesterday);
