@@ -38,6 +38,7 @@ instant with different keys, the first payload establishes the key and the other
 refused from then on — it does not mix ciphertext, but it also cannot join until it uses
 that passphrase. Previously the claim above overstated this: a wrong key on a second device
 could freeze itself into the graph and mix ciphertexts.
+
 Nearby Mac discovery is not a one-shot at launch: a client that finds no host keeps looking
 on the runner's slow cadence while the saved mode is Nearby and no runner exists, because the
 host machine is often asleep when the laptop starts (`ac_12_7_a_nearby_client_keeps_looking_for_its_host`).

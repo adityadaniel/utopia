@@ -257,6 +257,10 @@ pub fn may_freeze_key(probe: &probe::Probe) -> bool {
 /// A non-secret, encrypted fixed marker protects the graph even if its Keychain item is
 /// lost or the graph is copied (§12.6). No passphrase, derived key or token is serialized.
 /// Like a page payload, the marker can only be opened by the original graph key.
+///
+/// It is also an *offline* verifier for that key: whoever holds the graph file can try
+/// passphrase guesses against it without the relay, at the same Argon2 cost as a relay
+/// ciphertext would (PRD §15.6 records the trade-off).
 pub fn verify_passphrase(
     pass: Option<&str>,
     graph: &str,
