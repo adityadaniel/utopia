@@ -28,6 +28,12 @@ pub struct LineInput {
     placeholder: SharedString,
     /// Passphrase entry: shown as `*`, never copied.
     masked: bool,
+    /// A stored value a host asked to show while the input method owned the buffer
+    /// (§13.5). Applied when the composition ends, unless the user's text is newer.
+    pending_fill: Option<String>,
+    /// The user has changed the buffer since the host last wrote it: a late
+    /// [`Self::fill`] from a saved value must not replace it.
+    user_edited: bool,
 }
 
 impl EventEmitter<LineInputEvent> for LineInput {}
@@ -59,6 +65,8 @@ impl LineInput {
             focus: cx.focus_handle(),
             placeholder: placeholder.into(),
             masked: false,
+            pending_fill: None,
+            user_edited: false,
         }
     }
 
@@ -78,6 +86,10 @@ impl LineInput {
     /// on every page change (`PageView::show`, §13.4), and emitting there would make its
     /// listener rebuild the item list a second time for nothing (rule 10).
     pub fn set_text(&mut self, text: &str, cx: &mut Context<Self>) {
+        // A host write supersedes anything queued for the old text, and makes the field
+        // host-owned until the user types again.
+        self.pending_fill = None;
+        self.user_edited = false;
         if self.field.text == text {
             return;
         }
@@ -91,11 +103,33 @@ impl LineInput {
     /// Show a saved value for editing (a Settings field): caret at the end, nothing
     /// selected. [`Self::set_text`] selects what it wrote, which is right for a value the
     /// user is expected to replace and wrong for one they are expected to keep.
+    ///
+    /// Unlike `set_text` this is a load, not a command: it waits for a live composition
+    /// and never replaces what the user has typed since the host last wrote the field
+    /// (§13.5).
     pub fn fill(&mut self, text: &str, cx: &mut Context<Self>) {
-        if self.field.text == text {
+        if self.field.composing() {
+            self.pending_fill = Some(text.to_string());
             return;
         }
+        self.pending_fill = None;
+        if self.field.text == text || self.user_edited {
+            return;
+        }
+        self.write_fill(text, cx);
+    }
+
+    /// The host has taken this field's text into a request that is now in flight. A later
+    /// [`Self::fill`] of the value that settles it (for a secret, `""`) may replace it,
+    /// unless the user types something newer meanwhile (§13.5, §15.6).
+    pub fn submitted(&mut self) {
+        self.pending_fill = None;
+        self.user_edited = false;
+    }
+
+    fn write_fill(&mut self, text: &str, cx: &mut Context<Self>) {
         self.field.set_text(text, text.len());
+        self.user_edited = false;
         cx.emit(LineInputEvent::Changed(self.field.text.clone()));
         cx.notify();
     }
@@ -105,9 +139,20 @@ impl LineInput {
     }
 
     fn after_edit(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.field.composing() {
-            cx.emit(LineInputEvent::Changed(self.field.text.clone()));
+        if self.field.composing() {
+            return;
         }
+        if let Some(text) = self.pending_fill.take() {
+            // The composition ended on the text it started from, so it was cancelled and
+            // nothing the user committed is newer than the queued stored value.
+            let cancelled = self.field.composition_base() == Some(self.field.text.as_str());
+            if cancelled && !self.user_edited {
+                self.write_fill(&text, cx);
+                return;
+            }
+        }
+        self.user_edited = true;
+        cx.emit(LineInputEvent::Changed(self.field.text.clone()));
     }
 
     fn edit(
