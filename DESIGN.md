@@ -1,6 +1,6 @@
 # Utopia Design Spec ("Quiet paper")
 
-Utopia is a desktop outliner. This file covers the visual system and the three main screens: the Daily Notes feed, a page view, and the sidebar. Build it to match what's written here. If something isn't covered, pick the option that fits the principles below.
+Utopia is a desktop outliner. This file covers the visual system and the main screens: the Daily Notes feed, a page view, the sidebar, and the stacked panes that hold them (§4.3, §4.4). Build it to match what's written here. If something isn't covered, pick the option that fits the principles below.
 
 ## 1. Principles
 
@@ -195,6 +195,43 @@ Sidebar plus main area. The main area has the top bar and the content column. Da
 ### 4.2 Page view
 
 Sidebar (the page is highlighted in Pages) plus main area: top bar with breadcrumb, page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then Unlinked references.
+
+### 4.3 Stacked panes (navigation model)
+
+Pages open side by side in panes instead of replacing each other. Daily Notes is always the first pane.
+
+Layout:
+
+- The main area below the top bar is one horizontal scroller (overflow-x: auto) with `--well` as its background. Panes sit in a row inside it.
+- Each pane: fixed width 560px (allowed range 480 to 720), full height, `--paper` background, 1px `--line` border on both sides. Each pane scrolls vertically by itself.
+- Each pane is `position: sticky` with `left: index × 40px`. As you scroll right, older panes stay stuck at the left edge, and newer panes slide over them.
+- Spine: when a pane is almost fully covered by the next one (less than about 80px of it shows), its visible 40px strip turns into a spine: `--well` fill, 1px `--line` right border, and the page title written vertically (`writing-mode: vertical-rl`, 13/500 `--ink-2`), starting 18px from the top. Clicking the spine scrolls back so that pane is fully visible (`scrollLeft = index × (paneWidth − 40)`).
+- Pane header: 44px tall. It holds a close (×) icon button on the right, on every pane except the first. Pane content: padding 0 40px 72px. Page title is 30/38 inside a pane, and day titles are 26/34.
+
+Behavior:
+
+- Plain click on a page link, date link or tag in pane i keeps panes 0…i, drops every pane to the right of i, adds the target as pane i + 1, and smooth-scrolls to the end. ⌘-click (Ctrl-click off macOS) replaces pane i in place: keep 0…i−1, put the target at i, and drop the rest. The Daily Notes pane is never replaced, so a ⌘-click inside pane 0 acts like a plain click.
+- If the target is already open anywhere in the stack, nothing is added. The scroller just smooth-scrolls to that pane.
+- In pane i, any link whose target is open in pane i + 1 gets a `--link-tint` highlight (2px tint ring, radius 3), so you can see which link the next pane came from.
+- Closing a pane removes only that pane. The panes after it shift left.
+- Sidebar items (pages, tags, calendar days) open their target as a new pane at the end of the stack. Clicking "Daily Notes" in the sidebar resets the stack to only the Daily Notes pane.
+- Top bar: the breadcrumb is replaced by a trail of the open panes (titles separated by chevron-right icons; the last one is `--ink` 500, the others `--ink-3`). Clicking a title scrolls to that pane. "Close other panes" (outline button) keeps the Daily Notes pane and the focused pane. Back closes the last pane.
+- Save the stack to the window's state (and the URL, if you have one) so a reload restores the same panes.
+- Day titles in the Daily Notes pane are buttons that open that date's page as a pane.
+
+### 4.4 View mode toggle: Panes or Single
+
+A segmented control in the top bar, just left of "Close other panes": Panes (three-column icon) | Single (page icon). Height 32, 1px `--line-strong` border, radius 8. The selected side has a `--selected` fill and `--ink` 500 text; the other side is white with `--ink-3` text. Use `aria-pressed`. Remember the choice across app launches (a setting, not per page).
+
+Both modes share one list: the pane stack. Single mode just shows its last item.
+
+- Single mode: one page fills the main area. The content column is centered with a max width of 760px. There are no spines, close buttons or "Close other panes" button.
+- A plain click navigates: it adds the target to the end of the list. If the target is already in the list, cut the list back to that entry instead of adding a duplicate.
+- ⌘-click opens the target as a pane: switch to Panes mode and add it at the end. This gives a quick way to "peek" a page next to the current one without changing the setting.
+- Back removes the last item. Clicking a title in the top bar trail goes back to that entry.
+- Switching modes keeps the list as it is. Single → Panes shows every entry as a pane, scrolled to the end. Panes → Single shows the last pane.
+
+Keyboard (both modes): each pane is a landmark (section with the page title as its label). Suggested shortcuts: ⌘W closes the focused pane, ⌥← and ⌥→ move focus between panes, and moving focus into a pane scrolls it fully into view.
 
 ## 5. Behavior and accessibility checklist
 

@@ -161,6 +161,43 @@ pub const CONTENT_PADDING_BOTTOM: f32 = 96.;
 /// Space above and below a day section in the feed, with a 1 px `line_soft` divider (§2.3).
 pub const DAY_GAP: f32 = 40.;
 
+// Stacked panes (§4.3).
+/// A pane's width: 560 px (the spec allows 480 to 720).
+pub const PANE_WIDTH: f32 = 560.;
+/// The strip an older pane keeps when the next one slides over it, and where pane `i`
+/// sticks (`i × 40`).
+pub const PANE_SPINE: f32 = 40.;
+/// A pane showing less than this becomes a spine.
+pub const PANE_SPINE_THRESHOLD: f32 = 80.;
+/// The pane header: 44 px, holding the close button.
+pub const PANE_HEADER_HEIGHT: f32 = 44.;
+/// Air below a pane's last block (§4.3: padding 0 40px 72px).
+pub const PANE_PADDING_BOTTOM: f32 = 72.;
+/// Where a spine's vertical title starts, from the top of the spine.
+pub const SPINE_TITLE_TOP: f32 = 18.;
+/// The ring around a link whose page is open in the next pane: 2 px of `link_tint`.
+pub const LINK_RING_WIDTH: f32 = 2.;
+/// That ring's radius (§4.3: 3).
+pub const RADIUS_LINK_RING: f32 = 3.;
+/// A page title inside a pane: 30 / 38, semibold (§4.3).
+pub const PANE_PAGE_TITLE: TypeRole = TypeRole {
+    size: 30.,
+    line: 38.,
+    weight: SANS_SEMIBOLD,
+};
+/// A day title inside a pane: 26 / 34, semibold (§4.3).
+pub const PANE_DAY_TITLE: TypeRole = TypeRole {
+    size: 26.,
+    line: 34.,
+    weight: SANS_SEMIBOLD,
+};
+/// A spine's title: 13 / 500 (§4.3), drawn one glyph per line.
+pub const SPINE_TITLE: TypeRole = TypeRole {
+    size: 13.,
+    line: 16.,
+    weight: SANS_MEDIUM,
+};
+
 /// The left sidebar: 264 px wide, never below 240, 12 px padding (§2.3).
 pub const SIDEBAR_WIDTH: f32 = 264.;
 pub const SIDEBAR_MIN_WIDTH: f32 = 240.;

@@ -59,7 +59,7 @@ both env vars at a scratch folder when trying the app so you never touch the use
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
 `{"version": 1, "font": "system" | "ibm-plex-sans", "density": "comfortable" | "compact",
 "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
-"right_sidebar_width": 380.0}` (`utopia_ui::appearance`); a missing file or
+"right_sidebar_width": 380.0, "view_mode": "single" | "panes"}` (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
 not know.
 
@@ -337,7 +337,7 @@ Implemented:
   + one-click Link, co-reference and date filters, attributes + page metadata header, aliases UI,
   journal and page templates (`templates/<name>` pages), extract block to page, drag across
   pages, block embeds (`{{embed: ((uid))}}`), quick capture (in-app and system-wide hotkey,
-  plus `utopia capture`), split panes (Cmd+Shift+Click), Roam JSON import, OPML export.
+  plus `utopia capture`), stacked panes (DESIGN.md §4.3/§4.4, PRD §9.2.1; replaced split panes), Roam JSON import, OPML export.
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
   snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.
@@ -402,6 +402,16 @@ Known limits (pick these up deliberately, don't paper over them):
 - The folder transport re-reads every file of a changed page (imports are idempotent) and
   never compacts, because it must not delete other devices' files.
 - Very large flat sibling lists (≫5k blocks under one parent) make each insert O(n).
+- Stacked panes (DESIGN.md §4.3): gpui has no `position: sticky`, so `pane_stack::Geometry`
+  places each pane; when the window cannot hold every spine plus a whole pane, the oldest
+  spines fold under one another at the left edge (the newest pane always shows whole).
+  gpui 0.2 cannot rotate text, so a spine sets its title one grapheme per line, upright.
+  There is no accessibility tree, so panes are not landmarks and the toggle has no
+  `aria-pressed`. gpui hands a click to every hitbox under the pointer: each pane
+  `occlude()`s the panes it covers and forwards the sideways wheel itself — keep that, or a
+  click lands in a covered pane too. Spines and off-screen panes do not draw their page,
+  except the one holding the edit. In Single mode the hidden entries keep their views but
+  are inactive (`PageView::set_active`): they rebuild when shown, not on every change.
 
 Beyond the PRD's scope ladder there is nothing scheduled; new feature requests go through the
 PRD first (risk R8).

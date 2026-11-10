@@ -21,7 +21,8 @@ use crate::app_state::{AppState, IndexUpdated};
 use crate::editor::{BlockEditor, EditorEvent};
 use crate::graph_view::{GraphEvent, GraphView};
 use crate::icons::{icon, Icon, ICON_SIZE};
-use crate::page_view::{PageView, PageViewEvent};
+use crate::page_view::{NextLink, PageView, PageViewEvent};
+use crate::pane_stack::{self, Click, Entry, Geometry, Origin, Plan, ViewMode};
 use crate::pdf_view::{PdfEvent, PdfView};
 use crate::quick_jump::{JumpPalette, PaletteMode, QuickJumpEvent};
 use crate::sync_runner::{
@@ -33,6 +34,10 @@ use crate::theme::{
     RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT,
     TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI,
     VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
+};
+use crate::theme::{
+    outline_button, PANE_HEADER_HEIGHT, PANE_SPINE, PANE_SPINE_THRESHOLD, PANE_WIDTH, SPINE_TITLE,
+    SPINE_TITLE_TOP,
 };
 
 /// The reference panel's sub-tabs: which way the edges are looked at (FR-4.6).
@@ -170,14 +175,79 @@ enum MainContent {
     Pdf(Entity<PdfView>),
 }
 
+/// A sideways scroll of the pane row on its way to `to` (DESIGN.md §4.3 "smooth-scrolls").
+/// Each frame reads the clock; nothing runs between frames.
+#[derive(Debug, Clone, Copy)]
+struct ScrollAnim {
+    from: f32,
+    to: f32,
+    start: std::time::Instant,
+}
+
+/// How long a smooth scroll of the pane row takes, ease-out (DESIGN.md §5: short motion).
+const SCROLL_ANIM: Duration = Duration::from_millis(200);
+
+/// `local_state` key holding the pane stack (SP-8): device-local like collapse (rule 9).
+const STACK_KEY: &str = "pane_stack";
+
+/// The collapsed left sidebar's rail.
+const LEFT_RAIL_WIDTH: f32 = 32.;
+
+/// A spine shows at most this many graphemes of its title; a window is never that tall.
+const SPINE_MAX_GLYPHS: usize = 64;
+
+/// macOS "Reduce motion" (DESIGN.md §5): a smooth scroll lands at once. Read when a
+/// scroll starts (a handler), never in a frame.
+#[cfg(target_os = "macos")]
+#[allow(unexpected_cfgs)] // objc 0.2's msg_send! checks a cfg this crate does not declare
+fn reduce_motion() -> bool {
+    use objc::runtime::{Class, Object, BOOL, NO};
+    use objc::{msg_send, sel, sel_impl};
+    let Some(cls) = Class::get("NSWorkspace") else {
+        return false;
+    };
+    // SAFETY: `sharedWorkspace` and `accessibilityDisplayShouldReduceMotion` are plain
+    // getters on AppKit's singleton (macOS 10.12+); a nil workspace is checked first.
+    unsafe {
+        let ws: *mut Object = msg_send![cls, sharedWorkspace];
+        if ws.is_null() {
+            return false;
+        }
+        let on: BOOL = msg_send![ws, accessibilityDisplayShouldReduceMotion];
+        on != NO
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reduce_motion() -> bool {
+    false
+}
+
 pub struct Workspace {
     app: Entity<AppState>,
     editor: Entity<BlockEditor>,
-    main: Entity<PageView>,
-    /// What the main column shows in place of `main` (P2).
+    /// The pane stack (DESIGN.md §4.3, SP-1): one page view per entry, `stack[0]` always the
+    /// Daily Notes feed. The click rules live in `pane_stack`; this is only their result.
+    stack: Vec<Entity<PageView>>,
+    /// Panes or Single (§4.4). Starts from the setting; a ⌘-click in Single switches to
+    /// Panes for this window without changing the setting.
+    mode: ViewMode,
+    /// The entry that has focus: the one ⌘W closes and ⌥←/⌥→ move from. Always the last
+    /// one in Single mode.
+    focused: usize,
+    /// Focus last moved by key (⌥←/⌥→), so the focused pane shows its ring (§3.4).
+    key_focus: bool,
+    /// How far the pane row is scrolled sideways, in points (§4.3).
+    scroll_x: f32,
+    scroll_anim: Option<ScrollAnim>,
+    /// Smooth scrolling is on (tests turn it off to read final positions at once).
+    animate: bool,
+    /// The stack as last saved and as the views were last told about their neighbours, so
+    /// a view's frequent notifications cost a compare, not a store read (rule 10).
+    stack_seen: Vec<Entry>,
+    /// What the main column shows in place of the stack (P2).
     content: MainContent,
     panes: Vec<SidePane>,
-    splits: Vec<Entity<PageView>>,
     right_open: bool,
     /// The right sidebar's width in points (RS-4), kept in `settings.json` (rule 9).
     right_width: f32,
@@ -278,6 +348,7 @@ impl Workspace {
         let editor = cx.new(|cx| BlockEditor::new(app.clone(), cx));
         let main =
             cx.new(|cx| PageView::new(app.clone(), editor.clone(), false, false, window, cx));
+        let mode = crate::appearance::view_mode(cx);
         let today = app.read(cx).store.today();
         let backup_dir = app
             .read(cx)
@@ -286,6 +357,7 @@ impl Workspace {
             .and_then(|p| p.parent().map(|d| d.join("backup")));
         let mut subs = vec![
             cx.subscribe_in(&main, window, Self::on_page_event),
+            cx.observe(&main, Self::on_view_changed),
             cx.subscribe_in(
                 &editor,
                 window,
@@ -369,10 +441,16 @@ impl Workspace {
         let mut me = Self {
             app,
             editor,
-            main,
+            stack: vec![main],
+            mode,
+            focused: 0,
+            key_focus: false,
+            scroll_x: 0.,
+            scroll_anim: None,
+            animate: true,
+            stack_seen: vec![Entry::Daily],
             content: MainContent::Page,
             panes: Vec::new(),
-            splits: Vec::new(),
             right_open: false,
             right_width: crate::appearance::right_sidebar_width(cx),
             resize_from: None,
@@ -409,21 +487,14 @@ impl Workspace {
         // keeps meaning the page you are reading or editing. A panel hidden with the sidebar
         // is not drawn, so it does no work; `show_right` brings it up to date when the
         // sidebar returns (workspace-main-pane-content.md, issue 3).
-        let main = me.main.clone();
-        me.subs.push(cx.observe(&main, |this, main, cx| {
-            if !this.right_open {
-                return;
-            }
-            let page = main.read(cx).page();
-            if let Some(panel) = this.graph_panel.clone() {
-                panel.update(cx, |graph, cx| graph.set_origin(page, cx));
-            }
-        }));
+        // (Each stack view is observed by `on_view_changed`, which keeps that up to date.)
         // GR-5: the panel is an index projection. In debounced mode links arrive after the
         // keystroke, so reload when the writer has caught up, not only when the page changes.
         let app = me.app.clone();
         me.subs
             .push(cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
+                // A rename or a new alias changes how links name the next pane (§4.3).
+                this.sync_next_links(cx);
                 if !this.right_open {
                     return;
                 }
@@ -725,31 +796,507 @@ impl Workspace {
         true
     }
 
-    /// Split panes (P1): an editable page beside the main one (Cmd+Shift+Click). At most
-    /// two splits; the oldest closes first.
-    pub fn open_split(&mut self, page: PageId, window: &mut Window, cx: &mut Context<Self>) {
-        // Cmd+Shift+Click opens a split without going through `open`, and it is still a page
-        // opened: the Quick jump empty state should offer it next time (QJ-1).
-        self.page_menu = false;
-        self.note_opened(&page, cx);
+    // ---------------------------------------------------------------- pane stack (§4.3)
+
+    /// The view of the focused entry: the page the top bar, the day navigation, the page
+    /// menu and Cmd+Shift+G act on. In Single mode it is the one page on screen.
+    fn current(&self) -> Entity<PageView> {
+        let i = self.focused.min(self.stack.len().saturating_sub(1));
+        self.stack[i].clone()
+    }
+
+    /// What each entry shows, read from its view: a zoom or a merged page changes the
+    /// entry without a click, so the views are the source and this is derived.
+    fn entries(&self, cx: &gpui::App) -> Vec<Entry> {
+        self.stack
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                let v = v.read(cx);
+                match v.page() {
+                    _ if i == 0 => Entry::Daily,
+                    Some(page) => Entry::Page {
+                        page,
+                        zoom: v.zoom(),
+                    },
+                    None => Entry::Daily,
+                }
+            })
+            .collect()
+    }
+
+    /// The pages of the stack, in order (the feed as today's page), for tests and scripts.
+    pub fn stack_pages(&self, cx: &gpui::App) -> Vec<Option<PageId>> {
+        self.stack.iter().map(|v| v.read(cx).page()).collect()
+    }
+
+    /// The stack as entries (SP-1), for tests.
+    pub fn stack_entries(&self, cx: &gpui::App) -> Vec<Entry> {
+        self.entries(cx)
+    }
+
+    /// The view at `i` in the stack, for tests.
+    pub fn stack_view(&self, i: usize) -> Option<Entity<PageView>> {
+        self.stack.get(i).cloned()
+    }
+
+    pub fn view_mode(&self) -> ViewMode {
+        self.mode
+    }
+
+    pub fn focused_pane(&self) -> usize {
+        self.focused
+    }
+
+    /// The sideways scroll in force and where an animation is taking it.
+    pub fn pane_scroll(&self) -> (f32, Option<f32>) {
+        (self.scroll_x, self.scroll_anim.map(|a| a.to))
+    }
+
+    /// Turn smooth scrolling off (tests) so a scroll lands at once.
+    pub fn set_scroll_animation(&mut self, on: bool) {
+        self.animate = on;
+        if !on {
+            self.settle_scroll();
+        }
+    }
+
+    /// Jump a running scroll animation to its end.
+    pub fn settle_scroll(&mut self) {
+        if let Some(a) = self.scroll_anim.take() {
+            self.scroll_x = a.to;
+        }
+    }
+
+    /// The width the pane row has: the window less the two sidebars. Computed, not
+    /// measured, so a handler can place panes before the next frame.
+    fn scroller_width(&self, window: &Window) -> f32 {
+        let left = if self.left_open {
+            crate::theme::SIDEBAR_WIDTH
+        } else {
+            LEFT_RAIL_WIDTH
+        };
+        let right = if self.right_open {
+            self.right_width
+        } else {
+            0.
+        };
+        (f32::from(window.viewport_size().width) - left - right).max(PANE_WIDTH)
+    }
+
+    fn geometry(&self, window: &Window) -> Geometry {
+        Geometry {
+            pane: PANE_WIDTH,
+            spine: PANE_SPINE,
+            threshold: PANE_SPINE_THRESHOLD,
+            viewport: self.scroller_width(window),
+            count: self.stack.len(),
+        }
+    }
+
+    /// Scroll the pane row to `to`, smoothly unless motion is reduced (DESIGN.md §5).
+    fn scroll_to(&mut self, to: f32, window: &Window, cx: &mut Context<Self>) {
+        let to = to.clamp(0., self.geometry(window).max_scroll());
+        // A new target starts from where the row is now, mid-animation or not.
+        let from = self.scroll_x;
+        if (to - from).abs() < 0.5 {
+            self.scroll_anim = None;
+            self.scroll_x = to;
+        } else if self.animate && !reduce_motion() {
+            self.scroll_anim = Some(ScrollAnim {
+                from,
+                to,
+                start: std::time::Instant::now(),
+            });
+        } else {
+            self.scroll_anim = None;
+            self.scroll_x = to;
+        }
+        cx.notify();
+    }
+
+    /// Bring entry `i` fully into view (SP-9). Nothing to scroll in Single mode.
+    fn reveal(&mut self, i: usize, window: &Window, cx: &mut Context<Self>) {
+        if self.mode == ViewMode::Panes {
+            let from = self.scroll_anim.map_or(self.scroll_x, |a| a.to);
+            let to = self.geometry(window).reveal(i, from);
+            self.scroll_to(to, window, cx);
+        }
+    }
+
+    /// A new view for `entry`, subscribed like every stack view.
+    fn new_view(
+        &mut self,
+        entry: &Entry,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<PageView> {
         let v = cx.new(|cx| {
             PageView::new(
                 self.app.clone(),
                 self.editor.clone(),
-                true,
-                true,
+                false,
+                false,
                 window,
                 cx,
             )
         });
         self.subs
             .push(cx.subscribe_in(&v, window, Self::on_page_event));
-        v.update(cx, |v, cx| v.open(page, None, cx));
-        if self.splits.len() >= 2 {
-            self.splits.remove(0);
+        self.subs.push(cx.observe(&v, Self::on_view_changed));
+        if let Entry::Page { page, zoom } = entry {
+            v.update(cx, |v, cx| v.open(page.clone(), zoom.clone(), cx));
         }
-        self.splits.push(v);
+        v
+    }
+
+    /// Turn the stack into what `plan` says (`pane_stack`). Kept entries keep their views,
+    /// so their scroll, folds and caret stay; an edit hosted by a dropped view ends first,
+    /// since a focused element that is no longer drawn swallows every key (AGENTS.md).
+    fn apply_plan(&mut self, plan: Plan, window: &mut Window, cx: &mut Context<Self>) {
+        let dropped: Vec<EntityId> = (0..self.stack.len())
+            .filter(|i| !plan.keep.contains(i))
+            .map(|i| self.stack[i].entity_id())
+            .collect();
+        for host in dropped {
+            self.end_edit_in(host, window, cx);
+        }
+        let mut stack: Vec<Entity<PageView>> = plan
+            .keep
+            .iter()
+            .filter_map(|&i| self.stack.get(i).cloned())
+            .collect();
+        if stack.is_empty() {
+            // `keep` always holds entry 0 (`pane_stack`); never leave the window empty.
+            stack.push(self.stack[0].clone());
+        }
+        if let Some(e) = &plan.push {
+            let v = self.new_view(e, window, cx);
+            stack.push(v);
+        }
+        self.stack = stack;
+        let switched = self.mode != plan.mode;
+        self.mode = plan.mode;
+        self.focused = plan.focus.min(self.stack.len() - 1);
+        if self.mode == ViewMode::Single {
+            self.focused = self.stack.len() - 1;
+        }
+        self.key_focus = false;
+        self.stack_changed(cx);
+        if switched {
+            // Same list, but rings exist only in Panes mode (§4.3).
+            self.sync_next_links(cx);
+        }
+        if switched && self.mode == ViewMode::Panes {
+            // Single → Panes shows every entry, scrolled to the end (§4.4).
+            self.scroll_x = self.geometry(window).max_scroll();
+        }
+        let f = self.focused;
+        self.reveal(f, window, cx);
+        self.title_window(window, cx);
         cx.notify();
+    }
+
+    /// After the stack or an entry changed: tell each view how to draw and which link the
+    /// next pane came from, and save the stack (SP-8). Cheap when nothing changed.
+    fn stack_changed(&mut self, cx: &mut Context<Self>) {
+        let in_pane = self.mode == ViewMode::Panes;
+        let last = self.stack.len() - 1;
+        for (i, v) in self.stack.clone().into_iter().enumerate() {
+            // Single mode shows the last entry only; the others wait, stale but cheap.
+            let active = in_pane || i == last;
+            v.update(cx, |v, cx| {
+                v.set_in_pane(in_pane, cx);
+                v.set_active(active, cx);
+            });
+        }
+        let entries = self.entries(cx);
+        if entries == self.stack_seen {
+            return;
+        }
+        let saved = pane_stack::save(&entries);
+        self.stack_seen = entries;
+        self.sync_next_links(cx);
+        if let Err(e) = self.app.read(cx).store.local_set(STACK_KEY, &saved) {
+            eprintln!("utopia: {e}");
+        }
+    }
+
+    /// A stack view notified: its page or zoom may have moved under it (a zoom, a merge,
+    /// a promoted draft day). The graph panel follows the focused view (GR-5).
+    fn on_view_changed(&mut self, view: Entity<PageView>, cx: &mut Context<Self>) {
+        if !self.stack.contains(&view) {
+            return;
+        }
+        if self.right_open && self.current() == view {
+            let page = view.read(cx).page();
+            if let Some(panel) = self.graph_panel.clone() {
+                panel.update(cx, |graph, cx| graph.set_origin(page, cx));
+            }
+        }
+        if self.entries(cx) != self.stack_seen {
+            self.stack_changed(cx);
+            cx.notify();
+        }
+    }
+
+    /// The ring in pane `i` names the page open in pane `i + 1` (§4.3); Single mode shows
+    /// one page, so nothing is ringed there. Store reads, so only when the stack changed.
+    fn sync_next_links(&mut self, cx: &mut Context<Self>) {
+        let panes = self.mode == ViewMode::Panes;
+        let entries = self.entries(cx);
+        for (i, v) in self.stack.clone().into_iter().enumerate() {
+            let next = match entries.get(i + 1) {
+                Some(Entry::Page { page, zoom }) if panes => self.next_link(page, zoom, cx),
+                _ => None,
+            };
+            v.update(cx, |v, cx| v.set_next_link(next, cx));
+        }
+    }
+
+    fn next_link(
+        &self,
+        page: &PageId,
+        zoom: &Option<BlockId>,
+        cx: &mut Context<Self>,
+    ) -> Option<NextLink> {
+        self.app.update(cx, |app, _| {
+            let (title, date) = {
+                let st = app.store.page_state(page).ok()?;
+                (st.meta.title.clone(), st.meta.daily_date)
+            };
+            let mut keys = vec![normalize_title(&title)];
+            for a in app.store.aliases(page).unwrap_or_default() {
+                let k = normalize_title(&a);
+                if !keys.contains(&k) {
+                    keys.push(k);
+                }
+            }
+            Some(NextLink {
+                keys,
+                date,
+                block: zoom.clone(),
+                date_format: app.store.date_format().clone(),
+            })
+        })
+    }
+
+    /// The window title names the focused page.
+    fn title_window(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self.current();
+        if view.read(cx).is_journal() {
+            window.set_window_title("Daily Notes — Utopia");
+            return;
+        }
+        let Some(page) = view.read(cx).page() else {
+            return;
+        };
+        let _ = self
+            .app
+            .read(cx)
+            .store
+            .local_set("last_page", page.as_str());
+        let title = self.pane_title(&page, cx);
+        window.set_window_title(&format!("{title} — Utopia"));
+    }
+
+    /// The index of `view` in the stack, if it is a stack view.
+    fn stack_index(&self, view: &Entity<PageView>) -> Option<usize> {
+        self.stack.iter().position(|v| v == view)
+    }
+
+    /// Open from a click (`pane_stack::open`): `origin` is the pane the link was in.
+    #[allow(clippy::too_many_arguments)]
+    pub fn open_from(
+        &mut self,
+        origin: Origin,
+        click: Click,
+        page: PageId,
+        zoom: Option<BlockId>,
+        focus: Option<BlockId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |e, cx| e.end(cx));
+        self.page_menu = false;
+        self.note_opened(&page, cx);
+        // A page opened in the main column replaces whatever it was showing: a PDF is
+        // closed and a full-screen graph gives way, so the page is never opened
+        // invisibly behind the graph (workspace-main-pane-content.md, issues 1 and 2).
+        self.content = MainContent::Page;
+        let entries = self.entries(cx);
+        let plan = pane_stack::open(
+            &entries,
+            self.mode,
+            origin,
+            click,
+            Entry::Page {
+                page,
+                zoom: zoom.clone(),
+            },
+        );
+        self.apply_plan(plan, window, cx);
+        let view = self.current();
+        match focus {
+            // Zooming in by key (Cmd+Alt+Down in the feed): the caret goes on into the
+            // zoomed block's first row, as it does when a page zooms in place.
+            Some(b) if zoom.as_ref() == Some(&b) => {
+                view.update(cx, |m, cx| m.focus_first(window, cx))
+            }
+            // A reference row or a link can point at a block that is folded away, so
+            // reveal it rather than quietly failing to place the caret (RS-1, RS-3).
+            Some(b) => view.update(cx, |m, cx| m.reveal_block(&b, window, cx)),
+            None => window.focus(&self.focus),
+        }
+    }
+
+    /// The × on pane `i`, or ⌘W on the focused one (SP-4).
+    pub fn close_pane(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = pane_stack::close(self.stack.len(), self.mode, i);
+        self.apply_plan(plan, window, cx);
+    }
+
+    /// Back in the top bar (SP-5): the last entry goes.
+    pub fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = pane_stack::back(self.stack.len(), self.mode);
+        self.apply_plan(plan, window, cx);
+    }
+
+    /// "Close other panes" (SP-4): Daily Notes and the focused pane stay.
+    pub fn close_other_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = pane_stack::close_others(self.stack.len(), self.mode, self.focused);
+        self.apply_plan(plan, window, cx);
+    }
+
+    /// A title in the trail (SP-5).
+    pub fn trail_to(&mut self, j: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let plan = pane_stack::trail(self.stack.len(), self.mode, j);
+        self.apply_plan(plan, window, cx);
+    }
+
+    /// The Panes | Single toggle (SP-6): the list stays; the choice is the setting.
+    pub fn set_mode(&mut self, mode: ViewMode, window: &mut Window, cx: &mut Context<Self>) {
+        if let Err(e) = crate::appearance::set_view_mode(cx, mode) {
+            eprintln!("utopia: {e}");
+        }
+        let plan = pane_stack::set_mode(self.stack.len(), mode);
+        self.apply_plan(plan, window, cx);
+        window.focus(&self.focus);
+    }
+
+    fn toggle_view_mode(
+        &mut self,
+        _: &ToggleViewMode,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let next = match self.mode {
+            ViewMode::Panes => ViewMode::Single,
+            ViewMode::Single => ViewMode::Panes,
+        };
+        self.set_mode(next, window, cx);
+    }
+
+    fn close_pane_action(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
+        let i = self.focused;
+        self.close_pane(i, window, cx);
+    }
+
+    fn focus_pane_left(&mut self, _: &FocusPaneLeft, window: &mut Window, cx: &mut Context<Self>) {
+        self.move_focus(-1, window, cx);
+    }
+
+    fn focus_pane_right(
+        &mut self,
+        _: &FocusPaneRight,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.move_focus(1, window, cx);
+    }
+
+    /// ⌥← / ⌥→ (SP-9): the neighbour takes focus and scrolls fully into view. Single
+    /// mode shows one entry, so there is nowhere to move.
+    fn move_focus(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mode != ViewMode::Panes {
+            return;
+        }
+        let last = self.stack.len() as isize - 1;
+        let i = (self.focused as isize + delta).clamp(0, last) as usize;
+        self.focus_pane(i, window, cx);
+        self.key_focus = true;
+    }
+
+    /// Give entry `i` focus and bring it into view (SP-9).
+    pub fn focus_pane(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if i >= self.stack.len() {
+            return;
+        }
+        if self.focused != i {
+            let host = self.stack[self.focused.min(self.stack.len() - 1)].entity_id();
+            self.end_edit_in(host, window, cx);
+        }
+        self.focused = i;
+        self.reveal(i, window, cx);
+        self.title_window(window, cx);
+        cx.notify();
+    }
+
+    /// A spine was clicked (§4.3): scroll so that pane is whole, `i × (width − 40)`.
+    fn open_spine(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let to = self.geometry(window).spine_target(i);
+        self.focused = i;
+        self.key_focus = false;
+        self.scroll_to(to, window, cx);
+        self.title_window(window, cx);
+    }
+
+    /// Put back the stack saved at the last quit (SP-8): Daily Notes first, then each
+    /// saved page that still lives. Returns whether anything beyond Daily Notes came back.
+    fn restore_stack(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let saved = self
+            .app
+            .read(cx)
+            .store
+            .local_get(STACK_KEY)
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let entries = {
+            let store = &self.app.read(cx).store;
+            pane_stack::restore(&saved, |e| match e {
+                Entry::Daily => true,
+                Entry::Page { page, zoom } => {
+                    store
+                        .page_row(page)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|r| r.is_live())
+                        && zoom.as_ref().is_none_or(|z| {
+                            store
+                                .block_row(z)
+                                .ok()
+                                .flatten()
+                                .is_some_and(|b| &b.page_id == page && b.deleted_at.is_none())
+                        })
+                }
+            })
+        };
+        if entries.len() < 2 {
+            return false;
+        }
+        for e in entries.iter().skip(1) {
+            let v = self.new_view(e, window, cx);
+            self.stack.push(v);
+        }
+        self.focused = self.stack.len() - 1;
+        self.stack_changed(cx);
+        if self.mode == ViewMode::Panes {
+            self.scroll_x = self.geometry(window).max_scroll();
+        }
+        self.title_window(window, cx);
+        cx.notify();
+        true
     }
 
     /// Current sync status, if sync is enabled.
@@ -770,28 +1317,21 @@ impl Workspace {
         self.editor.clone()
     }
 
-    /// The main pane's view, for debug-only probes (query counts).
-    #[cfg(debug_assertions)]
+    /// The focused entry's view (the page on screen in Single mode), for probes and tests.
     pub fn main_view(&self) -> Entity<PageView> {
-        self.main.clone()
+        self.current()
     }
 
-    /// The page shown in the main pane.
+    /// The page the focused entry shows (in Single mode, the page on screen).
     pub fn main_page(&self, cx: &gpui::App) -> Option<PageId> {
-        self.main.read(cx).page()
+        let i = self.focused.min(self.stack.len().saturating_sub(1));
+        self.stack[i].read(cx).page()
     }
 
-    /// The block the main pane is zoomed into, if any.
+    /// The block the focused entry is zoomed into, if any.
     pub fn main_zoom(&self, cx: &gpui::App) -> Option<BlockId> {
-        self.main.read(cx).zoom()
-    }
-
-    /// Pages open in split panes beside the main one.
-    pub fn split_pages(&self, cx: &gpui::App) -> Vec<PageId> {
-        self.splits
-            .iter()
-            .filter_map(|p| p.read(cx).page())
-            .collect()
+        let i = self.focused.min(self.stack.len().saturating_sub(1));
+        self.stack[i].read(cx).zoom()
     }
 
     /// The title a sidebar card shows for `page` (RS-5): the display title, from the shard,
@@ -826,8 +1366,16 @@ impl Workspace {
             .collect()
     }
 
-    /// Open the configured launch page (FR-1.1): today by default, or the last page.
+    /// Open the configured launch page (FR-1.1): today by default, or the last page. The
+    /// feed is always the stack's first entry; a stack saved at the last quit comes back
+    /// over it (SP-8), and only an empty one falls back to the launch rule.
     pub fn open_launch_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_journal(window, cx);
+        if self.restore_stack(window, cx) {
+            self.editor.update(cx, |e, cx| e.end(cx));
+            window.focus(&self.focus);
+            return;
+        }
         let (mode, last) = {
             let s = &self.app.read(cx).store;
             (
@@ -850,11 +1398,9 @@ impl Workspace {
                     .is_some_and(|r| r.is_live())
                 {
                     self.open(p, None, None, false, window, cx);
-                    return;
                 }
             }
         }
-        self.open_journal(window, cx);
     }
 
     /// Remember that `page` was opened, for the Quick jump empty state (QJ-1). Local UI
@@ -891,23 +1437,45 @@ impl Workspace {
                 zoom,
                 focus,
                 sidebar,
-            } => self.open(
-                page.clone(),
-                zoom.clone(),
-                focus.clone(),
-                *sidebar,
-                window,
-                cx,
-            ),
+                click,
+                replace,
+            } => {
+                let index = self.stack_index(view);
+                if *replace {
+                    // The view's page merged into `page` (§8.6): show it in the same place.
+                    match index {
+                        Some(i) if i > 0 => {
+                            self.stack[i].update(cx, |v, cx| v.open(page.clone(), None, cx));
+                            self.stack_changed(cx);
+                            self.title_window(window, cx);
+                            cx.notify();
+                        }
+                        _ => self.open(page.clone(), None, None, false, window, cx),
+                    }
+                } else if *sidebar {
+                    self.open(page.clone(), zoom.clone(), focus.clone(), true, window, cx);
+                } else {
+                    // A link in pane `i` follows the click rules from `i`; a link in the
+                    // right sidebar is outside the stack (SP-2, SP-7).
+                    let origin = index.map_or(Origin::Outside, Origin::Pane);
+                    self.open_from(
+                        origin,
+                        *click,
+                        page.clone(),
+                        zoom.clone(),
+                        focus.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }
             PageViewEvent::Close => {
                 self.panes.retain(|p| &p.view != view);
-                self.splits.retain(|p| p != view);
                 cx.notify();
             }
             PageViewEvent::OpenGraph { page } => {
                 self.open_graph(Some(page.clone()), window, cx);
             }
-            PageViewEvent::OpenSplit { page } => self.open_split(page.clone(), window, cx),
             PageViewEvent::OpenPdf {
                 hash,
                 name,
@@ -972,32 +1540,9 @@ impl Workspace {
             self.panes.insert(0, pane);
             self.show_right(cx);
         } else {
-            // A page opened in the main column replaces whatever it was showing: a PDF is
-            // closed and a full-screen graph gives way, so the page is never opened
-            // invisibly behind the graph (workspace-main-pane-content.md, issues 1 and 2).
-            self.content = MainContent::Page;
-            self.main
-                .update(cx, |m, cx| m.open(page.clone(), zoom.clone(), cx));
-            let _ = self
-                .app
-                .read(cx)
-                .store
-                .local_set("last_page", page.as_str());
-            // From the shard: a draft day has no index row yet.
-            let title = self.app.update(cx, |app, _| {
-                let fmt = app.store.date_format().clone();
-                app.store
-                    .page_state(&page)
-                    .map(|st| utopia_store::display_title(st, &fmt))
-                    .unwrap_or_default()
-            });
-            window.set_window_title(&format!("{title} — Utopia"));
-            match focus {
-                // A reference row or a link can point at a block that is folded away, so
-                // reveal it rather than quietly failing to place the caret (RS-1, RS-3).
-                Some(b) => self.main.update(cx, |m, cx| m.reveal_block(&b, window, cx)),
-                None => window.focus(&self.focus),
-            }
+            // Anything outside the stack — the sidebars, Quick jump, a `utopia://` link —
+            // opens at the end (SP-7).
+            self.open_from(Origin::Outside, Click::Plain, page, zoom, focus, window, cx);
         }
         cx.notify();
     }
@@ -1119,7 +1664,7 @@ impl Workspace {
     }
 
     fn open_graph_full(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let origin = self.main.read(cx).page();
+        let origin = self.current().read(cx).page();
         self.open_graph(origin, window, cx);
     }
 
@@ -1147,7 +1692,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let origin = origin.or_else(|| self.main.read(cx).page());
+        let origin = origin.or_else(|| self.current().read(cx).page());
         let Some(origin) = origin else {
             return;
         };
@@ -1185,7 +1730,15 @@ impl Workspace {
                     self.content = MainContent::Page;
                 }
                 if *split {
-                    self.open_split(page.clone(), window, cx);
+                    self.open_from(
+                        Origin::Outside,
+                        Click::Secondary,
+                        page.clone(),
+                        None,
+                        None,
+                        window,
+                        cx,
+                    );
                     if had_focus {
                         window.focus(&self.focus);
                     }
@@ -1274,7 +1827,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(page) = self.main.read(cx).page() else {
+        let Some(page) = self.current().read(cx).page() else {
             return;
         };
         self.app.update(cx, |app, cx| {
@@ -1435,42 +1988,45 @@ impl Workspace {
         let Some(page) = page else { return };
         self.editor.update(cx, |e, cx| e.end(cx));
         self.content = MainContent::Page;
-        self.main
-            .update(cx, |m, cx| m.open_journal(page.clone(), cx));
+        // "Daily Notes" resets the stack to the feed alone (SP-7).
+        let plan = pane_stack::reset(self.mode);
+        self.apply_plan(plan, window, cx);
+        let feed = self.stack[0].clone();
+        feed.update(cx, |m, cx| m.open_journal(page.clone(), cx));
         let _ = self
             .app
             .read(cx)
             .store
             .local_set("last_page", page.as_str());
         window.set_window_title("Daily Notes — Utopia");
-        self.main.update(cx, |m, cx| m.focus_first(window, cx));
+        feed.update(cx, |m, cx| m.focus_first(window, cx));
         cx.notify();
     }
 
     /// Days shown in the main pane's Daily Notes feed, newest first (empty otherwise).
     pub fn journal_days(&self, cx: &gpui::App) -> Vec<PageId> {
-        self.main.read(cx).journal_days()
+        self.current().read(cx).journal_days()
     }
 
     /// The oldest calendar day the feed has loaded (FR-1.2); `None` outside the feed.
     pub fn journal_shown_through(&self, cx: &gpui::App) -> Option<NaiveDate> {
-        self.main.read(cx).journal_shown_through()
+        self.current().read(cx).journal_shown_through()
     }
 
     /// The date whose heading is pinned at the top of the feed (DN-3), for scripts.
     pub fn main_sticky_day(&self, cx: &gpui::App) -> Option<NaiveDate> {
-        self.main.read(cx).sticky_day()
+        self.current().read(cx).sticky_day()
     }
 
     /// How many days the feed shows open, with a date heading (DN-1), for scripts.
     pub fn open_journal_days(&self, cx: &gpui::App) -> usize {
-        self.main.read(cx).open_day_count()
+        self.current().read(cx).open_day_count()
     }
 
     /// Empty-day rows in the feed as separate list items (DESIGN.md §3.6), for scripts:
     /// one item per day keeps the list virtualizing a long run of blank days.
     pub fn main_empty_day_rows(&self, cx: &gpui::App) -> usize {
-        self.main.read(cx).empty_day_rows()
+        self.current().read(cx).empty_day_rows()
     }
 
     pub fn open_date(
@@ -1493,13 +2049,13 @@ impl Workspace {
         if let Some(page) = page {
             self.open(page, None, None, sidebar, window, cx);
             if focus && !sidebar {
-                self.main.update(cx, |m, cx| m.focus_first(window, cx));
+                self.current().update(cx, |m, cx| m.focus_first(window, cx));
             }
         }
     }
 
     fn current_date(&self, cx: &mut Context<Self>) -> NaiveDate {
-        let page = self.main.read(cx).page();
+        let page = self.current().read(cx).page();
         page.and_then(|p| {
             self.app
                 .update(cx, |app, _| app.store.page_state(&p).ok()?.meta.daily_date)
@@ -1544,7 +2100,7 @@ impl Workspace {
         }
         self.right_open = true;
         if let Some(panel) = self.graph_panel.clone() {
-            let origin = self.main.read(cx).page();
+            let origin = self.current().read(cx).page();
             let moved = was_hidden_with.is_some_and(|page| page != origin);
             panel.update(cx, |graph, cx| {
                 if moved {
@@ -1587,7 +2143,7 @@ impl Workspace {
         if focused {
             window.focus(&self.focus);
         }
-        self.hidden_main_page = Some(self.main.read(cx).page());
+        self.hidden_main_page = Some(self.current().read(cx).page());
         self.right_open = false;
         cx.notify();
     }
@@ -1687,7 +2243,7 @@ impl Workspace {
             caret
         });
         if let Some(c) = caret {
-            self.main
+            self.current()
                 .update(cx, |m, cx| m.restore_caret(&c, window, cx));
         }
     }
@@ -1776,7 +2332,7 @@ impl Workspace {
                 pane.title = title;
             }
         }
-        let Some(page) = self.main.read(cx).page() else {
+        let Some(page) = self.current().read(cx).page() else {
             return;
         };
         if self.inspector_seen.as_ref() != Some(&(page.clone(), v)) {
@@ -1870,7 +2426,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let main = self.main.read(cx);
+        let main = self.current().read(cx);
         let active = page.is_some() && !main.is_journal() && main.page() == page;
         div()
             .id(id)
@@ -1906,7 +2462,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let main = self.main.read(cx);
+        let main = self.current().read(cx);
         let active = !main.is_journal() && main.page().as_ref() == Some(&page.id);
         let count = self.sidebar.ref_counts.get(&page.id).copied().unwrap_or(0);
         let id = page.id.clone();
@@ -1997,7 +2553,7 @@ impl Workspace {
     fn render_left(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let today = self.today;
-        let journal = self.main.read(cx).is_journal();
+        let journal = self.current().read(cx).is_journal();
         let vault = self.vault_name(cx);
         let initial: String = vault
             .chars()
@@ -2797,7 +3353,7 @@ impl Workspace {
                     .hover(|d| d.bg(th.hover))
                     .child(div().flex_1().min_w_0().child(e.text.clone()))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.main
+                        this.current()
                             .update(cx, |m, cx| m.reveal_block(&block, window, cx));
                     })),
             );
@@ -2809,7 +3365,7 @@ impl Workspace {
     /// Pinning is local UI state, kept in `settings.json` (rule 9) and never synced.
     fn render_pinned(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let current = self.main.read(cx).page();
+        let current = self.current().read(cx).page();
         let pinned_here = current
             .as_ref()
             .is_some_and(|p| self.pinned.iter().any(|(q, _)| q == p));
@@ -2912,20 +3468,332 @@ impl Workspace {
         self.pinned_version = Some(self.app.read(cx).refs_version);
     }
 
-    /// The main pane's top bar (DESIGN.md §3.3): title or breadcrumb on the left, actions on
-    /// the right, a `line_soft` hairline below. Back/forward are not drawn because the app
-    /// has no navigation history to move through (the report says so).
+    /// The title entry `i` goes by in the trail and on its spine: "Daily Notes" for the
+    /// feed, else the page's display title from the view's header (no store read).
+    fn entry_title(&self, i: usize, cx: &gpui::App) -> SharedString {
+        let v = self.stack[i].read(cx);
+        if i == 0 || v.is_journal() {
+            "Daily Notes".into()
+        } else {
+            v.page_title()
+        }
+    }
+
+    /// Panes mode (DESIGN.md §4.3): every entry side by side in one sideways scroller on
+    /// `well`, each pane sticking at `index × 40` while newer panes slide over it. gpui has
+    /// no `position: sticky`, so each pane is placed at `Geometry::left` here. A frame does
+    /// arithmetic only; the wheel handler stores an offset and asks for a frame, so a burst
+    /// of wheel events costs one frame, not one per event.
+    fn render_panes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let g = self.geometry(window);
+        if let Some(a) = self.scroll_anim {
+            let t = a.start.elapsed().as_secs_f32() / SCROLL_ANIM.as_secs_f32();
+            if t >= 1. {
+                self.scroll_x = a.to;
+                self.scroll_anim = None;
+            } else {
+                // Ease-out cubic: quick to answer, gentle to land.
+                let e = 1. - (1. - t).powi(3);
+                self.scroll_x = a.from + (a.to - a.from) * e;
+                window.request_animation_frame();
+            }
+        }
+        // A narrower window or a closed pane can leave the offset past the end.
+        self.scroll_x = self.scroll_x.clamp(0., g.max_scroll());
+        let s = self.scroll_x;
+        let editing = self.editor.read(cx).target().map(|t| t.host);
+        let mut row = div()
+            .id("pane-scroller")
+            .debug_selector(|| "pane-scroller".into())
+            .relative()
+            .size_full()
+            .overflow_hidden()
+            .bg(th.well)
+            .on_scroll_wheel(cx.listener(Self::wheel));
+        for i in 0..self.stack.len() {
+            let view = self.stack[i].clone();
+            // AGENTS.md: the pane holding the edit is always drawn, or its keys go nowhere.
+            let hosts_edit = editing == Some(view.entity_id());
+            if g.off_screen(i, s) && !hosts_edit {
+                continue;
+            }
+            let spine = g.is_spine(i, s);
+            let mut pane = div()
+                .debug_selector(move || format!("stack-pane-{i}"))
+                .absolute()
+                .top_0()
+                .bottom_0()
+                .left(px(g.left(i, s)))
+                .w(px(PANE_WIDTH))
+                .flex()
+                .flex_col()
+                .bg(th.paper)
+                .border_l_1()
+                .border_r_1()
+                .border_color(th.line)
+                // gpui sends a press to every hitbox under the pointer, not only the top
+                // one: without this, a click on a pane also reached the panes it covers
+                // (their spines, their blocks). Occluding blocks the scroller behind as
+                // well, so each pane hands the sideways wheel on itself.
+                .occlude()
+                .on_scroll_wheel(cx.listener(Self::wheel))
+                // A press anywhere in a pane focuses it (⌘W, ⌥←/⌥→ start from there). It
+                // does not scroll: the pane must not move under the pointer.
+                .capture_any_mouse_down(cx.listener(
+                    move |this, _: &MouseDownEvent, window, cx| {
+                        if this.focused != i || this.key_focus {
+                            this.focused = i;
+                            this.key_focus = false;
+                            this.title_window(window, cx);
+                            cx.notify();
+                        }
+                    },
+                ));
+            // A spine's body is under the next pane: drawing it would be wasted work.
+            if !spine || hosts_edit {
+                pane = pane
+                    .child(self.pane_header(i, &th, cx))
+                    .child(div().flex_1().min_h_0().child(view));
+            }
+            if spine {
+                let w = g.visible(i, s).max(PANE_SPINE);
+                pane = pane.child(self.spine(i, w, &th, cx));
+            }
+            if self.key_focus && self.focused == i {
+                // §3.4's focus ring, inset so the next pane cannot hide it.
+                pane = pane.child(
+                    div()
+                        .debug_selector(move || format!("stack-focus-{i}"))
+                        .absolute()
+                        .inset_0()
+                        .border_2()
+                        .border_color(th.link),
+                );
+            }
+            row = row.child(pane);
+        }
+        row.into_any_element()
+    }
+
+    /// The sideways part of a wheel or trackpad scroll moves the pane row (§4.3); the
+    /// up-and-down part stays with the pane's own list. Only an offset is stored here.
+    fn wheel(&mut self, e: &gpui::ScrollWheelEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let dx = f32::from(e.delta.pixel_delta(px(crate::theme::LINE_GRID)).x);
+        if dx == 0. {
+            return;
+        }
+        self.scroll_anim = None;
+        let max = self.geometry(window).max_scroll();
+        let next = (self.scroll_x - dx).clamp(0., max);
+        if next != self.scroll_x {
+            self.scroll_x = next;
+            cx.notify();
+        }
+    }
+
+    /// The 44 px pane header (§4.3): a close button on the right of every pane but the first.
+    fn pane_header(
+        &self,
+        i: usize,
+        th: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .h(px(PANE_HEADER_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_end()
+            .px(px(crate::theme::SPACING[1]))
+            .when(i > 0, |d| {
+                d.child(
+                    ghost_icon(("stack-close", i), Icon::Close, th)
+                        .debug_selector(move || format!("stack-close-{i}"))
+                        .tooltip(tip("Close pane"))
+                        .on_click(
+                            cx.listener(move |this, _, window, cx| this.close_pane(i, window, cx)),
+                        ),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The spine of pane `i` (§4.3): its visible strip on `well`, the title written top to
+    /// bottom from 18 px down. gpui 0.2 cannot rotate text, so the title is set one
+    /// grapheme per line, upright (like `text-orientation: upright`). A button: it scrolls
+    /// the pane back into view; the tooltip carries the title as its accessible name.
+    fn spine(
+        &self,
+        i: usize,
+        w: f32,
+        th: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        use unicode_segmentation::UnicodeSegmentation;
+        let title = self.entry_title(i, cx);
+        let label = title.clone();
+        let glyphs = title
+            .graphemes(true)
+            .take(SPINE_MAX_GLYPHS)
+            .map(|g| {
+                if g.trim().is_empty() {
+                    // A word space: half a line.
+                    div().h(px(SPINE_TITLE.line / 2.)).into_any_element()
+                } else {
+                    div().child(g.to_string()).into_any_element()
+                }
+            })
+            .collect::<Vec<_>>();
+        div()
+            .id(("stack-spine", i))
+            .debug_selector(move || format!("stack-spine-{i}"))
+            .absolute()
+            .top_0()
+            .left_0()
+            .bottom_0()
+            .w(px(w))
+            .overflow_hidden()
+            .flex()
+            .flex_col()
+            .items_center()
+            .pt(px(SPINE_TITLE_TOP))
+            .bg(th.well)
+            .border_r_1()
+            .border_color(th.line)
+            .cursor_pointer()
+            .hover(|d| d.bg(th.nav_hover))
+            .text_size(px(SPINE_TITLE.size))
+            .line_height(px(SPINE_TITLE.line))
+            .font_weight(SPINE_TITLE.weight)
+            .text_color(th.ink_2)
+            .children(glyphs)
+            .tooltip(move |_, cx| cx.new(|_| Tip::new(label.clone())).into())
+            .on_click(cx.listener(move |this, _, window, cx| this.open_spine(i, window, cx)))
+            .into_any_element()
+    }
+
+    /// The trail of open entries (§4.3): titles between chevron-right icons, the last in
+    /// `ink` 500 and the others `ink_3`. A title scrolls to its pane (Panes) or goes back
+    /// to it (Single, §4.4).
+    fn trail(&self, th: &crate::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let n = self.stack.len();
+        let mut trail = div()
+            .debug_selector(|| "breadcrumb".into())
+            .flex()
+            .items_center()
+            .gap_1()
+            .min_w_0()
+            .overflow_hidden()
+            .text_size(px(UI.size));
+        for i in 0..n {
+            if i > 0 {
+                trail = trail.child(div().flex_none().child(icon(
+                    Icon::ChevronRight,
+                    ICON_SIZE,
+                    th.ink_3,
+                )));
+            }
+            let last = i + 1 == n;
+            let sel = if n == 1 {
+                "topbar-title".to_string()
+            } else {
+                format!("trail-{i}")
+            };
+            trail = trail.child(
+                div()
+                    .id(("trail", i))
+                    .debug_selector(move || sel.clone())
+                    .min_w_0()
+                    .truncate()
+                    .px_1()
+                    .rounded(px(RADIUS_CONTROL))
+                    .cursor_pointer()
+                    .hover(|d| d.bg(th.hover))
+                    .when(last, |d| {
+                        d.flex_shrink_0()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(th.ink)
+                    })
+                    .when(!last, |d| d.text_color(th.ink_3))
+                    .child(self.entry_title(i, cx))
+                    .on_click(cx.listener(move |this, _, window, cx| this.trail_to(i, window, cx))),
+            );
+        }
+        trail.into_any_element()
+    }
+
+    /// The Panes | Single toggle (DESIGN.md §4.4): 32 px, a `line_strong` hairline, radius
+    /// 8; the chosen side `selected` with `ink` 500, the other paper with `ink_3`. gpui has
+    /// no `aria-pressed`; the chosen side is told by its fill and its debug name.
+    fn mode_toggle(&self, th: &crate::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
+        let seg = |mode: ViewMode, glyph: Icon, label: &'static str, th: &crate::theme::Theme| {
+            let on = self.mode == mode;
+            let key = mode.key();
+            div()
+                .id(key)
+                .debug_selector(move || format!("mode-{key}{}", if on { "-on" } else { "" }))
+                .h_full()
+                .flex()
+                .items_center()
+                .gap_1()
+                .px(px(crate::theme::BUTTON_PADDING_X))
+                .text_size(px(SMALL.size))
+                .cursor_pointer()
+                .when(on, |d| {
+                    d.bg(th.selected)
+                        .text_color(th.ink)
+                        .font_weight(gpui::FontWeight::MEDIUM)
+                })
+                .when(!on, |d| {
+                    d.bg(th.paper)
+                        .text_color(th.ink_3)
+                        .hover(|d| d.bg(th.hover))
+                })
+                .child(icon(glyph, ICON_SIZE, if on { th.ink } else { th.ink_3 }))
+                .child(label)
+        };
+        // The inner corners follow the hairline's radius, less its width.
+        let inner = px(RADIUS_INPUT - 1.);
+        div()
+            .debug_selector(|| "mode-toggle".into())
+            .h(px(BUTTON_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS_INPUT))
+            .border_1()
+            .border_color(th.line_strong)
+            .child(
+                seg(ViewMode::Panes, Icon::Columns, "Panes", th)
+                    .rounded_l(inner)
+                    .border_r_1()
+                    .border_color(th.line_strong)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_mode(ViewMode::Panes, window, cx)
+                    })),
+            )
+            .child(
+                seg(ViewMode::Single, Icon::Page, "Single", th)
+                    .rounded_r(inner)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_mode(ViewMode::Single, window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The main pane's top bar (DESIGN.md §3.3, §4.3, §4.4): Back, the trail of open
+    /// entries, then the focused entry's own controls (day navigation or the page menu),
+    /// the view mode toggle, "Close other panes" in Panes mode, and the right panel toggle.
+    /// No Forward button: closing a pane cannot be undone by going forward.
     fn render_top_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let (journal, title, page, draft) = {
-            let main = self.main.read(cx);
-            (
-                main.is_journal(),
-                main.page_title(),
-                main.page(),
-                main.is_draft(),
-            )
+        let (journal, page, draft) = {
+            let main = self.current().read(cx);
+            (main.is_journal(), main.page(), main.is_draft())
         };
+        let can_back = self.stack.len() > 1;
         let mut bar = div()
             .debug_selector(|| "top-bar".into())
             .min_h(px(TOP_BAR_MIN_HEIGHT))
@@ -2937,44 +3805,45 @@ impl Workspace {
             .py(px(TOP_BAR_PADDING_Y))
             .bg(th.paper)
             .border_b_1()
-            .border_color(th.line_soft);
-        if journal {
-            bar = bar
-                .child(
-                    div()
-                        .debug_selector(|| "topbar-title".into())
-                        .text_size(px(UI.size))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(th.ink)
-                        .child("Daily Notes"),
-                )
-                .child(div().flex_1())
-                .child(self.day_nav(cx));
-        } else {
-            bar = bar.child(
+            .border_color(th.line_soft)
+            .child(
                 div()
-                    .debug_selector(|| "breadcrumb".into())
+                    .id("back")
+                    .debug_selector(|| "back".into())
+                    .size(px(crate::theme::GHOST_BUTTON))
+                    .flex_none()
                     .flex()
                     .items_center()
-                    .gap_1()
-                    .min_w_0()
-                    .text_size(px(UI.size))
-                    .child(div().flex_none().text_color(th.ink_3).child("Pages"))
-                    .child(div().flex_none().text_color(th.ink_3).child("/"))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .text_color(th.ink)
-                            .child(title),
+                    .justify_center()
+                    .rounded(px(RADIUS_CONTROL))
+                    .tooltip(tip("Back"))
+                    .child(icon(
+                        Icon::ArrowLeft,
+                        ICON_SIZE,
+                        if can_back { th.ink_3 } else { th.disabled },
+                    ))
+                    .when(can_back, |d| {
+                        d.cursor_pointer()
+                            .hover(|d| d.bg(th.hover))
+                            .on_click(cx.listener(|this, _, window, cx| this.back(window, cx)))
+                    }),
+            )
+            .child(self.trail(&th, cx))
+            .child(div().flex_1());
+        if journal {
+            bar = bar.child(self.day_nav(cx));
+        } else if page.is_some() && !draft {
+            bar = bar.child(self.page_menu_button(cx));
+        }
+        bar = bar.child(self.mode_toggle(&th, cx));
+        if self.mode == ViewMode::Panes {
+            bar = bar.child(
+                outline_button("close-others", "Close other panes", &th)
+                    .debug_selector(|| "close-others".into())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.close_other_panes(window, cx)),
                     ),
             );
-            if page.is_some() && !draft {
-                bar = bar.child(div().flex_1()).child(self.page_menu_button(cx));
-            } else {
-                bar = bar.child(div().flex_1());
-            }
         }
         let open = self.right_open;
         bar.child(
@@ -3028,7 +3897,7 @@ impl Workspace {
                 seg("day-prev", Icon::ChevronLeft, &th)
                     .tooltip(tip("Previous day"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.main
+                        this.current()
                             .update(cx, |m, cx| m.scroll_to_adjacent_day(-1, cx))
                     })),
             )
@@ -3039,7 +3908,7 @@ impl Workspace {
                     .h(px(BUTTON_HEIGHT - 2.))
                     .px_2()
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.main.update(cx, |m, cx| m.scroll_to_today(cx))
+                        this.current().update(cx, |m, cx| m.scroll_to_today(cx))
                     })),
             )
             .child(divider())
@@ -3047,7 +3916,7 @@ impl Workspace {
                 seg("day-next", Icon::ChevronRight, &th)
                     .tooltip(tip("Next day"))
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.main
+                        this.current()
                             .update(cx, |m, cx| m.scroll_to_adjacent_day(1, cx))
                     })),
             )
@@ -3085,9 +3954,9 @@ impl Workspace {
 
     fn page_menu_popup(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let page = self.main.read(cx).page();
-        let kind = self.main.read(cx).page_kind();
-        let has_aliases = self.main.read(cx).has_aliases();
+        let page = self.current().read(cx).page();
+        let kind = self.current().read(cx).page_kind();
+        let has_aliases = self.current().read(cx).has_aliases();
         let pinned = page
             .as_ref()
             .is_some_and(|p| crate::appearance::is_pinned(cx, p));
@@ -3095,14 +3964,15 @@ impl Workspace {
             .debug_selector(|| "page-menu-graph".into())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.page_menu = false;
-                this.main.update(cx, |m, cx| m.request_open_graph(cx));
+                this.current().update(cx, |m, cx| m.request_open_graph(cx));
                 cx.notify();
             }));
         let export = quiet_control("page-menu-export", "Export", &th)
             .debug_selector(|| "page-menu-export".into())
             .on_click(cx.listener(|this, _, window, cx| {
                 this.page_menu = false;
-                this.main.update(cx, |m, cx| m.export_graph(window, cx));
+                this.current()
+                    .update(cx, |m, cx| m.export_graph(window, cx));
                 cx.notify();
             }));
         // Daily titles are display-only (rule 6): Rename would open the calendar instead.
@@ -3111,7 +3981,8 @@ impl Workspace {
                 .debug_selector(|| "page-menu-rename".into())
                 .on_click(cx.listener(|this, _, window, cx| {
                     this.page_menu = false;
-                    this.main.update(cx, |m, cx| m.start_rename(window, cx));
+                    this.current()
+                        .update(cx, |m, cx| m.start_rename(window, cx));
                     cx.notify();
                 }))
         });
@@ -3120,7 +3991,8 @@ impl Workspace {
                 .debug_selector(|| "page-menu-rewrite".into())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.page_menu = false;
-                    this.main.update(cx, |m, cx| m.page_action("rewrite", cx));
+                    this.current()
+                        .update(cx, |m, cx| m.page_action("rewrite", cx));
                     cx.notify();
                 }))
         });
@@ -3146,7 +4018,8 @@ impl Workspace {
             .debug_selector(|| "page-menu-delete".into())
             .on_click(cx.listener(|this, _, _, cx| {
                 this.page_menu = false;
-                this.main.update(cx, |m, cx| m.page_action("delete", cx));
+                this.current()
+                    .update(cx, |m, cx| m.page_action("delete", cx));
                 cx.notify();
             }));
         div()
@@ -3189,7 +4062,7 @@ impl Render for Workspace {
             // Collapsed: a thin rail that brings the sidebar back (Cmd+\).
             div()
                 .debug_selector(|| "left-rail".into())
-                .w(px(32.))
+                .w(px(LEFT_RAIL_WIDTH))
                 .h_full()
                 .flex_none()
                 .flex()
@@ -3248,7 +4121,16 @@ impl Render for Workspace {
         if matches!(self.content, MainContent::Page) {
             main_col = main_col.child(self.render_top_bar(cx));
         }
-        let mut panes_row = div()
+        let stack = match self.mode {
+            ViewMode::Panes => self.render_panes(window, cx),
+            // §4.4 Single: the last entry alone, its column centred at 760.
+            ViewMode::Single => div()
+                .debug_selector(|| "single-page".into())
+                .size_full()
+                .child(self.stack[self.stack.len() - 1].clone())
+                .into_any_element(),
+        };
+        let panes_row = div()
             .debug_selector(move || format!("ui-density-{}", density.key()))
             .flex_1()
             .min_h_0()
@@ -3262,21 +4144,9 @@ impl Render for Workspace {
                     .map(|d| match &self.content {
                         MainContent::Graph(graph) => d.child(graph.clone()),
                         MainContent::Pdf(pdf) => d.child(pdf.clone()),
-                        MainContent::Page => d.child(self.main.clone()),
+                        MainContent::Page => d.child(stack),
                     }),
             );
-        for (i, sp) in self.splits.iter().enumerate() {
-            panes_row = panes_row.child(
-                div()
-                    .debug_selector(move || format!("split-{i}"))
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .border_l_1()
-                    .border_color(th.line)
-                    .child(sp.clone()),
-            );
-        }
         main_col = main_col.child(panes_row);
         let main_col = main_col.debug_selector(|| "main-pane".into());
         let right = self.right_open.then(|| {
@@ -3509,6 +4379,10 @@ impl Render for Workspace {
             .on_mouse_up(MouseButton::Left, cx.listener(Self::resize_done))
             .on_action(cx.listener(Self::toggle_left))
             .on_action(cx.listener(Self::toggle_refs))
+            .on_action(cx.listener(Self::toggle_view_mode))
+            .on_action(cx.listener(Self::close_pane_action))
+            .on_action(cx.listener(Self::focus_pane_left))
+            .on_action(cx.listener(Self::focus_pane_right))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .relative()

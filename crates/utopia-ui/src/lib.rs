@@ -13,6 +13,7 @@ pub mod icons;
 pub mod kill;
 pub mod line_input;
 pub mod page_view;
+pub mod pane_stack;
 pub mod pdf;
 pub mod pdf_view;
 pub mod quick_jump;

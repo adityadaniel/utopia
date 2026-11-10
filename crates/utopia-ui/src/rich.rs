@@ -12,7 +12,9 @@ use gpui::{
 };
 use utopia_core::inline::{extract_refs, parse, Inline, Mark, RefKind};
 
-use crate::theme::{Theme, RADIUS_TAG, TAG_HEIGHT, TAG_PADDING_X};
+use crate::theme::{
+    Theme, LINK_RING_WIDTH, RADIUS_LINK_RING, RADIUS_TAG, TAG_HEIGHT, TAG_PADDING_X,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
@@ -317,6 +319,8 @@ pub struct LinkText {
     text: StyledText,
     links: Vec<Range<usize>>,
     chips: Vec<(Range<usize>, Hsla)>,
+    rings: Vec<Range<usize>>,
+    ring_color: Hsla,
 }
 
 impl LinkText {
@@ -325,12 +329,22 @@ impl LinkText {
             text,
             links,
             chips: Vec::new(),
+            rings: Vec::new(),
+            ring_color: gpui::transparent_black(),
         }
     }
 
     /// Draw `chips` (tag runs) as rounded `bg` fills behind the text (DESIGN.md §3.1).
     pub fn with_chips(mut self, chips: Vec<Range<usize>>, bg: Hsla) -> Self {
         self.chips = chips.into_iter().map(|r| (r, bg)).collect();
+        self
+    }
+
+    /// Ring the links at `rings` (DESIGN.md §4.3: the link whose page is open in the next
+    /// pane gets a 2 px `link_tint` ring, radius 3). A tag's ring goes round its chip.
+    pub fn with_rings(mut self, rings: Vec<Range<usize>>, color: Hsla) -> Self {
+        self.rings = rings;
+        self.ring_color = color;
         self
     }
 }
@@ -409,6 +423,35 @@ impl Element for LinkText {
             let (left, right) = chip_padding(&layout, &self.chips, range);
             for rect in chip_line_rects(start, end, line_height, bounds, left, right) {
                 window.paint_quad(gpui::fill(rect, *bg).corner_radii(px(RADIUS_TAG)));
+            }
+        }
+        for range in &self.rings {
+            let (Some(start), Some(end)) = (
+                layout.position_for_index(range.start),
+                layout.position_for_index(range.end),
+            ) else {
+                continue;
+            };
+            // Outside the chip for a tag, just outside the glyphs for a link.
+            let (left, right) = if self.chips.iter().any(|(r, _)| r == range) {
+                chip_padding(&layout, &self.chips, range)
+            } else {
+                (0., 0.)
+            };
+            let w = LINK_RING_WIDTH;
+            for rect in chip_line_rects(start, end, line_height, bounds, left + w, right + w) {
+                let rect = Bounds::from_corners(
+                    point(rect.left(), rect.top() - px(w)),
+                    point(rect.right(), rect.bottom() + px(w)),
+                );
+                window.paint_quad(gpui::quad(
+                    rect,
+                    px(RADIUS_LINK_RING),
+                    gpui::transparent_black(),
+                    px(w),
+                    self.ring_color,
+                    gpui::BorderStyle::Solid,
+                ));
             }
         }
         Element::paint(

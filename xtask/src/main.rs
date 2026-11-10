@@ -1017,6 +1017,60 @@ fn seed_page_view(path: &Path) -> Result<()> {
 /// A scratch graph for the Daily Notes feed screenshots (DN-1 to DN-3): a long today so
 /// the pinned date can be caught mid-scroll, a written yesterday, empty days to fold and an
 /// older day with notes. Never seed into a real graph.
+/// `seed-panes <graph> [depth]`: the help graph plus what stacked panes need to be looked at
+/// (DESIGN.md §4.3): a chain of eight pages that link onward, one of them long, and
+/// today's note linking into the chain. With a depth, the first `depth` chain pages are
+/// saved as the open stack (`local_state` `pane_stack`, SP-8), so a launch shows them.
+fn seed_panes_graph(path: &Path, depth: usize) -> Result<()> {
+    use BlockKind::{Bullet, Heading, Todo};
+    seed_help_graph(path)?;
+    let mut s = Store::open(path)?;
+    let chain = [
+        "Reading list",
+        "Evergreen notes",
+        "Spaced repetition",
+        "Working memory",
+        "Attention",
+        "Deliberate practice",
+        "Feedback loops",
+        "Writing to think",
+    ];
+    let mut stack = vec!["daily".to_string()];
+    for (i, name) in chain.iter().enumerate() {
+        let page = s.create_page(name)?;
+        if i < depth {
+            stack.push(format!("page {}", page.as_str()));
+        }
+        let next = chain.get(i + 1).copied().unwrap_or(chain[0]);
+        let link = format!("Leads on to [[{next}]] and back to [[Atlas Launch]]");
+        let mut rows: Vec<(usize, BlockKind, String)> = vec![
+            (0, Bullet, link),
+            (0, Heading(2), "Notes".to_string()),
+            (1, Bullet, format!("Why {name} matters to the #research")),
+            (1, Todo, format!("Summarise {name} in one line")),
+        ];
+        if i == 2 {
+            // A long page: enough rows to scroll well past one screen.
+            for n in 1..=80 {
+                rows.push((1, Bullet, format!("Card {n}: one fact worth keeping")));
+            }
+        }
+        let rows: Vec<(usize, BlockKind, &str)> =
+            rows.iter().map(|(d, k, t)| (*d, *k, t.as_str())).collect();
+        insert_tree(&mut s, &page, &rows)?;
+    }
+    let today = s.draft_daily(chrono::Local::now().date_naive())?;
+    insert_tree(
+        &mut s,
+        &today,
+        &[(0, Bullet, "Start the week from the [[Reading list]]")],
+    )?;
+    s.local_set("pane_stack", &stack.join("\n"))?;
+    s.sync_index()?;
+    println!("seeded {}", path.display());
+    Ok(())
+}
+
 fn seed_daily_feed(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Heading, Quote, Todo};
     let mut s = Store::open(path)?;
@@ -1399,9 +1453,13 @@ fn main() -> Result<()> {
             seed_page_view(Path::new(args.get(1).context("graph path to seed")?))
         }
         Some("seed-daily") => seed_daily_feed(Path::new(args.get(1).context("graph path")?)),
+        Some("seed-panes") => seed_panes_graph(
+            Path::new(args.get(1).context("graph path")?),
+            args.get(2).map_or(Ok(0), |d| d.parse()).context("depth")?,
+        ),
         _ => {
             println!(
-                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
+                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
             );
             Ok(())
         }
