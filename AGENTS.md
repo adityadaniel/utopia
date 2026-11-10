@@ -5,6 +5,11 @@ a GPUI front end, a SQLite store, and Loro CRDT documents. **`PRD.md` is the spe
 Read the section you are touching before changing behaviour, and cite requirement
 ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 
+## Agents Protocol
+- “Make a note” => edit AGENTS.md (shortcut; not a blocker).
+- Editor: zed <path>.
+- Commits: Conventional Commits (feat|fix|refactor|build|ci|chore|docs|style|perf|test).
+
 ## Visual system
 
 **`DESIGN.md` is the visual spec ("Quiet paper").** Read it before changing anything on
