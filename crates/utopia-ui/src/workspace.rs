@@ -2347,13 +2347,9 @@ impl Workspace {
     fn sync_popover(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
         let (line, warn) = match &self.sync {
-            None => ("Off — this graph stays on this machine.".to_string(), false),
+            None => ("Off.".to_string(), false),
             Some(runner) => status_line(runner, self.app.read(cx).store.now()),
         };
-        let target = self
-            .sync_target
-            .clone()
-            .unwrap_or_else(|| "No relay or folder configured.".to_string());
         div()
             .id("sync-popover")
             .debug_selector(|| "sync-popover".into())
@@ -2373,16 +2369,20 @@ impl Workspace {
                     .child("Sync"),
             )
             .child(div().when(warn, |d| d.text_color(th.warning)).child(line))
-            .child(div().child(target))
+            .when_some(self.sync_target.clone(), |d, target| {
+                d.child(div().child(target))
+            })
             .child(div().child(if self.encrypted {
                 "Encrypted at rest."
             } else {
                 "Not encrypted at rest."
             }))
             .when(self.sync.is_none(), |d| {
-                d.child(div().text_color(th.muted).child(
-                    "Set UTOPIA_SYNC_URL or UTOPIA_SYNC_FOLDER, then reopen the graph, to sync.",
-                ))
+                d.child(
+                    div()
+                        .text_color(th.muted)
+                        .child("Set it up in Settings → Sync."),
+                )
             })
     }
 
@@ -2841,11 +2841,7 @@ impl Workspace {
             );
         }
         if self.pinned.is_empty() {
-            body = body.child(self.panel_empty(
-                "pinned-empty",
-                "No pinned pages yet. Pin the page you are reading to keep it one click away.",
-                cx,
-            ));
+            body = body.child(self.panel_empty("pinned-empty", "No pinned pages yet.", cx));
         }
         for (i, (page, title)) in self.pinned.clone().into_iter().enumerate() {
             let open_page = page.clone();

@@ -545,11 +545,6 @@ impl Render for Root {
                         )
                         .child(
                             div()
-                                .text_color(th.muted)
-                                .child("Name your graph. It is a single file you own."),
-                        )
-                        .child(
-                            div()
                                 .px_2()
                                 .py_1()
                                 .border_1()
@@ -584,7 +579,7 @@ impl Render for Root {
                             .child("This graph is locked"),
                     )
                     .child(div().text_color(th.muted).child(format!(
-                        "{} is encrypted at rest. Enter its passphrase.",
+                        "{} is encrypted at rest.",
                         path.file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_default()
@@ -599,7 +594,7 @@ impl Render for Root {
                             .child(input.clone()),
                     )
                     .child(div().text_size(px(utopia_ui::theme::CAPTION_SIZE)).text_color(th.muted).child(
-                        "Tip: store it in the keychain (service utopia-db) to unlock automatically.",
+                        "A passphrase saved in the keychain (service utopia-db) unlocks it without asking.",
                     ))
                     .children(
                         error

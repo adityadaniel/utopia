@@ -843,7 +843,7 @@ impl Render for GraphView {
                         .flex()
                         .justify_center()
                         .text_color(th.muted)
-                        .child("No links yet. Type [[ to link pages and they appear here."),
+                        .child("No links yet. Type [[ in a block to link pages."),
                 )
             });
 

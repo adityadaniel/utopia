@@ -89,29 +89,6 @@ impl Tab {
         }
     }
 
-    /// One line under the pane title, so a tab explains itself.
-    fn summary(self) -> &'static str {
-        match self {
-            Tab::Appearance => {
-                "The font your notes and the interface are set in (code stays in Menlo), \
-                 and how tightly blocks are set."
-            }
-            Tab::Keybindings => {
-                "Every action in the app and the keys it answers to. Click a \
-                                 key to change it."
-            }
-            Tab::Shortcuts => "Everything bound right now, as a cheat sheet.",
-            Tab::Sync => {
-                "Where this graph syncs to: choose a transport, enter its credentials \
-                 and connect another device."
-            }
-            Tab::Help => {
-                "A short tour of what the app can do, with pictures of the real \
-                          thing."
-            }
-        }
-    }
-
     /// How a debug selector names the tab.
     fn key(self) -> &'static str {
         match self {
@@ -248,12 +225,11 @@ impl SettingsView {
                 &search,
                 window,
                 |this, _, e: &LineInputEvent, window, cx| match e {
-                    LineInputEvent::Changed(query) => {
-                        if *query != this.query {
-                            this.query = query.clone();
-                            cx.notify();
-                        }
+                    LineInputEvent::Changed(query) if *query != this.query => {
+                        this.query = query.clone();
+                        cx.notify();
                     }
+                    LineInputEvent::Changed(_) => {}
                     LineInputEvent::Cancel => {
                         this.clear_filter(cx);
                         let focus = this.focus.clone();
@@ -595,82 +571,74 @@ impl SettingsView {
 
     /// Settings → Appearance: put `font` in force in every window and remember it.
     pub fn choose_font(&mut self, font: UiFont, cx: &mut Context<Self>) {
-        let before = appearance::ui_font(cx);
-        self.status = Some(match appearance::set_font(cx, font, &self.config_dir) {
-            Err(e) => format!(
-                "{} applies now, but could not save {}: {e}",
-                font.label(),
-                appearance::FILE
-            )
-            .into(),
-            Ok(()) if before == font => format!("The font is already {}.", font.label()).into(),
-            Ok(()) => format!("The font is now {}.", font.label()).into(),
-        });
+        // The radio shows the result; only a failed save needs words.
+        self.status = match appearance::set_font(cx, font, &self.config_dir) {
+            Err(e) => Some(
+                format!(
+                    "{} applies now, but could not save {}: {e}",
+                    font.label(),
+                    appearance::FILE
+                )
+                .into(),
+            ),
+            Ok(()) => None,
+        };
         cx.notify();
     }
 
     /// Settings → Appearance: put the right sidebar back to its default width (RS-4).
     pub fn reset_sidebar_width(&mut self, cx: &mut Context<Self>) {
-        let width = appearance::RIGHT_SIDEBAR_DEFAULT_WIDTH as i32;
-        self.status = Some(
-            match appearance::reset_right_sidebar_width(cx, &self.config_dir) {
-                Ok(()) => format!("The right sidebar is back to {width} px.").into(),
-                Err(e) => format!("Could not save settings.json: {e}").into(),
-            },
-        );
+        self.status = match appearance::reset_right_sidebar_width(cx, &self.config_dir) {
+            Ok(()) => None,
+            Err(e) => Some(format!("Could not save settings.json: {e}").into()),
+        };
         cx.notify();
     }
 
     /// Settings → Appearance: how many children a reference shows inline (LR-4).
     pub fn choose_ref_children(&mut self, count: usize, cx: &mut Context<Self>) {
-        let before = appearance::ref_children(cx);
-        self.status = Some(
-            match appearance::set_ref_children(cx, count, &self.config_dir) {
-                Err(e) => format!(
+        self.status = match appearance::set_ref_children(cx, count, &self.config_dir) {
+            Err(e) => Some(
+                format!(
                     "{count} applies now, but could not save {}: {e}",
                     appearance::FILE
                 )
                 .into(),
-                Ok(()) if before == count => {
-                    format!("References already show {count} children.").into()
-                }
-                Ok(()) => format!("References now show {count} children.").into(),
-            },
-        );
+            ),
+            Ok(()) => None,
+        };
         cx.notify();
     }
 
     /// Settings → Appearance: remove every pinned page (SB-3). The pages are untouched;
     /// only the sidebar's local order changes.
     pub fn clear_pins(&mut self, cx: &mut Context<Self>) {
-        self.status = Some(match appearance::clear_pinned(cx) {
-            Ok(()) => "Unpinned every page.".into(),
-            Err(e) => format!(
-                "The pins are gone for this session, but could not save {}: {e}",
-                appearance::FILE
-            )
-            .into(),
-        });
+        self.status = match appearance::clear_pinned(cx) {
+            Ok(()) => None,
+            Err(e) => Some(
+                format!(
+                    "The pins are gone for this session, but could not save {}: {e}",
+                    appearance::FILE
+                )
+                .into(),
+            ),
+        };
         cx.notify();
     }
 
     /// Settings → Appearance: switch density in every window and remember it (ALL-5).
     pub fn choose_density(&mut self, density: Density, cx: &mut Context<Self>) {
-        let before = appearance::density(cx);
-        self.status = Some(
-            match appearance::set_density(cx, density, &self.config_dir) {
-                Err(e) => format!(
+        self.status = match appearance::set_density(cx, density, &self.config_dir) {
+            Err(e) => Some(
+                format!(
                     "{} applies now, but could not save {}: {e}",
                     density.label(),
                     appearance::FILE
                 )
                 .into(),
-                Ok(()) if before == density => {
-                    format!("The density is already {}.", density.label()).into()
-                }
-                Ok(()) => format!("The density is now {}.", density.label()).into(),
-            },
-        );
+            ),
+            Ok(()) => None,
+        };
         cx.notify();
     }
 }
@@ -766,22 +734,12 @@ impl Render for SettingsView {
 
         // The pane title sits in the same column as its cards, not at the window's edge.
         let header = div().px_6().pt_6().pb_1().child(
-            column()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(crate::theme::H1_SIZE))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(self.tab.label()),
-                )
-                .child(
-                    div()
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.muted)
-                        .child(self.tab.summary()),
-                ),
+            column().flex().flex_col().gap_1().child(
+                div()
+                    .text_size(px(crate::theme::H1_SIZE))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(self.tab.label()),
+            ),
         );
 
         div()
@@ -1086,13 +1044,9 @@ impl SettingsView {
 
         let hint = if self.query.trim().is_empty() {
             if changed == 0 {
-                "Click a key, then press the combination you want. Esc keeps the one you had."
-                    .to_string()
+                "Click a key, then press the new one.".to_string()
             } else {
-                format!(
-                    "Click a key, then press the combination you want. {changed} changed from \
-                     the default."
-                )
+                format!("Click a key, then press the new one. {changed} changed from the default.")
             }
         } else {
             format!(
@@ -1208,7 +1162,7 @@ impl SettingsView {
             .cursor_pointer()
             .hover(|x| x.border_color(th.link))
             .child(if capturing {
-                "Press keys…".to_string()
+                "Press keys · Esc cancels".to_string()
             } else if let Some((raw, _)) = &invalid {
                 raw.clone()
             } else {
@@ -1264,12 +1218,14 @@ impl SettingsView {
                             .flex_col()
                             .flex_1()
                             .child(div().child(d.label))
-                            .child(
-                                div()
-                                    .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
-                                    .child(d.help),
-                            ),
+                            .when(!d.help.is_empty(), |c| {
+                                c.child(
+                                    div()
+                                        .text_size(px(crate::theme::CAPTION_SIZE))
+                                        .text_color(th.muted)
+                                        .child(d.help),
+                                )
+                            }),
                     )
                     .child(
                         div()
@@ -1465,18 +1421,7 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .flex_1()
-                            .child(div().child(d.label()))
-                            .child(
-                                div()
-                                    .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
-                                    .child(match d {
-                                        Density::Comfortable => {
-                                            "15 px body on 24 px lines, as before."
-                                        }
-                                        Density::Compact => "13.5 px body and 4 px between blocks.",
-                                    }),
-                            ),
+                            .child(div().child(d.label())),
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_density(d, cx))),
                 i + 1 == Density::ALL.len(),
@@ -1492,10 +1437,7 @@ impl SettingsView {
             div()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
-                .child(
-                    "How many children a Linked Reference shows inline. 0 keeps them all \
-                     behind its \"+N more\" chip.",
-                ),
+                .child("0 keeps every child behind the “+N more” chip."),
             false,
             &th,
         ));
@@ -1542,17 +1484,6 @@ impl SettingsView {
         list = list.child(card_top(&th, "Pinned pages").mt_4());
         list = list.child(appearance_row(
             div()
-                .text_size(px(crate::theme::CAPTION_SIZE))
-                .text_color(th.muted)
-                .child(
-                    "Pages pinned to the top of the sidebar (SB-3). Local to this machine, \
-                     kept in settings.json, never synced.",
-                ),
-            false,
-            &th,
-        ));
-        list = list.child(appearance_row(
-            div()
                 .debug_selector(|| "settings-pinned".into())
                 .flex()
                 .items_center()
@@ -1589,8 +1520,7 @@ impl SettingsView {
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
                 .child(format!(
-                    "Width: {} px. Drag the sidebar's left edge to resize it; the width is \
-                     kept in settings.json and never synced.",
+                    "Width: {} px, set by dragging the sidebar's left edge.",
                     sidebar_width.round() as i32
                 )),
             false,
@@ -1724,46 +1654,23 @@ impl SettingsView {
         let th = theme(cx).clone();
         let density = appearance::density(cx);
         let facts = sync_runner::facts(cx);
-        let (status, status_help) = if facts.is_on() {
-            (
-                "Sync is on for this graph.",
-                "Page changes are exchanged in the background; the sidebar of the main \
-                 window shows the latest round.",
-            )
+        let status = if facts.is_on() {
+            "Sync is on for this graph."
         } else {
-            (
-                "Sync is off for this graph.",
-                "Utopia is local-only: nothing leaves this machine unless you start it with \
-                 a sync target.",
-            )
+            "Sync is off for this graph."
         };
-        let transport = facts
-            .target
-            .clone()
-            .unwrap_or_else(|| "Local only (no relay, no shared folder)".to_string());
-        let encryption = if !facts.is_on() {
-            "Nothing to encrypt: sync is off"
-        } else if facts.encrypted {
-            "End-to-end encrypted: the relay only sees ciphertext"
+        let transport = facts.target.clone().unwrap_or_else(|| "Off".to_string());
+        let encryption = if facts.encrypted {
+            "End-to-end encrypted"
         } else {
-            "Not encrypted: a relay can read page payloads"
+            "Not encrypted: the relay can read your notes"
         };
 
         let mut this_graph = card(&th)
             .debug_selector(|| "settings-sync".into())
             .child(card_title(&th, "This graph"))
             .child(card_row(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_0p5()
-                    .child(div().text_size(px(crate::theme::BODY_SIZE)).child(status))
-                    .child(
-                        div()
-                            .text_size(px(crate::theme::CAPTION_SIZE))
-                            .text_color(th.muted)
-                            .child(status_help),
-                    ),
+                div().text_size(px(crate::theme::BODY_SIZE)).child(status),
                 0,
                 &th,
                 density,
@@ -1785,17 +1692,19 @@ impl SettingsView {
                 &th,
                 density,
             ))
-            .child(card_row(
-                fact_row("Encryption", encryption.to_string(), &th),
-                3,
-                &th,
-                density,
-            ));
+            .when(facts.is_on(), |c| {
+                c.child(card_row(
+                    fact_row("Encryption", encryption.to_string(), &th),
+                    3,
+                    &th,
+                    density,
+                ))
+            });
 
         this_graph = this_graph.child(card_row(
             div()
                 .text_color(th.muted)
-                .child("Open a graph to configure its sync transport and credentials."),
+                .child("Open a graph to set up sync."),
             4,
             &th,
             density,
