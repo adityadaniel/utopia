@@ -1,9 +1,23 @@
 name: CI
 
+# Documentation does not change what cargo builds or tests: no crate includes a Markdown file
+# or anything under docs/. A change that touches only these paths starts no run. A change
+# that also touches code still runs, because every changed file must match the list.
+# Keep the two lists the same.
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".agents/**"
+      - ".claude/**"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - ".agents/**"
+      - ".claude/**"
   workflow_dispatch:
 
 # A new push to a PR makes the previous run irrelevant; macOS minutes are expensive.
