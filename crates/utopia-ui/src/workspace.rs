@@ -245,6 +245,11 @@ pub struct Workspace {
     /// The stack as last saved and as the views were last told about their neighbours, so
     /// a view's frequent notifications cost a compare, not a store read (rule 10).
     stack_seen: Vec<Entry>,
+    /// The last save of the stack failed (`local_state`): the next change tries again.
+    stack_unsaved: bool,
+    /// Each non-first stack view's subscriptions, dropped with the view when it leaves the
+    /// stack so closed panes do not pile up handlers.
+    stack_subs: HashMap<EntityId, [Subscription; 2]>,
     /// What the main column shows in place of the stack (P2).
     content: MainContent,
     panes: Vec<SidePane>,
@@ -312,7 +317,7 @@ impl crate::reference::RefRowHost for Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open(page, None, Some(block), shift, window, cx);
+        self.open_shifted(page, None, Some(block), shift, window, cx);
     }
 
     fn open_reference_page(
@@ -323,7 +328,7 @@ impl crate::reference::RefRowHost for Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open(page, None, block, shift, window, cx);
+        self.open_shifted(page, None, block, shift, window, cx);
     }
 
     fn follow_reference(
@@ -357,7 +362,7 @@ impl Workspace {
             .and_then(|p| p.parent().map(|d| d.join("backup")));
         let mut subs = vec![
             cx.subscribe_in(&main, window, Self::on_page_event),
-            cx.observe(&main, Self::on_view_changed),
+            cx.observe_in(&main, window, Self::on_view_changed),
             cx.subscribe_in(
                 &editor,
                 window,
@@ -449,6 +454,8 @@ impl Workspace {
             scroll_anim: None,
             animate: true,
             stack_seen: vec![Entry::Daily],
+            stack_unsaved: false,
+            stack_subs: HashMap::new(),
             content: MainContent::Page,
             panes: Vec::new(),
             right_open: false,
@@ -848,6 +855,13 @@ impl Workspace {
         self.focused
     }
 
+    /// How many stack views hold subscriptions (debug builds only): one per entry after
+    /// the first, however many panes were opened and closed.
+    #[cfg(debug_assertions)]
+    pub fn stack_subscriptions(&self) -> usize {
+        self.stack_subs.len()
+    }
+
     /// The sideways scroll in force and where an animation is taking it.
     pub fn pane_scroll(&self) -> (f32, Option<f32>) {
         (self.scroll_x, self.scroll_anim.map(|a| a.to))
@@ -881,17 +895,18 @@ impl Workspace {
         } else {
             0.
         };
-        (f32::from(window.viewport_size().width) - left - right).max(PANE_WIDTH)
+        f32::from(window.viewport_size().width) - left - right
     }
 
+    /// Panes are 560 px, or the whole scroller when it is narrower (`Geometry::fit`).
     fn geometry(&self, window: &Window) -> Geometry {
-        Geometry {
-            pane: PANE_WIDTH,
-            spine: PANE_SPINE,
-            threshold: PANE_SPINE_THRESHOLD,
-            viewport: self.scroller_width(window),
-            count: self.stack.len(),
-        }
+        Geometry::fit(
+            PANE_WIDTH,
+            PANE_SPINE,
+            PANE_SPINE_THRESHOLD,
+            self.scroller_width(window),
+            self.stack.len(),
+        )
     }
 
     /// Scroll the pane row to `to`, smoothly unless motion is reduced (DESIGN.md §5).
@@ -941,9 +956,11 @@ impl Workspace {
                 cx,
             )
         });
-        self.subs
-            .push(cx.subscribe_in(&v, window, Self::on_page_event));
-        self.subs.push(cx.observe(&v, Self::on_view_changed));
+        let subs = [
+            cx.subscribe_in(&v, window, Self::on_page_event),
+            cx.observe_in(&v, window, Self::on_view_changed),
+        ];
+        self.stack_subs.insert(v.entity_id(), subs);
         if let Entry::Page { page, zoom } = entry {
             v.update(cx, |v, cx| v.open(page.clone(), zoom.clone(), cx));
         }
@@ -954,12 +971,14 @@ impl Workspace {
     /// so their scroll, folds and caret stay; an edit hosted by a dropped view ends first,
     /// since a focused element that is no longer drawn swallows every key (AGENTS.md).
     fn apply_plan(&mut self, plan: Plan, window: &mut Window, cx: &mut Context<Self>) {
-        let dropped: Vec<EntityId> = (0..self.stack.len())
+        let was_focused = self.current();
+        let dropped: Vec<Entity<PageView>> = (0..self.stack.len())
             .filter(|i| !plan.keep.contains(i))
-            .map(|i| self.stack[i].entity_id())
+            .map(|i| self.stack[i].clone())
             .collect();
-        for host in dropped {
-            self.end_edit_in(host, window, cx);
+        for view in &dropped {
+            self.release_pane(view, window, cx);
+            self.stack_subs.remove(&view.entity_id());
         }
         let mut stack: Vec<Entity<PageView>> = plan
             .keep
@@ -981,6 +1000,10 @@ impl Workspace {
         if self.mode == ViewMode::Single {
             self.focused = self.stack.len() - 1;
         }
+        if self.current() != was_focused {
+            // Focus left a pane that stays (open, trail, toggle): its edit ends too.
+            self.release_pane(&was_focused, window, cx);
+        }
         self.key_focus = false;
         self.stack_changed(cx);
         if switched {
@@ -993,7 +1016,7 @@ impl Workspace {
         }
         let f = self.focused;
         self.reveal(f, window, cx);
-        self.title_window(window, cx);
+        self.follow_focus(window, cx);
         cx.notify();
     }
 
@@ -1011,33 +1034,97 @@ impl Workspace {
             });
         }
         let entries = self.entries(cx);
-        if entries == self.stack_seen {
+        if entries != self.stack_seen {
+            self.stack_seen = entries;
+            self.stack_unsaved = true;
+            self.sync_next_links(cx);
+        }
+        if !self.stack_unsaved {
             return;
         }
-        let saved = pane_stack::save(&entries);
-        self.stack_seen = entries;
-        self.sync_next_links(cx);
-        if let Err(e) = self.app.read(cx).store.local_set(STACK_KEY, &saved) {
-            eprintln!("utopia: {e}");
+        let saved = pane_stack::save(&self.stack_seen);
+        match self.app.read(cx).store.local_set(STACK_KEY, &saved) {
+            Ok(()) => self.stack_unsaved = false,
+            Err(e) => eprintln!("utopia: {e}"),
         }
     }
 
     /// A stack view notified: its page or zoom may have moved under it (a zoom, a merge,
     /// a promoted draft day). The graph panel follows the focused view (GR-5).
-    fn on_view_changed(&mut self, view: Entity<PageView>, cx: &mut Context<Self>) {
-        if !self.stack.contains(&view) {
+    fn on_view_changed(
+        &mut self,
+        view: Entity<PageView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(i) = self.stack_index(&view) else {
             return;
-        }
-        if self.right_open && self.current() == view {
-            let page = view.read(cx).page();
-            if let Some(panel) = self.graph_panel.clone() {
-                panel.update(cx, |graph, cx| graph.set_origin(page, cx));
-            }
+        };
+        if self.current() == view {
+            self.follow_graph(cx);
         }
         if self.entries(cx) != self.stack_seen {
-            self.stack_changed(cx);
-            cx.notify();
+            self.entry_changed(i, window, cx);
         }
+    }
+
+    /// Entry `i` changed without a click (a zoom, a merge). If it now shows what another
+    /// entry shows, one copy goes (`pane_stack::dedupe`); otherwise the stack is saved.
+    fn entry_changed(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let entries = self.entries(cx);
+        match pane_stack::dedupe(&entries, self.mode, i) {
+            Some(plan) => self.apply_plan(plan, window, cx),
+            None => {
+                self.stack_changed(cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// The graph panel follows the focused entry (GR-5), whatever moved the focus.
+    fn follow_graph(&mut self, cx: &mut Context<Self>) {
+        if !self.right_open {
+            return;
+        }
+        let page = self.current().read(cx).page();
+        if let Some(panel) = self.graph_panel.clone() {
+            panel.update(cx, |graph, cx| graph.set_origin(page, cx));
+        }
+    }
+
+    /// Everything that names the focused entry: the window title and the graph panel.
+    fn follow_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.title_window(window, cx);
+        self.follow_graph(cx);
+    }
+
+    /// Focus moves off `view` (it leaves the stack, is hidden, or another pane takes
+    /// focus): its edit ends and a text field in it gives the keyboard back. Otherwise ⌘W
+    /// and the top bar would act on one pane while typing still lands in another, or keys
+    /// would go to a field that is no longer drawn (AGENTS.md).
+    fn release_pane(
+        &mut self,
+        view: &Entity<PageView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_edit_in(view.entity_id(), window, cx);
+        if view.read(cx).holds_focus(window, cx) {
+            window.focus(&self.focus);
+        }
+    }
+
+    /// Give pane `i` focus (SP-9). Every pointer, trail, spine and key move goes through
+    /// here, so the pane that loses focus always lets go of its edit.
+    fn set_focus(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let i = i.min(self.stack.len() - 1);
+        if self.focused != i {
+            let old = self.current();
+            self.release_pane(&old, window, cx);
+        }
+        self.focused = i;
+        self.follow_focus(window, cx);
+        cx.notify();
     }
 
     /// The ring in pane `i` names the page open in pane `i + 1` (§4.3); Single mode shows
@@ -1232,23 +1319,16 @@ impl Workspace {
         if i >= self.stack.len() {
             return;
         }
-        if self.focused != i {
-            let host = self.stack[self.focused.min(self.stack.len() - 1)].entity_id();
-            self.end_edit_in(host, window, cx);
-        }
-        self.focused = i;
+        self.set_focus(i, window, cx);
         self.reveal(i, window, cx);
-        self.title_window(window, cx);
-        cx.notify();
     }
 
     /// A spine was clicked (§4.3): scroll so that pane is whole, `i × (width − 40)`.
     fn open_spine(&mut self, i: usize, window: &mut Window, cx: &mut Context<Self>) {
         let to = self.geometry(window).spine_target(i);
-        self.focused = i;
+        self.set_focus(i, window, cx);
         self.key_focus = false;
         self.scroll_to(to, window, cx);
-        self.title_window(window, cx);
     }
 
     /// Put back the stack saved at the last quit (SP-8): Daily Notes first, then each
@@ -1294,7 +1374,7 @@ impl Workspace {
         if self.mode == ViewMode::Panes {
             self.scroll_x = self.geometry(window).max_scroll();
         }
-        self.title_window(window, cx);
+        self.follow_focus(window, cx);
         cx.notify();
         true
     }
@@ -1446,9 +1526,8 @@ impl Workspace {
                     match index {
                         Some(i) if i > 0 => {
                             self.stack[i].update(cx, |v, cx| v.open(page.clone(), None, cx));
-                            self.stack_changed(cx);
-                            self.title_window(window, cx);
-                            cx.notify();
+                            self.entry_changed(i, window, cx);
+                            self.follow_focus(window, cx);
                         }
                         _ => self.open(page.clone(), None, None, false, window, cx),
                     }
@@ -1494,6 +1573,44 @@ impl Workspace {
             }
             PageViewEvent::TogglePin { page } => self.toggle_pin(page.clone(), cx),
         }
+    }
+
+    /// Open from a click outside the stack (the sidebars, search results) with the
+    /// modifiers it was made with, by the same rule as a link in a page: Shift alone stacks
+    /// it in the right sidebar, ⌘ (with or without Shift) is the secondary click (SP-3,
+    /// SP-7), so a ⌘-click in Single mode opens the page as a pane.
+    pub fn open_clicked(
+        &mut self,
+        page: PageId,
+        zoom: Option<BlockId>,
+        focus: Option<BlockId>,
+        m: &gpui::Modifiers,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let click = crate::page_view::click_of(m);
+        if m.shift && click == Click::Plain {
+            self.open(page, zoom, focus, true, window, cx);
+        } else {
+            self.open_from(Origin::Outside, click, page, zoom, focus, window, cx);
+            cx.notify();
+        }
+    }
+
+    /// [`Self::open_clicked`] for a host that only passed on Shift: the other keys are
+    /// read from the window, as `PageView::emit_open` does.
+    fn open_shifted(
+        &mut self,
+        page: PageId,
+        zoom: Option<BlockId>,
+        focus: Option<BlockId>,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut m = window.modifiers();
+        m.shift = shift;
+        self.open_clicked(page, zoom, focus, &m, window, cx);
     }
 
     pub fn open(
@@ -2444,7 +2561,7 @@ impl Workspace {
                 d.on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                        this.open(page.clone(), None, None, e.modifiers.shift, window, cx)
+                        this.open_clicked(page.clone(), None, None, &e.modifiers, window, cx)
                     }),
                 )
             })
@@ -2531,7 +2648,7 @@ impl Workspace {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                    this.open(id.clone(), None, None, e.modifiers.shift, window, cx)
+                    this.open_clicked(id.clone(), None, None, &e.modifiers, window, cx)
                 }),
             )
     }
@@ -2741,7 +2858,14 @@ impl Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                                this.open(page.clone(), None, None, e.modifiers.shift, window, cx)
+                                this.open_clicked(
+                                    page.clone(),
+                                    None,
+                                    None,
+                                    &e.modifiers,
+                                    window,
+                                    cx,
+                                )
                             }),
                         ),
                 );
@@ -2987,12 +3111,12 @@ impl Workspace {
                     }
                 });
                 if let Some(page) = page {
-                    self.open(page, None, None, sidebar, window, cx);
+                    self.open_shifted(page, None, None, sidebar, window, cx);
                 }
             }
             crate::rich::LinkTarget::Block(uid) => {
                 if let Ok(Some(b)) = self.app.read(cx).store.block_row(&BlockId(uid)) {
-                    self.open(b.page_id, Some(b.id), None, sidebar, window, cx);
+                    self.open_shifted(b.page_id, Some(b.id), None, sidebar, window, cx);
                 }
             }
             // Attachments and URLs are the page's business, not the panel's.
@@ -3176,7 +3300,14 @@ impl Workspace {
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
-                                this.open(page.clone(), None, None, e.modifiers.shift, window, cx)
+                                this.open_clicked(
+                                    page.clone(),
+                                    None,
+                                    None,
+                                    &e.modifiers,
+                                    window,
+                                    cx,
+                                )
                             }),
                         );
                     body = body.child(header);
@@ -3431,14 +3562,7 @@ impl Workspace {
                             })),
                     )
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
-                        this.open(
-                            open_page.clone(),
-                            None,
-                            None,
-                            e.modifiers().shift,
-                            window,
-                            cx,
-                        )
+                        this.open_clicked(open_page.clone(), None, None, &e.modifiers(), window, cx)
                     })),
             );
         }
@@ -3514,7 +3638,8 @@ impl Workspace {
         for i in 0..self.stack.len() {
             let view = self.stack[i].clone();
             // AGENTS.md: the pane holding the edit is always drawn, or its keys go nowhere.
-            let hosts_edit = editing == Some(view.entity_id());
+            let hosts_edit =
+                editing == Some(view.entity_id()) || view.read(cx).holds_focus(window, cx);
             if g.off_screen(i, s) && !hosts_edit {
                 continue;
             }
@@ -3525,7 +3650,7 @@ impl Workspace {
                 .top_0()
                 .bottom_0()
                 .left(px(g.left(i, s)))
-                .w(px(PANE_WIDTH))
+                .w(px(g.pane))
                 .flex()
                 .flex_col()
                 .bg(th.paper)
@@ -3543,10 +3668,8 @@ impl Workspace {
                 .capture_any_mouse_down(cx.listener(
                     move |this, _: &MouseDownEvent, window, cx| {
                         if this.focused != i || this.key_focus {
-                            this.focused = i;
+                            this.set_focus(i, window, cx);
                             this.key_focus = false;
-                            this.title_window(window, cx);
-                            cx.notify();
                         }
                     },
                 ));

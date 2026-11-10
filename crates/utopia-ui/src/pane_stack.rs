@@ -238,6 +238,27 @@ pub fn trail(len: usize, mode: ViewMode, j: usize) -> Plan {
     }
 }
 
+/// Entry `i` became what another entry already shows, without a click: a rename merged
+/// its page into one that is open (§8.6), or it zoomed (in or out) to what another entry
+/// shows. One copy stays: entry `i`, the one in use, with its caret, scroll and focus; the
+/// other copy goes. `None` when `i` has no twin.
+pub fn dedupe(stack: &[Entry], mode: ViewMode, i: usize) -> Option<Plan> {
+    if i == 0 {
+        return None;
+    }
+    let target = stack.get(i)?;
+    let j = stack
+        .iter()
+        .enumerate()
+        .position(|(k, e)| k != i && e == target)?;
+    if j == 0 {
+        return None;
+    }
+    let mut plan = close(stack.len(), mode, j);
+    plan.focus = if i > j { i - 1 } else { i };
+    Some(plan)
+}
+
 /// The mode toggle (SP-6): the list stays; Panes scrolls to the end, Single shows the last.
 pub fn set_mode(len: usize, mode: ViewMode) -> Plan {
     Plan::stay(len, mode, len.saturating_sub(1))
@@ -282,6 +303,27 @@ pub struct Geometry {
 }
 
 impl Geometry {
+    /// The geometry for a scroller `viewport` wide. A pane is `pane` wide, or narrower when
+    /// the scroller is (both sidebars open in a small window): a pane wider than the
+    /// scroller would put its right side, and its close button, out of reach. With more
+    /// than one entry it also leaves room for one spine, so the older panes stay in sight
+    /// and a click away.
+    pub fn fit(pane: f32, spine: f32, threshold: f32, viewport: f32, count: usize) -> Self {
+        let viewport = viewport.max(1.);
+        let room = if count > 1 {
+            viewport - spine
+        } else {
+            viewport
+        };
+        Geometry {
+            pane: pane.min(room).max(spine.min(viewport)),
+            spine,
+            threshold,
+            viewport,
+            count,
+        }
+    }
+
     /// How far the row scrolls: the panes laid end to end, less what the scroller shows.
     pub fn max_scroll(&self) -> f32 {
         (self.count as f32 * self.pane - self.viewport).max(0.)
@@ -700,5 +742,61 @@ mod tests {
         assert!(!g.off_screen(1, 0.));
         assert!(g.off_screen(2, 0.));
         assert!(!g.off_screen(2, 200.));
+    }
+
+    #[test]
+    fn a_scroller_narrower_than_a_pane_shrinks_the_pane_to_fit() {
+        // 960 window − 264 left sidebar − 380 right sidebar = 316 for the scroller.
+        let g = Geometry::fit(560., 40., 80., 316., 4);
+        assert_eq!(g.pane, 276., "the pane leaves room for one spine");
+        let end = g.max_scroll();
+        assert_eq!(g.left(3, end) + g.pane, 316.);
+        assert_eq!(g.visible(3, end), 276.);
+        assert!(g.is_spine(2, end));
+        assert_eq!(g.visible(2, end), 40., "the previous pane shows as a spine");
+        // One entry has no spine to show: the pane takes the whole scroller.
+        assert_eq!(Geometry::fit(560., 40., 80., 316., 1).pane, 316.);
+        for i in 0..4 {
+            let at = g.spine_target(i);
+            assert!(g.left(i, at) >= 0.);
+            assert!(g.left(i, at) + g.pane <= 316. + 0.01, "pane {i}");
+        }
+        // A wide scroller keeps the 560 px pane (§4.3).
+        assert_eq!(Geometry::fit(560., 40., 80., 1200., 4).pane, 560.);
+    }
+
+    #[test]
+    fn a_merge_onto_an_open_page_leaves_one_copy() {
+        // Panes: [Daily, a, b, a] after pane 3 merged into a: the older a goes, pane 3
+        // (the one in use) stays and keeps focus at its new index.
+        let s = vec![Entry::Daily, p("a"), p("b"), p("a")];
+        let plan = dedupe(&s, ViewMode::Panes, 3).unwrap();
+        assert_eq!(
+            plan.apply(&s, Entry::clone),
+            vec![Entry::Daily, p("b"), p("a")]
+        );
+        assert_eq!(plan.focus, 2);
+        // The twin is newer: it goes, and pane 1 keeps its place and focus.
+        let plan = dedupe(&s, ViewMode::Panes, 1).unwrap();
+        assert_eq!(
+            plan.apply(&s, Entry::clone),
+            vec![Entry::Daily, p("a"), p("b")]
+        );
+        assert_eq!(plan.focus, 1);
+        // Single: the shown entry stays the last one.
+        let plan = dedupe(&s, ViewMode::Single, 3).unwrap();
+        assert_eq!(
+            plan.apply(&s, Entry::clone),
+            vec![Entry::Daily, p("b"), p("a")]
+        );
+        // No twin, or Daily Notes: nothing to do.
+        assert!(dedupe(&abc(), ViewMode::Panes, 2).is_none());
+        assert!(dedupe(&abc(), ViewMode::Panes, 0).is_none());
+        // A zoom is part of the entry: the same page zoomed elsewhere is not a twin.
+        let z = Entry::Page {
+            page: PageId("a".into()),
+            zoom: Some(BlockId("b1".into())),
+        };
+        assert!(dedupe(&[Entry::Daily, p("a"), z], ViewMode::Panes, 2).is_none());
     }
 }

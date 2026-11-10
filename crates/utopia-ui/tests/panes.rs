@@ -592,3 +592,238 @@ fn sp_8_the_stack_is_restored_on_relaunch(cx: &mut TestAppContext) {
     let entries = ws.update(vcx, |w, cx| w.stack_entries(cx));
     assert_eq!(entries[0], Entry::Daily);
 }
+
+// ---------------------------------------------------------------- review fixes (PR #54)
+
+/// AGENTS.md: a pane whose text field has the keyboard stays drawn when the row scrolls
+/// it under the next pane, so typing still reaches the field. The rule used to cover the
+/// block editor only, so a rename in a pane that became a spine swallowed every key.
+#[gpui::test]
+fn a_rename_survives_its_pane_becoming_a_spine(cx: &mut TestAppContext) {
+    let (app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    for p in &c.pages[..7] {
+        open(&ws, p, cx);
+    }
+    ws.update_in(cx, |w, window, cx| w.focus_pane(2, window, cx));
+    cx.run_until_parked();
+    let alpha = ws.update(cx, |w, _| w.stack_view(2)).unwrap();
+    alpha.update_in(cx, |v, window, cx| v.start_rename(window, cx));
+    cx.run_until_parked();
+    let scroller = cx.debug_bounds("pane-scroller").unwrap();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: scroller.center(),
+        delta: gpui::ScrollDelta::Pixels(point(px(-10_000.), px(0.))),
+        ..Default::default()
+    });
+    cx.run_until_parked();
+    let (s, _) = ws.update(cx, |w, _| w.pane_scroll());
+    assert!(s > 2. * PANE_WIDTH, "scrolled past pane 2: {s}");
+    assert!(alpha.update(cx, |v, _| v.is_renaming()));
+    cx.simulate_keystrokes("end");
+    cx.simulate_input(" Prime");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let title = app.update(cx, |a, _| {
+        a.store.page_state(&c.pages[1]).unwrap().meta.title.clone()
+    });
+    assert_eq!(title, "Alpha Prime", "the keys reached the rename");
+}
+
+/// SP-9: moving focus to another pane (the trail, a spine, ⌥←/⌥→) ends the edit in the
+/// pane it leaves, so ⌘W and the top bar never act on one pane while typing lands in
+/// another.
+#[gpui::test]
+fn moving_pane_focus_ends_the_edit_it_leaves(cx: &mut TestAppContext) {
+    let (app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    open(&ws, &c.pages[0], cx);
+    open(&ws, &c.pages[1], cx);
+    // Edit Home's block in pane 1.
+    let text = cx
+        .debug_bounds(sel(format!("text-{}", c.blocks[0].0)))
+        .unwrap();
+    cx.simulate_click(
+        point(text.right() - px(2.), text.center().y),
+        Modifiers::default(),
+    );
+    cx.run_until_parked();
+    assert_eq!(ws.update(cx, |w, _| w.focused_pane()), 1);
+    assert!(ws.update(cx, |w, cx| w.editor().read(cx).target().is_some()));
+    ws.update_in(cx, |w, window, cx| w.trail_to(2, window, cx));
+    cx.run_until_parked();
+    assert_eq!(ws.update(cx, |w, _| w.focused_pane()), 2);
+    assert!(
+        ws.update(cx, |w, cx| w.editor().read(cx).target().is_none()),
+        "the edit in pane 1 ended with the focus"
+    );
+    cx.simulate_input("zz");
+    cx.run_until_parked();
+    let home = app.update(cx, |a, _| {
+        let st = a.store.page_state(&c.pages[0]).unwrap();
+        st.block(&c.blocks[0]).unwrap().text.clone()
+    });
+    assert_eq!(home, "[[Alpha]] comes next", "no keys went to pane 1");
+    // ⌘W closes the focused pane, the one the top bar names.
+    cx.simulate_keystrokes("cmd-w");
+    cx.run_until_parked();
+    assert_eq!(tail(&ws, &c, cx), vec![0]);
+}
+
+/// §4.3: with both sidebars open in a small window the scroller is narrower than a pane;
+/// the pane shrinks to it, so its right side and close button stay in reach.
+#[gpui::test]
+fn panes_fit_a_scroller_narrower_than_a_pane(cx: &mut TestAppContext) {
+    let (_app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    cx.simulate_resize(size(px(960.), px(800.)));
+    cx.simulate_keystrokes("cmd-shift-\\");
+    cx.run_until_parked();
+    assert!(cx.debug_bounds("right-sidebar").is_some());
+    for p in &c.pages[..3] {
+        open(&ws, p, cx);
+    }
+    let scroller = cx.debug_bounds("pane-scroller").unwrap();
+    assert!(scroller.size.width < px(PANE_WIDTH), "{scroller:?}");
+    let last = cx.debug_bounds("stack-pane-3").unwrap();
+    assert_eq!(last.size.width, scroller.size.width - px(PANE_SPINE));
+    cx.debug_bounds("stack-spine-2")
+        .expect("the previous pane shows as a spine beside it");
+    assert!(last.right() <= scroller.right() + px(0.5), "{last:?}");
+    let close = cx.debug_bounds("stack-close-3").unwrap();
+    assert!(close.right() <= scroller.right() + px(0.5), "{close:?}");
+    cx.simulate_click(close.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(tail(&ws, &c, cx), vec![0, 1], "the close button works");
+}
+
+/// §4.4, SP-7: a ⌘-click on a page in the left sidebar follows the link rule: in Single
+/// mode it opens the page as a pane, and ⌘⇧ is a ⌘-click, not a right-sidebar open.
+#[gpui::test]
+fn a_cmd_click_in_the_sidebar_opens_a_pane(cx: &mut TestAppContext) {
+    let (_app, ws, cx, _c) = setup(cx, ViewMode::Single);
+    let row = cx.debug_bounds("page-row-0").expect("a sidebar page row");
+    cx.simulate_click(row.center(), cmd());
+    cx.run_until_parked();
+    assert_eq!(ws.update(cx, |w, _| w.view_mode()), ViewMode::Panes);
+    assert_eq!(ws.update(cx, |w, cx| w.stack_entries(cx)).len(), 2);
+    let row = cx
+        .debug_bounds("page-row-1")
+        .expect("a second sidebar page row");
+    cx.simulate_click(
+        row.center(),
+        Modifiers {
+            platform: true,
+            shift: true,
+            ..Default::default()
+        },
+    );
+    cx.run_until_parked();
+    assert_eq!(ws.update(cx, |w, cx| w.stack_entries(cx)).len(), 3);
+    assert!(
+        ws.update(cx, |w, cx| w.sidebar_pages(cx)).is_empty(),
+        "⌘⇧ did not stack the page in the right sidebar"
+    );
+}
+
+/// §8.6: renaming a pane's page onto a page already open merges them; the stack keeps one
+/// entry for the survivor instead of showing it twice.
+#[gpui::test]
+fn a_merge_onto_an_open_page_leaves_one_entry(cx: &mut TestAppContext) {
+    let (_app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    open(&ws, &c.pages[1], cx); // Alpha
+    open(&ws, &c.pages[2], cx); // Beta
+    let beta = ws.update(cx, |w, _| w.stack_view(2)).unwrap();
+    beta.update_in(cx, |v, window, cx| v.start_rename(window, cx));
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-a");
+    cx.simulate_input("Alpha");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(tail(&ws, &c, cx), vec![1], "one Alpha, not two");
+    assert_eq!(ws.update(cx, |w, _| w.focused_pane()), 1);
+}
+
+/// GR-5: the graph panel follows the focused pane however focus moves, not only when the
+/// focused view changes its page.
+#[gpui::test]
+fn the_graph_panel_follows_pane_focus(cx: &mut TestAppContext) {
+    let (_app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    cx.simulate_resize(size(px(1800.), px(900.)));
+    open(&ws, &c.pages[0], cx);
+    open(&ws, &c.pages[1], cx);
+    cx.simulate_keystrokes("cmd-shift-g");
+    cx.run_until_parked();
+    let local = cx.debug_bounds("graph-local").expect("Around this page");
+    cx.simulate_click(local.center(), Modifiers::default());
+    cx.run_until_parked();
+    let panel = ws.update(cx, |w, _| w.graph_panel()).expect("panel open");
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(c.pages[1].clone())
+    );
+    cx.simulate_keystrokes("alt-left");
+    cx.run_until_parked();
+    assert_eq!(ws.update(cx, |w, _| w.focused_pane()), 1);
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(c.pages[0].clone())
+    );
+    ws.update_in(cx, |w, window, cx| w.trail_to(2, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        panel.update(cx, |g, _| g.origin()),
+        Some(c.pages[1].clone())
+    );
+}
+
+/// Closed panes take their subscriptions with them.
+#[gpui::test]
+fn closed_panes_drop_their_subscriptions(cx: &mut TestAppContext) {
+    let (_app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    for _ in 0..3 {
+        for p in &c.pages[..4] {
+            open(&ws, p, cx);
+        }
+        ws.update_in(cx, |w, window, cx| w.open_journal(window, cx));
+        cx.run_until_parked();
+    }
+    for p in &c.pages[..2] {
+        open(&ws, p, cx);
+    }
+    assert_eq!(ws.update(cx, |w, _| w.stack_subscriptions()), 2);
+}
+
+/// SP-8: a save of the stack that fails is tried again at the next change, not taken as
+/// done (the stack would otherwise come back stale at the next launch).
+#[gpui::test]
+fn a_failed_stack_save_is_tried_again(cx: &mut TestAppContext) {
+    let (app, ws, cx, c) = setup(cx, ViewMode::Panes);
+    open(&ws, &c.pages[0], cx);
+    app.update(cx, |a, _| {
+        a.store
+            .conn()
+            .execute_batch(
+                "CREATE TEMP TRIGGER no_stack BEFORE INSERT ON local_state \
+                 WHEN NEW.key = 'pane_stack' BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap()
+    });
+    open(&ws, &c.pages[1], cx);
+    let saved = |app: &Entity<AppState>, cx: &mut VisualTestContext| {
+        app.update(cx, |a, _| a.store.local_get("pane_stack").unwrap())
+            .unwrap_or_default()
+    };
+    assert_eq!(saved(&app, cx).lines().count(), 2, "the save failed");
+    app.update(cx, |a, _| {
+        a.store
+            .conn()
+            .execute_batch("DROP TRIGGER no_stack;")
+            .unwrap()
+    });
+    // A focus move changes nothing in the list, but the save is still owed.
+    ws.update_in(cx, |w, window, cx| w.trail_to(1, window, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        saved(&app, cx).lines().count(),
+        3,
+        "saved on the next change"
+    );
+}

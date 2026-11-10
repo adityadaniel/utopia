@@ -994,6 +994,18 @@ impl PageView {
         self.in_pane
     }
 
+    /// One of this view's own text fields (the title rename, the alias field, the
+    /// reference filter) has the keyboard. The block editor is shared and tracked by its
+    /// host instead. The workspace keeps such a view drawn and hands the keyboard back
+    /// before hiding it: a focused element that is not drawn swallows every key.
+    pub fn holds_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.rename
+            .iter()
+            .chain(self.alias_input.iter())
+            .chain(std::iter::once(&self.filter))
+            .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     /// Put the view on or off screen (Single mode hides all but the last entry). Coming
     /// back rebuilds what went stale while it was away, here and not in the next frame.
     pub fn set_active(&mut self, on: bool, cx: &mut Context<Self>) {
@@ -3002,7 +3014,7 @@ impl PageView {
         }
     }
 
-    pub(crate) fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.header.kind == PageKind::Daily || self.zoom().is_some() {
             self.show_calendar = !self.show_calendar;
             if let Some(d) = self.header.date {

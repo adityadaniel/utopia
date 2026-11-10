@@ -410,7 +410,10 @@ Known limits (pick these up deliberately, don't paper over them):
   `aria-pressed`. gpui hands a click to every hitbox under the pointer: each pane
   `occlude()`s the panes it covers and forwards the sideways wheel itself — keep that, or a
   click lands in a covered pane too. Spines and off-screen panes do not draw their page,
-  except the one holding the edit. In Single mode the hidden entries keep their views but
+  except the one holding the edit or a focused text field (rename, alias, filter); every
+  focus move goes through `Workspace::set_focus` / `apply_plan`, which end the edit in the
+  pane focus leaves. A scroller narrower than 560 px (both sidebars open in a small
+  window) shrinks the pane to fit (`Geometry::fit`). In Single mode the hidden entries keep their views but
   are inactive (`PageView::set_active`): they rebuild when shown, not on every change.
 
 Beyond the PRD's scope ladder there is nothing scheduled; new feature requests go through the
