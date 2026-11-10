@@ -174,6 +174,9 @@ at the wrong size, a second Settings window opening instead of the first being r
 every test and was caught by looking at a picture. So verification has four steps, in order.
 
 **1. `make check`.** fmt, build, test, clippy. Never skip it and never open a PR without it.
+The one exception is a change that touches only documentation (`docs/**`, `*.md`,
+`.agents/**`, `.claude/**`): no crate includes those files, so `make check` is not needed and
+CI does not run for it (`paths-ignore` in `.github/workflows/ci.yml`). Say so in the PR.
 
 **2. Seed a graph with mock data.** Drive the `Store` directly rather than typing content
 through keystrokes: it is deterministic, it reads well in a screenshot, and it cannot race the
@@ -214,8 +217,8 @@ captures.
 
 ## Opening a PR
 
-CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS for every PR; it is
-the floor, not the evidence. A PR is reviewable when its description carries:
+CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS for every PR that
+changes more than documentation; it is the floor, not the evidence. A PR is reviewable when its description carries:
 
 - **What changed and why**, citing the PRD ids the change implements.
 - **Proof of work**: the screenshots from step 4 above, inlined from
