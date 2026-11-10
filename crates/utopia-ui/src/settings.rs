@@ -2,9 +2,9 @@
 //! side as System Settings has it (ST-5):
 //!
 //! - **Appearance** — the font notes and the interface are set in (System or the bundled
-//!   IBM Plex Sans) and how densely blocks are set (Comfortable or Compact). Applies to
-//!   every window at once; kept in `settings.json` ([`crate::appearance`]), not in
-//!   `keymap.json`.
+//!   IBM Plex Sans), how densely blocks are set (Comfortable or Compact) and how far
+//!   children indent (Wide, 45 px, or Narrow, 26 px). Applies to every window at once;
+//!   kept in `settings.json` ([`crate::appearance`]), not in `keymap.json`.
 //! - **Keybindings** — every action in [`crate::actions::CATALOG`] with the keys in force,
 //!   rebindable by pressing the combination you want. Changes apply at once and are written
 //!   to `keymap.json`; only the actions you changed are stored.
@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use crate::actions::{
     by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
-use crate::appearance::{self, Density, UiFont};
+use crate::appearance::{self, Density, Indent, UiFont};
 use crate::help::{shot_image, TOPICS};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::sync_runner;
@@ -633,6 +633,22 @@ impl SettingsView {
                 format!(
                     "{} applies now, but could not save {}: {e}",
                     density.label(),
+                    appearance::FILE
+                )
+                .into(),
+            ),
+            Ok(()) => None,
+        };
+        cx.notify();
+    }
+
+    /// Settings → Appearance: switch the indent step in every window and remember it.
+    pub fn choose_indent(&mut self, indent: Indent, cx: &mut Context<Self>) {
+        self.status = match appearance::set_indent(cx, indent, &self.config_dir) {
+            Err(e) => Some(
+                format!(
+                    "{} applies now, but could not save {}: {e}",
+                    indent.label(),
                     appearance::FILE
                 )
                 .into(),
@@ -1425,6 +1441,43 @@ impl SettingsView {
                     )
                     .on_click(cx.listener(move |this, _, _, cx| this.choose_density(d, cx))),
                 i + 1 == Density::ALL.len(),
+                &th,
+            ));
+        }
+
+        // How far children step right of their parent (DESIGN.md §3.1), a local preference
+        // like the density. Compact panes keep their own step whatever this says.
+        let current_indent = appearance::indent(cx);
+        list = list.child(card_top(&th, "Indent").mt_4());
+        for (i, &d) in Indent::ALL.iter().enumerate() {
+            let on = d == current_indent;
+            let th = th.clone();
+            list = list.child(appearance_row(
+                div()
+                    .id(SharedString::from(format!("indent-{}", d.key())))
+                    .debug_selector(move || format!("settings-indent-{}", d.key()))
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .when(on, |x| x.bg(th.line_soft))
+                    .cursor_pointer()
+                    .hover(|x| x.bg(th.hover))
+                    .child(radio(on, &th))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .child(div().child(d.label()))
+                            .child(
+                                div()
+                                    .text_size(px(crate::theme::CAPTION_SIZE))
+                                    .text_color(th.muted)
+                                    .child(format!("{} px per level", d.step())),
+                            ),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.choose_indent(d, cx))),
+                i + 1 == Indent::ALL.len(),
                 &th,
             ));
         }

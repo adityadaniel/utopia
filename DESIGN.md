@@ -96,11 +96,11 @@ Icon-only buttons must have an accessible label.
 ### 3.1 Block (outliner row)
 
 - The row height follows a **28px line grid**. Bullets, carets and checkboxes are vertically centered within the first 28px line.
-- Layout from left: caret slot (20px, sits in the left gutter outside the text column) → bullet slot (24px) → content.
+- Layout from left: caret slot (20px, sits in the left gutter outside the text column) → bullet slot (24px) → content. A top-level bullet's left edge sits on the page title's left edge; the text starts 15px further in (the rest of the bullet slot).
 - Bullet: 6px circle, `--bullet`.
 - Collapsed block: the bullet gets a 12px `--line-strong` ring around a 6px `--ink-3` dot, and the caret points right.
 - Caret: 12px chevron, `--bullet`. Shown on blocks that have children. Can be shown only on hover if you prefer, but must always be there for keyboard and screen reader users.
-- Children: indent by `margin-left: 31px; padding-left: 13px;` with a 1px `--line` left border (the thread line). The thread line lines up under the parent bullet's center.
+- Children: indent by `margin-left: 31px; padding-left: 13px;` with a 1px `--line` left border (the thread line). The thread line lines up under the parent bullet's center. Settings → Appearance → Indent offers a 26px step instead of the 45px; the thread line follows.
 - Todo: a real checkbox, 16px, `accent-color: --link`, with 10px gap before the text. Done todos: text `--muted` with a strikethrough.
 - Inline page link: `--link`, no underline, underline on hover.
 - Date link: same as page link (dates are pages).

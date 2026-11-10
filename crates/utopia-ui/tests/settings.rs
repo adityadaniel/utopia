@@ -1101,7 +1101,7 @@ mod appearance {
     use utopia_store::Store;
     use utopia_ui::actions::install_keymap;
     use utopia_ui::app_state::AppState;
-    use utopia_ui::appearance::{self, Density, UiFont};
+    use utopia_ui::appearance::{self, Density, Indent, UiFont};
     use utopia_ui::settings::{SettingsView, Tab};
     use utopia_ui::theme::Theme;
     use utopia_ui::workspace::Workspace;
@@ -1243,6 +1243,7 @@ mod appearance {
                 "version": 1,
                 "font": "system",
                 "density": "comfortable",
+                "indent": "wide",
                 "ref_children": 2,
                 "pinned": [],
                 "right_sidebar_width": 380.0,
@@ -1320,6 +1321,35 @@ mod appearance {
             Density::Comfortable
         );
         assert_eq!(settings_json(dir.path()).unwrap()["density"], "comfortable");
+    }
+
+    /// DESIGN.md §3.1: the indent step is a local preference like the density. Picking
+    /// Narrow applies at once and is written to settings.json; Wide can be picked back.
+    #[gpui::test]
+    fn choosing_the_indent_step_applies_and_is_saved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_main, settings) = open_both(cx, dir.path());
+        assert_eq!(cx.update(|cx| appearance::indent(cx)), Indent::Wide);
+        assert!(settings_json(dir.path()).is_none(), "nothing saved yet");
+
+        let mut s = VisualTestContext::from_window(settings, cx);
+        s.run_until_parked();
+        let option = s
+            .debug_bounds("settings-indent-narrow")
+            .expect("the Narrow choice is shown");
+        s.simulate_click(option.center(), Modifiers::default());
+        s.run_until_parked();
+
+        assert_eq!(s.update(|_, cx| appearance::indent(cx)), Indent::Narrow);
+        let saved = settings_json(dir.path()).expect("settings.json written");
+        assert_eq!(saved["indent"], "narrow");
+        assert_eq!(saved["font"], "ibm-plex-sans", "the font is kept");
+
+        let option = s.debug_bounds("settings-indent-wide").unwrap();
+        s.simulate_click(option.center(), Modifiers::default());
+        s.run_until_parked();
+        assert_eq!(s.update(|_, cx| appearance::indent(cx)), Indent::Wide);
+        assert_eq!(settings_json(dir.path()).unwrap()["indent"], "wide");
     }
 
     /// SB-3: pins live in settings.json (not keymap.json, never the graph). Settings →

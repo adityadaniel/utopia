@@ -23,15 +23,15 @@ use crate::line_input::{LineInput, LineInputEvent};
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
     outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill,
-    AVATAR_SIZE, AVATAR_TEXT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE, CARET_SLOT, CHILD_INDENT,
+    AVATAR_SIZE, AVATAR_TEXT, BLOCK_TEXT_LEFT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE, CARET_SLOT,
     COLLAPSED_RING, COMPACT_INDENT, CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP,
     CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP,
     DAY_HEADER_PAD_TOP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL,
     LABEL_MONO, MAX_VISUAL_DEPTH, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_REFS_GAP,
     PROPERTY_GAP_BELOW_TITLE, PROPERTY_HOVER_BLEED, PROPERTY_ICON, PROPERTY_KEY_WIDTH,
-    PROPERTY_KEY_WIDTH_COMPACT, PROPERTY_PADDING_Y, PROPERTY_ROW_MIN_HEIGHT, STATUS_DOT,
-    STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
-    UNLINKED_ROW_HEIGHT,
+    PROPERTY_KEY_WIDTH_COMPACT, PROPERTY_PADDING_Y, PROPERTY_ROW_MIN_HEIGHT, ROW_GUTTER,
+    STATUS_DOT, STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET, TODO_CHECK_SIZE,
+    TODO_GAP, TODO_SIZE, UNLINKED_ROW_HEIGHT,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -3084,6 +3084,27 @@ impl PageView {
             .into_any_element()
     }
 
+    /// How far a child row steps right of its parent in this pane (DESIGN.md §3.1).
+    fn indent_step(&self, cx: &gpui::App) -> f32 {
+        if self.compact {
+            COMPACT_INDENT
+        } else {
+            crate::appearance::indent(cx).step()
+        }
+    }
+
+    /// Where block text at `depth` starts, from the pane's left edge, so items that are
+    /// not rows (notices, query headers and hits, attachments) line up with the text of
+    /// the row they belong under.
+    fn text_left(&self, depth: usize, cx: &gpui::App) -> f32 {
+        let base = if self.compact {
+            CARET_SLOT + BULLET_SLOT
+        } else {
+            BLOCK_TEXT_LEFT
+        };
+        base + depth.min(MAX_VISUAL_DEPTH) as f32 * self.indent_step(cx)
+    }
+
     fn render_row(&self, ix: usize, r: &RowItem, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let density = crate::appearance::density(cx);
@@ -3091,16 +3112,13 @@ impl PageView {
         let vpad = density.block_spacing() / 2.;
         let host = cx.entity_id();
         let editing = self.editor.read(cx).is_editing(host, &r.page, &r.block);
-        // DESIGN.md §3.1: children step right by 31 + 13 + the 1 px thread line; the row's
-        // caret/bullet gutter hangs in the content column's side padding so block text
-        // lines up with the page or day title. A compact pane is too narrow for 45 px a
-        // level (the right sidebar is 380 px, a split less), so it indents less and its
-        // thread lines follow that same step.
-        let indent = if self.compact {
-            COMPACT_INDENT
-        } else {
-            CHILD_INDENT
-        };
+        // DESIGN.md §3.1: children step right by 31 + 13 + the 1 px thread line (or the
+        // narrower step Settings → Appearance → Indent picked); the row's caret slot hangs
+        // in the content column's side padding so a top-level bullet's left edge lines up
+        // with the page or day title. A compact pane is too narrow for 45 px a level (the
+        // right sidebar is 380 px, a split less), so it indents less and its thread lines
+        // follow that same step.
+        let indent = self.indent_step(cx);
         let step = r.depth.min(MAX_VISUAL_DEPTH) as f32 * indent;
         // PG-3: a heading's own line box, so H3 is not padded out to the body's 24 px.
         let line = match r.kind {
@@ -3209,19 +3227,16 @@ impl PageView {
                 }))
         };
         let target = r.clone();
-        // DESIGN.md §2.3/§3.1: in the main pane the gutter hangs in the column's 40 px side
-        // padding, so block text starts exactly where the title does. The right sidebar is
-        // narrower (its design is still open, §6), so its rows keep the gutter inside.
+        // DESIGN.md §2.3/§3.1: in the main pane the caret slot hangs in the column's 40 px
+        // side padding, so a top-level bullet starts exactly where the title does. The
+        // right sidebar is narrower (its design is still open, §6), so its rows keep the
+        // gutter inside.
         let pad_x = if self.compact {
             crate::theme::SPACING[3]
         } else {
             CONTENT_PADDING_X
         };
-        let row_gutter = if self.compact {
-            0.
-        } else {
-            pad_x - (CARET_SLOT + BULLET_SLOT)
-        };
+        let row_gutter = if self.compact { 0. } else { ROW_GUTTER };
         div()
             .id(("row", ix))
             .debug_selector(move || format!("row-{ix}"))
@@ -4616,18 +4631,14 @@ impl PageView {
             Item::Header => self.render_header(cx),
             Item::Row(r) => self.render_row(ix, &r, cx),
             Item::Notice { depth, text } => div()
-                .pl(px(
-                    depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
-                ))
+                .pl(px(self.text_left(depth, cx)))
                 .text_size(px(crate::theme::BODY_SIZE))
                 .text_color(th.muted)
                 .child(text)
                 .into_any_element(),
             Item::QueryHeader { depth, label } => div()
                 .debug_selector(|| "query-header".into())
-                .pl(px(
-                    depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
-                ))
+                .pl(px(self.text_left(depth, cx)))
                 .pt_1()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
@@ -4646,9 +4657,7 @@ impl PageView {
                 );
                 div()
                     .id(("query-hit", ix))
-                    .pl(px(
-                        depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X
-                    ))
+                    .pl(px(self.text_left(depth, cx)))
                     .pr_4()
                     .py_0p5()
                     .flex()
@@ -4685,7 +4694,7 @@ impl PageView {
                 host,
             } => {
                 use utopia_core::attach::BlobKind;
-                let pad = px(depth.min(MAX_VISUAL_DEPTH) as f32 * CHILD_INDENT + CONTENT_PADDING_X);
+                let pad = px(self.text_left(depth, cx));
                 let open_path = path.clone();
                 let kind = blob.kind;
                 match (kind, path.clone()) {
