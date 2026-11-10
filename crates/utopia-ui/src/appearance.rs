@@ -11,6 +11,7 @@
 //!   "version": 1,
 //!   "font": "ibm-plex-sans",
 //!   "density": "comfortable",
+//!   "indent": "wide",
 //!   "ref_children": 2,
 //!   "pinned": [],
 //!   "right_sidebar_width": 380.0
@@ -18,7 +19,8 @@
 //! ```
 //!
 //! `font` is `"system"` (the default) or `"ibm-plex-sans"`; `density` is
-//! `"comfortable"` (the default) or `"compact"` (ALL-5); `ref_children` is how many
+//! `"comfortable"` (the default) or `"compact"` (ALL-5); `indent` is `"wide"` (the
+//! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `ref_children` is how many
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
@@ -34,7 +36,7 @@ use std::path::{Path, PathBuf};
 use utopia_core::PageId;
 
 use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
-use crate::theme::{BODY_SIZE, LINE_HEIGHT};
+use crate::theme::{BODY_SIZE, CHILD_INDENT, LINE_HEIGHT, NARROW_INDENT};
 
 pub const FILE: &str = "settings.json";
 pub const VERSION: u64 = 1;
@@ -140,6 +142,48 @@ impl Density {
     }
 }
 
+/// How far a child row steps right of its parent in the main pane. Local to the machine,
+/// like the density; compact panes (the right sidebar, a split) keep their own narrower
+/// step whatever this says, because their width decides it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Indent {
+    /// DESIGN.md §3.1's 45 px: 31 px margin + 13 px padding + the 1 px thread line.
+    #[default]
+    Wide,
+    /// 26 px: a tighter outline for deep trees.
+    Narrow,
+}
+
+impl Indent {
+    pub const ALL: &'static [Indent] = &[Indent::Wide, Indent::Narrow];
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Indent::Wide => "wide",
+            Indent::Narrow => "narrow",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|d| d.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Indent::Wide => "Wide",
+            Indent::Narrow => "Narrow",
+        }
+    }
+
+    /// The step in points, per level of depth.
+    pub fn step(self) -> f32 {
+        match self {
+            Indent::Wide => CHILD_INDENT,
+            Indent::Narrow => NARROW_INDENT,
+        }
+    }
+}
+
 /// The right sidebar's width as it was before the setting existed.
 pub const RIGHT_SIDEBAR_DEFAULT_WIDTH: f32 = 380.;
 /// Narrow enough to leave a readable page beside it, wide enough for a reference.
@@ -160,6 +204,7 @@ pub fn clamp_sidebar_width(width: f32) -> f32 {
 pub struct Prefs {
     pub font: UiFont,
     pub density: Density,
+    pub indent: Indent,
     /// Children shown inline under a referencing block (LR-4); 0 folds them all.
     pub ref_children: usize,
     /// Page ids kept at the top of the sidebar, in the order they were pinned (SB-3), and
@@ -178,6 +223,7 @@ impl Default for Prefs {
         Self {
             font: UiFont::default(),
             density: Density::default(),
+            indent: Indent::default(),
             ref_children: DEFAULT_REF_CHILDREN,
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
@@ -235,6 +281,19 @@ impl Prefs {
                     "{FILE}: density should be a string, not {v}; using Comfortable"
                 ));
                 Density::default()
+            }
+        };
+        let indent = match rest.remove("indent") {
+            None => Indent::default(),
+            Some(Value::String(s)) => Indent::from_key(&s).unwrap_or_else(|| {
+                warnings.push(format!("{FILE}: unknown indent {s:?}; using Wide"));
+                Indent::default()
+            }),
+            Some(v) => {
+                warnings.push(format!(
+                    "{FILE}: indent should be a string, not {v}; using Wide"
+                ));
+                Indent::default()
             }
         };
         let right_sidebar_width = match rest.remove("right_sidebar_width") {
@@ -332,6 +391,7 @@ impl Prefs {
             Self {
                 font,
                 density,
+                indent,
                 ref_children,
                 pinned,
                 right_sidebar_width,
@@ -346,6 +406,7 @@ impl Prefs {
         m.insert("version".into(), VERSION.into());
         m.insert("font".into(), self.font.key().into());
         m.insert("density".into(), self.density.key().into());
+        m.insert("indent".into(), self.indent.key().into());
         m.insert(
             "right_sidebar_width".into(),
             serde_json::Number::from_f64(clamp_sidebar_width(self.right_sidebar_width) as f64)
@@ -434,6 +495,12 @@ pub fn font_family(cx: &App) -> SharedString {
 pub fn density(cx: &App) -> Density {
     cx.try_global::<Appearance>()
         .map_or(Density::default(), |a| a.prefs.density)
+}
+
+/// The main pane's indent step in force. Wide when nothing was installed.
+pub fn indent(cx: &App) -> Indent {
+    cx.try_global::<Appearance>()
+        .map_or(Indent::default(), |a| a.prefs.indent)
 }
 
 /// The right sidebar's width in force (RS-4). 380 when nothing was installed.
@@ -530,6 +597,13 @@ pub fn set_density(cx: &mut App, density: Density, config_dir: &Path) -> std::io
     cx.global::<Appearance>().prefs.save(config_dir)
 }
 
+/// Switch the indent step in every window and remember it.
+pub fn set_indent(cx: &mut App, indent: Indent, config_dir: &Path) -> std::io::Result<()> {
+    cx.default_global::<Appearance>().prefs.indent = indent;
+    cx.refresh_windows();
+    cx.global::<Appearance>().prefs.save(config_dir)
+}
+
 /// Change how many children a reference shows inline (LR-4) and remember it. Open reference
 /// panels notice the change on their next render and rebuild their rows.
 pub fn set_ref_children(cx: &mut App, count: usize, config_dir: &Path) -> std::io::Result<()> {
@@ -575,6 +649,7 @@ mod tests {
         let p = Prefs {
             font: UiFont::IbmPlexSans,
             density: Density::Compact,
+            indent: Indent::Narrow,
             ref_children: 0,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
             right_sidebar_width: 420.0,
@@ -588,6 +663,7 @@ mod tests {
                 "version": 1,
                 "font": "ibm-plex-sans",
                 "density": "compact",
+                "indent": "narrow",
                 "ref_children": 0,
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,
@@ -730,6 +806,22 @@ mod tests {
         assert_eq!(p.density, Density::Comfortable);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("tiny"), "{warnings:?}");
+    }
+
+    /// DESIGN.md §3.1: the indent step is Wide (45 px) unless the file says Narrow; a value
+    /// this build does not know is logged and read as Wide (rule 11).
+    #[test]
+    fn the_indent_step_is_read_and_degrades_to_wide() {
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "indent": "narrow"}"#);
+        assert_eq!((p.indent, p.indent.step()), (Indent::Narrow, NARROW_INDENT));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "indent": "huge"}"#);
+        assert_eq!((p.indent, p.indent.step()), (Indent::Wide, CHILD_INDENT));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("huge"), "{warnings:?}");
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "indent": 26}"#);
+        assert_eq!(p.indent, Indent::Wide);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
     }
 
     /// A newer release's file: what we know is read, the rest is kept for it.

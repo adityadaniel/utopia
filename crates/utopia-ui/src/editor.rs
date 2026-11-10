@@ -18,7 +18,7 @@ use utopia_core::{BlockId, BlockKind, PageId};
 
 use crate::actions::*;
 use crate::app_state::{AppState, PageReplaced};
-use crate::field::{FieldElement, FieldHost, Goal, TextField};
+use crate::field::{Blink, FieldElement, FieldHost, Goal, TextField, BLINK_INTERVAL};
 use crate::rich::source_highlights;
 use crate::theme::theme;
 
@@ -375,6 +375,10 @@ pub struct BlockEditor {
     focus: FocusHandle,
     session: EditorSession,
     ac: Autocomplete,
+    blink: Blink,
+    /// The block, text length and selection the caret was last drawn for: a change in any
+    /// of them is a keystroke or a move, which holds the caret steady (see `render`).
+    blink_mark: (Option<BlockId>, usize, std::ops::Range<usize>),
     _sub: Subscription,
     _page_sub: Subscription,
 }
@@ -403,6 +407,9 @@ impl FieldHost for BlockEditor {
     }
     fn focus_handle_ref(&self) -> &FocusHandle {
         &self.focus
+    }
+    fn caret_visible(&self) -> bool {
+        self.blink.visible()
     }
 }
 
@@ -435,9 +442,59 @@ impl BlockEditor {
             focus: cx.focus_handle(),
             session: EditorSession::Idle,
             ac: Autocomplete::Closed,
+            blink: Blink::default(),
+            blink_mark: (None, 0, 0..0),
             _sub: sub,
             _page_sub: page_sub,
         }
+    }
+
+    /// Keep the caret's blink in step with the session (Zed's blink manager, in
+    /// `field::Blink`): it runs while a block is being edited, holds steady for
+    /// [`BLINK_INTERVAL`] after every keystroke or caret move, and stops with the edit.
+    /// Decided from the state the frame is drawn from rather than in each handler, so no
+    /// path that moves the caret can forget to show it.
+    fn sync_blink(&mut self, cx: &mut Context<Self>) {
+        let target = self.target().map(|t| t.block.clone());
+        if target.is_none() {
+            self.blink.disable();
+            return;
+        }
+        let mark = (target, self.field.text.len(), self.field.sel.clone());
+        if let Some(epoch) = self.blink.enable() {
+            // The first tick shows the caret in this very frame; the hide that follows
+            // is scheduled like any other.
+            if let Some(next) = self.blink.tick(epoch) {
+                self.schedule_blink(next, false, cx);
+            }
+        }
+        if self.blink_mark != mark {
+            self.blink_mark = mark;
+            if let Some(epoch) = self.blink.pause() {
+                self.schedule_blink(epoch, true, cx);
+            }
+        }
+    }
+
+    /// Wake up after one interval with `epoch`: resume from a pause, or flip the caret.
+    /// A stale epoch (something moved meanwhile) does nothing, so nothing is cancelled.
+    fn schedule_blink(&mut self, epoch: usize, resume: bool, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(BLINK_INTERVAL).await;
+            this.update(cx, |this, cx| {
+                let next = if resume {
+                    this.blink.resume(epoch)
+                } else {
+                    this.blink.tick(epoch)
+                };
+                if let Some(next) = next {
+                    cx.notify();
+                    this.schedule_blink(next, false, cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The block owning the caret, if any. The host reads this to focus the editor for an
@@ -2176,6 +2233,7 @@ impl BlockEditor {
 
 impl Render for BlockEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_blink(cx);
         let th = theme(cx).clone();
         let text = self.field.text.clone();
         let (styled, shown) = if text.is_empty() {

@@ -58,7 +58,7 @@ dir), the only `*.utopia` in `~/Documents/Utopia`; otherwise onboarding asks for
 both env vars at a scratch folder when trying the app so you never touch the user's real graph.
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
 `{"version": 1, "font": "system" | "ibm-plex-sans", "density": "comfortable" | "compact",
-"ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
+"indent": "wide" | "narrow", "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
 "right_sidebar_width": 380.0}` (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
 not know.
@@ -193,6 +193,10 @@ UTOPIA_SHOT_SCRIPT="wait 900; keys escape; wait 300; keys cmd-shift-t; wait 700;
 
 - `keys escape` before a shot: a focused block shows its raw `[[markup]]`, which is not what
   the feature looks like in use.
+- The caret blinks (`field::Blink`, Zed's blink manager): steady for 500 ms after the last
+  keystroke or caret move, then 500 ms on, 500 ms off. A `shot` itself takes ~400 ms to
+  present and capture, so a shot that must show the caret goes right after the key, with no
+  `wait`; a shot taken later may land in the off half and is not a bug.
 - `wait` generously (500–1200 ms) after anything that opens a panel, loads days or lays out the
   graph. A shot taken too early captures a half-drawn frame and is worse than no shot.
 - For a second window (Settings), `keys cmd-,; wait 1200; target last; wait 500; shot …`.

@@ -9,7 +9,8 @@ use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
 use utopia_ui::theme::{
-    Theme, CHILD_INDENT, DAY_GAP, DAY_HEADER_PAD_TOP, REFERENCE, SIDEBAR_WIDTH,
+    Theme, BLOCK_TEXT_LEFT, CHILD_INDENT, CONTENT_PADDING_X, DAY_GAP, DAY_HEADER_PAD_TOP,
+    NARROW_INDENT, REFERENCE, SIDEBAR_WIDTH,
 };
 use utopia_ui::workspace::Workspace;
 
@@ -772,9 +773,9 @@ fn empty_days_are_individual_list_items(cx: &mut TestAppContext) {
 }
 
 /// DESIGN.md §3.1: rows follow the 28 px line grid. The caret slot (20 px) sits in the
-/// gutter, the bullet slot is 24 px, a 6 px bullet is centred in the first line, block
-/// text lines up with the page title, and children step 45 px with a thread line under
-/// each ancestor's bullet.
+/// gutter, the bullet slot is 24 px, a 6 px bullet is centred in the first line, a
+/// top-level bullet's left edge lines up with the page title, and children step 45 px with
+/// a thread line under each ancestor's bullet.
 #[gpui::test]
 fn block_rows_follow_the_line_grid_and_the_thread(cx: &mut TestAppContext) {
     let cx = setup_page(cx);
@@ -808,11 +809,19 @@ fn block_rows_follow_the_line_grid_and_the_thread(cx: &mut TestAppContext) {
         "bullet centre after the 20 px caret slot and half the 24 px bullet slot: \
          {dot:?} {row1:?}"
     );
-    // The gutter hangs in the column's padding, so the text starts where the title does.
+    // The caret slot hangs in the column's padding, so the bullet starts where the title
+    // does and the text follows the bullet slot.
     let title = bounds(cx, "page-title");
     assert!(
-        approx(content1.origin.x, f32::from(title.origin.x)),
-        "block text aligns with the title: {content1:?} {title:?}"
+        approx(dot.origin.x, f32::from(title.origin.x)),
+        "the bullet's left edge aligns with the title: {dot:?} {title:?}"
+    );
+    assert!(
+        approx(
+            content1.origin.x - title.origin.x,
+            BLOCK_TEXT_LEFT - CONTENT_PADDING_X
+        ),
+        "block text starts after the bullet slot: {content1:?} {title:?}"
     );
     // Children step 45 px (31 margin + 13 padding + the 1 px line).
     assert!(approx(content2.origin.x - content1.origin.x, CHILD_INDENT));
@@ -825,6 +834,37 @@ fn block_rows_follow_the_line_grid_and_the_thread(cx: &mut TestAppContext) {
         assert!(
             (f32::from(thread.origin.x + thread.size.width) - f32::from(centre)).abs() <= 1.,
             "thread {k} lines up under the parent bullet: {thread:?} {centre:?}"
+        );
+    }
+
+    // Settings → Appearance → Indent: Narrow steps 26 px instead, the top-level bullet
+    // stays on the title, and the thread lines follow the narrower step.
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|_, cx| {
+        utopia_ui::appearance::set_indent(cx, utopia_ui::appearance::Indent::Narrow, dir.path())
+            .unwrap();
+    });
+    cx.run_until_parked();
+    let dot = bounds(cx, "dot-1");
+    let title = bounds(cx, "page-title");
+    assert!(
+        approx(dot.origin.x, f32::from(title.origin.x)),
+        "{dot:?} {title:?}"
+    );
+    let content1 = bounds(cx, "content-1");
+    let content2 = bounds(cx, "content-2");
+    let content3 = bounds(cx, "content-3");
+    assert!(
+        approx(content2.origin.x - content1.origin.x, NARROW_INDENT),
+        "narrow step: {content1:?} {content2:?}"
+    );
+    assert!(approx(content3.origin.x - content2.origin.x, NARROW_INDENT));
+    for (k, parent) in [(0, "dot-1"), (1, "dot-2")] {
+        let thread = bounds_of(cx, format!("thread-3-{k}"));
+        let centre = bounds(cx, parent).origin.x + bounds(cx, parent).size.width / 2.;
+        assert!(
+            (f32::from(thread.origin.x + thread.size.width) - f32::from(centre)).abs() <= 1.,
+            "thread {k} follows the narrow step: {thread:?} {centre:?}"
         );
     }
 }

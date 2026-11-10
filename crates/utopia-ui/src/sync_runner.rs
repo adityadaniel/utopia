@@ -168,6 +168,11 @@ pub struct SyncRunner {
     /// release it with the workspace).
     pub loop_task: Option<gpui::Task<()>>,
     pub realtime: Option<utopia_sync::realtime::Listener>,
+    /// Lowered when the runner is dropped (replaced or stopped). The background exchange
+    /// reads it before touching the transport: dropping `loop_task` does not drop the
+    /// loop's future at once (the executor does, on a last scheduled run), so an exchange
+    /// that was already queued could otherwise still reach the relay (§13.3).
+    alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SyncRunner {
@@ -183,9 +188,24 @@ impl SyncRunner {
             generation: NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             loop_task: None,
             realtime: None,
+            alive: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
         }
     }
 
+    /// A flag the background exchange checks before calling the transport; false once
+    /// this runner is gone.
+    pub fn alive(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.alive.clone()
+    }
+}
+
+impl Drop for SyncRunner {
+    fn drop(&mut self) {
+        self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl SyncRunner {
     /// Whether `generation` is this runner's token; false once sync was restarted.
     pub fn is_generation(&self, generation: u64) -> bool {
         self.generation == generation
