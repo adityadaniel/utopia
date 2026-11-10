@@ -1361,15 +1361,13 @@ mod appearance {
         );
         assert!(s.update(|_, cx| appearance::pinned(cx).is_empty()));
         // Nothing to clear any more. (The old control's debug bounds linger, so assert on
-        // what replaced it: the status line says the pins are gone.)
+        // view state.) A clear that saved says nothing: the count row shows the result,
+        // and only a failed save earns a status line (docs/copy-cleanup.md).
         let view = s
             .update(|window, _| window.root::<SettingsView>())
             .flatten()
             .expect("settings root");
-        assert_eq!(
-            view.update(cx, |v, _| v.status().map(str::to_string)),
-            Some("Unpinned every page.".to_string())
-        );
+        assert_eq!(view.update(cx, |v, _| v.status().map(str::to_string)), None);
     }
 
     /// RS-3: the Pinned tab writes through the same local list as the left sidebar's Pinned

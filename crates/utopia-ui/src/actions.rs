@@ -332,7 +332,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Outline,
         keys: "cmd-shift-backspace",
         context: EDITOR,
-        help: "Send this block to the trash. Its id survives, so references still resolve.",
+        help: "Send this block to the trash.",
     },
     ActionDoc {
         action: "CopyBlockRef",
@@ -374,7 +374,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-z",
         context: None,
-        help: "Undo the last change. A rename that merged two pages undoes as one step.",
+        help: "Undo the last change.",
     },
     ActionDoc {
         action: "Redo",
@@ -382,7 +382,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-shift-z",
         context: None,
-        help: "Redo the change you just undid.",
+        help: "",
     },
     ActionDoc {
         action: "Copy",
@@ -390,7 +390,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-c",
         context: TEXT,
-        help: "Copy the selection.",
+        help: "",
     },
     ActionDoc {
         action: "Cut",
@@ -398,7 +398,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "cmd-x",
         context: TEXT,
-        help: "Cut the selection.",
+        help: "",
     },
     ActionDoc {
         action: "Paste",
@@ -706,7 +706,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Editing,
         keys: "ctrl-k",
         context: TEXT,
-        help: "Delete to the end of the paragraph and keep the text for Ctrl+Y. Never merges blocks.",
+        help: "Delete to the end of the paragraph and keep the text for Ctrl+Y.",
     },
     ActionDoc {
         action: "EmacsYank",
@@ -838,7 +838,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Application,
         keys: "cmd-,",
         context: None,
-        help: "Open Settings, where you can change these keybindings.",
+        help: "",
     },
     ActionDoc {
         action: "ShowShortcuts",
@@ -862,7 +862,7 @@ pub const CATALOG: &[ActionDoc] = &[
         category: Category::Application,
         keys: "cmd-q",
         context: None,
-        help: "Quit Utopia. Edits are already saved.",
+        help: "Quit Utopia.",
     },
 ];
 

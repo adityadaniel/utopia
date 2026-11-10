@@ -53,12 +53,12 @@ impl SyncSetup {
             i
         });
         let token = cx.new(|cx| {
-            let mut i = LineInput::new("Enter token · blank keeps saved token", cx);
+            let mut i = LineInput::new("Blank keeps the saved token", cx);
             i.set_masked(true, cx);
             i
         });
         let passphrase = cx.new(|cx| {
-            let mut i = LineInput::new("Enter passphrase · blank keeps saved key", cx);
+            let mut i = LineInput::new("Blank keeps the saved passphrase", cx);
             i.set_masked(true, cx);
             i
         });
@@ -274,43 +274,42 @@ impl Render for SyncSetup {
             .flex()
             .flex_col()
             .gap_3()
-            .child(div().text_size(px(18.)).child("Sync this graph"))
             .child(if self.graph_editable {
                 div()
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .child(field("Graph id", "sync-graph", self.graph_input.clone(), cx))
-                    .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(th.muted)
-                            .child("Names this graph on the relay or folder. Choose a different id for a copy of a graph; it cannot be changed once the graph has synced."),
-                    )
+                    .child(field(
+                        "Graph id",
+                        "sync-graph",
+                        self.graph_input.clone(),
+                        cx,
+                    ))
+                    .child(div().text_size(px(12.)).text_color(th.muted).child(
+                        "Fixed once the graph has synced. A copy of a graph needs its own id.",
+                    ))
             } else {
                 div()
                     .text_color(th.muted)
                     .child(format!("Graph id: {}", self.graph))
             })
-            .child(
-                div()
-                    .debug_selector(|| "settings-sync-transport".into())
-                    .child(
-                        facts
-                            .target
-                            .clone()
-                            .unwrap_or_else(|| "Off · your notes stay on this Mac".into()),
-                    ),
-            )
+            // The running target, when there is one. Off is the highlighted mode button.
+            .when_some(facts.target.clone(), |d, target| {
+                d.child(
+                    div()
+                        .debug_selector(|| "settings-sync-transport".into())
+                        .child(target),
+                )
+            })
             .when(facts.is_on(), |d| {
                 d.child(
                     div()
                         .debug_selector(|| "settings-sync-encryption".into())
                         .text_color(th.muted)
                         .child(if facts.encrypted {
-                            "End-to-end encrypted: the relay or folder only holds ciphertext"
+                            "End-to-end encrypted"
                         } else {
-                            "Not encrypted: the relay or folder holds page payloads in the clear"
+                            "Not encrypted: the relay or folder can read your notes"
                         }),
                 )
             });
@@ -335,24 +334,18 @@ impl Render for SyncSetup {
         }
         body = body.child(modes);
         match mode {
-            Mode::Off => {
-                body = body.child(
-                    div()
-                        .text_color(th.muted)
-                        .child("Apply to stop sync. Local edits and queued changes are kept."),
-                );
-            }
+            Mode::Off => {}
             Mode::Relay => {
                 body = body.child(field("Relay URL", "sync-url", self.url.clone(), cx));
             }
             Mode::Nearby => {
                 let hosting = self.preferences.host.is_some();
-                body = body.child(div().text_color(th.muted).child("Discover a Mac hosting this graph over mDNS. For Tailscale, choose Relay on the other Mac and enter the host's Tailscale address."))
+                body = body.child(div().text_color(th.muted).child("Finds a Mac on this network that hosts this graph. Over Tailscale, choose Relay and enter the host's address instead."))
                     .child(control("sync-host", if hosting { "Host this graph from this Mac · on" } else { "Host this graph from this Mac · off" }, cx).on_click(cx.listener(|this, _, _, cx| {
                         if !this.busy { this.preferences.host = if this.preferences.host.is_some() { None } else { Some(this.bind.read(cx).text().into()) }; cx.notify(); }
                     })));
                 if hosting {
-                    body = body.child(field("Listen address", "sync-bind", self.bind.clone(), cx)).child(div().text_color(th.muted).child("Hosting starts when you Apply and needs a relay token; enter the same token on the other device."));
+                    body = body.child(field("Listen address", "sync-bind", self.bind.clone(), cx));
                 }
             }
             Mode::Folder => {
@@ -367,17 +360,30 @@ impl Render for SyncSetup {
                         control("sync-pick-folder", "Choose folder…", cx)
                             .on_click(cx.listener(|this, _, _, cx| this.pick_folder(cx))),
                     )
-                    .child(div().text_color(th.muted).child(
-                        "Use a dedicated folder for this graph, shared by your file sync service.",
-                    ));
+                    .child(
+                        div()
+                            .text_color(th.muted)
+                            .child("Give the graph a folder of its own."),
+                    );
             }
         }
         if mode != Mode::Off {
             if mode != Mode::Folder {
                 body = body.child(field("Relay token", "sync-token", self.token.clone(), cx));
             }
-            body = body.child(field("End-to-end passphrase", "sync-passphrase", self.passphrase.clone(), cx))
-                .child(div().text_size(px(12.)).text_color(th.muted).child("Secrets are kept only in macOS Keychain. Blank fields keep saved credentials. A saved passphrase cannot be changed; leave it blank for unencrypted sync only if none has been saved."));
+            body = body
+                .child(field(
+                    "End-to-end passphrase",
+                    "sync-passphrase",
+                    self.passphrase.clone(),
+                    cx,
+                ))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(th.muted)
+                        .child("A passphrase cannot be changed once it is saved."),
+                );
         }
         body = body
             .child(
@@ -429,7 +435,7 @@ impl Render for SyncSetup {
                 .child("Connect another device")
                 .child(format!("Create or open {}.utopia on the other device. Its Sync graph id must be {}.", self.graph, self.graph))
                 .child(endpoint)
-                .child("Enter the relay token and the same E2E passphrase yourself on the other device. They are never displayed here."));
+                .child("Enter the same relay token and passphrase on the other device."));
         }
         body
     }

@@ -156,11 +156,7 @@ impl Coordinator {
             Ok(client) => client,
             Err(_) => {
                 self.view.update(cx, |view, cx| {
-                    view.finish(
-                        "Could not initialize sync bookkeeping. Local editing is still available."
-                            .into(),
-                        cx,
-                    )
+                    view.finish("Could not set up sync for this graph.".into(), cx)
                 });
                 return;
             }
@@ -211,7 +207,7 @@ impl Coordinator {
                 }
                 request.preferences.validate()?;
                 if request.preferences.mode == Mode::Off {
-                    return Ok((None, "Sync is Off. Your notes and queued edits are kept.".into()));
+                    return Ok((None, "Sync is Off.".into()));
                 }
                 let (token, passphrase) = credentials(&request, &graph, &env, secrets.as_ref())?;
                 let key_check = utopia_sync::setup::verify_passphrase(passphrase.as_deref(), &graph, marker.as_deref())?;
@@ -221,7 +217,7 @@ impl Coordinator {
                     Mode::Folder => SyncTarget::Folder(request.preferences.folder.clone().ok_or("Choose a shared folder.")?),
                     Mode::Nearby => {
                         let url = if let Some(bind) = &request.preferences.host {
-                            if env.host.is_none() && token.as_ref().is_none_or(|s| s.is_empty()) { return Err("Hosting requires a relay token. Enter one, then Apply.".into()); }
+                            if env.host.is_none() && token.as_ref().is_none_or(|s| s.is_empty()) { return Err("Hosting needs a relay token.".into()); }
                             if let Some(parent) = relay_file.parent() { std::fs::create_dir_all(parent).map_err(|_| "Could not create the relay directory.")?; }
                             let db = relay_file.with_extension("relay.db");
                             let cfg = utopia_syncd::Config { tokens: token.clone().into_iter().collect(), ..Default::default() };
@@ -272,7 +268,7 @@ impl Coordinator {
                 }
                 let transport: BoxTransport = Box::new(transport);
                 let destination = destination(&cfg, transport.cursor_space(), connected.instance);
-                Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on. The sidebar shows connection status.".into()))
+                Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on.".into()))
             }).await;
             let update = this.update(cx, |this, cx| -> (Option<utopia_sync::realtime::Listener>, bool) {
                 match result {
@@ -311,7 +307,7 @@ impl Coordinator {
                         // device was hosting must stop with it.
                         if ready.is_err() {
                             this.lan = None;
-                            this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination. Local data is unchanged.".into(), cx));
+                            this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination.".into(), cx));
                             return (old, false);
                         }
                         // The settings describe what is running, so they are written after
@@ -329,7 +325,7 @@ impl Coordinator {
                         let started = this.ws.update(cx, |ws, cx| ws.start_prepared_sync(&prepared.cfg, prepared.transport, cx));
                         if !started {
                             this.lan = None;
-                            this.view.update(cx, |view, cx| view.finish("Sync is Off: the runner could not start. Local editing is still available.".into(), cx));
+                            this.view.update(cx, |view, cx| view.finish("Sync is Off: it could not start.".into(), cx));
                             return (old, false);
                         }
                         this.lan = prepared.lan;
@@ -421,7 +417,7 @@ fn credentials(
         .or_else(|| stored.clone());
     if let (Some(old), Some(new)) = (&stored, &passphrase) {
         if old != new {
-            return Err("The E2E passphrase differs from this graph's saved key. Re-keying is not supported; use the original passphrase.".into());
+            return Err("This passphrase is not the one the graph was first synced with. Use the original passphrase.".into());
         }
     }
     Ok((token, passphrase))
@@ -736,7 +732,7 @@ mod tests {
             ..Default::default()
         };
         let error = credentials(&request(), "g", &env, &Stored).unwrap_err();
-        assert!(error.contains("Re-keying is not supported"));
+        assert!(error.contains("original passphrase"), "{error}");
         assert!(!error.contains("different-key") && !error.contains("original-key"));
     }
 }
