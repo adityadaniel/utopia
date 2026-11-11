@@ -313,6 +313,16 @@ pub const TOOLTIP_MAX_WIDTH: f32 = 240.;
 pub const CARET_SLOT: f32 = 20.;
 pub const BULLET_SLOT: f32 = 24.;
 pub const CHILD_INDENT: f32 = 45.;
+/// The tighter step Settings → Appearance → Indent offers instead of [`CHILD_INDENT`].
+pub const NARROW_INDENT: f32 = 26.;
+const _: () = assert!(NARROW_INDENT < CHILD_INDENT);
+/// Where a main-pane row starts, from the content column's edge: the caret slot and the
+/// bullet slot's left margin hang in the column's side padding, so a top-level bullet's
+/// left edge sits on the page title's left edge (§3.1) and its text starts
+/// [`BLOCK_TEXT_LEFT`] in.
+pub const ROW_GUTTER: f32 = CONTENT_PADDING_X - CARET_SLOT - (BULLET_SLOT - BULLET_SIZE) / 2.;
+pub const BLOCK_TEXT_LEFT: f32 = ROW_GUTTER + CARET_SLOT + BULLET_SLOT;
+const _: () = assert!(ROW_GUTTER >= 0.);
 /// The step a compact pane (the 380 px right sidebar, a split) uses instead. §3.1's 45 px
 /// is measured for the 760 px column; at depth 8 it would start the text past the edge of
 /// a narrow pane, so a compact row keeps the previous, narrower step and its thread lines.

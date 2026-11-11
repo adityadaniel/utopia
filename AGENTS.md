@@ -58,7 +58,7 @@ dir), the only `*.utopia` in `~/Documents/Utopia`; otherwise onboarding asks for
 both env vars at a scratch folder when trying the app so you never touch the user's real graph.
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
 `{"version": 1, "font": "system" | "ibm-plex-sans", "density": "comfortable" | "compact",
-"ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
+"indent": "wide" | "narrow", "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
 "right_sidebar_width": 380.0, "view_mode": "single" | "panes"}` (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
 not know.
@@ -174,6 +174,9 @@ at the wrong size, a second Settings window opening instead of the first being r
 every test and was caught by looking at a picture. So verification has four steps, in order.
 
 **1. `make check`.** fmt, build, test, clippy. Never skip it and never open a PR without it.
+The one exception is a change that touches only documentation (`docs/**`, `*.md`,
+`.agents/**`, `.claude/**`): no crate includes those files, so `make check` is not needed and
+CI does not run for it (`paths-ignore` in `.github/workflows/ci.yml`). Say so in the PR.
 
 **2. Seed a graph with mock data.** Drive the `Store` directly rather than typing content
 through keystrokes: it is deterministic, it reads well in a screenshot, and it cannot race the
@@ -193,6 +196,10 @@ UTOPIA_SHOT_SCRIPT="wait 900; keys escape; wait 300; keys cmd-shift-t; wait 700;
 
 - `keys escape` before a shot: a focused block shows its raw `[[markup]]`, which is not what
   the feature looks like in use.
+- The caret blinks (`field::Blink`, Zed's blink manager): steady for 500 ms after the last
+  keystroke or caret move, then 500 ms on, 500 ms off. A `shot` itself takes ~400 ms to
+  present and capture, so a shot that must show the caret goes right after the key, with no
+  `wait`; a shot taken later may land in the off half and is not a bug.
 - `wait` generously (500–1200 ms) after anything that opens a panel, loads days or lays out the
   graph. A shot taken too early captures a half-drawn frame and is worse than no shot.
 - For a second window (Settings), `keys cmd-,; wait 1200; target last; wait 500; shot …`.
@@ -210,8 +217,8 @@ captures.
 
 ## Opening a PR
 
-CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS for every PR; it is
-the floor, not the evidence. A PR is reviewable when its description carries:
+CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS for every PR that
+changes more than documentation; it is the floor, not the evidence. A PR is reviewable when its description carries:
 
 - **What changed and why**, citing the PRD ids the change implements.
 - **Proof of work**: the screenshots from step 4 above, inlined from

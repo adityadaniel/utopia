@@ -371,6 +371,97 @@ pub trait FieldHost: EntityInputHandler + 'static {
     fn field(&self) -> &TextField;
     fn field_mut(&mut self) -> &mut TextField;
     fn focus_handle_ref(&self) -> &FocusHandle;
+    /// Whether the caret is drawn this frame. A host that blinks it (see [`Blink`])
+    /// answers from its blink state; the default is a steady caret.
+    fn caret_visible(&self) -> bool {
+        true
+    }
+}
+
+/// How long the caret stays in one state while blinking, and how long it holds steady
+/// after a keystroke before blinking resumes.
+pub const BLINK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The caret's blink, kept the way Zed's `BlinkManager` keeps it. The state is plain so a
+/// host owns the timers: every method returns the epoch the host should wake up with, and
+/// a wake-up whose epoch is stale (a later pause or tick moved it on) does nothing, which
+/// is how a keystroke cancels the blink that was due without tracking tasks.
+///
+/// Disabled, the caret is steady: a host that never enables it draws as before.
+#[derive(Debug)]
+pub struct Blink {
+    epoch: usize,
+    visible: bool,
+    paused: bool,
+    enabled: bool,
+}
+
+impl Default for Blink {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            visible: true,
+            paused: false,
+            enabled: false,
+        }
+    }
+}
+
+impl Blink {
+    pub fn visible(&self) -> bool {
+        self.visible
+    }
+
+    /// Start blinking. Returns the epoch to [`Self::tick`] with at once, so the caret is
+    /// shown in the frame being drawn and the first hide is scheduled; `None` when it was
+    /// already running.
+    pub fn enable(&mut self) -> Option<usize> {
+        if self.enabled {
+            return None;
+        }
+        self.enabled = true;
+        self.paused = false;
+        self.visible = false;
+        Some(self.epoch)
+    }
+
+    /// Stop blinking and leave the caret steady for whoever draws it next.
+    pub fn disable(&mut self) {
+        self.enabled = false;
+        self.visible = true;
+    }
+
+    /// A blink is due. When `epoch` is still current the caret flips and the next tick's
+    /// epoch is returned, to be delivered after [`BLINK_INTERVAL`].
+    pub fn tick(&mut self, epoch: usize) -> Option<usize> {
+        if epoch != self.epoch || !self.enabled || self.paused {
+            return None;
+        }
+        self.visible = !self.visible;
+        self.epoch += 1;
+        Some(self.epoch)
+    }
+
+    /// The caret moved or the text changed: show it steady and hold the blink. Returns
+    /// the epoch to [`Self::resume`] with after [`BLINK_INTERVAL`].
+    pub fn pause(&mut self) -> Option<usize> {
+        if !self.enabled {
+            return None;
+        }
+        self.visible = true;
+        self.paused = true;
+        self.epoch += 1;
+        Some(self.epoch)
+    }
+
+    /// The hold after a pause is over: blink again unless something moved since.
+    pub fn resume(&mut self, epoch: usize) -> Option<usize> {
+        if epoch != self.epoch {
+            return None;
+        }
+        self.paused = false;
+        self.tick(epoch)
+    }
 }
 
 /// For hosts that take typed text as it comes (see [`impl_field_input_handler`]).
@@ -681,7 +772,7 @@ impl<V: FieldHost> Element for FieldElement<V> {
             window,
             cx,
         );
-        if focus.is_focused(window) {
+        if focus.is_focused(window) && self.view.read(cx).caret_visible() {
             if let Some(c) = prepaint.cursor.take() {
                 window.paint_quad(c);
             }
@@ -770,5 +861,32 @@ mod tests {
         f.set_text("ab", 2);
         assert!(!f.composing());
         assert_eq!(f.text, "ab");
+    }
+
+    /// The caret blinks while enabled, shows steady for one interval after a keystroke
+    /// (a pause), and a wake-up carrying a stale epoch does nothing, which is how a
+    /// keystroke cancels the blink that was due without tracking tasks.
+    #[test]
+    fn the_caret_blinks_and_holds_steady_after_a_move() {
+        let mut b = Blink::default();
+        assert!(b.visible(), "a host that never blinks draws a steady caret");
+        let e = b.enable().unwrap();
+        assert!(!b.visible());
+        let e = b.tick(e).unwrap();
+        assert!(b.visible(), "the first tick shows the caret");
+        let stale = e;
+        let e = b.tick(e).unwrap();
+        assert!(!b.visible(), "the next hides it");
+        assert_eq!(b.tick(stale), None, "a stale epoch does nothing");
+        let p = b.pause().unwrap();
+        assert!(b.visible(), "a keystroke shows the caret at once");
+        assert_eq!(b.tick(e), None, "the blink that was due is cancelled");
+        let e = b.resume(p).unwrap();
+        assert!(!b.visible(), "blinking resumes after the hold");
+        assert_eq!(b.enable(), None, "already running");
+        b.disable();
+        assert!(b.visible(), "steady again once the edit ends");
+        assert_eq!(b.tick(e), None);
+        assert!(b.enable().is_some());
     }
 }

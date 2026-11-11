@@ -729,6 +729,7 @@ impl Workspace {
             let prepared = this.update(cx, |this, cx| {
                 let Workspace { app, sync, .. } = this;
                 let runner = sync.as_mut().filter(|r| r.is_generation(generation))?;
+                let alive = runner.alive();
                 let transport = runner.begin_round()?;
                 // The footer's dot says "syncing" from now until the exchange returns; ask
                 // for the frame now, or an idle window keeps last round's green (SB-4).
@@ -737,7 +738,7 @@ impl Workspace {
                 match out {
                     Ok(out) => {
                         runner.exchange();
-                        Some((out, transport))
+                        Some((out, transport, alive))
                     }
                     Err(e) => {
                         let status =
@@ -748,14 +749,23 @@ impl Workspace {
                 }
             });
             let Ok(prepared) = prepared else { break };
-            let Some((out, transport)) = prepared else {
+            let Some((out, transport, alive)) = prepared else {
                 continue;
             };
-            // 2. Network on a background thread.
-            let (result, transport) = cx
+            // 2. Network on a background thread. A runner replaced or stopped while this
+            // was queued lowers `alive`: its round must never reach the relay (§13.3), and
+            // the loop that owned it ends here.
+            let exchanged = cx
                 .background_executor()
-                .spawn(async move { exchange_owned(transport, out) })
+                .spawn(async move {
+                    alive
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                        .then(|| exchange_owned(transport, out))
+                })
                 .await;
+            let Some((result, transport)) = exchanged else {
+                break;
+            };
             // 3. Import on the UI thread and announce merges.
             let applied = this.update(cx, |this, cx| {
                 let Workspace { app, sync, .. } = this;
