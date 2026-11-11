@@ -14,7 +14,8 @@
 //!   "indent": "wide",
 //!   "ref_children": 2,
 //!   "pinned": [],
-//!   "right_sidebar_width": 380.0
+//!   "right_sidebar_width": 380.0,
+//!   "view_mode": "single"
 //! }
 //! ```
 //!
@@ -25,7 +26,8 @@
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
 //! Pinned group (SB-3) and the right sidebar's Pinned tab (RS-3); `right_sidebar_width`
-//! is the width that sidebar was dragged to (RS-4). A missing file means defaults; an
+//! is the width that sidebar was dragged to (RS-4); `view_mode` is `"single"` (the default)
+//! or `"panes"`, the main area's view mode (DESIGN.md §4.4, SP-6). A missing file means defaults; an
 //! unreadable file, an unknown value or a newer version is logged and read as far as it can
 //! be, never a panic (rule 11). Keys this version does not know are kept when the file is
 //! rewritten, so a newer release's preferences survive a round trip through an older one.
@@ -36,6 +38,7 @@ use std::path::{Path, PathBuf};
 use utopia_core::PageId;
 
 use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
+pub use crate::pane_stack::ViewMode;
 use crate::theme::{BODY_SIZE, CHILD_INDENT, LINE_HEIGHT, NARROW_INDENT};
 
 pub const FILE: &str = "settings.json";
@@ -214,6 +217,8 @@ pub struct Prefs {
     /// How wide the right sidebar is, in points (RS-4). Clamped to
     /// [`RIGHT_SIDEBAR_MIN_WIDTH`]..=[`RIGHT_SIDEBAR_MAX_WIDTH`] when read and written.
     pub right_sidebar_width: f32,
+    /// Panes or Single (DESIGN.md §4.4, SP-6): an app setting, not per page.
+    pub view_mode: ViewMode,
     /// Keys this version does not understand, written back untouched.
     rest: Map<String, Value>,
 }
@@ -227,6 +232,7 @@ impl Default for Prefs {
             ref_children: DEFAULT_REF_CHILDREN,
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
+            view_mode: ViewMode::default(),
             rest: Map::new(),
         }
     }
@@ -281,6 +287,19 @@ impl Prefs {
                     "{FILE}: density should be a string, not {v}; using Comfortable"
                 ));
                 Density::default()
+            }
+        };
+        let view_mode = match rest.remove("view_mode") {
+            None => ViewMode::default(),
+            Some(Value::String(s)) => ViewMode::from_key(&s).unwrap_or_else(|| {
+                warnings.push(format!("{FILE}: unknown view_mode {s:?}; using single"));
+                ViewMode::default()
+            }),
+            Some(v) => {
+                warnings.push(format!(
+                    "{FILE}: view_mode should be a string, not {v}; using single"
+                ));
+                ViewMode::default()
             }
         };
         let indent = match rest.remove("indent") {
@@ -395,6 +414,7 @@ impl Prefs {
                 ref_children,
                 pinned,
                 right_sidebar_width,
+                view_mode,
                 rest,
             },
             warnings,
@@ -413,6 +433,7 @@ impl Prefs {
                 .map_or(Value::Null, Value::Number),
         );
         m.insert("ref_children".into(), self.ref_children.into());
+        m.insert("view_mode".into(), self.view_mode.key().into());
         m.insert(
             "pinned".into(),
             Value::Array(
@@ -523,6 +544,19 @@ pub fn reset_right_sidebar_width(cx: &mut App, config_dir: &Path) -> std::io::Re
     cx.default_global::<Appearance>().prefs.right_sidebar_width = RIGHT_SIDEBAR_DEFAULT_WIDTH;
     cx.refresh_windows();
     cx.global::<Appearance>().prefs.save(config_dir)
+}
+
+/// The view mode in force (DESIGN.md §4.4). Single when nothing was installed.
+pub fn view_mode(cx: &App) -> ViewMode {
+    cx.try_global::<Appearance>()
+        .map_or(ViewMode::default(), |a| a.prefs.view_mode)
+}
+
+/// Switch the view mode and remember it (SP-6). A failed write is returned, not fatal: the
+/// mode still applies for this session (rule 11).
+pub fn set_view_mode(cx: &mut App, mode: ViewMode) -> std::io::Result<()> {
+    cx.default_global::<Appearance>().prefs.view_mode = mode;
+    remember(cx)
 }
 
 /// How many children a Linked Reference shows inline (LR-4), clamped to the offered range.
@@ -653,6 +687,7 @@ mod tests {
             ref_children: 0,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
             right_sidebar_width: 420.0,
+            view_mode: ViewMode::Panes,
             ..Default::default()
         };
         let json = p.to_json();
@@ -667,9 +702,22 @@ mod tests {
                 "ref_children": 0,
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,
+                "view_mode": "panes",
             })
         );
         assert_eq!(Prefs::from_json(&json), (p, vec![]));
+    }
+
+    /// SP-6: the view mode is Single unless the file says Panes; an unknown value is logged
+    /// and read as the default, never a failure (rule 11).
+    #[test]
+    fn sp_6_view_mode_defaults_to_single() {
+        assert_eq!(Prefs::default().view_mode, ViewMode::Single);
+        let (p, w) = Prefs::from_json(r#"{"version": 1, "view_mode": "tabs"}"#);
+        assert_eq!(p.view_mode, ViewMode::Single);
+        assert_eq!(w.len(), 1, "{w:?}");
+        let (p, w) = Prefs::from_json(r#"{"version": 1, "view_mode": "panes"}"#);
+        assert_eq!((p.view_mode, w), (ViewMode::Panes, vec![]));
     }
 
     /// Merge fix: the branch before the merge stored the sidebar pins under

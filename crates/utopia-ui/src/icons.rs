@@ -36,6 +36,10 @@ pub enum Icon {
     List,
     DashedCircle,
     More,
+    /// A pane's close button (DESIGN.md §4.3).
+    Close,
+    /// The Panes side of the view mode toggle (§4.4): Lucide's three-column icon.
+    Columns,
 }
 
 impl Icon {
@@ -58,6 +62,8 @@ impl Icon {
         Icon::List,
         Icon::DashedCircle,
         Icon::More,
+        Icon::Close,
+        Icon::Columns,
     ];
 
     /// The file name under `assets/icons`.
@@ -81,6 +87,8 @@ impl Icon {
             Icon::List => "list",
             Icon::DashedCircle => "dashed-circle",
             Icon::More => "more",
+            Icon::Close => "x",
+            Icon::Columns => "columns",
         }
     }
 
@@ -109,6 +117,8 @@ impl Icon {
             Icon::List => icon!("list"),
             Icon::DashedCircle => icon!("dashed-circle"),
             Icon::More => icon!("more"),
+            Icon::Close => icon!("x"),
+            Icon::Columns => icon!("columns"),
         }
     }
 

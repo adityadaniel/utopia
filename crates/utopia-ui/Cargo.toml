@@ -13,6 +13,8 @@ gpui.workspace = true
 image = { version = "0.25", default-features = false }
 serde.workspace = true
 serde_json.workspace = true
+# A spine writes its title one grapheme per line (DESIGN.md §4.3).
+unicode-segmentation.workspace = true
 utopia-core.workspace = true
 utopia-plugin.workspace = true
 utopia-store.workspace = true

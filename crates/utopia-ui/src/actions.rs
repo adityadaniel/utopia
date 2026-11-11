@@ -107,7 +107,16 @@ actions!(
 
 actions!(
     utopia,
-    [FullSearch, QuickCapture, ShowGraph, ToggleLeftSidebar]
+    [
+        FullSearch,
+        QuickCapture,
+        ShowGraph,
+        ToggleLeftSidebar,
+        ClosePane,
+        FocusPaneLeft,
+        FocusPaneRight,
+        ToggleViewMode,
+    ]
 );
 
 pub const EDITOR_CONTEXT: &str = "BlockEditor";
@@ -166,6 +175,8 @@ pub struct ActionDoc {
 
 const EDITOR: Option<&str> = Some("BlockEditor");
 const TEXT: Option<&str> = Some("BlockEditor || LineInput");
+/// The main window, outside any text field (its fields' contexts are deeper and win).
+const WORKSPACE: Option<&str> = Some("Workspace");
 /// Only while a `[[`, `#`, `((` or `/` menu is open, so the same key can keep its
 /// everyday meaning (Tab indents) the rest of the time.
 const COMPLETING: Option<&str> = Some("BlockEditor && autocomplete");
@@ -823,6 +834,40 @@ pub const CATALOG: &[ActionDoc] = &[
         context: None,
         help: "See the graph of pages and the links between them.",
     },
+    ActionDoc {
+        action: "ToggleViewMode",
+        label: "Toggle Panes / Single",
+        category: Category::View,
+        keys: "cmd-alt-p",
+        context: None,
+        help: "Show the open pages side by side, or only the last one.",
+    },
+    ActionDoc {
+        action: "ClosePane",
+        label: "Close Pane",
+        category: Category::View,
+        keys: "cmd-w",
+        context: None,
+        help: "Close the focused pane. Daily Notes stays open.",
+    },
+    // Not while text is being edited: there ⌥← and ⌥→ move by word (the editor's context
+    // is deeper, so its binding wins).
+    ActionDoc {
+        action: "FocusPaneLeft",
+        label: "Focus Pane Left",
+        category: Category::View,
+        keys: "alt-left",
+        context: WORKSPACE,
+        help: "Move focus to the pane on the left and bring it into view.",
+    },
+    ActionDoc {
+        action: "FocusPaneRight",
+        label: "Focus Pane Right",
+        category: Category::View,
+        keys: "alt-right",
+        context: WORKSPACE,
+        help: "Move focus to the pane on the right and bring it into view.",
+    },
     // ----- Application -----
     ActionDoc {
         action: "QuickCapture",
@@ -953,6 +998,10 @@ pub fn action_for(name: &str) -> Option<Box<dyn gpui::Action>> {
         "AcceptCompletion" => Box::new(AcceptCompletion),
         "ShowCharacterPalette" => Box::new(ShowCharacterPalette),
         "ToggleLeftSidebar" => Box::new(ToggleLeftSidebar),
+        "ClosePane" => Box::new(ClosePane),
+        "FocusPaneLeft" => Box::new(FocusPaneLeft),
+        "FocusPaneRight" => Box::new(FocusPaneRight),
+        "ToggleViewMode" => Box::new(ToggleViewMode),
         "ToggleRightSidebar" => Box::new(ToggleRightSidebar),
         "ToggleReferences" => Box::new(ToggleReferences),
         "ShowGraph" => Box::new(ShowGraph),
@@ -1135,6 +1184,10 @@ pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBindi
             QuickCapture,
             ShowGraph,
             ToggleLeftSidebar,
+            ClosePane,
+            FocusPaneLeft,
+            FocusPaneRight,
+            ToggleViewMode,
             ToggleTodo,
             Newline,
             SoftBreak,

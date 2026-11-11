@@ -11,6 +11,7 @@ use gpui::{
 };
 use utopia_core::inline::{extract_refs, plain_text};
 use utopia_core::outline::{self, Focus, Plan};
+use utopia_core::title::normalize_title;
 use utopia_core::undo::Caret;
 use utopia_core::{BlockId, BlockKind, Command, PageId, PageKind};
 use utopia_store::{LinkedRefs, Mention, PageRow, RefChildren, RefHit, RefQuery, RefSort};
@@ -20,6 +21,7 @@ use crate::editor::{BlockEditor, EditTarget, EditorEvent};
 use crate::field::Goal;
 use crate::icons::{icon, Icon};
 use crate::line_input::{LineInput, LineInputEvent};
+use crate::pane_stack::Click;
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
     outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill,
@@ -60,13 +62,16 @@ pub enum PageViewEvent {
         page: PageId,
         zoom: Option<BlockId>,
         focus: Option<BlockId>,
+        /// Shift (and not ⌘): stack the page in the right sidebar (RS-5).
         sidebar: bool,
+        /// Plain or ⌘/Ctrl: which stacked-panes rule applies (DESIGN.md §4.3, SP-2/SP-3).
+        /// ⌘⇧ is `Secondary` too: it used to open a split pane, which the stack replaced.
+        click: Click,
+        /// This view's own page is gone and `page` took its place (a rename merged it,
+        /// §8.6): the pane shows `page` where it is, nothing is added.
+        replace: bool,
     },
     Close,
-    /// Cmd+Shift+Click: open beside the main pane (P1 split panes).
-    OpenSplit {
-        page: PageId,
-    },
     /// Slash "Extract block to page": the workspace asks for a title (FR-2.18).
     RequestExtract {
         page: PageId,
@@ -634,6 +639,16 @@ pub struct PageView {
     /// Whether this pane draws its own ✕ in the page header (split panes do, sidebar cards
     /// carry the close in their card header, RS-5).
     close: bool,
+    /// Drawn as a stacked pane (DESIGN.md §4.3): the workspace's 44 px pane header sits
+    /// above, so no top padding, 72 px below, and the smaller pane title sizes. Local view
+    /// state (rule 9).
+    in_pane: bool,
+    /// The page the next pane shows, so its links here get a ring (§4.3).
+    next_link: Option<NextLink>,
+    /// On screen. A stack entry hidden by Single mode (§4.4) keeps its view so coming back
+    /// keeps its scroll and folds, but it only marks itself stale when the store moves;
+    /// [`PageView::set_active`] catches up, outside a frame (rule 10).
+    active: bool,
     items: Vec<Item>,
     list: ListState,
     header: Header,
@@ -717,22 +732,76 @@ pub struct PageView {
 
 impl EventEmitter<PageViewEvent> for PageView {}
 
+/// The page open in the next pane, as the links in this one spell it (DESIGN.md §4.3:
+/// "in pane i, any link whose target is open in pane i + 1 gets a ring"). The workspace
+/// builds it from the store when the stack changes; a frame only compares strings.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextLink {
+    /// `normalize_title` of the page's title and every alias (§10.3.1 resolver order).
+    pub keys: Vec<String>,
+    /// The day, when the page is a daily page: `[[2026-11-10]]` names it as well.
+    pub date: Option<NaiveDate>,
+    /// The block, when the next pane is zoomed into one: a `((uid))` chip names it.
+    pub block: Option<BlockId>,
+    pub date_format: utopia_core::date::DateFormat,
+}
+
+impl NextLink {
+    pub fn matches(&self, target: &LinkTarget) -> bool {
+        match target {
+            LinkTarget::Page(title) => {
+                self.keys.contains(&normalize_title(title))
+                    || self.date.is_some_and(|d| {
+                        utopia_core::date::parse_unambiguous_date(title, &self.date_format)
+                            == Some(d)
+                    })
+            }
+            LinkTarget::Block(uid) => self.block.as_ref().is_some_and(|b| &b.0 == uid),
+            LinkTarget::Url(_) => false,
+        }
+    }
+}
+
+/// The stacked-panes click a pointer press means (DESIGN.md §4.3): ⌘ on macOS, Ctrl
+/// elsewhere, with or without Shift.
+pub fn click_of(m: &gpui::Modifiers) -> Click {
+    if m.secondary() {
+        Click::Secondary
+    } else {
+        Click::Plain
+    }
+}
+
+/// The open a link clicked with `m` asks for: Shift alone stacks the page in the right
+/// sidebar (RS-5); ⌘⇧ goes to the pane stack like ⌘ (it used to open a split pane).
+pub fn open_event(
+    page: PageId,
+    zoom: Option<BlockId>,
+    focus: Option<BlockId>,
+    m: &gpui::Modifiers,
+) -> PageViewEvent {
+    let click = click_of(m);
+    PageViewEvent::Open {
+        page,
+        zoom,
+        focus,
+        sidebar: m.shift && click == Click::Plain,
+        click,
+        replace: false,
+    }
+}
+
 impl crate::reference::RefRowHost for PageView {
     fn open_reference(
         &mut self,
         page: PageId,
         block: BlockId,
         sidebar: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.editor.update(cx, |e, cx| e.end(cx));
-        cx.emit(PageViewEvent::Open {
-            page,
-            zoom: None,
-            focus: Some(block),
-            sidebar,
-        });
+        self.emit_open(page, None, Some(block), sidebar, window, cx);
     }
 
     fn follow_reference(
@@ -750,16 +819,11 @@ impl crate::reference::RefRowHost for PageView {
         page: PageId,
         block: Option<BlockId>,
         sidebar: bool,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.editor.update(cx, |e, cx| e.end(cx));
-        cx.emit(PageViewEvent::Open {
-            page,
-            zoom: None,
-            focus: block,
-            sidebar,
-        });
+        self.emit_open(page, None, block, sidebar, window, cx);
     }
 
     /// LR-4: the "+N more" chip opens the rest of this block's children. The children are a
@@ -800,6 +864,10 @@ impl PageView {
                     || shown
                     || this.interest == Interest::AllPages;
                 if relevant && this.cycle.store_changed(e.version, Invalidation::rows()) {
+                    // An entry out of sight only remembers it is stale (`set_active`).
+                    if !this.active {
+                        return;
+                    }
                     if this.interest == Interest::AllPages {
                         // A query block or an open transclusion reads other pages: answer
                         // in this handler, never in a frame (rule 10).
@@ -824,6 +892,9 @@ impl PageView {
             cx.subscribe(&app, |this, _, _: &IndexUpdated, cx| {
                 this.cycle
                     .invalidate(Invalidation::refs() | Invalidation::unlinked());
+                if !this.active {
+                    return;
+                }
                 // DESIGN.md §3.7: unlinked references are searched only while the row is
                 // expanded. A closed row costs nothing when the index moves.
                 if this.unlinked_open {
@@ -839,7 +910,7 @@ impl PageView {
             // place, so any rebuild builds with the preference in force (issue 3).
             cx.observe_global::<crate::appearance::Appearance>(|this, cx| {
                 this.sync_preferences(cx);
-                if this.cycle.dirty() {
+                if this.active && this.cycle.dirty() {
                     this.rebuild(cx);
                     cx.notify();
                 }
@@ -863,6 +934,9 @@ impl PageView {
             mode: Mode::Empty,
             compact,
             close,
+            in_pane: false,
+            next_link: None,
+            active: true,
             items: Vec::new(),
             list,
             header: Header::default(),
@@ -906,6 +980,123 @@ impl PageView {
             frame_rebuilds: 0,
             _subs: subs,
         }
+    }
+
+    /// Draw as a stacked pane (§4.3) or as the full-width page (§4.4 Single mode).
+    pub fn set_in_pane(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.in_pane != on {
+            self.in_pane = on;
+            cx.notify();
+        }
+    }
+
+    pub fn in_pane(&self) -> bool {
+        self.in_pane
+    }
+
+    /// One of this view's own text fields (the title rename, the alias field, the
+    /// reference filter) has the keyboard. The block editor is shared and tracked by its
+    /// host instead. The workspace keeps such a view drawn and hands the keyboard back
+    /// before hiding it: a focused element that is not drawn swallows every key.
+    pub fn holds_focus(&self, window: &Window, cx: &gpui::App) -> bool {
+        self.rename
+            .iter()
+            .chain(self.alias_input.iter())
+            .chain(std::iter::once(&self.filter))
+            .any(|i| i.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    /// Put the view on or off screen (Single mode hides all but the last entry). Coming
+    /// back rebuilds what went stale while it was away, here and not in the next frame.
+    pub fn set_active(&mut self, on: bool, cx: &mut Context<Self>) {
+        if self.active == on {
+            return;
+        }
+        self.active = on;
+        if on {
+            self.sync_preferences(cx);
+            if self.unlinked_open {
+                self.refresh_unlinked(cx);
+            }
+            if self.cycle.dirty() {
+                self.rebuild(cx);
+            }
+            cx.notify();
+        }
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.active
+    }
+
+    /// Ring the links to the page open in the next pane (§4.3); `None` rings nothing.
+    pub fn set_next_link(&mut self, next: Option<NextLink>, cx: &mut Context<Self>) {
+        if self.next_link != next {
+            self.next_link = next;
+            cx.notify();
+        }
+    }
+
+    pub fn next_link(&self) -> Option<&NextLink> {
+        self.next_link.as_ref()
+    }
+
+    /// The page title's type role: smaller inside a pane (§4.3).
+    fn page_title_role(&self) -> crate::theme::TypeRole {
+        if self.in_pane {
+            crate::theme::PANE_PAGE_TITLE
+        } else {
+            crate::theme::PAGE_TITLE
+        }
+    }
+
+    /// A day title's type role: smaller inside a pane (§4.3).
+    fn day_title_role(&self) -> crate::theme::TypeRole {
+        if self.in_pane {
+            crate::theme::PANE_DAY_TITLE
+        } else {
+            DAY_TITLE
+        }
+    }
+
+    /// The pinned day heading's height (DN-3) for the day title in force.
+    fn sticky_height(&self) -> f32 {
+        STICKY_HEIGHT - DAY_TITLE.line + self.day_title_role().line
+    }
+
+    /// Air above the column: none in a pane, whose 44 px header is the air (§4.3).
+    fn pad_top(&self, page: bool) -> f32 {
+        match (self.in_pane, page) {
+            (true, _) => 0.,
+            (false, true) => CONTENT_PADDING_TOP_PAGE,
+            (false, false) => CONTENT_PADDING_TOP,
+        }
+    }
+
+    /// Air below the last item: 72 in a pane (§4.3), 96 otherwise (§2.3).
+    fn pad_bottom(&self) -> f32 {
+        if self.in_pane {
+            crate::theme::PANE_PADDING_BOTTOM
+        } else {
+            CONTENT_PADDING_BOTTOM
+        }
+    }
+
+    /// Ask the workspace to open `page` for a pointer press. `shift` is the press's own
+    /// Shift; ⌘/Ctrl is read from the window, which holds the modifiers of the event being
+    /// dispatched, so every link, chip and row follows the same rule (SP-2, SP-3).
+    fn emit_open(
+        &mut self,
+        page: PageId,
+        zoom: Option<BlockId>,
+        focus: Option<BlockId>,
+        shift: bool,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut m = window.modifiers();
+        m.shift = shift;
+        cx.emit(open_event(page, zoom, focus, &m));
     }
 
     /// How many rebuild passes this view has run (debug builds only).
@@ -1427,7 +1618,7 @@ impl PageView {
             // DN-3: the row was under the pinned heading: put its top below it.
             Some(ix) if under_heading => self.list.scroll_to(ListOffset {
                 item_ix: ix,
-                offset_in_item: -px(STICKY_HEIGHT),
+                offset_in_item: -px(self.sticky_height()),
             }),
             Some(ix) => {
                 self.list.scroll_to_reveal_item(ix);
@@ -1454,17 +1645,17 @@ impl PageView {
         let viewport = self.list.viewport_bounds();
         if viewport.size.height > px(0.) {
             if let Some(row) = self.list.bounds_for_item(ix) {
-                return row.top() < viewport.top() + px(STICKY_HEIGHT);
+                return row.top() < viewport.top() + px(self.sticky_height());
             }
         }
         // A splice (an edit starts by re-registering the rows so the editor can keep the
         // keystrokes) leaves the list with no measured rows until the next layout. Estimate
         // from the offset instead: the heading covers `STICKY_HEIGHT`, and a row is at
         // least one line tall, so only the first few rows can hide under it.
-        if -self.list.logical_scroll_top().offset_in_item >= px(STICKY_HEIGHT) {
+        if -self.list.logical_scroll_top().offset_in_item >= px(self.sticky_height()) {
             return false;
         }
-        let rows = (STICKY_HEIGHT / line_height.max(1.)).ceil() as usize;
+        let rows = (self.sticky_height() / line_height.max(1.)).ceil() as usize;
         ix <= self.list.logical_scroll_top().item_ix + rows
     }
 
@@ -1479,7 +1670,7 @@ impl PageView {
         if self.sticky_heading().is_some() {
             self.list.scroll_to(ListOffset {
                 item_ix: ix,
-                offset_in_item: -px(STICKY_HEIGHT),
+                offset_in_item: -px(self.sticky_height()),
             });
         }
     }
@@ -2429,15 +2620,21 @@ impl PageView {
             EditorEvent::ToggleCollapseAll => self.toggle_collapse_all(&t.page, cx),
             EditorEvent::ZoomIn => {
                 self.editor.update(cx, |e, cx| e.end(cx));
-                if self.page().as_ref() == Some(&t.page) {
+                // The feed is the stack's first entry and stays the feed (DESIGN.md §4.3):
+                // zooming into one of its days opens that zoom as the next entry.
+                if self.page().as_ref() == Some(&t.page) && !self.is_journal() {
                     self.open(t.page.clone(), Some(t.block.clone()), cx);
                     self.focus_first(window, cx);
                 } else {
+                    // A key, not a press: always the plain rule, whatever is held. `focus` is
+                    // the zoom root itself: the caret goes on into the zoomed rows.
                     cx.emit(PageViewEvent::Open {
                         page: t.page.clone(),
                         zoom: Some(t.block.clone()),
-                        focus: None,
+                        focus: Some(t.block.clone()),
                         sidebar: false,
+                        click: Click::Plain,
+                        replace: false,
                     });
                 }
             }
@@ -2654,16 +2851,7 @@ impl PageView {
                 });
                 if let Some(page) = page {
                     self.editor.update(cx, |e, cx| e.end(cx));
-                    if sidebar && window.modifiers().platform {
-                        cx.emit(PageViewEvent::OpenSplit { page });
-                    } else {
-                        cx.emit(PageViewEvent::Open {
-                            page,
-                            zoom: None,
-                            focus: None,
-                            sidebar,
-                        });
-                    }
+                    self.emit_open(page, None, None, sidebar, window, cx);
                 }
             }
             LinkTarget::Block(uid) => {
@@ -2672,12 +2860,7 @@ impl PageView {
                     // so following it opens the block it points at (FR-4.3).
                     if let Ok(Some(b)) = self.app.read(cx).store.block_row(&BlockId(uid.clone())) {
                         self.editor.update(cx, |e, cx| e.end(cx));
-                        cx.emit(PageViewEvent::Open {
-                            page: b.page_id,
-                            zoom: Some(b.id),
-                            focus: None,
-                            sidebar,
-                        });
+                        self.emit_open(b.page_id, Some(b.id), None, sidebar, window, cx);
                     }
                 } else if let Some(row) = row {
                     let key = (row.block.clone(), uid);
@@ -2831,7 +3014,7 @@ impl PageView {
         }
     }
 
-    pub(crate) fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn start_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.header.kind == PageKind::Daily || self.zoom().is_some() {
             self.show_calendar = !self.show_calendar;
             if let Some(d) = self.header.date {
@@ -2884,6 +3067,8 @@ impl PageView {
                 zoom: None,
                 focus: None,
                 sidebar: false,
+                click: Click::Plain,
+                replace: true,
             }),
             _ => {
                 self.cycle.invalidate(Invalidation::rows());
@@ -2892,7 +3077,7 @@ impl PageView {
         }
     }
 
-    fn pick_date(&mut self, d: NaiveDate, sidebar: bool, _w: &mut Window, cx: &mut Context<Self>) {
+    fn pick_date(&mut self, d: NaiveDate, sidebar: bool, w: &mut Window, cx: &mut Context<Self>) {
         self.show_calendar = false;
         let page = self.app.update(cx, |app, cx| {
             let r = app.store.draft_daily(d);
@@ -2902,12 +3087,7 @@ impl PageView {
             p
         });
         if let Some(page) = page {
-            cx.emit(PageViewEvent::Open {
-                page,
-                zoom: None,
-                focus: None,
-                sidebar,
-            });
+            self.emit_open(page, None, None, sidebar, w, cx);
         }
     }
 
@@ -3043,6 +3223,15 @@ impl PageView {
         let row2 = row.clone();
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
         let chips = rendered.chips.clone();
+        // §4.3: the link the next pane came from. A string compare per link, no store read.
+        let rings = self.next_link.as_ref().map_or_else(Vec::new, |next| {
+            rendered
+                .links
+                .iter()
+                .filter(|(_, t)| next.matches(t))
+                .map(|(r, _)| r.clone())
+                .collect()
+        });
         let text_sel = format!("text-{}", row_block.0);
         let mut root = div().flex_1().min_h(px(min_h));
         if named {
@@ -3052,7 +3241,11 @@ impl PageView {
             // An editable row shows the I-beam between its links; a read-only one (a query
             // or search hit) is itself clickable, so it keeps its container's pointer.
             .when(row.is_some(), |d| d.cursor_text())
-            .child(rich::LinkText::new(styled, links).with_chips(chips, th.tag_bg))
+            .child(
+                rich::LinkText::new(styled, links)
+                    .with_chips(chips, th.tag_bg)
+                    .with_rings(rings, th.link_tint),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -3213,13 +3406,17 @@ impl PageView {
                 )
                 .on_click(cx.listener(move |this, e: &gpui::ClickEvent, window, cx| {
                     this.editor.update(cx, |ed, cx| ed.end(cx));
-                    if e.modifiers().shift || Some(&page) != this.page().as_ref() {
-                        cx.emit(PageViewEvent::Open {
-                            page: page.clone(),
-                            zoom: Some(block.clone()),
-                            focus: None,
-                            sidebar: e.modifiers().shift,
-                        });
+                    if e.modifiers().shift
+                        || e.modifiers().secondary()
+                        || this.is_journal()
+                        || Some(&page) != this.page().as_ref()
+                    {
+                        cx.emit(open_event(
+                            page.clone(),
+                            Some(block.clone()),
+                            None,
+                            &e.modifiers(),
+                        ));
                     } else {
                         this.open(page.clone(), Some(block.clone()), cx);
                         this.focus_first(window, cx);
@@ -4007,7 +4204,7 @@ impl PageView {
             .pt(px(if self.compact {
                 crate::theme::SPACING[3]
             } else {
-                CONTENT_PADDING_TOP_PAGE
+                self.pad_top(true)
             }))
             .pb_2();
         if h.missing {
@@ -4118,8 +4315,8 @@ impl PageView {
         };
         let title_el: AnyElement = match &self.rename {
             Some(input) => div()
-                .text_size(px(crate::theme::PAGE_TITLE.size))
-                .line_height(px(crate::theme::PAGE_TITLE.line))
+                .text_size(px(self.page_title_role().size))
+                .line_height(px(self.page_title_role().line))
                 .border_b_1()
                 .border_color(th.link)
                 .child(input.clone())
@@ -4127,9 +4324,9 @@ impl PageView {
             None => div()
                 .id("title")
                 .debug_selector(|| "page-title".into())
-                .text_size(px(crate::theme::PAGE_TITLE.size))
-                .line_height(px(crate::theme::PAGE_TITLE.line))
-                .font_weight(crate::theme::PAGE_TITLE.weight)
+                .text_size(px(self.page_title_role().size))
+                .line_height(px(self.page_title_role().line))
+                .font_weight(self.page_title_role().weight)
                 .text_color(if h.deleted { th.muted } else { th.ink })
                 .cursor_pointer()
                 .child(if title_text.is_empty() {
@@ -4676,12 +4873,12 @@ impl PageView {
                     .child(div().flex_1().child(text))
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
                         this.editor.update(cx, |ed, cx| ed.end(cx));
-                        cx.emit(PageViewEvent::Open {
-                            page: page.clone(),
-                            zoom: None,
-                            focus: Some(block.clone()),
-                            sidebar: e.modifiers().shift,
-                        });
+                        cx.emit(open_event(
+                            page.clone(),
+                            None,
+                            Some(block.clone()),
+                            &e.modifiers(),
+                        ));
                     }))
                     .into_any_element()
             }
@@ -4806,7 +5003,7 @@ impl PageView {
             } => div()
                 .debug_selector(move || if first { "today-title" } else { "day-title" }.into())
                 .px(px(CONTENT_PADDING_X))
-                .when(first, |d| d.pt(px(CONTENT_PADDING_TOP)))
+                .when(first, |d| d.pt(px(self.pad_top(false))))
                 .when(!first, |d| {
                     // 40 px between days, then the 1 px divider, then the heading. Keeping
                     // that gap in the margin means the pinned copy (STICKY_HEIGHT) is
@@ -4855,9 +5052,9 @@ impl PageView {
                         .debug_selector(move || {
                             format!("day-date-{}", utopia_core::date::iso(date))
                         })
-                        .text_size(px(crate::theme::DAY_TITLE.size))
-                        .line_height(px(crate::theme::DAY_TITLE.line))
-                        .font_weight(crate::theme::DAY_TITLE.weight)
+                        .text_size(px(self.day_title_role().size))
+                        .line_height(px(self.day_title_role().line))
+                        .font_weight(self.day_title_role().weight)
                         .cursor_pointer()
                         .hover(|s| s.text_color(th.link))
                         .child(title)
@@ -4870,12 +5067,7 @@ impl PageView {
                                 })
                             });
                             if let Some(page) = page {
-                                cx.emit(PageViewEvent::Open {
-                                    page,
-                                    zoom: None,
-                                    focus: None,
-                                    sidebar: e.modifiers().shift,
-                                });
+                                cx.emit(open_event(page, None, None, &e.modifiers()));
                             }
                         })),
                 )
@@ -4981,7 +5173,7 @@ impl PageView {
                     .debug_selector(|| "journal-end".into())
                     .px(px(CONTENT_PADDING_X))
                     .pt_8()
-                    .pb(px(CONTENT_PADDING_BOTTOM))
+                    .pb(px(self.pad_bottom()))
                     .text_size(px(crate::theme::BODY_SIZE))
                     .text_color(th.muted)
                     .child("Loading older days…")
@@ -4991,7 +5183,7 @@ impl PageView {
                 .debug_selector(|| "feed-end".into())
                 .px(px(CONTENT_PADDING_X))
                 .pt_8()
-                .pb(px(CONTENT_PADDING_BOTTOM))
+                .pb(px(self.pad_bottom()))
                 .text_size(px(crate::theme::BODY_SIZE))
                 .text_color(th.muted)
                 .child("No earlier notes.")
@@ -5179,12 +5371,7 @@ impl PageView {
                     )
                     .on_click(cx.listener(move |this, e: &gpui::ClickEvent, _, cx| {
                         this.editor.update(cx, |ed, cx| ed.end(cx));
-                        cx.emit(PageViewEvent::Open {
-                            page: id.clone(),
-                            zoom: None,
-                            focus: None,
-                            sidebar: e.modifiers().shift,
-                        });
+                        cx.emit(open_event(id.clone(), None, None, &e.modifiers()));
                     }))
                     .into_any_element()
             }
@@ -5865,6 +6052,7 @@ impl Render for PageView {
         // DN-3: the day the column is inside stays at the top of the column while a long
         // day scrolls. Reading the offset and one heading is all `render` does for it.
         let sticky = self.sticky_heading().cloned();
+        let (day_role, sticky_h) = (self.day_title_role(), self.sticky_height());
         div()
             .size_full()
             .bg(th.paper)
@@ -5908,7 +6096,7 @@ impl Render for PageView {
                                 .debug_selector(|| "sticky-day".into())
                                 .w_full()
                                 .max_w(px(CONTENT_MAX_WIDTH))
-                                .h(px(STICKY_HEIGHT))
+                                .h(px(sticky_h))
                                 .px(px(CONTENT_PADDING_X))
                                 .pt(px(DAY_HEADER_PAD_TOP))
                                 .pb(px(DAY_HEADER_GAP))
@@ -5939,9 +6127,9 @@ impl Render for PageView {
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(crate::theme::DAY_TITLE.size))
-                                        .line_height(px(crate::theme::DAY_TITLE.line))
-                                        .font_weight(crate::theme::DAY_TITLE.weight)
+                                        .text_size(px(day_role.size))
+                                        .line_height(px(day_role.line))
+                                        .font_weight(day_role.weight)
                                         .child(h.title.clone()),
                                 ),
                         ),

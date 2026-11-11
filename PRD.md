@@ -159,7 +159,7 @@ The data model is exposed through a Datalog-style query API, which is why the co
 ### 4.2 Priority ladder
 
 - **P0 (must ship, v1.0):** Daily notes · Bullet outliner · Backlinks · Reference nodes · **tags-as-pages** · **date links** · **rename/merge** · **right sidebar with stacked pages** · local persistence · undo/redo · quick jump by page title · export.
-- **P1 (v1.1):** search (FTS5), todos/headings/quotes/code block types, slash menu, unlinked references + promote-to-link, reference filters, attributes + page metadata header, templates (journal + page), extract-block-to-page, Roam import, block embeds, quick capture hotkey, split panes.
+- **P1 (v1.1):** search (FTS5), todos/headings/quotes/code block types, slash menu, unlinked references + promote-to-link, reference filters, attributes + page metadata header, templates (journal + page), extract-block-to-page, Roam import, block embeds, quick capture hotkey, split panes (since replaced by stacked panes, §9.2.1).
 - **P2 (v1.2+):** mobile client, E2E sync, queries, graph view, attachments, PDF, plugin runtime, local HTTP API.
 
 ### 4.3 Validated workflows (from practitioner usage)
@@ -512,6 +512,24 @@ Bindings load from `keymap.json` in the app config dir; unknown actions log a wa
 │ Synced 2m ago │                                      │                        │
 └───────────────┴──────────────────────────────────────┴────────────────────────┘
 ```
+
+#### 9.2.1 Stacked panes and the view mode (SP)
+
+The main column holds one list of open pages, the **pane stack**, like Andy Matuschak's
+notes. The visual spec is DESIGN.md §4.3 and §4.4; the click rules live in one pure
+function (`utopia_ui::pane_stack::open`).
+
+| Id | Requirement |
+|---|---|
+| SP-1 | There is one stack per window. Entry 0 is always the Daily Notes feed; an entry is a page, optionally zoomed into a block. The stack is local UI state (§11, rule 9): never in a shard, never synced. |
+| SP-2 | Panes mode: a plain click on a page link, date link or tag in pane *i* keeps panes 0…*i*, drops the rest and adds the target as pane *i* + 1. A target already open anywhere is not added again; the row scrolls to it. |
+| SP-3 | Panes mode: ⌘-click (Ctrl-click off macOS, ⌘⇧ included) in pane *i* > 0 replaces pane *i*. In pane 0 it acts as a plain click. ⌘⇧-click no longer opens a split pane: the stack replaces split panes (P1). |
+| SP-4 | Each pane but the first has a close button; ⌘W closes the focused pane; "Close other panes" keeps Daily Notes and the focused pane. Daily Notes never closes. |
+| SP-5 | Back removes the last entry. The top bar's trail lists every entry: in Panes mode a title scrolls to its pane, in Single mode it cuts the stack back to it. Single mode: a plain click adds the target at the end, or cuts back to it if it is already open. |
+| SP-6 | Panes \| Single is an app setting (`settings.json` `view_mode`, default `single`). Switching keeps the stack. ⌘-click in Single switches the window to Panes and adds the target at the end, without changing the setting. |
+| SP-7 | Sidebar pages, tags, calendar days, Quick jump and `utopia://` links open their target at the end of the stack (or scroll to it when open). "Daily Notes" resets the stack to the feed alone. |
+| SP-8 | The stack is saved in `local_state` (`pane_stack`) on every change and restored at launch, without pages deleted since; the launch rule (FR-1.1) applies only when nothing beyond the feed was saved. |
+| SP-9 | ⌥←/⌥→ move focus between panes outside text editing (inside a block they move by word); a focused pane scrolls fully into view. |
 
 ### 9.3 Empty and error states
 

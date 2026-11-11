@@ -7583,6 +7583,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "unicode-segmentation",
  "utopia-core",
  "utopia-plugin",
  "utopia-store",

@@ -10,6 +10,7 @@ use utopia_core::PageId;
 use utopia_store::Store;
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::{AppState, IndexUpdated};
+use utopia_ui::pane_stack::{Click, Origin};
 use utopia_ui::theme::Theme;
 use utopia_ui::workspace::Workspace;
 
@@ -510,14 +511,22 @@ fn quick_jump_drops_a_replaced_default_key(cx: &mut TestAppContext) {
     );
 }
 
-/// P3: a page opened in a split pane was still opened, so it belongs in the recent list
-/// the empty state offers.
+/// P3: a page ⌘-clicked open as a pane (once a split pane) was still opened, so it belongs
+/// in the recent list the empty state offers.
 #[gpui::test]
-fn quick_jump_records_pages_opened_in_a_split(cx: &mut TestAppContext) {
+fn quick_jump_records_pages_opened_as_a_pane(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     let reading = app.update(cx, |app, _| app.store.create_page("Reading log").unwrap());
     ws.update_in(cx, |w, window, cx| {
-        w.open_split(reading.clone(), window, cx)
+        w.open_from(
+            Origin::Pane(0),
+            Click::Secondary,
+            reading.clone(),
+            None,
+            None,
+            window,
+            cx,
+        )
     });
     cx.run_until_parked();
     app.update(cx, |app, _| {
@@ -529,7 +538,7 @@ fn quick_jump_records_pages_opened_in_a_split(cx: &mut TestAppContext) {
         assert_eq!(
             stored.lines().next(),
             Some(reading.as_str()),
-            "a split is an open: {stored:?}"
+            "a pane is an open: {stored:?}"
         );
     });
 }
@@ -3135,14 +3144,32 @@ fn leaving_a_page_drops_its_open_transclusions(cx: &mut TestAppContext) {
         "the opened transclusion reads the target page"
     );
 
+    // SP-1: opening another page stacks a new entry; Home's view stays, out of sight in
+    // Single mode, and an entry out of sight does no work when other pages change.
     ws.update_in(cx, |w, window, cx| {
-        w.open(other, None, None, false, window, cx)
+        w.open(other.clone(), None, None, false, window, cx)
     });
+    cx.run_until_parked();
+    assert!(!view.read_with(cx, |v, _| v.is_active()));
+    let hidden = view.read_with(cx, |v, _| v.rebuilds());
+    app.update(cx, |app, cx| app.changed(vec![target.clone()], false, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |v, _| v.rebuilds()),
+        hidden,
+        "a hidden entry only marks itself stale"
+    );
+
+    // The original regression: a view that moves to another page drops the page's open
+    // transclusions (rebuild-cycle issue 2).
+    view.update(cx, |v, cx| v.open(other, None, cx));
     cx.run_until_parked();
     assert!(
         !view.read_with(cx, |v, _| v.interested_in_all_pages()),
         "the transclusion belonged to the page that was left"
     );
+    view.update(cx, |v, cx| v.set_active(true, cx));
+    cx.run_until_parked();
     let before = view.read_with(cx, |v, _| v.rebuilds());
     app.update(cx, |app, cx| app.changed(vec![target.clone()], false, cx));
     cx.run_until_parked();
@@ -3451,7 +3478,7 @@ fn unlinked_references_count_and_link_all(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn embeds_render_and_split_panes(cx: &mut TestAppContext) {
+fn embeds_render_and_open_as_a_pane(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     let (other, target) = app.update(cx, |app, _| {
         let p = app.store.create_page("Source").unwrap();
@@ -3469,12 +3496,27 @@ fn embeds_render_and_split_panes(cx: &mut TestAppContext) {
         cx.debug_bounds("content-2").is_some(),
         "embedded row rendered"
     );
-    ws.update_in(cx, |w, window, cx| w.open_split(other.clone(), window, cx));
+    // ⌘-click (once a split pane): the page opens as a pane beside the feed (§4.4).
+    ws.update_in(cx, |w, window, cx| {
+        w.set_scroll_animation(false);
+        w.open_from(
+            Origin::Pane(0),
+            Click::Secondary,
+            other.clone(),
+            None,
+            None,
+            window,
+            cx,
+        )
+    });
     cx.run_until_parked();
-    assert_eq!(ws.update(cx, |w, cx| w.split_pages(cx)), vec![other]);
-    let split = cx.debug_bounds("split-0").expect("split pane drawn");
-    let main = cx.debug_bounds("main-pane").unwrap();
-    assert!(split.origin.x > main.origin.x && split.size.width > gpui::px(100.));
+    assert_eq!(
+        ws.update(cx, |w, cx| w.stack_pages(cx)).last(),
+        Some(&Some(other))
+    );
+    let pane = cx.debug_bounds("stack-pane-1").expect("second pane drawn");
+    let feed = cx.debug_bounds("stack-pane-0").unwrap();
+    assert!(pane.origin.x > feed.origin.x && pane.size.width > gpui::px(100.));
 }
 
 #[gpui::test]
@@ -3682,9 +3724,10 @@ fn graph_hover_shows_a_floating_card(cx: &mut TestAppContext) {
     assert_eq!(graph.update(cx, |g, _| g.hovered()), None);
 }
 
-/// GR-2: a plain click opens the page; ⌘-click opens it in a split.
+/// GR-2: a plain click opens the page; ⌘-click opens it as a pane beside the feed
+/// (DESIGN.md §4.4; it opened a split before the stack replaced splits).
 #[gpui::test]
-fn graph_cmd_click_opens_a_split(cx: &mut TestAppContext) {
+fn graph_cmd_click_opens_a_pane(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     cx.simulate_input("[[Alpha]] meets [[Beta]]");
     cx.simulate_keystrokes("escape");
@@ -3707,11 +3750,14 @@ fn graph_cmd_click_opens_a_split(cx: &mut TestAppContext) {
     cx.simulate_click(at, cmd);
     cx.run_until_parked();
     assert!(ws.update(cx, |w, _| w.graph_view()).is_none());
-    assert_eq!(ws.update(cx, |w, cx| w.split_pages(cx)), vec![alpha]);
     assert_eq!(
-        ws.update(cx, |w, cx| w.main_page(cx)),
-        Some(main),
-        "the main page stays put"
+        ws.update(cx, |w, cx| w.stack_pages(cx)),
+        vec![Some(main), Some(alpha)],
+        "the feed stays put and the page opens beside it"
+    );
+    assert_eq!(
+        ws.update(cx, |w, _| w.view_mode()),
+        utopia_ui::pane_stack::ViewMode::Panes
     );
 }
 
@@ -4075,7 +4121,7 @@ fn hiding_the_sidebar_restores_focus_from_the_graph_panel(cx: &mut TestAppContex
     );
 }
 
-/// AGENTS.md focus invariant: ⌘-click opens a split, then the full-screen graph that had
+/// AGENTS.md focus invariant: ⌘-click opens a pane, then the full-screen graph that had
 /// focus disappears; focus must not go with it.
 #[gpui::test]
 fn graph_cmd_click_split_restores_focus(cx: &mut TestAppContext) {
@@ -4099,7 +4145,10 @@ fn graph_cmd_click_split_restores_focus(cx: &mut TestAppContext) {
     };
     cx.simulate_click(at, cmd);
     cx.run_until_parked();
-    assert_eq!(ws.update(cx, |w, cx| w.split_pages(cx)), vec![alpha]);
+    assert_eq!(
+        ws.update(cx, |w, cx| w.stack_pages(cx)).last(),
+        Some(&Some(alpha))
+    );
     cx.simulate_keystrokes("cmd-k");
     cx.run_until_parked();
     assert!(

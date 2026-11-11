@@ -8,6 +8,7 @@ use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
+use utopia_ui::pane_stack::{Click, Origin};
 use utopia_ui::theme::{
     Theme, BLOCK_TEXT_LEFT, CHILD_INDENT, CONTENT_PADDING_X, DAY_GAP, DAY_HEADER_PAD_TOP,
     NARROW_INDENT, REFERENCE, SIDEBAR_WIDTH,
@@ -4168,30 +4169,41 @@ fn reference_controls_fit_the_sidebar_pane(cx: &mut TestAppContext) {
     );
 }
 
-/// LR-1 review fix: a split pane can be narrower than the sidebar. The row must fit there
-/// too, with all three controls still on it.
+/// LR-1 review fix: a pane is narrower than the page view (560, DESIGN.md §4.3). The row
+/// must fit there too, with all three controls still on it. (This was a split pane before
+/// the stack replaced splits.)
 #[gpui::test]
-fn reference_controls_fit_a_narrow_split_pane(cx: &mut TestAppContext) {
+fn reference_controls_fit_a_stacked_pane(cx: &mut TestAppContext) {
     let (cx, ws, target) = setup_ref_controls(cx);
     cx.simulate_resize(size(px(900.), px(700.)));
-    ws.update_in(cx, |w, window, cx| w.open_split(target, window, cx));
+    ws.update_in(cx, |w, window, cx| {
+        w.set_scroll_animation(false);
+        w.open_from(
+            Origin::Outside,
+            Click::Secondary,
+            target,
+            None,
+            None,
+            window,
+            cx,
+        )
+    });
     cx.simulate_resize(size(px(900.), px(700.)));
     cx.run_until_parked();
-    let split = bounds(cx, "split-0");
+    let split = bounds(cx, "stack-pane-1");
     let row = bounds(cx, "refs-control-row");
     assert!(
         row.origin.x >= split.origin.x && row.origin.x + row.size.width <= split.right() + px(0.5),
         "the control row stays inside the split: {row:?} {split:?}"
     );
-    let filter = bounds(cx, "refs-filter");
-    assert!(
-        filter.size.width < px(240.),
-        "the field shrank to make room: {filter:?} {split:?}"
-    );
     let sort = bounds(cx, "refs-sort-menu-title");
     assert!(
         sort.origin.x + sort.size.width <= split.right() + px(0.5),
         "{sort:?} {split:?}"
+    );
+    assert!(
+        split.right() <= px(900.5),
+        "the pane scrolled whole into a 900 px window: {split:?}"
     );
 }
 

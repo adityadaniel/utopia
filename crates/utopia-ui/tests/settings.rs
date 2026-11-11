@@ -1247,6 +1247,7 @@ mod appearance {
                 "ref_children": 2,
                 "pinned": [],
                 "right_sidebar_width": 380.0,
+                "view_mode": "single",
             }))
         );
         assert!(
