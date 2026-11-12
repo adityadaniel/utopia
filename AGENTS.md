@@ -9,6 +9,7 @@ ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 - “Make a note” => edit AGENTS.md (shortcut; not a blocker).
 - Editor: zed <path>.
 - Commits: Conventional Commits (feat|fix|refactor|build|ci|chore|docs|style|perf|test).
+- when working on a feature / fix, use new worktree
 
 ## Visual system
 
