@@ -19,7 +19,7 @@
 //! }
 //! ```
 //!
-//! `font` is `"system"` (the default) or `"ibm-plex-sans"`; `density` is
+//! `font` is `"ibm-plex-sans"` (the default) or `"system"`; `density` is
 //! `"comfortable"` (the default) or `"compact"` (ALL-5); `indent` is `"wide"` (the
 //! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `ref_children` is how many
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
@@ -32,9 +32,10 @@
 //! be, never a panic (rule 11). Keys this version does not know are kept when the file is
 //! rewritten, so a newer release's preferences survive a round trip through an older one.
 
-use gpui::{App, Global, SharedString};
+use gpui::{App, FontFeatures, Global, SharedString, Styled};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use utopia_core::PageId;
 
 use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
@@ -89,7 +90,33 @@ impl UiFont {
             UiFont::IbmPlexSans => IBM_PLEX_SANS,
         }
     }
+
+    /// The OpenType features set with the family. System turns on SF Pro's tailed `l`
+    /// (`cv06`) and one-storey `a` (`cv07`). They are `cv` tags, not the `ss06`/`ss07`
+    /// sets, because those mean other things in Plex (Bulgarian forms); Menlo and the
+    /// bundled Plex faces have no `cv06`/`cv07`, so code and labels that inherit the
+    /// features from the window root do not change.
+    pub fn features(self) -> FontFeatures {
+        match self {
+            UiFont::System => FontFeatures(Arc::new(vec![("cv06".into(), 1), ("cv07".into(), 1)])),
+            UiFont::IbmPlexSans => FontFeatures::default(),
+        }
+    }
 }
+
+/// Sets a [`UiFont`] on an element: its family and its features together, so neither can
+/// be set without the other. Children inherit both, as with `font_family`.
+pub trait UiFontExt: Styled + Sized {
+    fn ui_font_style(mut self, font: UiFont) -> Self {
+        let style = self.text_style().get_or_insert_with(Default::default);
+        style.font_family = Some(font.family().into());
+        // `Some` even when empty, so a Plex sample under a System root drops the features.
+        style.font_features = Some(font.features());
+        self
+    }
+}
+
+impl<E: Styled> UiFontExt for E {}
 
 /// How tightly blocks are set (ALL-5). Local to the machine, like the font.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -677,6 +704,16 @@ fn apply(cx: &mut App, font: UiFont) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The System font gets SF Pro's tailed `l` and one-storey `a`; Plex Sans gets none.
+    #[test]
+    fn system_font_turns_on_alternate_a_and_l() {
+        assert_eq!(
+            UiFont::System.features().tag_value_list(),
+            &[("cv06".to_string(), 1), ("cv07".to_string(), 1)]
+        );
+        assert!(UiFont::IbmPlexSans.features().tag_value_list().is_empty());
+    }
 
     #[test]
     fn round_trip() {

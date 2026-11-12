@@ -19,6 +19,7 @@ use gpui::{
 use utopia_store::Store;
 use utopia_ui::actions::*;
 use utopia_ui::app_state::AppState;
+use utopia_ui::appearance::UiFontExt;
 use utopia_ui::line_input::{LineInput, LineInputEvent};
 use utopia_ui::settings::{SettingsView, Tab as SettingsTab};
 use utopia_ui::theme::{theme, Theme};
@@ -527,7 +528,7 @@ impl Render for Root {
             .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
-            .font_family(utopia_ui::appearance::font_family(cx));
+            .ui_font_style(utopia_ui::appearance::ui_font(cx));
         match &self.state {
             RootState::Ready(ready) => shell.child(ready.ws.clone()),
             RootState::Onboarding { input, error, .. } => {
