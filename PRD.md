@@ -480,6 +480,7 @@ Roam's most quietly important behavior: **renaming a page onto another page's ti
 | Previous / next day | `Cmd+[` / `Cmd+]` | In a daily page context |
 | Quick jump (pages) | `Cmd+K` | v1: titles + aliases only |
 | Full search | `Cmd+Shift+F` | P1 |
+| Tasks | `Cmd+Shift+X` | Every to-do in the graph (§9.2.2) |
 | Backlink panel | `Cmd+Shift+B` | |
 | Toggle right sidebar | `Cmd+Shift+\` | |
 | Open in right sidebar | `Shift+Click` on any link | Stacks the page beside the current one; `Cmd+Shift+Click` opens a new pane |
@@ -530,6 +531,24 @@ function (`utopia_ui::pane_stack::open`).
 | SP-7 | Sidebar pages, tags, calendar days, Quick jump and `utopia://` links open their target at the end of the stack (or scroll to it when open). "Daily Notes" resets the stack to the feed alone. |
 | SP-8 | The stack is saved in `local_state` (`pane_stack`) on every change and restored at launch, without pages deleted since; the launch rule (FR-1.1) applies only when nothing beyond the feed was saved. |
 | SP-9 | ⌥←/⌥→ move focus between panes outside text editing (inside a block they move by word); a focused pane scrolls fully into view. |
+
+#### 9.2.2 Tasks view (TK)
+
+One list of every to-do in the graph, so open work written in daily notes and pages can be
+found without a query block. It is a view over the `block` projection (§11.1): it has no
+data of its own, and it writes only through the same command a page uses. The visual spec is
+DESIGN.md §4.5.
+
+| Id | Requirement |
+|---|---|
+| TK-1 | The sidebar shows **Tasks** under Daily Notes, with the number of open to-dos on the right. Clicking it, or `GoTasks` (`Cmd+Shift+X`), shows the Tasks view in the main area, the way the graph view does: the pane stack is kept and comes back when a page is opened. A to-do block counts once, whatever its children are. |
+| TK-2 | The view lists every live `todo` block on a live page, one group per page. A group is headed by the page title (and, for a daily page, its weekday) and opens that page. Groups are ordered by the most recent change to a task in them; tasks keep outline order. A task under a heading block sits under a sub-heading with that heading's text; a task whose parent is a plain block shows the parent's text under it; a to-do under a listed to-do keeps its thread line. |
+| TK-3 | An Open / Done / All filter with a count on each. Open is the default; Done lists every done task, with no time limit. The filter and folds are local UI state (rule 9) and are not saved. |
+| TK-4 | Ticking a box runs the same command as ticking it on the page (rule 13): one undo step, synced like any edit. A row ticked under Open stays in place, struck through, until the filter changes or the view is left. |
+| TK-5 | A task's due date is its earliest date link (FR-1.10, W5). It is drawn once, inline, as a link; the row adds only **Overdue** (before today, not done) or **Today**. Ambiguous numeric dates never resolve (§5.5), so they never count. |
+| TK-6 | Clicking a task's text opens its page with the block revealed, by the reference-row rules (§9.2.1; Shift-click opens it in the right sidebar). |
+| TK-7 | The view and the sidebar count follow the index (`IndexUpdated`), so edits made elsewhere, including by sync, show without a refresh. |
+| TK-8 | With nothing to show, the view says so and how to make a to-do: `/To-do` or `Alt+Enter` in any block. |
 
 ### 9.3 Empty and error states
 

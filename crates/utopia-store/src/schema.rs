@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use crate::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i64 = 9;
+pub const SCHEMA_VERSION: i64 = 10;
 
 const V1: &str = r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -240,6 +240,16 @@ CREATE INDEX attachment_pending ON attachment(created_at, hash) WHERE state = 'p
 CREATE INDEX attachment_lost ON attachment(lost_at, hash) WHERE state = 'lost';
 "#;
 
+/// v10: the Tasks view (PRD §9.2.2) and its sidebar count read every live to-do on each
+/// index change. A partial index holds only those rows, so the read costs the number of
+/// to-dos, not the number of blocks. It is not a foreign-key index (rule 14). `IF NOT
+/// EXISTS`: an index is not data, so running the step again on a file whose version was
+/// rolled back (as the migration tests do) must not fail.
+const V10: &str = r#"
+CREATE INDEX IF NOT EXISTS block_todo ON block(page_id, checked)
+  WHERE block_type = 'todo' AND deleted_at IS NULL;
+"#;
+
 /// Attribute row values for a block's text, if it is an attribute block.
 pub(crate) fn attr_row(text: &str) -> Option<(String, String, String, String)> {
     use utopia_core::{inline, title::normalize_title};
@@ -358,6 +368,12 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         // `SCHEMA_VERSION` without adding a migration must not make an old file claim
         // the new schema.
         tx.execute_batch("PRAGMA user_version = 9")?;
+        tx.commit()?;
+    }
+    if version < 10 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V10)?;
+        tx.execute_batch("PRAGMA user_version = 10")?;
         tx.commit()?;
     }
     Ok(())
