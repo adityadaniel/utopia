@@ -24,6 +24,7 @@ mod query;
 mod schema;
 mod sync_destination;
 pub use sync_destination::Destination;
+mod tasks;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
@@ -47,6 +48,7 @@ pub use pages::PageFate;
 pub use project::{display_title, resolve_page_key};
 pub use query::*;
 pub use schema::SCHEMA_VERSION;
+pub use tasks::{Task, TaskGroup};
 pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 

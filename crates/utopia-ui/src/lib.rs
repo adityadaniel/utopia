@@ -24,5 +24,6 @@ pub mod settings;
 pub mod sources;
 pub mod sync_runner;
 pub mod sync_setup;
+pub mod tasks_view;
 pub mod theme;
 pub mod workspace;

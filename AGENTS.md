@@ -297,8 +297,8 @@ Dependency direction is one-way: `app → ui → (plugin → api) → store → 
     (`utopia_api::handle` / `Store` methods), so undo, references and sync behave identically.
 14. **Schema changes are migrations** (`schema.rs`, `PRAGMA user_version`), never edits to an
     existing version: graphs on disk must keep opening (§14.4). Check FK-heavy changes against
-    `xtask bench`: SQLite cannot use partial indexes for foreign-key checks. Current: v9
-   (v6 `attr`, v7 `attachment`, v8 `tombstone`, v9 attachment `state`).
+    `xtask bench`: SQLite cannot use partial indexes for foreign-key checks. Current: v10
+   (v6 `attr`, v7 `attachment`, v8 `tombstone`, v9 attachment `state`, v10 `block_todo` index).
 
 ## Conventions
 
@@ -346,6 +346,9 @@ Implemented:
   journal and page templates (`templates/<name>` pages), extract block to page, drag across
   pages, block embeds (`{{embed: ((uid))}}`), quick capture (in-app and system-wide hotkey,
   plus `utopia capture`), stacked panes (DESIGN.md §4.3/§4.4, PRD §9.2.1; replaced split panes), Roam JSON import, OPML export.
+  Tasks view (PRD §9.2.2, DESIGN.md §4.5, `GoTasks` ⇧⌘X): every to-do grouped by page, Open /
+  Done / All, ticks through the page's own command; it covers the stack like the graph view
+  and gives it back when a page opens. `cargo run -p xtask -- seed-tasks <graph>` seeds its shots.
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
   snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.

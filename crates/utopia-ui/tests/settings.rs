@@ -731,7 +731,9 @@ fn a_clash_link_reveals_a_row_in_a_tall_category(cx: &mut TestAppContext) {
     let path = dir.path().to_path_buf();
     let (view, cx) =
         cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
-    cx.simulate_resize(size(px(1100.), px(1150.)));
+    // 1230: Navigation grew a row with Tasks (PRD §9.2.2), and the New Block row must
+    // still be on screen to be clicked.
+    cx.simulate_resize(size(px(1100.), px(1230.)));
     cx.run_until_parked();
     let pane = cx.debug_bounds("settings-keys").unwrap();
     let link = cx

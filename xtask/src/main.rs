@@ -826,6 +826,45 @@ fn insert_tree(
     Ok(ids)
 }
 
+/// The Tasks view's shots (PRD §9.2.2): the help graph, plus to-dos whose date links make
+/// one overdue and one due today (TK-5), and one more page with open work, so the view
+/// shows every kind of row. Kept apart from `seed_help_graph` so the Help tour's own
+/// screenshots do not change.
+fn seed_tasks_graph(path: &Path) -> Result<()> {
+    use BlockKind::{Heading, Todo};
+    seed_help_graph(path)?;
+    let mut s = Store::open(path)?;
+    let today = chrono::Local::now().date_naive();
+    let fmt = s.date_format().clone();
+    let overdue = fmt.format(today - chrono::Duration::days(2));
+    let due_today = fmt.format(today);
+    let yesterday = s.ensure_daily_page(today - chrono::Duration::days(1))?;
+    let venue = format!("Confirm the room for the beta party [[{overdue}]]");
+    let invoice = format!("Send the design invoice [[{due_today}]]");
+    let dated = insert_tree(
+        &mut s,
+        &yesterday,
+        &[(0, Todo, venue.as_str()), (0, Todo, invoice.as_str())],
+    )?;
+    // Commit as the editor does, so each date link writes its day (FR-1.10) and resolves.
+    for id in &dated {
+        s.commit_block(&yesterday, id)?;
+    }
+    let home = s.create_page("Home")?;
+    insert_tree(
+        &mut s,
+        &home,
+        &[
+            (0, Heading(2), "This week"),
+            (1, Todo, "Water the plants"),
+            (1, Todo, "Renew the passport"),
+        ],
+    )?;
+    s.sync_index()?;
+    println!("seeded {}", path.display());
+    Ok(())
+}
+
 /// The mock graph behind the Help screenshots: a small project, a person, and a few days
 /// of notes that link them, so backlinks, attributes and the graph view all have something
 /// real to show.
@@ -1453,13 +1492,14 @@ fn main() -> Result<()> {
             seed_page_view(Path::new(args.get(1).context("graph path to seed")?))
         }
         Some("seed-daily") => seed_daily_feed(Path::new(args.get(1).context("graph path")?)),
+        Some("seed-tasks") => seed_tasks_graph(Path::new(args.get(1).context("graph path")?)),
         Some("seed-panes") => seed_panes_graph(
             Path::new(args.get(1).context("graph path")?),
             args.get(2).map_or(Ok(0), |d| d.parse()).context("depth")?,
         ),
         _ => {
             println!(
-                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
+                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
             );
             Ok(())
         }
