@@ -29,6 +29,7 @@ use crate::quick_jump::{JumpPalette, PaletteMode, QuickJumpEvent};
 use crate::sync_runner::{
     exchange_owned, status_line, sync_dot, BoxTransport, SyncDot, SyncPhase, SyncRunner,
 };
+use crate::tasks_view::{TaskFilter, TasksEvent, TasksView};
 use crate::theme::{
     ghost_icon, ghost_text, kbd, nav_row, quiet_control, quiet_danger, theme, BUTTON_HEIGHT, COUNT,
     FOOTER_DOT, LABEL_MONO, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
@@ -109,6 +110,8 @@ struct SidebarData {
     /// How many live blocks reference each page (DESIGN.md §3.2), read in one grouped
     /// query per index update, never one query per row.
     ref_counts: HashMap<PageId, usize>,
+    /// Open to-dos on live pages, beside the Tasks row (TK-1).
+    open_tasks: usize,
 }
 
 #[derive(Default)]
@@ -174,6 +177,9 @@ enum MainContent {
     Page,
     Graph(Entity<GraphView>),
     Pdf(Entity<PdfView>),
+    /// Every to-do in the graph (PRD §9.2.2). Like the graph, it covers the stack, which
+    /// is kept and comes back when a page is opened (TK-1).
+    Tasks(Entity<TasksView>),
 }
 
 /// A sideways scroll of the pane row on its way to `to` (DESIGN.md §4.3 "smooth-scrolls").
@@ -1937,7 +1943,7 @@ impl Workspace {
     pub fn pdf_view(&self) -> Option<Entity<PdfView>> {
         match &self.content {
             MainContent::Pdf(pdf) => Some(pdf.clone()),
-            MainContent::Page | MainContent::Graph(_) => None,
+            MainContent::Page | MainContent::Graph(_) | MainContent::Tasks(_) => None,
         }
     }
 
@@ -1998,8 +2004,68 @@ impl Workspace {
     pub fn graph_view(&self) -> Option<Entity<GraphView>> {
         match &self.content {
             MainContent::Graph(graph) => Some(graph.clone()),
-            MainContent::Page | MainContent::Pdf(_) => None,
+            MainContent::Page | MainContent::Pdf(_) | MainContent::Tasks(_) => None,
         }
+    }
+
+    /// The Tasks view when it is on screen (PRD §9.2.2), for tests and scripts.
+    pub fn tasks_view(&self) -> Option<Entity<TasksView>> {
+        match &self.content {
+            MainContent::Tasks(tasks) => Some(tasks.clone()),
+            _ => None,
+        }
+    }
+
+    /// `GoTasks` and the sidebar's Tasks row (TK-1): show every to-do in the main area.
+    /// The stack stays as it is underneath; a view already on screen is kept, filter and
+    /// folds included.
+    pub fn go_tasks(&mut self, _: &GoTasks, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |e, cx| e.end(cx));
+        self.page_menu = false;
+        if !matches!(self.content, MainContent::Tasks(_)) {
+            let view = cx.new(|cx| TasksView::new(self.app.clone(), cx));
+            self.subs
+                .push(cx.subscribe_in(&view, window, Self::on_tasks_event));
+            self.content = MainContent::Tasks(view);
+        }
+        // An edit hosted by a pane under the view would otherwise keep the keyboard
+        // (AGENTS.md: a focused element that is not drawn swallows every key).
+        let view = self.current();
+        self.release_pane(&view, window, cx);
+        window.focus(&self.focus);
+        window.set_window_title("Tasks — Utopia");
+        cx.notify();
+    }
+
+    /// Back, from the Tasks view: the stack shows again, as it was.
+    fn close_tasks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.content, MainContent::Tasks(_)) {
+            self.content = MainContent::Page;
+            window.focus(&self.focus);
+            self.title_window(window, cx);
+            cx.notify();
+        }
+    }
+
+    fn on_tasks_event(
+        &mut self,
+        _: &Entity<TasksView>,
+        e: &TasksEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match e.clone() {
+            // TK-6: by the reference-row rules; Shift keeps the view and opens the page in
+            // the right sidebar.
+            TasksEvent::OpenTask { page, block, shift } => {
+                self.open_shifted(page, None, Some(block), shift, window, cx)
+            }
+            TasksEvent::OpenPage { page, shift } => {
+                self.open_shifted(page, None, None, shift, window, cx)
+            }
+            TasksEvent::Follow { target, shift } => self.follow_link(target, shift, window, cx),
+        }
+        cx.notify();
     }
 
     /// The local graph panel in the right sidebar (GR-5).
@@ -2420,6 +2486,7 @@ impl Workspace {
             // computed from a frame (SB-2, rule 10).
             let tags = self.app.read(cx).tag_pages.clone();
             let ref_counts = store.page_backlink_counts().unwrap_or_default();
+            let open_tasks = store.open_task_count().unwrap_or_default();
             let pages = all
                 .iter()
                 .filter(|p| !p.is_daily() && !tags.contains(&p.id))
@@ -2435,6 +2502,7 @@ impl Workspace {
                 pages,
                 tag_rows,
                 ref_counts,
+                open_tasks,
                 all,
             };
             // Card headers name their page (RS-5); a rename must reach them.
@@ -2681,7 +2749,9 @@ impl Workspace {
     fn render_left(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let today = self.today;
-        let journal = self.current().read(cx).is_journal();
+        let tasks_on = matches!(self.content, MainContent::Tasks(_));
+        // One nav row is active: Tasks while its view covers the stack (TK-1).
+        let journal = !tasks_on && self.current().read(cx).is_journal();
         let vault = self.vault_name(cx);
         let initial: String = vault
             .chars()
@@ -2795,6 +2865,22 @@ impl Workspace {
         .debug_selector(|| "daily-notes".into())
         .mt_3()
         .on_click(cx.listener(|this, _, window, cx| this.open_journal(window, cx)));
+        // Tasks (TK-1, DESIGN.md §3.2): the open to-do count on the right, Mono 12.
+        let open_tasks = self.sidebar.open_tasks;
+        let tasks_row = nav_row("tasks", "Tasks", Some(Icon::SquareCheck), tasks_on, &th)
+            .debug_selector(|| "tasks-nav".into())
+            .mt_0p5()
+            .child(
+                div()
+                    .debug_selector(|| "tasks-nav-count".into())
+                    .flex_none()
+                    .font_family(crate::theme::LABEL_MONO)
+                    .text_size(px(crate::theme::COUNT.size))
+                    .font_weight(gpui::FontWeight::NORMAL)
+                    .text_color(th.muted)
+                    .child(open_tasks.to_string()),
+            )
+            .on_click(cx.listener(|this, _, window, cx| this.go_tasks(&GoTasks, window, cx)));
 
         // 4. The mini calendar, always shown (§3.2).
         let calendar = div()
@@ -2898,6 +2984,7 @@ impl Workspace {
             .child(workspace)
             .child(search)
             .child(nav)
+            .child(tasks_row)
             .child(calendar)
             .child(scroll)
             .child(self.render_footer(cx))
@@ -3992,6 +4079,113 @@ impl Workspace {
         .into_any_element()
     }
 
+    /// The top bar over the Tasks view (DESIGN.md §4.5): Back (to the stack), the title,
+    /// the Open | Done | All filter with its counts (TK-3), and the right panel toggle.
+    fn render_tasks_top_bar(
+        &mut self,
+        tasks: &Entity<TasksView>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = theme(cx).clone();
+        let (filter, counts) = {
+            let t = tasks.read(cx);
+            (t.filter(), TaskFilter::ALL.map(|f| t.count(f)))
+        };
+        let inner = px(RADIUS_INPUT - 1.);
+        let mut seg_row = div()
+            .debug_selector(|| "tasks-filter".into())
+            .h(px(BUTTON_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .rounded(px(RADIUS_INPUT))
+            .border_1()
+            .border_color(th.line_strong);
+        for (i, f) in TaskFilter::ALL.into_iter().enumerate() {
+            let on = filter == f;
+            let key = f.key();
+            let last = i + 1 == TaskFilter::ALL.len();
+            let tasks = tasks.clone();
+            seg_row = seg_row.child(
+                div()
+                    .id(key)
+                    .debug_selector(move || {
+                        format!("tasks-filter-{key}{}", if on { "-on" } else { "" })
+                    })
+                    .h_full()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .px(px(crate::theme::BUTTON_PADDING_X))
+                    .text_size(px(SMALL.size))
+                    .cursor_pointer()
+                    .when(i == 0, |d| d.rounded_l(inner))
+                    .when(last, |d| d.rounded_r(inner))
+                    .when(!last, |d| d.border_r_1().border_color(th.line_strong))
+                    .when(on, |d| {
+                        d.bg(th.selected)
+                            .text_color(th.ink)
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                    })
+                    .when(!on, |d| {
+                        d.bg(th.paper)
+                            .text_color(th.ink_3)
+                            .hover(|d| d.bg(th.hover))
+                    })
+                    .child(f.label())
+                    .child(
+                        div()
+                            .font_family(crate::theme::LABEL_MONO)
+                            .text_size(px(crate::theme::COUNT.size))
+                            .font_weight(gpui::FontWeight::NORMAL)
+                            .text_color(th.muted)
+                            .child(counts[i].to_string()),
+                    )
+                    .on_click(move |_, _, cx| tasks.update(cx, |t, cx| t.set_filter(f, cx))),
+            );
+        }
+        let open = self.right_open;
+        div()
+            .debug_selector(|| "top-bar".into())
+            .min_h(px(TOP_BAR_MIN_HEIGHT))
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(px(TOP_BAR_PADDING_X))
+            .py(px(TOP_BAR_PADDING_Y))
+            .bg(th.paper)
+            .border_b_1()
+            .border_color(th.line_soft)
+            .child(
+                ghost_icon("tasks-back", Icon::ArrowLeft, &th)
+                    .debug_selector(|| "back".into())
+                    .tooltip(tip("Back"))
+                    .on_click(cx.listener(|this, _, window, cx| this.close_tasks(window, cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(crate::theme::UI.size))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(th.ink)
+                    .child("Tasks"),
+            )
+            .child(seg_row)
+            .child(
+                ghost_icon("toggle-right", Icon::SidebarRight, &th)
+                    .debug_selector(|| "toggle-right".into())
+                    .tooltip(tip("Toggle right sidebar"))
+                    .when(open, |d| d.bg(th.hover))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.toggle_right(&ToggleRightSidebar, window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// The Daily Notes day navigation group: prev | Today | next (DESIGN.md §3.3). Prev and
     /// next move between the loaded days in the feed (older left, newer right, the same
     /// direction as `PrevDay`/`NextDay`); Today resets the feed to today (§4.1).
@@ -4252,8 +4446,13 @@ impl Render for Workspace {
                 );
             }
         }
-        if matches!(self.content, MainContent::Page) {
-            main_col = main_col.child(self.render_top_bar(cx));
+        match &self.content {
+            MainContent::Page => main_col = main_col.child(self.render_top_bar(cx)),
+            MainContent::Tasks(tasks) => {
+                let tasks = tasks.clone();
+                main_col = main_col.child(self.render_tasks_top_bar(&tasks, cx));
+            }
+            MainContent::Graph(_) | MainContent::Pdf(_) => {}
         }
         let stack = match self.mode {
             ViewMode::Panes => self.render_panes(window, cx),
@@ -4278,6 +4477,7 @@ impl Render for Workspace {
                     .map(|d| match &self.content {
                         MainContent::Graph(graph) => d.child(graph.clone()),
                         MainContent::Pdf(pdf) => d.child(pdf.clone()),
+                        MainContent::Tasks(tasks) => d.child(tasks.clone()),
                         MainContent::Page => d.child(stack),
                     }),
             );
@@ -4497,6 +4697,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::quick_jump))
             .on_action(cx.listener(Self::full_search))
             .on_action(cx.listener(Self::show_graph))
+            .on_action(cx.listener(Self::go_tasks))
             .on_drop(
                 cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
                     this.drop_files(paths.paths(), window, cx)

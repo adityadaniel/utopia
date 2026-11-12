@@ -40,6 +40,8 @@ pub enum Icon {
     Close,
     /// The Panes side of the view mode toggle (§4.4): Lucide's three-column icon.
     Columns,
+    /// The Tasks nav row (§3.2, §4.5): Lucide's square-check.
+    SquareCheck,
 }
 
 impl Icon {
@@ -64,6 +66,7 @@ impl Icon {
         Icon::More,
         Icon::Close,
         Icon::Columns,
+        Icon::SquareCheck,
     ];
 
     /// The file name under `assets/icons`.
@@ -89,6 +92,7 @@ impl Icon {
             Icon::More => "more",
             Icon::Close => "x",
             Icon::Columns => "columns",
+            Icon::SquareCheck => "square-check",
         }
     }
 
@@ -119,6 +123,7 @@ impl Icon {
             Icon::More => icon!("more"),
             Icon::Close => icon!("x"),
             Icon::Columns => icon!("columns"),
+            Icon::SquareCheck => icon!("square-check"),
         }
     }
 

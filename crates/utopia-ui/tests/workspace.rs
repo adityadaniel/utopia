@@ -7722,3 +7722,111 @@ fn ac_12_7_disabling_sync_stops_polling_and_reenable_starts_one_loop(cx: &mut Te
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+/// Insert a to-do at the end of `page`'s top level, ticked or not.
+fn seed_todo(
+    app: &Entity<AppState>,
+    page: &PageId,
+    text: &str,
+    done: bool,
+    cx: &mut VisualTestContext,
+) -> utopia_core::BlockId {
+    app.update(cx, |app, _| {
+        use utopia_core::{BlockId, BlockKind, Command};
+        let id = BlockId::new();
+        let after = app
+            .store
+            .page_state(page)
+            .unwrap()
+            .live_roots()
+            .last()
+            .cloned();
+        app.store
+            .execute(
+                page,
+                vec![Command::InsertBlock {
+                    id: id.clone(),
+                    parent: None,
+                    after,
+                    text: text.into(),
+                    kind: BlockKind::Todo,
+                }],
+                Default::default(),
+            )
+            .unwrap();
+        if done {
+            app.store
+                .set_block_kind(page, &id, BlockKind::Todo, true)
+                .unwrap();
+        }
+        app.store.sync_index().unwrap();
+        id
+    })
+}
+
+fn is_checked(
+    app: &Entity<AppState>,
+    block: &utopia_core::BlockId,
+    cx: &mut VisualTestContext,
+) -> bool {
+    app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        app.store
+            .tasks()
+            .unwrap()
+            .into_iter()
+            .flat_map(|g| g.tasks)
+            .find(|t| &t.block == block)
+            .expect("the task is listed")
+            .checked
+    })
+}
+
+/// TK-1, TK-4, TK-6: ⇧⌘X shows every to-do; ticking one is the page's own command (one
+/// undo step); clicking a task's text opens its page with the stack back on screen; the
+/// sidebar row shows the view again.
+#[gpui::test]
+fn tk_tasks_view_ticks_and_opens(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let atlas = app.update(cx, |app, _| app.store.create_page("Atlas").unwrap());
+    let write = seed_todo(&app, &atlas, "Write the notes", false, cx);
+    seed_todo(&app, &atlas, "Pick the testers", true, cx);
+    app.update(cx, |app, cx| app.changed(vec![atlas.clone()], true, cx));
+    cx.run_until_parked();
+
+    cx.simulate_keystrokes("escape cmd-shift-x");
+    cx.run_until_parked();
+    let tasks = ws
+        .update(cx, |w, _| w.tasks_view())
+        .expect("cmd-shift-x shows the Tasks view");
+    let counts = tasks.update(cx, |t, _| t.counts());
+    assert_eq!(counts, (1, 1, 2), "open, done, all");
+
+    let sel: &'static str = Box::leak(format!("task-check-{}", write.0).into_boxed_str());
+    let check = cx.debug_bounds(sel).expect("the open task has a checkbox");
+    cx.simulate_click(check.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(is_checked(&app, &write, cx), "the click ticked the block");
+    assert_eq!(tasks.update(cx, |t, _| t.counts()).0, 0);
+
+    cx.simulate_keystrokes("cmd-z");
+    cx.run_until_parked();
+    assert!(!is_checked(&app, &write, cx), "one undo step unticks it");
+
+    let sel: &'static str = Box::leak(format!("task-text-{}", write.0).into_boxed_str());
+    let text = cx.debug_bounds(sel).expect("the task's text is drawn");
+    cx.simulate_click(text.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        ws.update(cx, |w, _| w.tasks_view()).is_none(),
+        "the stack is back"
+    );
+    assert_eq!(ws.update(cx, |w, cx| w.main_page(cx)), Some(atlas));
+
+    let nav = cx
+        .debug_bounds("tasks-nav")
+        .expect("the sidebar has a Tasks row");
+    cx.simulate_click(nav.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert!(ws.update(cx, |w, _| w.tasks_view()).is_some());
+}

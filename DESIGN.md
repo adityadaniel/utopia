@@ -87,7 +87,7 @@ No shadows anywhere. Use borders instead. The only exception is the inset focus 
 
 ### 2.5 Icons
 
-16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. Use one consistent set (Lucide matches well). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status).
+16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. Use one consistent set (Lucide matches well). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks).
 
 Icon-only buttons must have an accessible label.
 
@@ -113,7 +113,7 @@ From top to bottom:
 
 1. **Workspace row:** 24px black square with the initial in white, the workspace name (15/600), a chevron-down for switching workspaces, and a collapse-sidebar icon button on the right.
 2. **Search field:** a button that opens the command palette. Height 36, radius 8, white fill, `--line-strong` border, search icon, placeholder text "Search or jump to" in `--muted`, and `⌘K` kbd on the right.
-3. **Nav:** Daily Notes, All pages. Each row is 34px tall, radius 6, 14px text. Active row: `--selected` fill, `--ink`, weight 500, icon in `--link`. Hover: `--nav-hover`.
+3. **Nav:** Daily Notes, Tasks (square-check icon, open to-do count in Mono 12 `--muted` on the right, §4.5), All pages. Each row is 34px tall, radius 6, 14px text. Active row: `--selected` fill, `--ink`, weight 500, icon in `--link`. Hover: `--nav-hover`.
 4. **Mini calendar:** month label (13/600) with prev/next buttons. A 7-column grid, weeks start on Sunday, weekday labels in Mono 11. Day cells are 30px tall. Today: solid `--link` fill with white text. Days with notes: a 4px `--link` dot under the number. Clicking a day opens that daily note.
 5. **Pages:** Mono label "PAGES", then rows 32px tall with an icon (person icon for people pages, page icon for others), the name, and the reference count in Mono 12 `--muted` on the right.
 6. **Tags:** Mono label "TAGS", then tag chips in a wrapping row. Tags are listed here, **not** in Pages.
@@ -232,6 +232,20 @@ Both modes share one list: the pane stack. Single mode just shows its last item.
 - Switching modes keeps the list as it is. Single → Panes shows every entry as a pane, scrolled to the end. Panes → Single shows the last pane.
 
 Keyboard (both modes): each pane is a landmark (section with the page title as its label). Suggested shortcuts: ⌘W closes the focused pane, ⌥← and ⌥→ move focus between panes, and moving focus into a pane scrolls it fully into view.
+
+### 4.5 Tasks
+
+Every to-do in the graph, grouped by the page it is written on (PRD §9.2.2). It takes the main area the way the graph view does; opening a page brings the pane stack back.
+
+- Top bar: back button, the title "Tasks" (`--ink` 500), then a segmented control **Open N | Done N | All N** (same style as §4.4, counts in Mono 12 `--muted`), then the right panel toggle.
+- Content column: the same 760px column as a page, padding 20px top, 28px sides, 32px bottom. Page title "Tasks" (Page title style). No summary line: the counts are in the control.
+- Group (one per page): a 1px `--line-soft` divider with 10px above and below it (12px above the first group). For a daily page, the weekday label (Mono 12 UPPERCASE `--muted`) sits directly above the title. The title is Section heading style in `--ink`, underlined in `--line-strong` on hover, and opens the page. A count badge (§3.4) sits on the right. A 12px chevron in the left gutter folds the group. No page icon: the title starts on the column edge, like the checkboxes below it.
+- Sub-heading (tasks under a heading block): the heading's plain text, 13/20 weight 600 `--ink-3`, 6px above, nothing below. No level tag. Tasks under no heading come first in the group, then one section per heading in the order the headings appear, so a task never looks as if it sits under a heading it is not under.
+- Task row: the §3.1 to-do (16px checkbox, 10px gap, Block text on the 28px grid), 4px below the group title. A done task is `--muted` with a strikethrough. Hover: `--well` fill, radius 6, reaching 8px past the text on each side.
+- Context line (parent is a plain block): 13/20 `--muted` under the task text, aligned with it, 4px tighter to the task above.
+- Nested to-do: indented under its parent's checkbox with the §3.1 thread line.
+- Due label: after the text on the right, Mono 11 UPPERCASE, fully round, padding 4px 7px. **Overdue** is `--danger` on `--danger-bg`; **Today** is `--link` on `--link-tint`. The date itself stays in the text as a date link.
+- Empty state: a 1px dashed `--line-strong` box, radius 10, padding 24px, 48px below the title, centered `--muted` text naming `/To-do` and ⌥↵.
 
 ## 5. Behavior and accessibility checklist
 
