@@ -18,6 +18,7 @@ use utopia_store::{OutgoingRef, PageRow, RefTarget};
 
 use crate::actions::*;
 use crate::app_state::{AppState, IndexUpdated};
+use crate::appearance::UiFontExt;
 use crate::editor::{BlockEditor, EditorEvent};
 use crate::graph_view::{GraphEvent, GraphView};
 use crate::icons::{icon, Icon, ICON_SIZE};
@@ -4526,7 +4527,7 @@ impl Render for Workspace {
             .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
-            .font_family(font.family())
+            .ui_font_style(font)
             .child(left)
             .child(main_col)
             .children(right)

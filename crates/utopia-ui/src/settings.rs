@@ -35,7 +35,7 @@ use std::path::PathBuf;
 use crate::actions::{
     by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
-use crate::appearance::{self, Density, Indent, UiFont};
+use crate::appearance::{self, Density, Indent, UiFont, UiFontExt};
 use crate::help::{shot_image, TOPICS};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::sync_runner;
@@ -769,7 +769,7 @@ impl Render for SettingsView {
             .text_color(th.ink)
             .text_size(px(density.text_size()))
             .line_height(px(density.line_height()))
-            .font_family(appearance::font_family(cx))
+            .ui_font_style(appearance::ui_font(cx))
             .child(
                 div()
                     .flex()
@@ -1403,7 +1403,7 @@ impl SettingsView {
                             // Each sample in its own font, whichever one is in force.
                             .child(
                                 div()
-                                    .font_family(f.family())
+                                    .ui_font_style(f)
                                     .text_size(px(crate::theme::CAPTION_SIZE))
                                     .text_color(th.muted)
                                     .child("Bob dug a big bog by the pond, quickly."),
