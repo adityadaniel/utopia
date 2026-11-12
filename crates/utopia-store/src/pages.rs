@@ -484,6 +484,22 @@ impl Store {
     /// longest-match rule, and create pages for new `[[links]]`, tags and dates so they
     /// exist immediately (W3, FR-1.10). Returns whether the text was rewritten.
     pub fn commit_block(&mut self, page: &PageId, block: &BlockId) -> Result<bool> {
+        self.commit_block_leaving_open(page, block, None)
+    }
+
+    /// [`Store::commit_block`], except that the page link starting at byte `open_link` of
+    /// the block's text creates no page: the editor names a link the user is still typing,
+    /// whose `]]` auto-pairing supplied (AC-3.2: "typing `[[Alpha` (unclosed) does not
+    /// create a page"). The link stays in the text and resolves, or is created, on a later
+    /// commit. The offset is measured on the text as the editor holds it; if NFC or the
+    /// hashtag rule rewrites text before it, the offset no longer starts that link and
+    /// the page is created as before, which loses nothing.
+    pub fn commit_block_leaving_open(
+        &mut self,
+        page: &PageId,
+        block: &BlockId,
+        open_link: Option<usize>,
+    ) -> Result<bool> {
         self.sync_index()?;
         let Some(text) = self
             .page_state(page)?
@@ -501,7 +517,7 @@ impl Store {
         let kind = self.page_state(page)?.block(block).map(|b| b.kind);
         if kind != Some(BlockKind::Code) {
             for r in extract_refs(&new) {
-                if !r.is_page_like() {
+                if !r.is_page_like() || Some(r.range.start) == open_link {
                     continue;
                 }
                 let key = normalize_title(&r.target);
