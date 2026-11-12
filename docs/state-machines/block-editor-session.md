@@ -18,6 +18,7 @@ that drops all five. The tables and line numbers below describe the pre-fix code
 | 4 `idle` survives the `sync_from_store` `None` branch | **fixed, unrepresentable** | the task is `Editing.pending`, and `detach` replaces the whole session. No failing-first test: the old guard order made the surviving task a no-op, so nothing observable changed. |
 | 5 `edits` and `idle` encode one fact twice | **fixed** | the `edits` counter is gone; replacing `pending` (`editor.rs:833`) cancels the previous task, which is that same fact. |
 | 6 `commit_block` ignores IME `marked` | **fixed by the IME machine** (`block-editor-ime-composition.md`) | `commit_block` and `begin` defer while composing; `focus_lost` takes the marked text as committed first (`accept_composition`). |
+| 7 a pause creates a page per prefix | **fixed** | `ac_3_2_a_slow_hashtag_creates_no_page_per_pause`, `ac_3_2_leaving_an_auto_closed_link_creates_no_page`, `fr_2_17_the_caret_between_closing_brackets_is_not_in_the_title`. `typing_link` skipped a bare `#tag`, so each 300 ms pause in `#Apple` committed and created "A", "Ap", "App", …; it now waits in a tag too. Auto-pairing makes `[[Ap` read `[[Ap]]`, so Escape, a blur or a click away created "Ap"; `Editing.open_link` remembers a link whose `]]` auto-pairing typed until the caret leaves it, and the finishing commit (`Store::commit_block_leaving_open`) creates no page for it (AC-3.2). `detect_trigger` no longer reads `[[Title]|]` as the query `Title]`, which let Enter create "Title]". |
 
 What was deliberately not done:
 

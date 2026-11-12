@@ -209,9 +209,14 @@ impl Autocomplete {
 /// The reference trigger the caret is inside, if any (FR-2.17).
 pub fn detect_trigger(text: &str, cursor: usize) -> Option<(AcKind, usize, String)> {
     let before = text.get(..cursor)?;
+    let after = text.get(cursor..).unwrap_or("");
     if let Some(i) = before.rfind("[[") {
         let q = &before[i + 2..];
-        if !q.contains("]]") && !q.contains('\n') {
+        // `[[Title]|]`: the caret is inside the closing `]]`, not in the title, so there is
+        // no query to complete; offering `Create "Title]"` there made a page with a stray
+        // bracket (FR-2.17).
+        let in_closer = q.ends_with(']') && after.starts_with(']');
+        if !q.contains("]]") && !q.contains('\n') && !in_closer {
             return Some(if before[..i].ends_with('#') {
                 (AcKind::BracketTag, i - 1, q.to_string())
             } else {
@@ -332,6 +337,12 @@ pub struct Editing {
     /// A store change arrived while the input method owned the buffer (§13.5):
     /// `sync_from_store` could not look, so it looks once the composition ends.
     pending_sync: bool,
+    /// Where the `[[`/`#[[` the caret is in starts, when auto-pairing typed its `]]` and
+    /// the user has not closed it yet (AC-3.2): the text reads `[[Ap]]`, but what was
+    /// typed is the unclosed `[[Ap`. Dropped once the caret leaves that link — a typed
+    /// `]` steps over the closer, a completion inserts the whole link, an arrow key or
+    /// click moves away — so only a link the user is still typing is left uncreated.
+    open_link: Option<usize>,
 }
 
 impl Editing {
@@ -342,6 +353,7 @@ impl Editing {
             pending: None,
             deferred: None,
             pending_sync: false,
+            open_link: None,
         }
     }
 }
@@ -800,6 +812,16 @@ impl BlockEditor {
             } else {
                 self.field.text = paired;
                 self.field.move_to(caret);
+                // `[` + `[` → `[[|]]`: the `]]` is ours, not the user's (AC-3.2).
+                let opened = self.link_at_caret().filter(|_| {
+                    self.field.text[self.field.cursor()..].starts_with("]]")
+                        && self.field.text[..self.field.cursor()].ends_with("[[")
+                });
+                if let Some(e) = self.session.editing_mut() {
+                    if opened.is_some() {
+                        e.open_link = opened;
+                    }
+                }
                 self.after_edit(window, cx);
             }
             return true;
@@ -983,11 +1005,34 @@ impl BlockEditor {
     /// link before its title is finished, so committing on idle here would create a page
     /// for every pause (`[[An` → "An"). The idle commit waits until the caret has left
     /// the link; blur, Enter and Escape commit at once, as before.
+    ///
+    /// A bare `#tag` counts too (FR-2.15): it is the same link as `[[tag]]`, and it is
+    /// complete at every letter, so committing on idle made a page for each pause
+    /// (`#Apple` → "A", "Ap", "App", …). The idle commit waits until the caret leaves it.
     fn typing_link(&self) -> bool {
         matches!(
             detect_trigger(&self.field.text, self.field.cursor()),
-            Some((AcKind::Page | AcKind::BracketTag, ..))
+            Some((AcKind::Page | AcKind::BracketTag | AcKind::Tag, ..))
         )
+    }
+
+    /// Where the `[[…` or `#[[…` the caret is typing in starts.
+    fn link_at_caret(&self) -> Option<usize> {
+        match detect_trigger(&self.field.text, self.field.cursor()) {
+            Some((AcKind::Page | AcKind::BracketTag, start, _)) => Some(start),
+            _ => None,
+        }
+    }
+
+    /// The auto-closed link the caret is still in (see [`Editing::open_link`]), forgotten
+    /// as soon as the caret is anywhere else.
+    fn track_open_link(&mut self) -> Option<usize> {
+        let here = self.link_at_caret();
+        let e = self.session.editing_mut()?;
+        if e.open_link != here {
+            e.open_link = None;
+        }
+        e.open_link
     }
 
     /// Commit the current block: NFC, hashtag longest-match, page creation for new links.
@@ -1014,10 +1059,18 @@ impl BlockEditor {
             e.pending = None;
         }
         self.expand_relative_dates(&t, finished, cx);
+        // Finishing the block with the caret still in a link that auto-pairing closed
+        // leaves that one link unresolved instead of creating a page for the half-typed
+        // title (AC-3.2). The idle commit never gets here inside a link (`typing_link`).
+        let open = if finished {
+            self.track_open_link()
+        } else {
+            None
+        };
         let before = self.field.text.clone();
         let caret = self.field.cursor();
         let after = self.app.update(cx, |app, cx| {
-            let r = app.store.commit_block(&t.page, &t.block);
+            let r = app.store.commit_block_leaving_open(&t.page, &t.block, open);
             app.report(r);
             app.store.seal_undo();
             app.changed(vec![t.page.clone()], true, cx);
@@ -1099,6 +1152,7 @@ impl BlockEditor {
             // composition (`settle`) is where the trigger is read again.
             return;
         }
+        self.track_open_link();
         let cursor = self.field.cursor();
         let Some((kind, start, query)) = detect_trigger(&self.field.text, cursor) else {
             self.ac = Autocomplete::Closed;
@@ -2397,6 +2451,13 @@ mod tests {
             Some((AcKind::Block, 0, "thes".into()))
         );
         assert_eq!(detect_trigger("[[A]] done", 10), None);
+        // FR-2.17: between the two closing brackets the caret is in the delimiter.
+        assert_eq!(detect_trigger("[[Guiding Activity]]", 19), None);
+        assert_eq!(detect_trigger("#[[Guiding Activity]]", 20), None);
+        assert_eq!(
+            detect_trigger("[[Guiding Activity]]", 18),
+            Some((AcKind::Page, 0, "Guiding Activity".into()))
+        );
         assert_eq!(detect_trigger("C#", 2), None);
         assert_eq!(detect_trigger("#a b", 4), None);
         assert_eq!(
