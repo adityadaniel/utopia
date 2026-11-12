@@ -7722,3 +7722,93 @@ fn ac_12_7_disabling_sync_stops_polling_and_reenable_starts_one_loop(cx: &mut Te
     }
     assert_eq!(calls.load(Ordering::SeqCst), 2);
 }
+
+/// Titles of every page that is not a day, after the index has caught up.
+fn page_titles(app: &Entity<AppState>, cx: &mut VisualTestContext) -> Vec<String> {
+    app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        let mut t: Vec<String> = app
+            .store
+            .list_pages(true)
+            .unwrap()
+            .into_iter()
+            .filter(|p| !p.is_daily())
+            .map(|p| p.title.clone())
+            .collect();
+        t.sort();
+        t
+    })
+}
+
+/// One keystroke at a time with a pause after each that is longer than the idle commit
+/// (300 ms, AC-3.2), the way a slow typist leaves the block alone mid-word.
+fn type_slowly(cx: &mut VisualTestContext, keys: &[&str]) {
+    for k in keys {
+        cx.simulate_keystrokes(k);
+        cx.run_until_parked();
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(400));
+        cx.run_until_parked();
+    }
+}
+
+#[gpui::test]
+fn ac_3_2_a_slow_hashtag_creates_no_page_per_pause(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    // FR-2.15: `#Apple` is the same link as `[[Apple]]`, so a pause inside it must not
+    // commit it any more than a pause inside `[[Appl` does.
+    type_slowly(cx, &["#", "shift-a", "p", "p", "l", "e"]);
+    assert_eq!(page_titles(&app, cx), Vec::<String>::new());
+    // Leaving the tag is what commits it: one page, the whole word.
+    type_slowly(cx, &["space", "x"]);
+    assert_eq!(page_titles(&app, cx), vec!["Apple".to_string()]);
+}
+
+#[gpui::test]
+fn ac_3_2_a_slow_link_creates_no_page_per_pause(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    type_slowly(cx, &["[", "[", "shift-a", "p", "p", "l", "e"]);
+    assert_eq!(page_titles(&app, cx), Vec::<String>::new());
+    type_slowly(cx, &["]", "]", "space", "x"]);
+    assert_eq!(page_titles(&app, cx), vec!["Apple".to_string()]);
+}
+
+#[gpui::test]
+fn ac_3_2_leaving_an_auto_closed_link_creates_no_page(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    // `[[` pairs to `[[|]]`, so the text says `[[Ap]]`, but the user never closed it:
+    // AC-3.2's "`[[Alpha` (unclosed) does not create a page" holds on Escape too.
+    type_slowly(cx, &["[", "[", "shift-a", "p", "escape", "escape"]);
+    assert_eq!(rows(&app, &page, cx)[0].0, "[[Ap]]");
+    assert_eq!(page_titles(&app, cx), Vec::<String>::new());
+}
+
+#[gpui::test]
+fn ac_3_2_leaving_a_closed_link_still_creates_its_page(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    // Typing the closer steps over the paired one: the user closed it, so it commits.
+    type_slowly(cx, &["[", "[", "shift-a", "p", "]", "]", "escape"]);
+    assert_eq!(page_titles(&app, cx), vec!["Ap".to_string()]);
+}
+
+#[gpui::test]
+fn ac_3_2_a_hashtag_left_mid_word_commits_as_typed(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    // A bare tag has no closer, so Escape finishes it as typed (FR-2.15).
+    type_slowly(cx, &["#", "shift-a", "p", "escape"]);
+    assert_eq!(page_titles(&app, cx), vec!["Ap".to_string()]);
+}
+
+#[gpui::test]
+fn fr_2_17_the_caret_between_closing_brackets_is_not_in_the_title(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    // One `]` steps over the first paired closer: `[[Guiding Activity]|]`. The menu must
+    // not offer `Create "Guiding Activity]"` there, so Enter splits as usual.
+    cx.simulate_input("[[Guiding Activity");
+    cx.run_until_parked();
+    type_slowly(cx, &["]", "enter"]);
+    assert_eq!(page_titles(&app, cx), vec!["Guiding Activity".to_string()]);
+    assert_eq!(rows(&app, &page, cx)[0].0, "[[Guiding Activity]");
+}
