@@ -144,7 +144,8 @@ access level controls (403 when `!level.permits(op.kind())`, never queued; 400 f
 is not an `Op`). The access setting is `<config>/mcp/<graph_key>.json`,
 `{"version": 1, "access": "off" | "read" | "write", "when_closed": false}`
 (`utopia_api::access`): missing, malformed, an unknown version or value means Off (MC-1); it is
-written atomically, read at start-up (a change needs a relaunch until the Settings tab), and no
+written atomically, read at start-up and by Settings → Assistants, which applies a change to the
+running server with no restart (the headless path re-reads it for each call), and no
 environment variable or flag raises it. With Off and no `UTOPIA_API` there is no server and no
 socket. `utopia_api::Client` is the blocking client for an owner's API. `cargo run -p xtask -- bundle` builds `target/Utopia.app`, whose
 Info.plist claims the `utopia://` scheme (registering it with LaunchServices happens when the
@@ -404,7 +405,20 @@ Implemented:
   the keymap is consulted, so the keys being recorded cannot also fire their own action —
   without that, rebinding onto Cmd+Q would quit the app. Keys are compared with
   `canonical_keys` (gpui's spelling), so `cmd-alt-t` and `alt-cmd-t` are one binding.
-- **v1.2+ / P2 (§4.2, §16):** query blocks (`{{query: …}}`, Roam syntax, SQL-backed, `/Query`)
+- **Assistant access over MCP (§13.8, MC-1 to MC-14; `docs/mcp-design.md`):** `utopia mcp
+  --graph <file>` is a stdio server for Claude Code, Claude Desktop and Codex, in both
+  protocol eras (the handshake revisions and 2026-07-28). Each tool call is one
+  `utopia_api::Op`: with the app open it runs there through `POST /v1/op`, and with the app
+  closed it runs headless only when the graph's access file says `when_closed` (MC-5). It
+  adds no write path, and page text goes only into tool results (MC-11). The six read tools
+  are built (`search`, `list_pages`, `read_page`, `read_block`, `get_backlinks`, `run_query`);
+  an outline line ends with the block id marker `{id:01J8…}`, which is not Utopia markup, so
+  an agent can send a line back; a read never makes a page (FR-1.2) and each result is cut at
+  24 KB with the call that continues it. Access is per graph and off by default (MC-1);
+  `Op::kind()` is the one read/write classification. `utopia mcp config <client>` prints the
+  entry that Settings → Assistants also copies, each pinning an absolute `--graph` (MC-13).
+  The four write tools are phase 3 and not built yet.
+- **v1.2+ / P2 (§4.2, Appendix A):** query blocks (`{{query: …}}`, Roam syntax, SQL-backed, `/Query`)
   with queryable `key:: value` attributes; graph view (Cmd+Shift+G, force-directed, local/global,
   journal toggle); attachments (drop files or `/Attach a file`, image previews, file chips,
   synced and E2E-encrypted, exported); PDF viewer with rectangle highlights stored as quote
@@ -425,9 +439,10 @@ Known limits (pick these up deliberately, don't paper over them):
   compilation, because the Metal toolchain is not installed); later launches draw in ~150 ms.
 - Screenshots come from the app capturing its own window (`UTOPIA_SHOT_SCRIPT`); colours and
   typography are checked by eye, not by tests.
-- Settings → Help embeds its screenshots with `include_bytes!` (~1.3 MB), so they go stale when
+- Settings → Help embeds its screenshots with `include_bytes!` (~1.2 MB), so they go stale when
   the UI changes: rerun `cargo run -p xtask -- help-shots` and look at the PNGs. They are shown
-  at a fixed size because gpui only learns an image's aspect ratio a frame after layout.
+  at a fixed 640 px width with the capture's own height ratio, because gpui only learns an
+  image's aspect ratio a frame after layout.
 - `open_settings` is deferred (`cx.defer`): gpui refuses to update a window from inside its own
   update, and global action handlers run during one, so Cmd+, pressed while Settings is focused
   would otherwise open a second Settings window instead of raising the first.
@@ -449,6 +464,18 @@ Known limits (pick these up deliberately, don't paper over them):
 - The folder transport re-reads every file of a changed page (imports are idempotent) and
   never compacts, because it must not delete other devices' files.
 - Very large flat sibling lists (≫5k blocks under one parent) make each insert O(n).
+- MCP: the four write tools are not built, so the level Read and write permits no MCP tool
+  that changes a note. `tools/list` does not depend on the level (only `--read-only` removes
+  a write tool, and none exists yet), because legacy clients do not ask for the list again.
+- MCP, app closed: a call does not sync (the write waits in the outbox for the next launch),
+  and an encrypted graph needs a passphrase the process can read
+  (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no
+  prompt is possible. A cancel keeps back the answer but does not reverse a write the owner
+  already started. `serve-api` reads the access file once at start, so its `/v1/op` level
+  follows the file only on restart; the app re-levels its own server at once.
+- MCP: Claude Desktop has not been run against `utopia mcp` (its entry needs
+  `claude_desktop_config.json` and a restart, so the owner adds it). Codex and Claude Code
+  were, and their protocol eras are in `docs/mcp-design.md` §6.
 - Stacked panes (DESIGN.md §4.3): gpui has no `position: sticky`, so `pane_stack::Geometry`
   places each pane; when the window cannot hold every spine plus a whole pane, the oldest
   spines fold under one another at the left edge (the newest pane always shows whole).

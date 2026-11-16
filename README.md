@@ -55,7 +55,9 @@ rename that merges duplicate pages and rewrites their links; journal and page te
 quick capture (in-app and system-wide); query blocks; attachments and a PDF viewer with
 highlights; undo/redo; Markdown, JSON and OPML export; Roam JSON import; optional encryption
 at rest; sync through a self-hostable relay, a shared folder or the LAN, with end-to-end
-encryption; a local HTTP automation API with `utopia://` links; and WASM plugins.
+encryption; a local HTTP automation API with `utopia://` links; assistant access over MCP, a
+stdio server for Claude Code, Claude Desktop and Codex that is off until you turn it on in
+Settings → Assistants; and WASM plugins.
 `AGENTS.md` → *Scope* has the full list.
 
 ## Build and run from source
@@ -115,10 +117,10 @@ list.
 
 The workspace is split into crates under `crates/`: `utopia-core` (domain), `utopia-doc`
 (CRDT), `utopia-store` (SQLite), `utopia-sync` / `utopia-syncd` (sync client and relay),
-`utopia-ui` (GPUI), `utopia-app` (the binary), plus `utopia-api`, `utopia-plugin` and
-`utopia-ffi`. [`AGENTS.md`](AGENTS.md) explains the layout, the architecture rules,
-headless commands such as `doctor`, `export` and `import-roam`, and how to drive the app
-for screenshots. [`PRD.md`](PRD.md) is the spec.
+`utopia-ui` (GPUI), `utopia-app` (the binary), plus `utopia-mcp`, `utopia-api`,
+`utopia-plugin` and `utopia-ffi`. [`AGENTS.md`](AGENTS.md) explains the layout, the
+architecture rules, headless commands such as `doctor`, `export` and `import-roam`, and how
+to drive the app for screenshots. [`PRD.md`](PRD.md) is the spec.
 
 ## Status and limits
 
