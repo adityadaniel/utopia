@@ -485,8 +485,10 @@ Known limits (pick these up deliberately, don't paper over them):
   page, which is where `outline::move_to` puts it, and its answer says where it landed; a
   move into the block's own subtree or past depth 12 (FR-2.9) fails with no write.
   `delete_block` can empty a page: the last block of a page can become a tombstone.
-- MCP, app closed: a call does not sync (the write waits in the outbox for the next launch),
-  and an encrypted graph needs a passphrase the process can read
+- MCP, app closed: a call does not sync (the write waits in the outbox for the next launch)
+  and leaves no undo step (the undo stack is the store's memory, and the store the call
+  opened is dropped before it answers, so `delete_block` says the app cannot undo it), and an
+  encrypted graph needs a passphrase the process can read
   (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no
   prompt is possible. A cancel keeps back the answer but does not reverse a write the owner
   already started. `serve-api` reads the access file once at start, so its `/v1/op` level

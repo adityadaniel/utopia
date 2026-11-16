@@ -203,6 +203,10 @@ release the lock.
   `open_graph` in `crates/utopia-app/src/mcp.rs`: `open_store` asks for a passphrase when it
   finds none.)
 - It does not sync. Writes go to the outbox and the app sends them at its next start.
+- It leaves no undo step in the app. The undo stack is the store's memory, and the store the
+  call opened is dropped before the answer is written, so `Cmd+Z` cannot reverse a headless
+  write (MC-9 applies when the app runs the call). `delete_block`'s answer says which of the
+  two happened instead of promising a recovery that is not there.
 - Slice 1.4 measured the cost of one call on the bench graph: 1.4 ms, median of 7, in
   release. `xtask bench` fails above 50 ms (§10).
 
@@ -619,7 +623,8 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 
 ## 10. Limits
 
-- **No sync when the app is closed.** See §2.3.
+- **No sync and no undo step when the app is closed.** See §2.3. A headless write is
+  durable, but the app's `Cmd+Z` cannot reverse it: `delete_block`'s answer says so.
 - **All four write tools exist.** Slices 3.1 to 3.3 added `append_blocks`, `update_block`,
   `move_block` and `delete_block`; the level `Read and write` permits them, and `/v1/op`
   permits every write op. `tools/list` offers the six read tools and those four.

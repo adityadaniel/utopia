@@ -14,6 +14,7 @@
 //! discovery file, which is what [`Router`] retries the lock for.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -79,6 +80,18 @@ impl BackendError {
 /// so a caller may hand a backend to it from anywhere.
 pub trait Backend: Send + Sync {
     fn call(&self, op: Op) -> Result<Value, BackendError>;
+
+    /// Whether the process that runs a call still holds the undo group when it answers: the
+    /// owner that keeps the store ([`Remote`], the app open) does, so `Cmd+Z` in Utopia
+    /// reverses an agent's write (MC-9). The headless path ([`Direct`]) opens a store for the
+    /// one call and drops it, and the undo stack is that store's memory, so nothing outlives
+    /// the answer. A tool that offers a way back reads this rather than guessing (PR 9's
+    /// review: a headless `delete_block` promised a Cmd+Z the app could not give). [`Router`]
+    /// answers for the path that served its last call.
+    fn keeps_undo(&self) -> bool {
+        // The safe answer for a backend that does not say: promise no way back.
+        false
+    }
 }
 
 /// The headless path: one call, one store, one owner lock (design §2.3).
@@ -233,6 +246,11 @@ impl Backend for Remote {
             )),
         }
     }
+
+    /// The owner ran the call and still holds the store, so its undo stack has the group.
+    fn keeps_undo(&self) -> bool {
+        true
+    }
 }
 
 /// The rule that picks the path for each call (PR 4):
@@ -247,6 +265,11 @@ pub struct Router {
     direct: Direct,
     remote: Remote,
     retry: Duration,
+    /// Whether the path that served the last call keeps its undo group
+    /// ([`Backend::keeps_undo`]). The protocol runs one call at a time (design §3.1), so a
+    /// tool asks right after its own call. `Direct` answers `false` and `Remote` `true`, and
+    /// the router is the only place that knows which of the two ran.
+    last_kept_undo: AtomicBool,
 }
 
 impl Router {
@@ -259,6 +282,7 @@ impl Router {
             direct,
             remote,
             retry: Self::RETRY,
+            last_kept_undo: AtomicBool::new(false),
         }
     }
 
@@ -278,6 +302,17 @@ impl Router {
         self.retry = wait;
         self
     }
+
+    /// Record which path ran, so a tool that finishes after [`Backend::call`] gets the fact
+    /// right: the headless call dropped its store, and the owner still holds it.
+    fn answer(
+        &self,
+        answer: Result<Value, BackendError>,
+        kept_undo: bool,
+    ) -> Result<Value, BackendError> {
+        self.last_kept_undo.store(kept_undo, Ordering::Relaxed);
+        answer
+    }
 }
 
 impl Backend for Router {
@@ -292,23 +327,29 @@ impl Backend for Router {
         // 2. A free lock is the headless call, or "Open Utopia" (MC-5).
         match self.direct.call(op.clone()) {
             Err(BackendError::OwnedElsewhere { .. }) => {}
-            other => return other,
+            other => return self.answer(other, false),
         }
 
         // 3. Another process owns the graph: it runs the op over its API, at its level.
         match self.remote.call(op.clone()) {
             Err(BackendError::NoOwnerApi { .. }) => {}
-            other => return other,
+            other => return self.answer(other, true),
         }
 
         // 4. The owner runs no API. A short write command may hold the lock, so try it
         //    again; a lock that stays held gives the text that says what to do (PR 4).
-        match self.direct.call_with(op, self.retry) {
+        let answer = match self.direct.call_with(op, self.retry) {
             Err(BackendError::OwnedElsewhere { .. }) => {
                 Err(BackendError::failed(503, OWNER_NO_API))
             }
             other => other,
-        }
+        };
+        self.answer(answer, false)
+    }
+
+    /// The path that served the last call: only the owner keeps the undo group.
+    fn keeps_undo(&self) -> bool {
+        self.last_kept_undo.load(Ordering::Relaxed)
     }
 }
 
@@ -337,6 +378,34 @@ mod tests {
             config,
             Box::new(move || Store::open(&g).map_err(|e| e.to_string())),
         )
+    }
+
+    /// MC-9: only the process that holds the store can undo a write after it answers. The
+    /// headless path opens one store per call and drops it, so it must not claim otherwise,
+    /// and the owner (`Remote`) must.
+    #[test]
+    fn mc_9_only_the_owner_keeps_the_undo_group() {
+        let (_dir, graph, config) = scratch();
+        assert!(
+            !direct(&graph, &config).keeps_undo(),
+            "a headless call drops its store, and the undo group with it"
+        );
+        assert!(
+            Remote::new(graph.clone(), config.clone()).keeps_undo(),
+            "the owner holds the store, so its history has the group"
+        );
+
+        // The router is what `utopia mcp` runs, and it is the only place that knows which
+        // path served a call: after a headless one it must answer for `Direct` (PR 9's
+        // review was that it answered the trait's default for every path).
+        std::fs::write(&graph, b"").unwrap();
+        set_access(&config, &graph, Level::Read, true);
+        let router = router(&graph, &config, Duration::ZERO);
+        router.call(Op::ListPages { daily: false }).unwrap();
+        assert!(
+            !router.keeps_undo(),
+            "the free lock means the headless path ran"
+        );
     }
 
     fn set_access(config: &std::path::Path, graph: &std::path::Path, level: Level, closed: bool) {

@@ -83,8 +83,8 @@ Every update_block call is one undo step in Utopia.
 move_block moves one block and everything under it, within its page or to another page
 named by `page`. The blocks keep their ids, so a ((reference)) to one still resolves.
 delete_block removes one block and everything under it as a tombstone: a ((reference)) to
-it still resolves and reads the block as deleted, and the owner's undo restores the
-subtree. Both are one undo step in Utopia.";
+it still resolves and reads the block as deleted, and the open app's undo restores the
+subtree. Both are one undo step when the app that holds the graph runs the call.";
 
 /// What a tool call answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,8 +238,9 @@ const CATALOG: &[Tool] = &[
         name: "delete_block",
         description: "Delete one block and everything under it. Utopia keeps a tombstone: the \
                       blocks keep their ids, so a ((reference)) to one still resolves and says \
-                      the block is deleted, and one undo in Utopia restores the whole subtree. \
-                      The answer says how many blocks became tombstones.",
+                      the block is deleted. One undo in the open app restores the whole \
+                      subtree, and the answer says whether that undo exists. It also says how \
+                      many blocks became tombstones.",
         kind: OpKind::Write,
         // Design §4.1: it takes blocks out of the page, so it is destructive.
         destructive: true,
@@ -775,7 +776,9 @@ fn run_move_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, Tool
 fn run_delete_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
     let id = args.string("id")?;
     let body = backend.call(Op::DeleteBlock { id })?;
-    Ok(render_delete(&body))
+    // MC-5, MC-9: only the process that keeps the store keeps the undo step, so only it can
+    // promise the owner a `Cmd+Z`.
+    Ok(render_delete(&body, backend.keeps_undo()))
 }
 
 /// A `text` argument as the block should hold it (PRD §13.8 MC-8, design §4).
@@ -1127,8 +1130,11 @@ fn render_move(body: &Value) -> String {
 }
 
 /// What `delete_block` answers: how many blocks became tombstones, that a reference still
-/// finds them, and how the owner puts them back.
-fn render_delete(body: &Value) -> String {
+/// finds them, and whether there is a way back. `keeps_undo` says the call ran in the process
+/// that holds the store (the open app); a headless call dropped its store, and with it the
+/// undo stack, before it answered, so promising `Cmd+Z` there would name a recovery the owner
+/// cannot make (MC-5, MC-9).
+fn render_delete(body: &Value, keeps_undo: bool) -> String {
     let blocks = body["blocks"].as_u64().unwrap_or(0);
     let title = one_line(body["title"].as_str().unwrap_or_default());
     let id = body["id"].as_str().unwrap_or_default();
@@ -1142,8 +1148,21 @@ fn render_delete(body: &Value) -> String {
     }
     doc.line(format!(
         "They are tombstones, and block {id} keeps its id: a ((reference)) to it still \
-         resolves and shows a deleted block. Cmd+Z in Utopia restores the whole subtree."
+         resolves and shows a deleted block."
     ));
+    match keeps_undo {
+        // The open app ran the call and still holds the store: its history has the group.
+        true => doc.line(
+            "Cmd+Z in Utopia restores the whole subtree while the app that ran this call is \
+             open; its undo history does not outlive a restart.",
+        ),
+        // `utopia mcp` ran it while Utopia was closed (MC-5): the store is gone, and the
+        // undo stack went with it. Say so instead of naming a Cmd+Z that does nothing.
+        false => doc.line(
+            "Utopia was closed when this call ran, so it left no undo step: the app cannot \
+             bring the subtree back.",
+        ),
+    }
     doc.finish()
 }
 
@@ -1717,17 +1736,42 @@ mod tests {
     fn mc_8_the_delete_result_names_the_tombstone() {
         let body = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 2});
         assert_eq!(
-            render_delete(&body),
+            render_delete(&body, true),
             "Deleted 2 blocks on \"Project X\": the block and the 1 under it.\n\
              They are tombstones, and block 01A keeps its id: a ((reference)) to it still \
-             resolves and shows a deleted block. Cmd+Z in Utopia restores the whole \
-             subtree.\n"
+             resolves and shows a deleted block.\n\
+             Cmd+Z in Utopia restores the whole subtree while the app that ran this call is \
+             open; its undo history does not outlive a restart.\n"
         );
         let one = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 1});
         assert_eq!(
-            render_delete(&one).lines().next(),
+            render_delete(&one, true).lines().next(),
             Some("Deleted the block on \"Project X\".")
         );
+    }
+
+    /// MC-5, MC-9: the headless path drops its store, so the undo stack is gone before the
+    /// answer is written. The result says that instead of offering a `Cmd+Z` that does
+    /// nothing (PR 9's review).
+    #[test]
+    fn mc_9_the_delete_result_promises_undo_only_where_it_exists() {
+        let body = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 2});
+        let headless = render_delete(&body, false);
+        assert!(
+            !headless.contains("Cmd+Z in Utopia restores"),
+            "no recovery the app cannot make: {headless}"
+        );
+        assert!(
+            headless.contains("left no undo step"),
+            "it says why: {headless}"
+        );
+        assert!(
+            headless.contains("tombstone"),
+            "the tombstone is still what it is: {headless}"
+        );
+        let owned = render_delete(&body, true);
+        assert!(owned.contains("Cmd+Z in Utopia restores"), "{owned}");
+        assert!(!owned.contains("left no undo step"), "{owned}");
     }
 
     /// MC-8: a line copied from `read_block` arrives as the block's text — the outline's

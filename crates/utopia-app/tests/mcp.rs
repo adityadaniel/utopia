@@ -434,6 +434,82 @@ fn mc_4_a_call_goes_to_the_open_owner_through_its_api() {
     assert!(OwnerLock::try_acquire(&s.graph).unwrap().is_some());
 }
 
+/// The live block ids of one page, read from a fresh store (the owner commits and flushes
+/// each write, so its work is visible here).
+fn live_ids(graph: &Path, title: &str) -> Vec<String> {
+    let mut store = Store::open(graph).unwrap();
+    let page = store.find_page(title).unwrap().expect("the page");
+    let st = store.page_state(&page).unwrap().clone();
+    st.live_preorder()
+        .into_iter()
+        .map(|(id, _)| id.as_str().to_string())
+        .collect()
+}
+
+/// MC-9, MC-5: the delete answer says who can undo it. A headless call drops its store (and
+/// the undo stack with it), so it must not offer a `Cmd+Z`; a call the owner runs is one step
+/// on the app's stack and says so. PR 9's review: the answer promised the undo either way.
+#[test]
+fn mc_9_the_delete_answer_says_who_can_undo_it() {
+    let s = Scratch::new();
+    s.access(Level::Write, true);
+    let headless_target = live_ids(&s.graph, "Zebra")[0].clone();
+
+    // The app closed: `utopia mcp` opens the store, deletes, and closes it.
+    let mut server = s.mcp(&[]);
+    server.send(tool_call(
+        1,
+        "delete_block",
+        json!({"id": headless_target}),
+        Some(modern_meta()),
+    ));
+    let (text, is_error) = text_of(&server.read());
+    assert!(!is_error, "{text}");
+    assert!(text.contains("tombstone"), "{text}");
+    assert!(
+        text.contains("left no undo step"),
+        "a headless delete says the app cannot undo it: {text}"
+    );
+    assert!(
+        !text.contains("Cmd+Z in Utopia restores"),
+        "and does not offer a recovery that is not there: {text}"
+    );
+    assert!(server.finish().status.success());
+
+    // The owner runs the next delete: `serve-api` holds the graph and its store, so the
+    // group is on its undo stack.
+    let mut owner = s.serve_api();
+    let mut server = s.mcp(&[]);
+    server.send(tool_call(
+        2,
+        "append_blocks",
+        json!({"page": "Zebra", "markdown": "- a block the owner will delete\n"}),
+        Some(modern_meta()),
+    ));
+    let (text, is_error) = text_of(&server.read());
+    assert!(!is_error, "{text}");
+    let owner_target = live_ids(&s.graph, "Zebra")
+        .pop()
+        .expect("the block the owner just added");
+    server.send(tool_call(
+        3,
+        "delete_block",
+        json!({"id": owner_target}),
+        Some(modern_meta()),
+    ));
+    let (text, is_error) = text_of(&server.read());
+    assert!(!is_error, "{text}");
+    assert!(
+        text.contains("Cmd+Z in Utopia restores"),
+        "the owner keeps the undo group, and the answer says so: {text}"
+    );
+    assert!(!text.contains("left no undo step"), "{text}");
+    assert!(server.finish().status.success());
+
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+}
+
 /// MC-5, step 4 of the rule: a process owns the graph but runs no API (what a level turned
 /// on while the app runs looks like until Settings can change it live). The command retries
 /// the lock for 2 s and then tells the owner what to do.

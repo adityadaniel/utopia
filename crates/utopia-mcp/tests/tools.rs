@@ -1328,3 +1328,22 @@ fn mc_11_the_move_and_delete_tools_are_described_without_page_text() {
         assert!(!description.contains("Ana"), "{description}");
     }
 }
+
+/// MC-5, MC-9: a headless delete (`when_closed`, the app closed) opens a store for the one
+/// call and drops it, and the undo stack lives in that store's memory. The answer must not
+/// offer the owner a Cmd+Z that is not there: it says which of the two happened.
+#[test]
+fn mc_9_a_headless_delete_does_not_promise_an_undo_step() {
+    let graph = Graph::new();
+    let (text, is_error) = delete_block(&graph, json!({"id": graph.root}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains("tombstone"), "{text}");
+    assert!(
+        !text.contains("Cmd+Z in Utopia restores"),
+        "the app has no undo step for a call it did not run: {text}"
+    );
+    assert!(
+        text.contains("no undo step"),
+        "it says the app cannot undo this call: {text}"
+    );
+}

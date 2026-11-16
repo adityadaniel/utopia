@@ -140,6 +140,40 @@ MCP tool call requires approval, but approval policy is never
 the destructive hint costs a Codex user an approval flag, not data. `move_block` is not
 destructive and runs under the default policy.
 
+## After the review: the fixes, and what they change on screen
+
+Nothing on screen changed. Two answers did, and both were reviewed after the captures
+above were taken; the captures and the client runs stay as they happened.
+
+**A delete's undo advice depends on who ran it.** The undo stack is the store's memory, so a
+headless call (the app closed, `when_closed` on) has none left when it answers. The tool now
+says which of the two happened. Headless, on a fresh scratch graph:
+
+```text
+Deleted the block on "Reading".
+They are tombstones, and block 01M7JD6HKBYAJHAKE6CY4ZC6KA keeps its id: a ((reference)) to it still resolves and shows a deleted block.
+Utopia was closed when this call ran, so it left no undo step: the app cannot bring the subtree back.
+```
+
+With an owner holding the graph (`utopia serve-api <graph>` in the background, so the call
+goes through `/v1/op`), the same call answers:
+
+```text
+Deleted 2 blocks on "Reading": the block and the 1 under it.
+They are tombstones, and block 01M7JD6HKB8GQFWG3J2F5X51VA keeps its id: a ((reference)) to it still resolves and shows a deleted block.
+Cmd+Z in Utopia restores the whole subtree while the app that ran this call is open; its undo history does not outlive a restart.
+```
+
+The delete captured in `5-after-delete.png` ran in the open app, so its `Cmd+Z` sentence was
+true; it now carries the "while the app that ran this call is open" clause. `doctor` was
+clean after each of these calls too (`ok: all invariants hold`).
+
+**A cross-page move is measured on what is live.** The depth ceiling had counted the rows a
+subtree left behind when part of it moved away, so a one-block move into another page could
+be refused as "maximum depth exceeded" because of the chain it used to hang from.
+`crates/utopia-api/tests/move_delete.rs::mc_8_a_moved_away_subtree_does_not_count_towards_the_depth_ceiling`
+covers it; no capture shows it, because the refusal produces no screen.
+
 ## Claude Desktop — for the owner to run
 
 Not run here: it needs an entry in `claude_desktop_config.json` and a restart, and that file
