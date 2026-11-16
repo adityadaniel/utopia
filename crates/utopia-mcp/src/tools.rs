@@ -155,8 +155,8 @@ const CATALOG: &[Tool] = &[
     Tool {
         name: "run_query",
         description: "Run a Roam-style query block against the graph, for example \
-                      `{and: [[Project X]] {todo: open}}`, and return the matching blocks \
-                      grouped by page.",
+                      `{and: [[Project X]] [[TODO]]}` (the unchecked to-dos on, under, or \
+                      linking Project X), and return the matching blocks grouped by page.",
         kind: OpKind::Read,
         destructive: false,
         schema: schema_run_query,

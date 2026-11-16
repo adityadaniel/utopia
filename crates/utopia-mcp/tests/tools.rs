@@ -387,6 +387,37 @@ fn mc_7_an_oversized_block_keeps_its_marker_and_says_it_was_cut() {
     assert!(text.contains("longer than one result"), "{text}");
 }
 
+/// MC-7: the query example the tool description advertises must parse. A model that
+/// follows the description must not be taught syntax the parser refuses.
+#[test]
+fn mc_7_the_advertised_query_example_parses() {
+    let graph = Graph::new();
+    let described = support::run(
+        vec![
+            initialize(1, "2025-11-25"),
+            support::request(2, "tools/list", json!({})),
+        ],
+        graph.backend(),
+        Options::new(),
+    );
+    let tools = described[1]["result"]["tools"].as_array().unwrap();
+    let description = tools.iter().find(|t| t["name"] == "run_query").unwrap()["description"]
+        .as_str()
+        .unwrap();
+    let example = description
+        .split('`')
+        .nth(1)
+        .unwrap_or_else(|| panic!("the description shows an example: {description}"));
+    assert!(
+        utopia_core::query::parse(example).is_ok(),
+        "{example:?} must parse: {:?}",
+        utopia_core::query::parse(example)
+    );
+    // And it is a query the backend accepts.
+    let (text, is_error) = call(&graph, "run_query", json!({"query": example}));
+    assert!(!is_error, "{text}");
+}
+
 /// MC-11: the catalog and the guide are the same for two graphs with different contents.
 #[test]
 fn mc_11_the_catalog_does_not_depend_on_the_graph() {
