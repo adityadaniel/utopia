@@ -1,4 +1,4 @@
-//! Local automation API (P2, §16 "In-app automation API → Local HTTP API + `utopia://`").
+//! Local automation API (P2; the row "In-app automation API" in §4.1 and Appendix A).
 //!
 //! The server only accepts loopback connections, requires a bearer token, and refuses
 //! browser requests (any `Origin` header, or a `Host` that is not loopback — DNS
