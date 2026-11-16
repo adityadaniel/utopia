@@ -59,6 +59,18 @@ use writer::{Job, PageJob, Persister, TrashOp};
 /// Fold `page_update` rows into the snapshot after this many updates.
 const COMPACT_AFTER: i64 = 128;
 
+/// Whether a page a caller installs is committed at once or left for the caller's flush.
+///
+/// The ordinary path is [`Ship::Now`]. `Op::AppendOutline` uses [`Ship::Later`] for the
+/// pages its `[[links]]` make: the outline and those pages then travel in one flush, which
+/// is one SQLite transaction, so a failure cannot leave the outline durable without the
+/// pages it named (MC-8, AGENTS.md rule 2).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ship {
+    Now,
+    Later,
+}
+
 #[derive(Debug, Error)]
 pub enum StoreError {
     #[error("database: {0}")]
@@ -694,6 +706,17 @@ impl Store {
 
     /// Queue shard commits; strict mode ships them immediately.
     fn queue(&mut self, pages: &[(PageId, Option<DocDelta>)], enqueue: bool) -> Result<()> {
+        self.queue_with(pages, enqueue, Ship::Now)
+    }
+
+    /// [`Store::queue`], except that [`Ship::Later`] leaves the pages in `pending` for the
+    /// caller's own flush, so they land in the caller's transaction (MC-8, rule 2).
+    fn queue_with(
+        &mut self,
+        pages: &[(PageId, Option<DocDelta>)],
+        enqueue: bool,
+        ship: Ship,
+    ) -> Result<()> {
         let mut promoted = false;
         // Pages a promoted draft had to be merged into (§8.6); their shards changed too.
         let mut merged_into: Vec<PageId> = Vec::new();
@@ -723,7 +746,7 @@ impl Store {
         for page in merged_into {
             self.push_pending(&page, None, enqueue);
         }
-        if self.debounced && !promoted {
+        if ship == Ship::Later || (self.debounced && !promoted) {
             Ok(())
         } else {
             self.flush()

@@ -105,3 +105,22 @@ command from the app bundle so the printed path is the bundle's):
 Add it below `mcpServers` in
 `~/Library/Application Support/Claude/claude_desktop_config.json`, start Claude Desktop
 again, and ask it to call `append_blocks` on a page of a scratch graph.
+
+## Re-run after the review fixes
+
+The two review findings (the markdown argument's indentation, and the outline sharing one
+transaction with the pages its links make) changed the write path, so both verifications
+were repeated with the fixed binary:
+
+- The app run behind `1-before.png` / `2-appended.png` / `3-undone-after-undo.png` was
+  repeated on a freshly seeded graph; the three captures are byte-identical to the ones in
+  this directory (same MD5), so one Cmd+Z still takes the whole outline off.
+- One Codex 0.169.0 run on a fresh scratch graph (`target/verify-clients2`), app closed:
+  it answered `Appended 2 blocks to "November 16th, 2026"`, `read_page today` shows
+
+  ```text
+  - Written by Codex after the atomicity fix {id:01M7J6XAH0XJVQT3JAK03AM7F4}
+    - with a child {id:01M7J6XAH0AGA27SQETN5BSY4Z}
+  ```
+
+  and `utopia doctor` says `ok: all invariants hold`.

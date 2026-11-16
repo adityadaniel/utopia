@@ -1374,6 +1374,86 @@ mod tests {
         assert!(store.doctor().unwrap().is_ok());
     }
 
+    /// MC-8, rule 2: the outline and the pages its links make are one transaction. When the
+    /// dependent write fails, no part of the outline is durable, so a retry cannot duplicate
+    /// it. The failure comes from SQLite itself (a trigger on the linked page's row), so the
+    /// writer path runs unchanged.
+    #[test]
+    fn mc_8_a_failed_link_page_write_leaves_no_outline() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.utopia");
+        let mut store = Store::open(&path).unwrap();
+        store.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+        let page = store.create_page("Log").unwrap();
+        store.sync_index().unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_linked_page BEFORE INSERT ON page
+                 WHEN NEW.title_key = 'ana'
+                 BEGIN SELECT RAISE(ABORT, 'injected linked-page failure'); END",
+            )
+            .unwrap();
+
+        let _ = handle(
+            &mut store,
+            append_outline("Log", "- met [[Ana]] there\n", None, false),
+        );
+        // The writer may not have run yet: the barrier is what reports its failure.
+        let err = store
+            .sync_index()
+            .expect_err("the linked page write failed");
+        assert!(err.to_string().contains("injected"), "{err}");
+        drop(store);
+
+        // A fresh store sees what the database holds: no outline, no page it named.
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(
+            store.page_state(&page).unwrap().live_count(),
+            0,
+            "a failed call must not leave the outline durable"
+        );
+        assert!(store.find_page("Ana").unwrap().is_none());
+        assert!(store.doctor().unwrap().is_ok());
+    }
+
+    /// MC-8, rule 2: the outline and the page its link makes are *one* transaction, so
+    /// neither can be durable alone. The failure is on the outline's own block, after the
+    /// page row was written in the same job: a separate earlier commit for the page would
+    /// survive, and this test would see it.
+    #[test]
+    fn mc_8_the_outline_and_its_pages_are_one_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("g.utopia");
+        let mut store = Store::open(&path).unwrap();
+        let page = store.create_page("Log").unwrap();
+        store.sync_index().unwrap();
+        store
+            .conn()
+            .execute_batch(
+                "CREATE TRIGGER fail_outline_block BEFORE INSERT ON block
+                 WHEN NEW.text = 'met [[Ana]] there'
+                 BEGIN SELECT RAISE(ABORT, 'injected outline failure'); END",
+            )
+            .unwrap();
+
+        let _ = handle(
+            &mut store,
+            append_outline("Log", "- met [[Ana]] there\n", None, false),
+        );
+        let err = store.sync_index().expect_err("the outline write failed");
+        assert!(err.to_string().contains("injected"), "{err}");
+        drop(store);
+
+        let mut store = Store::open(&path).unwrap();
+        assert!(
+            store.find_page("Ana").unwrap().is_none(),
+            "the page the link named must not survive without the outline"
+        );
+        assert_eq!(store.page_state(&page).unwrap().live_count(), 0);
+        assert!(store.doctor().unwrap().is_ok());
+    }
+
     /// MC-8, W3/FR-1.10: a `[[link]]` and a tag in an appended outline make their pages and
     /// their backlinks, as the same text typed into a block does.
     #[test]

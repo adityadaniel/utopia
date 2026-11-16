@@ -15,7 +15,7 @@ use utopia_core::{outline, BlockId, BlockKind, Command, DomainError, PageId, Pag
 use utopia_doc::PageDoc;
 
 use crate::project::resolve_page_key;
-use crate::{DraftDay, EditOpts, Result, Store, StoreError};
+use crate::{DraftDay, EditOpts, Result, Ship, Store, StoreError};
 
 /// The page lifecycle as one value (§6.5, AC-1.5; docs/state-machines/page-lifecycle-trash.md).
 ///
@@ -146,14 +146,24 @@ impl Store {
     /// Never duplicates: dates go to their daily page, existing titles and aliases win, and a
     /// tombstoned deterministic id is never resurrected (§10.3).
     pub fn create_page(&mut self, title: &str) -> Result<PageId> {
-        self.sync_index()?;
+        self.create_page_with(title, Ship::Now)
+    }
+
+    /// [`Store::create_page`], with [`Ship::Later`] leaving the new page's commit to the
+    /// caller's flush so it lands in the caller's transaction with its own writes (MC-8).
+    /// `Later` does not sync first: `sync_index` would ship the pages the caller has already
+    /// queued, and the caller has synced before it starts.
+    fn create_page_with(&mut self, title: &str, ship: Ship) -> Result<PageId> {
+        if ship == Ship::Now {
+            self.sync_index()?;
+        }
         let title = clean_title(title);
         if title.is_empty() {
             return Err(DomainError::EmptyTitle.into());
         }
         let key = normalize_title(&title);
         if let Some(d) = parse_unambiguous_date(&key, &self.date_format) {
-            return self.ensure_daily_page(d);
+            return self.ensure_daily_page_with(d, ship);
         }
         if let Some(p) = resolve_page_key(&self.conn, &key, &self.date_format)? {
             return Ok(p);
@@ -172,22 +182,32 @@ impl Store {
                 ..Default::default()
             },
         )?;
-        self.queue(&[(id.clone(), None)], true)?;
-        self.flush()?;
+        self.queue_with(&[(id.clone(), None)], true, ship)?;
+        if ship == Ship::Now {
+            // Strict mode ships in `queue_with`; debounced mode needs this flush.
+            self.flush()?;
+        }
         Ok(id)
     }
 
     /// The live daily page for `date`, created empty if absent (FR-1.5, FR-1.10). A draft
     /// of that date is written out instead, so the date never gets two pages.
     pub fn ensure_daily_page(&mut self, date: NaiveDate) -> Result<PageId> {
-        self.sync_index()?;
+        self.ensure_daily_page_with(date, Ship::Now)
+    }
+
+    /// [`Store::ensure_daily_page`] with the ship rule of [`Store::create_page_with`].
+    fn ensure_daily_page_with(&mut self, date: NaiveDate, ship: Ship) -> Result<PageId> {
+        if ship == Ship::Now {
+            self.sync_index()?;
+        }
         if let Some(p) = self.live_daily(date)? {
             // A draft of a day that now has a page is stale (FR-1.2): retire it for the day.
             self.retire_stale_draft(date, &p);
             return Ok(p);
         }
         if let Some(p) = self.draft_page(date) {
-            self.queue(&[(p.clone(), None)], true)?;
+            self.queue_with(&[(p.clone(), None)], true, ship)?;
             return Ok(p);
         }
         let mut id = PageId::for_date(date);
@@ -204,8 +224,10 @@ impl Store {
                 ..Default::default()
             },
         )?;
-        self.queue(&[(id.clone(), None)], true)?;
-        self.flush()?;
+        self.queue_with(&[(id.clone(), None)], true, ship)?;
+        if ship == Ship::Now {
+            self.flush()?;
+        }
         Ok(id)
     }
 
@@ -556,6 +578,12 @@ impl Store {
     /// planner before anything is applied; `Op::AppendOutline` in `utopia-api` checks the
     /// block count and parses, so a refused outline writes nothing.
     ///
+    /// The pages the links make are installed ([`Ship::Later`]) before the plan runs, so the
+    /// next flush — the plan's commit — carries the outline *and* those pages in one SQLite
+    /// transaction. MC-8 asks for one commit, and it means a failure of the dependent writes
+    /// cannot leave the outline durable with its links dangling; a retry then duplicates
+    /// nothing.
+    ///
     /// `items` are `(depth, text)` exactly as `markdown::parse_outline` gives them.
     pub fn append_outline(
         &mut self,
@@ -599,17 +627,47 @@ impl Store {
             Command::InsertBlock { id, .. } => Some(id.clone()),
             _ => None,
         }));
+        // A page that does not exist is created now and queued, not shipped: the plan's
+        // commit below writes it and the outline in one transaction (MC-8, rule 2). This is
+        // after the plan, which borrows the page's state, and before anything is applied, so
+        // a page that cannot be made still fails before the outline lands.
+        for target in &self.unresolved_page_links(&shaped)? {
+            self.create_page_with(target, Ship::Later)?;
+        }
         self.seal_undo();
         self.execute_plan(page, plan, None)?;
-        for id in &appended {
-            let text = self
-                .page_state(page)?
-                .block(id)
-                .map(|b| b.text.clone())
-                .unwrap_or_default();
-            self.create_link_pages(page, id, &text, None)?;
-        }
         Ok(appended)
+    }
+
+    /// The page-like refs of an outline that no page resolves, in order and without repeats,
+    /// so [`Store::append_outline`] can make them before it writes the text that names them
+    /// (W3, FR-1.10).
+    ///
+    /// `[[A]]` twice is one page, and dates are compared by the day they name, so
+    /// `[[2026-11-02]]` and `[[November 2nd, 2026]]` are the same page. The index must be
+    /// current: the caller has synced.
+    fn unresolved_page_links(&self, items: &[(usize, String)]) -> Result<Vec<String>> {
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut out = Vec::new();
+        for (_, text) in items {
+            for r in extract_refs(text) {
+                if !r.is_page_like() {
+                    continue;
+                }
+                let key = normalize_title(&r.target);
+                let one_page = match parse_unambiguous_date(&key, &self.date_format) {
+                    Some(day) => iso(day),
+                    None => key.clone(),
+                };
+                if !seen.insert(one_page) {
+                    continue;
+                }
+                if resolve_page_key(&self.conn, &key, &self.date_format)?.is_none() {
+                    out.push(r.target.clone());
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Rename (FR-3.6, FR-4.12, FR-4.13, §5.5). Returns the surviving page: `page` itself,
