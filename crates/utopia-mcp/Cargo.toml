@@ -1,0 +1,18 @@
+[package]
+name = "utopia-mcp"
+description = "The MCP server for Utopia (PRD §13.8): the wire protocol, the tool catalog and the headless backend"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+utopia-api.workspace = true
+utopia-core.workspace = true
+utopia-store.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

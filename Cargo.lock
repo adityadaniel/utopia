@@ -7482,6 +7482,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "utopia-mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "utopia-api",
+ "utopia-core",
+ "utopia-store",
+]
+
+[[package]]
 name = "utopia-plugin"
 version = "0.1.0"
 dependencies = [
