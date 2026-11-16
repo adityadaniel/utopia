@@ -6,8 +6,8 @@
 //! |---|---|---|
 //! | `search` | `query`, `limit` | [`Op::Search`] |
 //! | `list_pages` | `include_daily` | [`Op::ListPages`] |
-//! | `read_page` | `page` | [`Op::Journal`] for a date, [`Op::GetPage`] for the rest |
-//! | `read_block` | `id` | [`Op::GetBlock`] with `subtree` |
+//! | `read_page` | `page`, `after` | [`Op::Journal`] for a date, [`Op::GetPage`] for the rest |
+//! | `read_block` | `id`, `after` | [`Op::GetBlock`] with `subtree` |
 //! | `get_backlinks` | `page` | [`Op::Backlinks`] |
 //! | `run_query` | `query`, `limit` | [`Op::Query`] |
 //!
@@ -64,7 +64,9 @@ per level, and each line ends with the block's id in the form {id:01J8Z3K9V2}. T
 is not markup and not a reference: keep it on the line, and use the id with read_block.
 
 A read never creates anything: a day with no page reads as an empty outline. A result
-longer than 24 KB is cut at a block boundary and says how to read the rest.";
+longer than 24 KB is cut at a block boundary and ends with a line that says how many
+blocks are missing and gives an `after` id: pass that id back to the same call to read the
+next part.";
 
 /// What a tool call answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +125,8 @@ const CATALOG: &[Tool] = &[
         name: "read_page",
         description: "Read a page as an indented Markdown outline. `page` is a title, an \
                       alias, `today`, `yesterday` or an ISO date (2026-11-02). A day with no \
-                      page reads as an empty outline: a read never creates a page.",
+                      page reads as an empty outline: a read never creates a page. A result \
+                      cut at 24 KB names an `after` id: pass it back to read the next part.",
         kind: OpKind::Read,
         destructive: false,
         schema: schema_read_page,
@@ -133,7 +136,8 @@ const CATALOG: &[Tool] = &[
         name: "read_block",
         description: "Read one block and its children as an indented Markdown outline. The \
                       first line gives `rev`, the short hash of the block's text. The \
-                      outline ends each line with the block's id.",
+                      outline ends each line with the block's id. A result cut at 24 KB \
+                      names an `after` id: pass it back to read the next part.",
         kind: OpKind::Read,
         destructive: false,
         schema: schema_read_block,
@@ -240,6 +244,20 @@ impl Args<'_> {
         }
     }
 
+    /// An optional string argument: absent and `null` both mean "not given".
+    fn optional_string(&self, key: &str) -> Result<Option<String>, ToolError> {
+        match self.map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.trim().to_string())),
+            Some(Value::String(_)) => {
+                Err(ToolError::Failed(format!("The `{key}` argument is empty.")))
+            }
+            Some(other) => Err(ToolError::Failed(format!(
+                "The `{key}` argument must be a string, not {other}."
+            ))),
+        }
+    }
+
     fn boolean(&self, key: &str, default: bool) -> Result<bool, ToolError> {
         match self.map.get(key) {
             None | Some(Value::Null) => Ok(default),
@@ -309,6 +327,14 @@ fn schema_list_pages() -> Value {
     })
 }
 
+fn after_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "Continue after this block id: only the blocks that follow it are \
+                        returned. A cut result ends with the id to pass here.",
+    })
+}
+
 fn schema_read_page() -> Value {
     json!({
         "type": "object",
@@ -318,6 +344,7 @@ fn schema_read_page() -> Value {
                 "description": "A page title or alias, `today`, `yesterday`, or a date as \
                                 YYYY-MM-DD.",
             },
+            "after": after_property(),
         },
         "required": ["page"],
         "additionalProperties": false,
@@ -332,6 +359,7 @@ fn schema_read_block() -> Value {
                 "type": "string",
                 "description": "The block's id, as an outline line's {id:…} marker gives it.",
             },
+            "after": after_property(),
         },
         "required": ["id"],
         "additionalProperties": false,
@@ -383,6 +411,7 @@ fn run_list_pages(backend: &dyn Backend, args: &Args<'_>) -> Result<String, Tool
 
 fn run_read_page(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
     let page = args.string("page")?;
+    let after = args.optional_string("after")?;
     let body = match day_of(&page) {
         // A day is a page like any other, but its title depends on the graph's date
         // format, so ask for it by date (Op::Journal resolves it, and never creates it).
@@ -395,17 +424,23 @@ fn run_read_page(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolE
         },
         None => backend.call(Op::GetPage { title: page })?,
     };
-    Ok(render_outline(&body))
+    render_outline(&body, after.as_deref())
 }
 
 fn run_read_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
     let id = args.string("id")?;
-    let body = backend.call(Op::GetBlock { id, subtree: true })?;
+    let after = args.optional_string("after")?;
+    let body = backend.call(Op::GetBlock {
+        id: id.clone(),
+        subtree: true,
+    })?;
     let text = body["text"].as_str().unwrap_or_default();
     // MC-10: the `if_rev` of `update_block` is this same hash of this same text.
     let rev = block_rev(text);
-    let mut doc = Doc::with_prefix(&format!("rev: {rev}\n\n"));
-    outline_node(&body, 0, &mut doc);
+    let mut doc = Doc::outline(&format!("rev: {rev}\n\n"));
+    let mut walk = Cursor::new(after.as_deref());
+    outline_node(&body, 0, &mut walk, &mut doc);
+    walk.check(&id)?;
     Ok(doc.finish())
 }
 
@@ -473,22 +508,63 @@ fn heading_line(pad: &str, level: usize, text: &str) -> String {
     s
 }
 
-/// Append one block and then its children, depth first: the page's outline in order.
-fn outline_node(node: &Value, depth: usize, doc: &mut Doc) {
-    let id = node["id"].as_str().unwrap_or_default();
-    let text = node["text"].as_str().unwrap_or_default();
-    doc.block(block_line(node, depth, text), id);
-    for child in node["children"].as_array().into_iter().flatten() {
-        outline_node(child, depth + 1, doc);
+/// Where a continuation starts: after this block id the blocks are shown, before it they
+/// are skipped (MC-7). Blocks are in document order, so the id of the last block a result
+/// shows is the cursor that returns the ones it left out: nothing is repeated and nothing
+/// is skipped, however deep the cut falls.
+struct Cursor<'a> {
+    after: Option<&'a str>,
+    passed: bool,
+    found: bool,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(after: Option<&'a str>) -> Self {
+        Self {
+            after,
+            passed: after.is_none(),
+            found: after.is_none(),
+        }
+    }
+
+    /// A cursor that names a block this result does not hold is a mistake, not an empty
+    /// page: say so instead of answering nothing.
+    fn check(&self, id: &str) -> Result<(), ToolError> {
+        if self.found {
+            return Ok(());
+        }
+        Err(ToolError::Failed(format!(
+            "There is no block \"{}\" in this result, so there is nothing to continue \
+             after.",
+            self.after.unwrap_or(id)
+        )))
     }
 }
 
-fn render_outline(page: &Value) -> String {
-    let mut doc = Doc::default();
-    for node in page["blocks"].as_array().into_iter().flatten() {
-        outline_node(node, 0, &mut doc);
+/// Append one block and then its children, depth first: the page's outline in order.
+fn outline_node(node: &Value, depth: usize, walk: &mut Cursor<'_>, doc: &mut Doc) {
+    let id = node["id"].as_str().unwrap_or_default();
+    if walk.passed {
+        let text = node["text"].as_str().unwrap_or_default();
+        doc.block(block_line(node, depth, text), id);
+    } else if walk.after == Some(id) {
+        // This is the block the previous result ended at: skip its line, keep its children.
+        walk.passed = true;
+        walk.found = true;
     }
-    doc.finish()
+    for child in node["children"].as_array().into_iter().flatten() {
+        outline_node(child, depth + 1, walk, doc);
+    }
+}
+
+fn render_outline(page: &Value, after: Option<&str>) -> Result<String, ToolError> {
+    let mut doc = Doc::outline("");
+    let mut walk = Cursor::new(after);
+    for node in page["blocks"].as_array().into_iter().flatten() {
+        outline_node(node, 0, &mut walk, &mut doc);
+    }
+    walk.check("")?;
+    Ok(doc.finish())
 }
 
 // ---------------------------------------------------------------------------------------
@@ -637,13 +713,18 @@ struct Entry {
 struct Doc {
     prefix: String,
     entries: Vec<Entry>,
+    /// Whether its entries are blocks in document order, so a cut can name the id to
+    /// continue after ([`Cursor`]). Only the two outline tools set this.
+    continues: bool,
 }
 
 impl Doc {
-    fn with_prefix(prefix: &str) -> Self {
+    /// An outline (`read_page`, `read_block`): blocks in document order, continuable.
+    fn outline(prefix: &str) -> Self {
         Self {
             prefix: prefix.to_string(),
             entries: Vec::new(),
+            continues: true,
         }
     }
 
@@ -670,7 +751,7 @@ impl Doc {
     }
 
     fn finish(self) -> String {
-        fit(&self.prefix, self.entries)
+        fit(&self.prefix, self.entries, self.continues)
     }
 }
 
@@ -678,10 +759,11 @@ impl Doc {
 const RESERVE: usize = 256;
 
 /// Cut the result at [`BUDGET`] bytes of UTF-8 at a block boundary, and say what was left
-/// out and how to read it (§4.2, MC-7). When a single block is bigger than the budget its
-/// own text is cut at a character boundary, which is the only cut that is not at a block
-/// boundary.
-fn fit(prefix: &str, entries: Vec<Entry>) -> String {
+/// out and how to read it (§4.2, MC-7). An outline is cut between two blocks and names the
+/// id to continue after; a list is cut between two results and says how many were left.
+/// A block bigger than the whole budget is the one cut that is not at a block boundary: it
+/// keeps its head and its complete id marker, and the result says that it is cut short.
+fn fit(prefix: &str, entries: Vec<Entry>, continues: bool) -> String {
     let mut out = String::from(prefix);
     let room = BUDGET.saturating_sub(prefix.len() + RESERVE);
     let mut kept = 0;
@@ -704,8 +786,15 @@ fn fit(prefix: &str, entries: Vec<Entry>) -> String {
     if left.is_empty() && cut_short.is_none() {
         return out;
     }
+    // The last block this result shows. In an outline it is the entry right before the
+    // first one left out, so passing it back resumes exactly there.
+    let cursor = entries[..kept]
+        .iter()
+        .rev()
+        .find_map(|e| e.block.as_deref());
     let blocks = left.iter().filter(|e| e.block.is_some()).count();
-    let first = left.iter().find_map(|e| e.block.as_deref());
+    let first_left = left.iter().find_map(|e| e.block.as_deref());
+
     out.push('\n');
     let mut note = String::from("(24 KB budget: ");
     if let Some(entry) = cut_short {
@@ -720,7 +809,14 @@ fn fit(prefix: &str, entries: Vec<Entry>) -> String {
         }
     }
     if !left.is_empty() {
-        if let Some(first) = first {
+        if continues && blocks > 0 {
+            if let Some(cursor) = cursor {
+                note.push_str(&format!(
+                    "{blocks} block{} not shown. Continue with after: \"{cursor}\".",
+                    if blocks == 1 { "" } else { "s" }
+                ));
+            }
+        } else if let Some(first) = first_left {
             note.push_str(&format!(
                 "{blocks} block{} not shown. Read one of them with read_block(\"{first}\" \
                  to see the rest of that subtree).",
@@ -801,10 +897,10 @@ mod tests {
             ]
         });
         assert_eq!(
-            render_outline(&page),
+            render_outline(&page, None).unwrap(),
             "- root {id:01A}\n  - [x] kid {id:01B}\n  - ## second {id:01C}\n"
         );
-        assert_eq!(render_outline(&json!({"blocks": []})), "");
+        assert_eq!(render_outline(&json!({"blocks": []}), None).unwrap(), "");
     }
 
     /// A block whose text runs over several lines keeps one marker, at the end.
@@ -814,7 +910,10 @@ mod tests {
             "blocks": [{"id": "01A", "text": "one\ntwo", "kind": "bullet", "heading": null,
                         "checked": null, "children": []}]
         });
-        assert_eq!(render_outline(&page), "- one\n  two {id:01A}\n");
+        assert_eq!(
+            render_outline(&page, None).unwrap(),
+            "- one\n  two {id:01A}\n"
+        );
     }
 
     /// MC-7: a day with no page is an empty outline, and `read_page` says so instead of
@@ -853,7 +952,7 @@ mod tests {
             })
             .collect();
         let page = json!({"blocks": blocks});
-        let text = render_outline(&page);
+        let text = render_outline(&page, None).unwrap();
         assert!(text.len() <= BUDGET, "{} bytes", text.len());
         assert!(
             text.len() > BUDGET - 1024,
@@ -868,23 +967,34 @@ mod tests {
             "{missing} missing, text ends: {}",
             text.lines().last().unwrap_or_default()
         );
-        assert!(
-            text.contains("read_block(\"01"),
-            "names the call and the id"
-        );
+        // It names the continuation: the id of the last block it shows.
+        let cursor = text
+            .rsplit_once("after: \"")
+            .expect("the continuation")
+            .1
+            .split('"')
+            .next()
+            .expect("an id");
+        let shown = text
+            .lines()
+            .take(last)
+            .last()
+            .and_then(|l| l.rsplit_once("{id:"))
+            .map(|(_, rest)| rest.trim_end_matches('}'))
+            .expect("a last line");
+        assert_eq!(cursor, shown, "the cursor is the last block shown");
         // Every kept line is whole: a marker at the end, text of the seeded length.
         for line in text.lines().take(last) {
             assert!(line.ends_with('}'), "{line}");
         }
     }
 
-    /// MC-7: the one cut that is not at a block boundary keeps the id marker and says so,
-    /// even when the block is the only entry.
+    /// MC-7: the one cut that is not at a block boundary keeps the id marker and says so.
     #[test]
     fn a_cut_never_splits_a_marker_or_a_character() {
-        let mut doc = Doc::default();
+        let mut doc = Doc::outline("");
         doc.block(format!("- {}\n", "é".repeat(BUDGET)), "01A");
-        let text = fit("", doc.entries);
+        let text = fit("", doc.entries, true);
         assert!(text.len() <= BUDGET, "{}", text.len());
         assert!(text.ends_with("\n"));
         // The head is valid UTF-8 (it is a &str), and the cut landed on a boundary.
@@ -896,6 +1006,10 @@ mod tests {
         );
         assert_eq!(text.matches('…').count(), 1, "one cut marker: {text:.120}");
         assert!(text.contains("cut short"), "{}", &text[text.len() - 120..]);
+        assert!(
+            !text.contains("after:"),
+            "a block that big has no continuation"
+        );
     }
 
     /// `search` keeps pages and blocks apart, and a block line carries its id.

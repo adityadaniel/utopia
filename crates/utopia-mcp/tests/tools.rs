@@ -263,7 +263,7 @@ fn mc_7_read_page_and_read_block_return_marked_outlines() {
 }
 
 /// MC-7: a page bigger than the result budget is cut at a block boundary, says how many
-/// blocks it left out and which call reads them (design §4.2).
+/// blocks it left out and gives the `after` id that reads them (design §4.2).
 #[test]
 fn mc_7_a_large_page_is_cut_and_says_how_to_read_the_rest() {
     let graph = Graph::new();
@@ -278,21 +278,78 @@ fn mc_7_a_large_page_is_cut_and_says_how_to_read_the_rest() {
     let last = text.lines().last().expect("a last line").to_string();
     assert!(last.starts_with('('), "{last}");
     assert!(last.contains("not shown"), "{last}");
-    assert!(last.contains("read_block(\""), "{last}");
     let blocks = text.lines().filter(|l| l.starts_with("- block ")).count();
     assert!(blocks > 50 && blocks < 600, "{blocks} of 600 blocks kept");
 
-    // The call that it names answers with the rest of that subtree.
-    let id = last
-        .split("read_block(\"")
-        .nth(1)
-        .expect("an id")
-        .split('"')
-        .next()
-        .expect("an id");
-    let (rest, is_error) = call(&graph, "read_block", json!({"id": id}));
+    // Following the continuation returns the blocks the first call left out: the next
+    // sibling, not the same prefix again.
+    let cursor = continuation(&text).expect("a continuation");
+    let shown = block_ids(&text);
+    assert_eq!(
+        Some(&cursor),
+        shown.last(),
+        "the cursor is the last block shown"
+    );
+    let (rest, is_error) = call(
+        &graph,
+        "read_page",
+        json!({"page": "Big Page", "after": cursor}),
+    );
     assert!(!is_error, "{rest}");
-    assert!(rest.contains(&format!("{{id:{id}}}")), "{rest}");
+    let next = block_ids(&rest);
+    assert!(!next.is_empty(), "{rest}");
+    assert!(
+        next.iter().all(|id| !shown.contains(id)),
+        "the continuation repeats nothing"
+    );
+    assert!(
+        rest.contains("- block"),
+        "the continuation is the following siblings: {rest}"
+    );
+}
+
+/// The block ids of an outline, in order.
+fn block_ids(text: &str) -> Vec<String> {
+    text.lines()
+        .filter(|l| l.starts_with('-') || l.starts_with("  -"))
+        .filter_map(|l| l.rsplit_once("{id:"))
+        .map(|(_, rest)| rest.trim_end_matches('}').to_string())
+        .collect()
+}
+
+/// The continuation a cut result names, if it names one.
+fn continuation(text: &str) -> Option<String> {
+    let (_, rest) = text.rsplit_once("after: \"")?;
+    Some(rest.split('"').next()?.to_string())
+}
+
+/// MC-7: a cut result can be followed until every block has been read. A continuation
+/// that only reaches the first omitted subtree would leave the later siblings unseen.
+#[test]
+fn mc_7_the_cut_says_how_to_read_every_removed_block() {
+    let graph = Graph::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    for call_number in 0..20 {
+        let mut args = json!({"page": "Big Page"});
+        if let Some(a) = &after {
+            args["after"] = json!(a);
+        }
+        let (text, is_error) = call(&graph, "read_page", args);
+        assert!(!is_error, "call {call_number}: {text}");
+        for id in block_ids(&text) {
+            assert!(
+                !seen.contains(&id),
+                "call {call_number} returned block {id} again: the continuation went backwards"
+            );
+            seen.push(id);
+        }
+        match continuation(&text) {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 600, "every block of the page is reachable");
 }
 
 /// MC-7: a block bigger than the budget keeps its id marker and says that it was cut, even
