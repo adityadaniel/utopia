@@ -611,7 +611,9 @@ fn render_list_pages(body: &Value) -> String {
     }
     for p in pages {
         let title = one_line(p["title"].as_str().unwrap_or_default());
-        if p["kind"] == Value::String("daily".to_string()) {
+        // `PageRow.kind` serializes as `"Daily"` (the plain `PageKind` serde shape), so the
+        // day is read from `daily_date`: the same fact, and not a spelling to keep in step.
+        if p["daily_date"].is_string() {
             doc.line(format!("- {title} (daily note)"));
         } else {
             doc.line(format!("- {title}"));

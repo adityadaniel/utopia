@@ -418,6 +418,19 @@ fn mc_7_the_advertised_query_example_parses() {
     assert!(!is_error, "{text}");
 }
 
+/// MC-7: `list_pages` labels the daily notes it was asked to include.
+#[test]
+fn mc_7_list_pages_labels_the_daily_notes() {
+    let graph = Graph::new();
+    let (text, is_error) = call(&graph, "list_pages", json!({"include_daily": true}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains("Project X"), "{text}");
+    assert!(
+        text.lines().any(|l| l.ends_with("(daily note)")),
+        "one line is a daily note: {text}"
+    );
+}
+
 /// MC-11: the catalog and the guide are the same for two graphs with different contents.
 #[test]
 fn mc_11_the_catalog_does_not_depend_on_the_graph() {
