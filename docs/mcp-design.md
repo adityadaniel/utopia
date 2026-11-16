@@ -352,7 +352,11 @@ change that.
 - Each read tool cuts its result at 24 KB of UTF-8 text. This is a first value. Slice 1.4
   (§8.2) adjusts it with the real clients.
 - The cut is at a block boundary. The result gives the number of blocks that it did not
-  return and the call that returns them.
+  return and the call that returns them. For the two outline tools that call is the same
+  tool again with `after`, the id of the last block the result shows: the outline is in
+  document order, so the id reaches every omitted sibling, however deep the cut falls. The
+  other read tools return a set, not a document, so their cut only says how many were left
+  and that a narrower request is the way to see less of the graph.
 - `search`, `list_pages`, `get_backlinks` and `run_query` also keep their `limit`.
 
 ## 5. Access control
