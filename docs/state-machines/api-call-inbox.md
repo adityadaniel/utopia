@@ -10,6 +10,13 @@ compare-and-swaps, so exactly one side wins; the queue is bounded by `Limits`
 the deadline before it touches the store, and every answer that is not a result says whether
 the store changed (module docs, `:34`).
 
+`POST /v1/op` is a second way into the same queue (`lib.rs:976`): one `utopia_api::Op` as
+JSON, which is how the MCP bridge calls the open app. It does not get its own path — it runs
+the request checks, then the body (400 if it is not an `Op`), then the assistant access level
+(403 when `!level.permits(op.kind())`), and only then enqueues. A refused op is answered at
+the door and never reaches the owner, so a level change cannot leave a write in flight behind
+it ([`assistant-access-and-api-life.md`](assistant-access-and-api-life.md)).
+
 Fixed (the three issues this file listed):
 
 1. **Timed-out calls no longer execute** — `run` refuses a call whose reply receiver is gone,
@@ -43,8 +50,9 @@ Left, deliberately:
 
 ## What it controls
 
-How an HTTP request to the loopback API (P2, §4.1) becomes a store operation on the UI thread
-and how the reply gets back. `crates/utopia-api/src/lib.rs`.
+How an HTTP request to the loopback API (P2; the row in §4.1 and Appendix A) becomes a store
+operation on the UI thread and how the reply gets back, for both kinds of route: the REST
+ones and `POST /v1/op`. `crates/utopia-api/src/lib.rs`.
 
 ## Where the state lives
 
@@ -56,6 +64,7 @@ and how the reply gets back. `crates/utopia-api/src/lib.rs`.
 | Per-request wait | `tokio::time::timeout(ctx.wait, …)` (`:715`) | 504 at `:745` |
 | Server lifecycle | `ApiServer { shutdown, thread }` (`:516-523`), consumed only in `Drop` (`:562-570`) | – |
 | Auth | loopback/Origin/token checks (`:669-694`) | stateless |
+| Access level | `ApiServer.level: Arc<AtomicU8>` (`:603`, `:623`, `:629`) | read by `/v1/op` per request (`:984`); Off in a new server; changed by Settings with no restart |
 
 ## States
 
@@ -65,14 +74,17 @@ Per call: **Pending** → **Running** → **Done** (executed, answer sent) · **
 
 ## Events and transitions
 
-- request → token check → `ApiCall::new` → `try_send` into the queue (429 if full, 503 if the
-  queue is gone) → await the reply up to `Limits::wait`.
+- a request to `/v1/op` → token checks → the body parsed as an `Op` (400) → the level (403,
+  never queued) → `ApiCall::new` → `try_send` (429 if full, 503 if the queue is gone);
 - owner loop → `ApiCall::run`: `Pending --claim--> Running`, `handle(store, op)`, `Done`, send;
   refused if the reply receiver is closed, or past the deadline, or `claim` loses the race — in
   which case `expire` is set and a still-waiting caller gets a 504 "nothing was written".
 - waiter timeout → `expired` (`:745`): take a reply that arrived at the same instant, else
   `Pending --expire--> Expired` and answer "nothing was written", or, when the owner had
   already claimed it, "it may be applied".
+- Settings → Assistants turns access off → `ApiSlot::stop` sets the level Off, drops every
+  queued call (each handler answers 503 at once) and drops the server on the background
+  executor (MC-12, rule 10). A request that still reaches the handler is refused at Off.
 
 ## Impossible or unhandled combinations (evidence)
 
@@ -82,6 +94,17 @@ Per call: **Pending** → **Running** → **Done** (executed, answer sent) · **
 3. ~~**"Graph is closed" has two meanings.**~~ Fixed: one `not_running()` answer (`:739`) for
    both detection points; the status table in the module docs (`:34`) says what each failure
    means for the store.
+
+Things the level and the bridge add, kept deliberate:
+
+- **A queued op runs at the level it arrived under.** `/v1/op` checks the level before the
+  queue, so raising the level lets the next request through and lowering it stops the next
+  one — a call already accepted still runs. Turning access off cancels the calls that are
+  still queued (`ApiSlot::stop`) but cannot reverse one the owner has claimed, because the
+  store has no cancellation token for an operation that has started.
+- **`ApiCall::run` is not the level check.** The owner runs what it was given; the route is
+  the only place the level is enforced, which is why the MCP bridge's headless path enforces
+  the same `Op::kind()` rule itself rather than relying on the store.
 
 ## Diagram
 

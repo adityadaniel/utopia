@@ -40,7 +40,7 @@ Priority: **high** when the total is ≥ 7; **medium** when the total is 5–6 a
 | [Sync runner round](sync-runner-round.md) | 2 | 2 | 3 | 7 | `transport: Option` doubles as "in flight"; local store errors read as "Offline — N queued"; prepare failures never back off; a second `enable_sync_with` leaves two loops on one runner. |
 | [Daily Notes feed pagination](journal-feed-pagination.md) | 3 | 1 | 3 | 7 | No terminal state: the sentinel row re-requests a batch every frame it is visible, `limit` grows forever through empty years, each batch querying the store. |
 
-## Medium (14)
+## Medium (16)
 
 | Machine | R | D | C | Σ | Why |
 |---|---|---|---|---|---|
@@ -55,7 +55,9 @@ Priority: **high** when the total is ≥ 7; **medium** when the total is 5–6 a
 | [Attachment blob state](attachment-blob-state.md) | 2 | 2 | 1 | 5 | `blobs_to_upload` applies `LIMIT` before checking the file exists, so rows without files starve every newer attachment's upload. |
 | [FFI mobile sync](ffi-mobile-sync.md) | 2 | 2 | 1 | 5 | The whole network round runs under the store mutex; every error collapses to "Offline". |
 | [Plugin run lifecycle](plugin-run-lifecycle.md) | 2 | 2 | 1 | 5 | Host writes are committed mid-run but `changed` pages are dropped if the module then traps, so views are never told. |
-| [API call inbox](api-call-inbox.md) | 2 | 2 | 1 | 5 | A call that timed out (504) is still executed later; a client retry duplicates the write. |
+| [API call inbox](api-call-inbox.md) | 2 | 2 | 1 | 5 | A call that timed out (504) is still executed later; a client retry duplicates the write. `POST /v1/op` shares the queue, with the assistant access level checked at the door. |
+| [One owner for each graph](owner-lock.md) | 2 | 2 | 1 | 5 | The state is an `flock` and a handful of `Option<OwnerLock>` fields: the sidecar's existence is not the state, `flock` is per open file description, and `Running` must drop the store before the lock. |
+| [Assistant access: the level and the API's life](assistant-access-and-api-life.md) | 2 | 2 | 1 | 5 | One level in five places (the file, the running server's atomic, `confirmed`, the optimistic view, `UTOPIA_API`), plus an `Option<ApiServer>` in a slot whose `stop` leaves a third state the type does not name. |
 | [PDF highlight drag](pdf-highlight-drag.md) | 2 | 2 | 1 | 5 | No view-level mouse-up: an off-page release leaves a ghost selection; a release on another page writes a clamped, wrong highlight block. |
 | [Block editor autocomplete](block-editor-autocomplete.md) | 2 | 1 | 2 | 5 | Two definitions of "open" (`is_some` vs non-empty items): Escape on `/xyz` does not leave the block; `accept` uses the live caret against a frozen `start`. |
 
@@ -86,7 +88,8 @@ Priority: **high** when the total is ≥ 7; **medium** when the total is 5–6 a
   Each works until a second reader interprets `None` differently.
 - **Two copies of one fact** is the most common drift source: sync on/off (three holders),
   keymap overrides (three), sidebar width (three), filter text (two), `edits` + `idle`,
-  `dirty_since` + `pending`.
+  `dirty_since` + `pending`, and the assistant access level (the access file, the running
+  server's atomic, the tab's optimistic value, the coordinator's confirmed one).
 - **Error paths skip the cleanup that success paths do**: `flush` after `mem::take`,
   `exchange` after a successful push, `run` after a committed plugin write, `execute_multi`
   removing a doc but not its draft entry.
