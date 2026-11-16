@@ -1,6 +1,7 @@
 //! Utopia desktop app (§13.1 `utopia-app`): window, menus, keymap, onboarding, and the
 //! headless `doctor` / `export` commands.
 
+mod api_launch;
 mod cli;
 mod hotkey;
 mod paths;
@@ -483,31 +484,10 @@ impl Root {
                 };
                 let sync = sync_setup::Coordinator::install(ws.clone(), &path, config, cx);
                 // Links and the automation API run on the main thread against the same
-                // store the UI uses (P2: local HTTP API + utopia://).
-                let api = match std::env::var("UTOPIA_API").ok().filter(|v| !v.is_empty()) {
-                    Some(v) => {
-                        let addr = if v == "1" {
-                            "127.0.0.1:0".to_string()
-                        } else {
-                            v
-                        };
-                        match utopia_api::serve(&addr, utopia_api::new_token()) {
-                            Ok(server) => {
-                                let file = config.join("api.json");
-                                if let Err(e) = server.write_discovery(&file) {
-                                    eprintln!("utopia: could not write {}: {e}", file.display());
-                                }
-                                eprintln!("utopia: automation API on {}", server.url());
-                                Some(server)
-                            }
-                            Err(e) => {
-                                eprintln!("utopia: automation API failed: {e}");
-                                None
-                            }
-                        }
-                    }
-                    None => None,
-                };
+                // store the UI uses (P2: local HTTP API + utopia://). The API starts for
+                // `UTOPIA_API` or an assistant access level in the graph's access file
+                // (MC-1); with neither, there is no server.
+                let api = api_launch::start(config, &path);
                 let (ws2, app2) = (ws.clone(), app.clone());
                 let inbox = cx.spawn_in(window, async move |_, cx| loop {
                     cx.background_executor()
@@ -893,7 +873,7 @@ fn main() -> anyhow::Result<()> {
             let text = args[1..].join(" ");
             let graph = paths::resolve_graph(None, &paths::config_dir(), &paths::graphs_dir())
                 .ok_or_else(|| anyhow::anyhow!("no graph found; set UTOPIA_GRAPH"))?;
-            cli::capture(&graph, &text)
+            cli::capture(&graph, &paths::config_dir(), &text)
         }
         Some("encrypt") => {
             let Some(graph) = args.get(1) else {
@@ -912,7 +892,7 @@ fn main() -> anyhow::Result<()> {
                 anyhow::bail!("{}", cli::USAGE);
             };
             let addr = args.get(2).map_or("127.0.0.1:0", String::as_str);
-            cli::serve_api(graph.as_ref(), addr, &paths::config_dir().join("api.json"))
+            cli::serve_api(graph.as_ref(), addr, &paths::config_dir())
         }
         Some(url) if url.starts_with("utopia://") => {
             PENDING_URLS

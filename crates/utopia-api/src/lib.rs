@@ -21,6 +21,18 @@
 //! | GET | `/v1/search` | `?q=&limit=` |
 //! | POST | `/v1/query` | `{"query", "limit"?}` — query-block syntax |
 //! | POST | `/v1/capture` | `{"text"}` — appended to today's page |
+//! | POST | `/v1/op` | one [`Op`] as JSON (`{"op": "search", "q": …}`), at the graph's access level |
+//!
+//! `/v1/op` is the bridge for the MCP server (PRD §13.8, docs/mcp-design.md §2.4). It is the
+//! only route the assistant access level ([`access::Level`], MC-1, MC-2) controls: when
+//! `!level.permits(op.kind())` it answers 403 with a text for the agent to pass on, and the
+//! op is never queued. A new server is at [`access::Level::Off`]; the owner sets the level
+//! from the graph's access file (`<config>/mcp/<graph_key>.json`, [`access::access_file`])
+//! with [`ApiServer::set_level`]. A body that is not an [`Op`] answers 400.
+//!
+//! The owner writes `{"url", "token"}` to `<config>/api/<graph_key>.json`
+//! ([`discovery_file`], mode 0600), one file for each graph. [`Client`] reads it and calls
+//! the owner from another process (`utopia capture`, decision D10).
 //!
 //! A request becomes a [`ApiCall`] with one explicit state ([`CallState`]): `Pending` until
 //! the store's owner claims it (`Running` → `Done`) or the request gives up (`Expired`,
@@ -48,6 +60,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::{
+    body::Bytes,
     extract::{Path as UrlPath, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -55,17 +68,22 @@ use axum::{
     Json, Router,
 };
 use chrono::NaiveDate;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
 use utopia_core::{outline, title::normalize_title, BlockId, PageId};
 use utopia_store::{resolve_page_key, RefQuery, Store, StoreError};
 
+pub mod access;
+mod client;
 mod url;
+pub use access::{Access, Level};
+pub use client::{discovery_file, read_discovery, Client, ClientError, Discovery};
 pub use url::{parse_url, UrlAction};
 
-/// One API operation. Also the JSON request plugins send (`{"op": "search", "q": …}`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+/// One API operation. Also the JSON request plugins send (`{"op": "search", "q": …}`), and
+/// the body of `POST /v1/op`. It serializes to the same shape it reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op {
     ListPages {
@@ -538,6 +556,7 @@ impl ApiCall {
 pub struct ApiServer {
     pub addr: SocketAddr,
     pub token: String,
+    level: Arc<AtomicU8>,
     calls: std::sync::Mutex<mpsc::Receiver<ApiCall>>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -554,6 +573,17 @@ impl ApiServer {
 
     pub fn url(&self) -> String {
         format!("http://{}", self.addr)
+    }
+
+    /// The assistant access level `/v1/op` enforces (MC-2). Off until the owner sets it.
+    pub fn level(&self) -> Level {
+        Level::of(self.level.load(Ordering::SeqCst))
+    }
+
+    /// Change the level for every `/v1/op` request from now on, without a restart. Ops
+    /// already queued were checked at the level they arrived under.
+    pub fn set_level(&self, level: Level) {
+        self.level.store(level.code(), Ordering::SeqCst);
     }
 
     /// Write `{"url", "token"}` for scripts to discover the server, readable by the user
@@ -605,6 +635,7 @@ struct Ctx {
     token: String,
     port: u16,
     wait: Duration,
+    level: Arc<AtomicU8>,
 }
 
 /// Start the server on a loopback address (`127.0.0.1:0` picks a free port).
@@ -628,11 +659,13 @@ pub fn serve_with(addr: &str, token: String, limits: Limits) -> std::io::Result<
     let addr = listener.local_addr()?;
     let (calls_tx, calls) = mpsc::sync_channel(limits.queue.max(1));
     let (shutdown, stop) = tokio::sync::oneshot::channel::<()>();
+    let level = Arc::new(AtomicU8::new(Level::Off.code()));
     let ctx = Ctx {
         calls: calls_tx,
         token: token.clone(),
         port: addr.port(),
         wait: limits.wait,
+        level: level.clone(),
     };
     let thread = std::thread::Builder::new()
         .name("utopia-api".into())
@@ -653,6 +686,7 @@ pub fn serve_with(addr: &str, token: String, limits: Limits) -> std::io::Result<
     Ok(ApiServer {
         addr,
         token,
+        level,
         calls: std::sync::Mutex::new(calls),
         shutdown: Some(shutdown),
         thread: Some(thread),
@@ -670,6 +704,7 @@ fn router(ctx: Ctx) -> Router {
         .route("/v1/search", get(search))
         .route("/v1/query", post(query))
         .route("/v1/capture", post(capture))
+        .route("/v1/op", post(op_route))
         .with_state(ctx)
 }
 
@@ -719,6 +754,11 @@ async fn call(ctx: Ctx, headers: HeaderMap, op: Op) -> Response {
     if let Err((status, msg)) = check(&ctx, &headers) {
         return err(status, msg);
     }
+    enqueue(ctx, op).await
+}
+
+/// Queue one checked call for the store's owner and wait for its answer.
+async fn enqueue(ctx: Ctx, op: Op) -> Response {
     let (reply, mut rx) = oneshot::channel();
     let call = ApiCall::new(op, reply, ctx.wait);
     let state = call.state.clone();
@@ -886,6 +926,24 @@ async fn capture(State(c): State<Ctx>, h: HeaderMap, Json(b): Json<TextBody>) ->
     call(c, h, Op::Capture { text: b.text }).await
 }
 
+/// `POST /v1/op` (docs/mcp-design.md §2.4): the request checks of every route, then the
+/// body as an [`Op`] (400 if it is not one), then the access level (MC-2): a refused op is
+/// answered 403 here and never reaches the queue, so the store's owner never sees it.
+async fn op_route(State(c): State<Ctx>, h: HeaderMap, body: Bytes) -> Response {
+    if let Err((status, msg)) = check(&c, &h) {
+        return err(status, msg);
+    }
+    let op: Op = match serde_json::from_slice(&body) {
+        Ok(op) => op,
+        Err(e) => return err(400, &format!("the body is not an op: {e}")),
+    };
+    let level = Level::of(c.level.load(Ordering::SeqCst));
+    if let Some(refusal) = level.refusal(op.kind()) {
+        return err(403, refusal);
+    }
+    enqueue(c, op).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1015,6 +1073,99 @@ mod tests {
             match want {
                 OpKind::Write => assert!(!out.changed.is_empty(), "{name}: a write names its page"),
                 OpKind::Read => assert!(out.changed.is_empty(), "{name}: a read changes nothing"),
+            }
+        }
+    }
+
+    /// MC-3: the MCP bridge sends `Op` values over `/v1/op`, so each one must serialize to
+    /// the JSON shape it reads, and read back as itself.
+    #[test]
+    fn mc_3_every_op_round_trips_through_its_json() {
+        let all = vec![
+            (
+                Op::ListPages { daily: true },
+                json!({"op": "list_pages", "daily": true}),
+            ),
+            (
+                Op::GetPage { title: "A".into() },
+                json!({"op": "get_page", "title": "A"}),
+            ),
+            (
+                Op::Backlinks { title: "A".into() },
+                json!({"op": "backlinks", "title": "A"}),
+            ),
+            (
+                Op::AppendBlock {
+                    title: "A".into(),
+                    text: "t".into(),
+                    parent: Some("b1".into()),
+                    create: true,
+                },
+                json!({"op": "append_block", "title": "A", "text": "t", "parent": "b1", "create": true}),
+            ),
+            (
+                Op::AppendBlock {
+                    title: "A".into(),
+                    text: "t".into(),
+                    parent: None,
+                    create: false,
+                },
+                json!({"op": "append_block", "title": "A", "text": "t", "parent": null, "create": false}),
+            ),
+            (
+                Op::GetBlock { id: "b1".into() },
+                json!({"op": "get_block", "id": "b1"}),
+            ),
+            (
+                Op::UpdateBlock {
+                    id: "b1".into(),
+                    text: "t".into(),
+                },
+                json!({"op": "update_block", "id": "b1", "text": "t"}),
+            ),
+            (
+                Op::Journal {
+                    date: "today".into(),
+                },
+                json!({"op": "journal", "date": "today"}),
+            ),
+            (
+                Op::Search {
+                    q: "x".into(),
+                    limit: 5,
+                },
+                json!({"op": "search", "q": "x", "limit": 5}),
+            ),
+            (
+                Op::Query {
+                    query: "{and: [[A]]}".into(),
+                    limit: 7,
+                },
+                json!({"op": "query", "query": "{and: [[A]]}", "limit": 7}),
+            ),
+            (
+                Op::Capture { text: "t".into() },
+                json!({"op": "capture", "text": "t"}),
+            ),
+        ];
+        for (op, want) in all {
+            let v = serde_json::to_value(&op).unwrap();
+            assert_eq!(v, want, "{op:?} serializes to the shape it reads");
+            let back: Op = serde_json::from_value(v).unwrap();
+            assert_eq!(back, op);
+            // Exhaustive: a new variant does not compile until this match names it, which is
+            // the prompt to add a row to the table above.
+            match op {
+                Op::ListPages { .. }
+                | Op::GetPage { .. }
+                | Op::Backlinks { .. }
+                | Op::AppendBlock { .. }
+                | Op::GetBlock { .. }
+                | Op::UpdateBlock { .. }
+                | Op::Journal { .. }
+                | Op::Search { .. }
+                | Op::Query { .. }
+                | Op::Capture { .. } => {}
             }
         }
     }

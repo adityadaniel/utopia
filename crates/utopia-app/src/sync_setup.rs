@@ -90,10 +90,7 @@ impl Coordinator {
         // An environment variable owns this run, so its id is not the user's to edit here.
         let graph_editable = env.graph.is_none() && stored.is_none();
         let graph = env.graph.clone().or(stored).unwrap_or(default_graph);
-        let canonical = graph_path
-            .canonicalize()
-            .unwrap_or_else(|_| graph_path.to_path_buf());
-        let id = utopia_store::sha256_hex(canonical.to_string_lossy().as_bytes());
+        let id = utopia_store::graph_key(graph_path);
         cx.set_global(utopia_ui::sync_runner::SyncFacts {
             graph: Some(graph.clone()),
             ..Default::default()
@@ -490,11 +487,9 @@ mod tests {
 
     /// The settings file the coordinator reads for `graph` (`sync/<sha256>.json`).
     fn settings_file(config: &Path, graph: &Path) -> PathBuf {
-        let canonical = graph.canonicalize().unwrap_or_else(|_| graph.to_path_buf());
-        config.join("sync").join(format!(
-            "{}.json",
-            utopia_store::sha256_hex(canonical.to_string_lossy().as_bytes())
-        ))
+        config
+            .join("sync")
+            .join(format!("{}.json", utopia_store::graph_key(graph)))
     }
 
     struct Harness {

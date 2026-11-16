@@ -13,7 +13,8 @@ usage:
   utopia doctor <file.utopia> [--rebuild]  check invariants (and rebuild the index)
   utopia export <file.utopia> <dir>     write Markdown files, graph.json and graph.opml to <dir>
   utopia import-roam <file.utopia> <roam.json>   import a Roam JSON export
-  utopia capture <text…>                 append a line to today's note (bind to any OS shortcut)
+  utopia capture <text…>                 append a line to today's note (bind to any OS shortcut);
+                                         when Utopia has the graph open, the open app writes it
   utopia serve-api <file.utopia> [addr]  run the local automation API without the app
   utopia encrypt <file.utopia>          encrypt the graph at rest (or change its passphrase)
   utopia decrypt <file.utopia>          remove encryption at rest
@@ -22,8 +23,13 @@ usage:
 encrypted graphs: the passphrase comes from UTOPIA_DB_PASSPHRASE, the macOS keychain
 (service \"utopia-db\", account = graph name), or a prompt. It is never stored in the graph.
 
-automation API: UTOPIA_API=1 (or UTOPIA_API=127.0.0.1:<port>) starts it with the app; the
-URL and a per-launch bearer token are written to api.json in the config directory.
+automation API: UTOPIA_API=1 (or UTOPIA_API=127.0.0.1:<port>) starts it with the app, and so
+does assistant access read or write in mcp/<graph key>.json in the config directory
+({\"version\": 1, \"access\": \"off\" | \"read\" | \"write\", \"when_closed\": false}; a missing
+or malformed file means off, and no variable or flag raises it). The URL and a per-launch
+bearer token are written to api/<graph key>.json in the config directory (graph key =
+SHA-256 of the canonical graph path). POST /v1/op runs one op at the access level; the other
+routes do not follow it.
 
 sync (optional): set UTOPIA_SYNC_URL=<relay origin>, and optionally UTOPIA_SYNC_GRAPH=<id>
 and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\").";
@@ -205,28 +211,91 @@ pub fn import_roam(graph: &Path, file: &Path) -> Result<()> {
     Ok(())
 }
 
-pub fn capture(graph: &Path, text: &str) -> Result<()> {
-    if text.trim().is_empty() {
+/// What became of a capture sent to the graph's owner.
+enum Sent {
+    /// The owner wrote it.
+    Done,
+    /// It was refused before it reached the owner's queue, so nothing was written: there is
+    /// no discovery file, nothing listens at its address, or the token is not the owner's
+    /// (a stale file, possibly another server on a reused port).
+    NotDelivered,
+}
+
+/// D10 A: send a capture to the process that owns the graph, through its loopback API.
+/// An answer that leaves the outcome open (the connection broke after the request, or the
+/// owner answered with an error) stops here with the owner's own text: the capture is
+/// never tried a second time, so it cannot be written twice.
+fn send_to_owner(config: &Path, graph: &Path, text: &str) -> Result<Sent> {
+    use utopia_api::{Client, ClientError};
+    let file = utopia_api::discovery_file(config, graph);
+    let Ok(client) = Client::from_discovery(&file) else {
+        return Ok(Sent::NotDelivered);
+    };
+    match client.capture(text) {
+        Ok(_) => Ok(Sent::Done),
+        Err(ClientError::NotListening(_)) => Ok(Sent::NotDelivered),
+        // The token, Host and Origin checks run before the call is queued.
+        Err(ClientError::Status {
+            status: 401 | 403, ..
+        }) => Ok(Sent::NotDelivered),
+        Err(ClientError::Status { status, message }) => {
+            bail!("the open Utopia app did not take the capture ({status}): {message}")
+        }
+        Err(ClientError::Transport(e)) => bail!(
+            "the open Utopia app did not answer ({e}); the capture may be in today's note, \
+             look before you try again"
+        ),
+    }
+}
+
+/// `utopia capture` (MC-4, D10 A). When the graph is free it is written here. When another
+/// process owns it, the text goes to that owner's API (`POST /v1/capture`, found through
+/// `<config>/api/<graph_key>.json`). When that fails before anything was sent, it waits for
+/// the lock as the other write commands do, and stops with [`ALREADY_OPEN`].
+pub fn capture(graph: &Path, config: &Path, text: &str) -> Result<()> {
+    let text = text.trim();
+    if text.is_empty() {
         bail!("nothing to capture");
     }
-    let mut owned = open_owned(graph)?;
+    if !graph.exists() {
+        bail!("no graph at {}", graph.display());
+    }
+    // First without waiting, so a capture for the open app does not sit out the wait.
+    let owner = match OwnerLock::try_acquire(graph)
+        .with_context(|| format!("locking {}", graph.display()))?
+    {
+        Some(lock) => lock,
+        None => match send_to_owner(config, graph, text)? {
+            Sent::Done => {
+                println!("captured to today's note in the open Utopia app");
+                return Ok(());
+            }
+            Sent::NotDelivered => take_owner(graph)?,
+        },
+    };
+    let mut owned = Owned {
+        store: open_store(graph)?,
+        _owner: owner,
+    };
     let store = &mut owned.store;
-    let (page, _) = store.capture(text.trim())?;
+    let (page, _) = store.capture(text)?;
     let title = store.page_row(&page)?.map(|r| r.title).unwrap_or_default();
     println!("captured to {title}");
     Ok(())
 }
 
 /// `utopia serve-api`: the automation API over a graph with no window, for scripts and
-/// servers. Runs until killed, and owns the graph for all of that time (MC-4).
-pub fn serve_api(graph: &Path, addr: &str, discovery: &Path) -> Result<()> {
+/// servers. Runs until killed, and owns the graph for all of that time (MC-4). The level of
+/// `/v1/op` comes from the graph's access file (MC-1), and the discovery file is the graph's
+/// own, `<config>/api/<graph_key>.json`.
+pub fn serve_api(graph: &Path, addr: &str, config: &Path) -> Result<()> {
     let mut owned = open_owned(graph)?;
-    let server = utopia_api::serve(addr, utopia_api::new_token())?;
-    server.write_discovery(discovery)?;
+    let level = crate::api_launch::load_access(config, graph).level;
+    let server = crate::api_launch::serve(addr, level, config, graph)?;
     println!(
-        "automation API on {} (token in {})",
+        "automation API on {} (assistant access: {level:?}; token in {})",
         server.url(),
-        discovery.display()
+        utopia_api::discovery_file(config, graph).display()
     );
     loop {
         if let Some(call) = server.recv_timeout(std::time::Duration::from_secs(1)) {
@@ -256,7 +325,7 @@ mod tests {
         export(&graph, &out).unwrap();
         assert!(out.join("graph.json").exists());
         assert!(out.join("graph.opml").exists());
-        capture(&graph, "from the command line").unwrap();
+        capture(&graph, &dir.path().join("config"), "from the command line").unwrap();
         let roam = dir.path().join("roam.json");
         std::fs::write(
             &roam,

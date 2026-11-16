@@ -67,7 +67,8 @@ not know.
 Headless commands (`cargo run -p utopia-app -- <cmd>`): `doctor <file> [--rebuild]` checks
 the §10.4 invariants (exit 1 on problems); `export <file> <dir>` writes Markdown (attachments in
 `blobs/`), `graph.json` and `graph.opml`; `import-roam <file> <roam.json>` imports a Roam export;
-`capture <text…>` appends to today's note; `encrypt` / `decrypt <file>` switch encryption at rest
+`capture <text…>` appends to today's note (when another process owns the graph and runs the
+API, it sends the text to that owner instead, see below); `encrypt` / `decrypt <file>` switch encryption at rest
 (`UTOPIA_DB_PASSPHRASE`, `UTOPIA_DB_NEW_PASSPHRASE`, keychain service `utopia-db`, or a
 prompt); `serve-api <file> [addr]` runs the automation API without a window; a
 `utopia://…` argument opens that link.
@@ -77,7 +78,12 @@ prompt); `serve-api <file> [addr]` runs the automation API without a window; a
 canonical path; the file stays on disk on purpose). The app (before `Store::open_with_key`,
 held as long as its store), `serve-api` (its whole life), `capture`, `import-roam` and
 `doctor --rebuild` take it, trying for 2 s; if it stays held they write nothing and stop with
-"This graph is already open in Utopia" (the app shows it in the window). `doctor`, `export`
+"This graph is already open in Utopia" (the app shows it in the window). `capture` first
+sends the text to the owner (`POST /v1/capture` through the graph's discovery file, decision
+D10 A) and exits 0 when the owner wrote it; only when there is no discovery file, nothing
+listens at its address, or the token is refused (nothing was sent) does it wait for the lock
+as above. Any other failure stops it with the owner's message, so a capture is never written
+twice. `doctor`, `export`
 and `Store::open` do not take it. The kernel releases it when a process stops, so a crash
 leaves no lock. A scratch graph next to an open real one still starts: the lock is per graph.
 
@@ -124,8 +130,19 @@ cargo run -p xtask --release -- bench --ui      # --ui opens a real window for <
 `UTOPIA_PROBE=1` makes the app print its first-frame time and keystroke→frame cost, then quit.
 
 Automation (P2): `UTOPIA_API=1` (or `=127.0.0.1:<port>`) starts the loopback HTTP API with the
-app and writes `{url, token}` to `<config>/api.json` (mode 0600). Routes are documented in
-`crates/utopia-api/src/lib.rs`. `cargo run -p xtask -- bundle` builds `target/Utopia.app`, whose
+app, and so does an assistant access level `read` or `write` for the graph (address
+`127.0.0.1:0`). The owner (app or `serve-api`) writes `{url, token}` to
+`<config>/api/<graph_key>.json` (mode 0600), one file for each graph; `graph_key` is
+`utopia_store::graph_key`, the SHA-256 hex of the canonical graph path (the same key names
+the sync settings file). Routes are documented in `crates/utopia-api/src/lib.rs`; `POST /v1/op`
+takes one `utopia_api::Op` as JSON (the MCP bridge, PRD §13.8) and is the only route the
+access level controls (403 when `!level.permits(op.kind())`, never queued; 400 for a body that
+is not an `Op`). The access setting is `<config>/mcp/<graph_key>.json`,
+`{"version": 1, "access": "off" | "read" | "write", "when_closed": false}`
+(`utopia_api::access`): missing, malformed, an unknown version or value means Off (MC-1); it is
+written atomically, read at start-up (a change needs a relaunch until the Settings tab), and no
+environment variable or flag raises it. With Off and no `UTOPIA_API` there is no server and no
+socket. `utopia_api::Client` is the blocking client for an owner's API. `cargo run -p xtask -- bundle` builds `target/Utopia.app`, whose
 Info.plist claims the `utopia://` scheme (registering it with LaunchServices happens when the
 bundle is opened, so don't open it on a user's machine without asking).
 

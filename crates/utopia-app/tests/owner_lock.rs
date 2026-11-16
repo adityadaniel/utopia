@@ -188,3 +188,148 @@ fn mc_4_a_killed_owner_leaves_no_lock() {
         "a killed owner leaves no lock"
     );
 }
+
+impl Scratch {
+    fn config(&self) -> PathBuf {
+        self.root.join("config")
+    }
+
+    /// Start `serve-api` as the graph's owner and wait until it serves.
+    fn serve_api(&self) -> std::process::Child {
+        let mut child = self
+            .utopia()
+            .args([
+                "serve-api",
+                &self.graph.display().to_string(),
+                "127.0.0.1:0",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut line = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        assert!(line.contains("automation API on"), "serve-api said: {line}");
+        child
+    }
+}
+
+/// D10 A (MC-4): with the API running at the owner, `capture` sends the text there and
+/// exits 0; the text is in the graph exactly once.
+#[test]
+fn mc_4_capture_goes_to_the_owner_through_its_api() {
+    let s = Scratch::new();
+    let mut owner = s.serve_api();
+    let discovery = utopia_api::discovery_file(&s.config(), &s.graph);
+    assert!(
+        discovery.exists(),
+        "serve-api wrote the graph's discovery file"
+    );
+    assert!(
+        !s.config().join("api.json").exists(),
+        "no shared api.json any more"
+    );
+
+    let started = Instant::now();
+    let out = s
+        .utopia()
+        .args(["capture", "zebracapture through the owner"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "capture: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("open Utopia app"),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(1900),
+        "it did not wait for the lock first"
+    );
+
+    // Stop the owner before the graph is opened to count.
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    assert_eq!(hits(&s.graph, "zebracapture"), 1, "written exactly once");
+    assert!(Store::open(&s.graph).unwrap().doctor().unwrap().is_ok());
+}
+
+/// D10 A: a discovery file that names no server, or a server with another token (a stale
+/// file, a reused port), never gets the text; `capture` stops as in slice 1.1.
+#[test]
+fn mc_4_capture_with_a_stale_discovery_file_stops() {
+    let s = Scratch::new();
+    let _held = OwnerLock::try_acquire(&s.graph)
+        .unwrap()
+        .expect("free lock");
+    let discovery = utopia_api::discovery_file(&s.config(), &s.graph);
+    std::fs::create_dir_all(discovery.parent().unwrap()).unwrap();
+
+    // Another server, with its own token: the stale file's token is refused with 401.
+    let other = utopia_api::serve("127.0.0.1:0", "the-other-token".into()).unwrap();
+    // A port that nothing listens on once the listener is dropped.
+    let dead = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    for url in [other.url(), format!("http://{dead}")] {
+        std::fs::write(
+            &discovery,
+            format!(r#"{{"url": "{url}", "token": "stale-token"}}"#),
+        )
+        .unwrap();
+        let out = s
+            .utopia()
+            .args(["capture", "zebracapture stale"])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "capture must fail: {stderr}");
+        assert!(stderr.contains(ALREADY_OPEN), "{url} stderr: {stderr}");
+    }
+    assert!(
+        other.try_recv().is_none(),
+        "nothing reached the other server"
+    );
+    assert_eq!(hits(&s.graph, "zebracapture"), 0, "nothing was written");
+}
+
+/// MC-1, MC-2: `serve-api` takes the `/v1/op` level from the graph's access file.
+#[test]
+fn mc_2_serve_api_sets_the_level_from_the_access_file() {
+    use utopia_api::{Access, Client, ClientError, Level, Op};
+    let s = Scratch::new();
+    Access {
+        level: Level::Read,
+        when_closed: false,
+    }
+    .save(&utopia_api::access::access_file(&s.config(), &s.graph))
+    .unwrap();
+    let mut owner = s.serve_api();
+    let client =
+        Client::from_discovery(&utopia_api::discovery_file(&s.config(), &s.graph)).unwrap();
+    client
+        .op(&Op::Search {
+            q: "zebra".into(),
+            limit: 5,
+        })
+        .expect("read is permitted");
+    match client.op(&Op::Capture {
+        text: "zebra".into(),
+    }) {
+        Err(ClientError::Status {
+            status: 403,
+            message,
+        }) => assert!(message.contains("read access only"), "{message}"),
+        other => panic!("expected 403, got {other:?}"),
+    }
+    owner.kill().unwrap();
+    owner.wait().unwrap();
+    assert_eq!(hits(&s.graph, "zebra"), 0);
+}
