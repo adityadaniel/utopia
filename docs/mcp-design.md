@@ -3,8 +3,9 @@
 Status: design, written on 2026-11-10. The owner answered each decision on 2026-11-16
 (§1.1). It is built up to slice 2.2: the owner lock, `POST /v1/op` and the access file, the
 `utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
-subcommand and the headless path, Settings → Assistants, and this documentation. The write
-tools (§8.4) are not built.
+subcommand and the headless path, Settings → Assistants, and this documentation. Slice 3.1
+adds the first write tool, `append_blocks`; `update_block`, `move_block` and `delete_block`
+(§8.4) are not built.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
@@ -300,7 +301,7 @@ The legacy rules:
 | `read_block` | read | `GetBlock` | exists; add children |
 | `get_backlinks` | read | `Backlinks` | exists |
 | `run_query` | read | `Query` | exists |
-| `append_blocks` | write | new `AppendOutline` | new |
+| `append_blocks` | write | new `AppendOutline` | exists (slice 3.1) |
 | `update_block` | write | `UpdateBlock` | add `kind`, `checked`, `if_rev` |
 | `move_block` | write | new `MoveBlock` | new |
 | `delete_block` | write | new `DeleteBlock` | new |
@@ -321,7 +322,10 @@ The legacy rules:
   subtree with `read_block`.
 - **`append_blocks`** accepts a Markdown outline. It uses `markdown::parse_outline`
   (`crates/utopia-core/src/markdown.rs:12`) and commits one transaction and one undo step.
-  With `create`, it makes the page if the title does not resolve.
+  With `create`, it makes the page if the title does not resolve; a title that names a date
+  is that day's page (FR-1.2). One call adds at most 2,000 blocks and no line may be deeper
+  than 12 levels (FR-2.9); a larger or deeper outline is refused with `isError` and nothing
+  is written, not even the page.
 - **`move_block`** uses `outline::move_to` and `Store::move_block_to_page`.
 - **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), and undo
   restores it.
@@ -393,7 +397,7 @@ One file for each graph: `<config>/mcp/<sha256-of-canonical-graph-path>.json`.
   `tools/list` still answers, so the client shows the server as connected.
 - The tool list does not depend on the access file. Legacy clients do not ask for the list
   again, so a list that follows the file goes stale after a change in Settings. Only
-  `--read-only` removes the four write tools from the list, for the life of that process.
+  `--read-only` removes the write tools from the list, for the life of that process.
 - Text that a tool returns goes to the AI client, and the client can send it to its model
   provider. Utopia makes no network call for this (PRD §15.6). The Settings tab says this
   in plain words, adjacent to the control that turns access on.
@@ -588,9 +592,17 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 ## 10. Limits
 
 - **No sync when the app is closed.** See §2.3.
-- **The write tools do not exist yet.** The level `Read and write` can be set, and the route
-  enforces it (a write op sent to `/v1/op` is permitted at that level), but `tools/list`
-  offers the six read tools only. Slices 3.1 to 3.3 add the four write tools.
+- **Three of the four write tools do not exist yet.** Slice 3.1 added `append_blocks`; the
+  level `Read and write` permits it, and `/v1/op` permits every write op. `tools/list` offers
+  the six read tools and `append_blocks`. Slices 3.2 and 3.3 add `update_block` with `kind`,
+  `checked` and `if_rev`, and `move_block` and `delete_block`.
+- **`append_blocks` writes every line as a bullet.** The outline is read with
+  `markdown::parse_outline`, which takes off the list markers but not the `[ ] `, `[x] `,
+  `## ` and `> ` prefixes that `read_page` writes for a to-do, a heading and a quote: those
+  stay in the block's text. Slice 3.2's `update_block` with `kind` and `checked` is the way
+  to set a block's kind through the bridge until then.
+- **A refused `append_blocks` writes nothing.** It does not even create the page `create`
+  would have made, and it records no undo step.
 - **`serve-api` reads the access file once**, when it starts, so a level changed while it
   runs applies to `/v1/op` when it restarts. The app re-levels its own server at once
   (MC-12); the two processes' levels can differ in between.
