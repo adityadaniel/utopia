@@ -59,6 +59,10 @@ pub struct Coordinator {
     config: PathBuf,
     graph: PathBuf,
     api: ApiSlot,
+    /// The setting the access file and the server agree on. The view is optimistic: it holds
+    /// the *requested* value by the time the request arrives here, so it cannot say what to
+    /// restore when a save fails.
+    confirmed: Access,
     _sub: Subscription,
 }
 
@@ -88,6 +92,7 @@ impl Coordinator {
                 config: config.to_path_buf(),
                 graph: graph.to_path_buf(),
                 api,
+                confirmed: setting,
                 _sub: sub,
             }
         })
@@ -96,11 +101,9 @@ impl Coordinator {
     /// Save first, then move the socket: the file is what a headless call reads (MC-1), so
     /// the setting must not depend on the server starting here.
     fn apply(&mut self, request: Request, cx: &mut Context<Self>) {
-        // What is in force if the write fails: the controls go back to it.
-        let previous = {
-            let view = self.view.read(cx);
-            view.access
-        };
+        // What is in force if the write fails: the controls go back to it, so the same click
+        // can retry (the view holds the requested value, not this one).
+        let previous = self.confirmed;
         let file = access::access_file(&self.config, &self.graph);
         if let Err(error) = request.access.save(&file) {
             let bridge = bridge(&self.api);
@@ -114,6 +117,8 @@ impl Coordinator {
             });
             return;
         }
+        // The file is the setting now, whatever happens to the socket next.
+        self.confirmed = request.access;
         let env = std::env::var("UTOPIA_API").ok();
         let failure = match action(env.as_deref(), self.api.is_running(), request.access) {
             Action::Nothing => None,
@@ -150,6 +155,7 @@ impl Coordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::TestAppContext;
 
     fn access(level: Level) -> Access {
         Access {
@@ -210,6 +216,53 @@ mod tests {
                 addr: "127.0.0.1:0".into(),
                 level: Level::Read
             }
+        );
+    }
+
+    /// MC-12: the view is optimistic, so the coordinator cannot read "what was in force"
+    /// back from it after a request arrives. A save that fails must put the confirmed level
+    /// back, or the control says Off while the server still permits writes (and clicking Off
+    /// again would be a no-op, so there is no retry).
+    #[gpui::test]
+    fn mc_12_a_failed_save_puts_the_confirmed_level_back(cx: &mut TestAppContext) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("g.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let config = dir.path().join("config");
+        let file = access::access_file(&config, &graph);
+        Access {
+            level: Level::Write,
+            when_closed: false,
+        }
+        .save(&file)
+        .unwrap();
+
+        let (coordinator, view) = cx.update(|cx| {
+            let coordinator = Coordinator::install(&graph, &config, ApiSlot::new(None), cx);
+            let view = cx.global::<AssistantsHandle>().0.clone();
+            (coordinator, view)
+        });
+        let _coordinator = coordinator;
+        assert_eq!(view.read_with(cx, |v, _| v.access.level), Level::Write);
+
+        // Make the save fail but keep the file: a directory this process cannot write in.
+        let mcp = config.join("mcp");
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o500)).unwrap();
+        view.update(cx, |v, cx| v.choose_level(Level::Off, cx));
+        cx.run_until_parked();
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(
+            view.read_with(cx, |v, _| v.access.level),
+            Level::Write,
+            "a save that failed leaves the control on the level still in force"
+        );
+        assert_eq!(
+            Access::load(&file).0.level,
+            Level::Write,
+            "the file was not changed"
         );
     }
 }
