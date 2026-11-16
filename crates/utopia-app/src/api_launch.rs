@@ -69,6 +69,10 @@ impl ApiSlot {
         let Some(server) = self.take() else {
             return;
         };
+        // A call that reaches the handler between here and the shutdown is refused rather
+        // than queueing for an owner that no longer drains (nothing would run it, but the
+        // refusal is the answer the level now says).
+        server.set_level(Level::Off);
         while let Some(call) = server.try_recv() {
             drop(call);
         }
