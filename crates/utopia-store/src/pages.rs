@@ -591,8 +591,8 @@ impl Store {
         parent: Option<&BlockId>,
         items: &[(usize, String)],
     ) -> Result<Vec<BlockId>> {
-        // `heal_tags` reads live titles from the index, and `create_link_pages` decides
-        // what to write from it too (rule 2).
+        // `heal_tags` reads live titles from the index, and `unresolved_page_links` reads it
+        // to decide which pages to make, so the index must be current (rule 2).
         self.sync_index()?;
         let mut shaped: Vec<(usize, String)> = Vec::with_capacity(items.len());
         for (depth, text) in items {
