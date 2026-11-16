@@ -1,7 +1,8 @@
 # MCP support: design
 
 Status: design, written on 2026-11-10. The owner answered each decision on 2026-11-16
-(§1.1). No code has changed.
+(§1.1). The implementation started on 2026-11-16. `docs/mcp-handoff.md` has the state of
+each pull request and a brief for each one that is not started.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 

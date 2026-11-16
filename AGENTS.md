@@ -427,6 +427,10 @@ Known limits (pick these up deliberately, don't paper over them):
   window) shrinks the pane to fit (`Geometry::fit`). In Single mode the hidden entries keep their views but
   are inactive (`PageView::set_active`): they rebuild when shown, not on every change.
 
+In progress: assistant access over MCP (PRD §13.8). `docs/mcp-handoff.md` has the state of
+each pull request, the procedure, and a brief for each pull request that is not started;
+`docs/mcp-design.md` is the design. Read the handoff file before you continue that work.
+
 Beyond the PRD's scope ladder there is nothing scheduled; new feature requests go through the
 PRD first (risk R8).
 
