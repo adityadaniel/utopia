@@ -63,6 +63,24 @@ pub enum Inline {
     },
 }
 
+impl Inline {
+    /// The node's byte range in the source. `Text` carries none: it is the whole gap
+    /// between its neighbours' ranges (or its parent's inner bounds), and it is the source
+    /// verbatim except where a backslash escaped the next character.
+    pub fn range(&self) -> Option<&Range<usize>> {
+        match self {
+            Inline::Text(_) => None,
+            Inline::Emph { range, .. }
+            | Inline::Code { range, .. }
+            | Inline::PageRef { range, .. }
+            | Inline::Tag { range, .. }
+            | Inline::BlockRef { range, .. }
+            | Inline::Link { range, .. }
+            | Inline::Embed { range, .. } => Some(range),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefKind {
     /// `[[Title]]`

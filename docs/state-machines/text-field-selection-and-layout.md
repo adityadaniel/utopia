@@ -63,8 +63,10 @@ Layout: **None** / **Valid** / **Stale** (text changed since paint) / **Placehol
    (`editor.rs:1452`) covers most cases; uncertain whether reachable.
 6. **Word-drag is unrepresentable.** Double-click selects a word and sets `selecting`, so the
    drag then extends char-by-char from the word's end rather than by word (`:1267-1285`).
-7. **`select_*` handlers never call `moved()`**, so the CRDT `anchor` and the autocomplete
-   are stale after a shift-selection (see `block-editor-autocomplete.md` item 2).
+7. **`select_*` handlers never call `moved()`**, so the autocomplete is stale after a
+   shift-selection (see `block-editor-autocomplete.md` item 2). The CRDT `anchor` was stale
+   there too, which sent the caret to its old place on the next store change; the anchor
+   has been removed (`block-editor-session.md`, Status).
 
 ## Diagram
 

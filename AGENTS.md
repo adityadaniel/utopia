@@ -350,7 +350,9 @@ Implemented:
   Done / All, ticks through the page's own command; it covers the stack like the graph view
   and gives it back when a page opens. `cargo run -p xtask -- seed-tasks <graph>` seeds its shots.
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
-  snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
+  snapshot compaction, caret preservation across merges (§6.5: carried through the text
+  diff, `utopia_core::text::carry_caret`; the editor stores no caret anchor), end-to-end
+  encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.
 - **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with five tabs —
   **Keybindings**, where every action can be rebound by pressing the keys and the change
