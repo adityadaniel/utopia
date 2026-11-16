@@ -823,7 +823,12 @@ fn mc_8_a_uniformly_indented_outline_keeps_its_siblings() {
     );
     assert!(!is_error, "{text}");
     assert!(text.contains("Appended 2 blocks"), "{text}");
-    let (page, is_error) = call_at(&graph, Level::Read, "read_page", json!({"page": "Project X"}));
+    let (page, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
     assert!(!is_error, "{page}");
     let line = |want: &str| {
         page.lines()
