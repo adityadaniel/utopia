@@ -38,9 +38,13 @@ checked against the discovery file the app writes (`<config>/api/<graph key>.jso
      Settings → Assistants (MC-2).
 3. Clicked **Off** in the same window:
    - the access file became `{"version":1,"access":"off",…}`;
-   - the discovery file was removed;
-   - the old URL refused the connection (`HTTP 000`, socket closed), and the app kept
-     running.
+   - the discovery file was removed at once;
+   - the old URL refused the connection (`HTTP 000`, socket closed) within 20 ms, and the
+     app kept running. The server thread is joined on the background executor, never on the
+     UI thread, and queued calls are cancelled first (`ApiSlot::stop`): with a call the app
+     had not drained, the click returns at once and the handler answers 503
+     (`mc_12_turning_access_off_does_not_wait_for_a_queued_call`). A request that reaches
+     the handler during the shutdown is refused at level Off.
 4. Clicked **Read and write** in the same window:
    - the access file became `{"version":1,"access":"write",…}`;
    - a new discovery file and socket appeared;
