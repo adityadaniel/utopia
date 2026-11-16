@@ -470,8 +470,9 @@ Known limits (pick these up deliberately, don't paper over them):
   never compacts, because it must not delete other devices' files.
 - Very large flat sibling lists (≫5k blocks under one parent) make each insert O(n).
 - MCP: `tools/list` does not depend on the level (only `--read-only` removes the write
-  tools), because legacy clients do not ask for the list again. `append_blocks` writes every line as a bullet: the `[ ] `, `## ` and `> `
-  prefixes `read_page` writes for to-dos, headings and quotes stay in the block's text. An
+  tools), because legacy clients do not ask for the list again. `append_blocks` writes every
+  line as a bullet: the `[ ] `, `## ` and `> ` prefixes `read_page` writes for to-dos,
+  headings and quotes stay in the block's text. An
   outline of more than 2,000 blocks, or deeper than 12 levels (FR-2.9), is refused and writes
   nothing. `update_block` refuses an empty `text` (it never wipes a block), takes the
   outline's marker, trailing newline and — from a line that carried a marker — the `- ` and

@@ -350,7 +350,7 @@ The legacy rules:
   live block on the target page, and a `parent` and `after` that are not parent and child, are
   refused rather than guessed at. The blocks keep their ids, so a `((reference))` to one still
   resolves. A move into the block's own subtree, and one that would put a descendant at depth
-  12 or below (FR-2.9), fail with a domain error and write nothing.
+  12 or deeper (FR-2.9), fail with a domain error and write nothing.
 - **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), so the id
   stays and a `((reference))` to it still resolves and reads "deleted block", and undo
   restores the subtree. The answer gives the number of blocks that became tombstones.
