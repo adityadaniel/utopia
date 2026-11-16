@@ -63,6 +63,9 @@ pub struct Coordinator {
     /// the *requested* value by the time the request arrives here, so it cannot say what to
     /// restore when a save fails.
     confirmed: Access,
+    /// `UTOPIA_API` as this run found it. It is a launch override, read once, so an apply
+    /// cannot see a different environment from the one the API started under.
+    env_api: Option<String>,
     _sub: Subscription,
 }
 
@@ -70,6 +73,18 @@ impl Coordinator {
     /// Install the tab for the graph that just opened. `api` is the same slot the inbox
     /// loop reads, so a server started here is drained by the running app (MC-12).
     pub fn install(graph: &Path, config: &Path, api: ApiSlot, cx: &mut App) -> Entity<Self> {
+        Self::install_with(graph, config, api, std::env::var("UTOPIA_API").ok(), cx)
+    }
+
+    /// [`Self::install`] with the launch override given, so a test does not depend on the
+    /// environment of the machine that runs it.
+    fn install_with(
+        graph: &Path,
+        config: &Path,
+        api: ApiSlot,
+        env_api: Option<String>,
+        cx: &mut App,
+    ) -> Entity<Self> {
         // The client entries pin `--graph`, and a client starts the server from its own
         // directory: a relative path shown here would point somewhere else (MC-13).
         let graph = crate::mcp::absolute(graph).unwrap_or_else(|_| graph.to_path_buf());
@@ -93,6 +108,7 @@ impl Coordinator {
                 graph: graph.to_path_buf(),
                 api,
                 confirmed: setting,
+                env_api,
                 _sub: sub,
             }
         })
@@ -119,17 +135,22 @@ impl Coordinator {
         }
         // The file is the setting now, whatever happens to the socket next.
         self.confirmed = request.access;
-        let env = std::env::var("UTOPIA_API").ok();
-        let failure = match action(env.as_deref(), self.api.is_running(), request.access) {
+        let failure = match action(
+            self.env_api.as_deref(),
+            self.api.is_running(),
+            request.access,
+        ) {
             Action::Nothing => None,
             Action::SetLevel(level) => {
                 self.api.set_level(level);
                 None
             }
             Action::Stop => {
-                // Dropping the server shuts the listener; the discovery file must not
-                // outlive it, or a client would dial an address nothing answers.
-                self.api.take();
+                // Queued calls are cancelled and the join runs off this thread (MC-12): a
+                // request the UI has not drained yet would otherwise hold the shutdown until
+                // its timeout, with the loop that drains it blocked here. The discovery file
+                // must not outlive the server, or a client would dial a dead address.
+                self.api.stop(cx.background_executor());
                 let _ = std::fs::remove_file(utopia_api::discovery_file(&self.config, &self.graph));
                 None
             }
@@ -264,5 +285,88 @@ mod tests {
             Level::Write,
             "the file was not changed"
         );
+    }
+
+    /// MC-12 (rule 10): turning access off must not join the server thread on the UI thread.
+    /// A call the app has not drained yet keeps its HTTP handler waiting, so a synchronous
+    /// drop would block the very loop that would drain it, until the server's wait expires.
+    #[gpui::test]
+    fn mc_12_turning_access_off_does_not_wait_for_a_queued_call(cx: &mut TestAppContext) {
+        use std::time::{Duration, Instant};
+
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("g.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let config = dir.path().join("config");
+        let file = access::access_file(&config, &graph);
+        Access {
+            level: Level::Write,
+            when_closed: false,
+        }
+        .save(&file)
+        .unwrap();
+
+        // A real server at Write. Its wait is short (2 s instead of the default 30 s), so a
+        // regression fails this test in a second instead of hanging the suite.
+        let server = utopia_api::serve_with(
+            "127.0.0.1:0",
+            "token".into(),
+            utopia_api::Limits {
+                wait: Duration::from_secs(2),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // `/v1/op` checks the level when the request arrives; the server starts at Off.
+        server.set_level(Level::Write);
+        let discovery = utopia_api::Discovery {
+            url: server.url(),
+            token: server.token.clone(),
+        };
+
+        // One request that the app does not answer. Taking its call out of the queue and
+        // holding it keeps the handler waiting, which is the state a synchronous drop has to
+        // wait for.
+        let request = std::thread::spawn(move || {
+            utopia_api::Client::new(discovery).op(&utopia_api::Op::ListPages { daily: false })
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let call = loop {
+            if let Some(call) = server.try_recv() {
+                break call;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the request never reached the queue"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        };
+
+        let (coordinator, view) = cx.update(|cx| {
+            let coordinator = Coordinator::install(&graph, &config, ApiSlot::new(Some(server)), cx);
+            let view = cx.global::<AssistantsHandle>().0.clone();
+            (coordinator, view)
+        });
+        let _coordinator = coordinator;
+
+        // The request is applied as an effect at the end of this update, on this thread.
+        let started = Instant::now();
+        view.update(cx, |v, cx| v.choose_level(Level::Off, cx));
+        let elapsed = started.elapsed();
+
+        // Let the waiting handler answer, then let the background shutdown finish joining.
+        drop(call);
+        cx.run_until_parked();
+        let result = request.join().unwrap();
+        assert!(
+            result.is_err(),
+            "the queued call was cancelled without running: {result:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "turning access off blocked the UI thread for {elapsed:?} on a queued call"
+        );
+        assert_eq!(Access::load(&file).0.level, Level::Off);
+        assert_eq!(view.read_with(cx, |v, _| v.access.level), Level::Off);
     }
 }

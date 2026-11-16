@@ -10,6 +10,7 @@ use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
 
+use gpui::BackgroundExecutor;
 use utopia_api::{access, Access, ApiCall, ApiServer, Level};
 
 /// The loopback API of the open graph, in one shared slot.
@@ -54,6 +55,24 @@ impl ApiSlot {
     /// Stop the server: dropping it shuts the listener down.
     pub fn take(&self) -> Option<ApiServer> {
         self.0.take()
+    }
+
+    /// Stop the server without blocking the caller (MC-12, rule 10).
+    ///
+    /// Queued calls are dropped first: each carries the oneshot its HTTP handler waits on,
+    /// so the handler answers "the app is not running" at once instead of holding the
+    /// server's graceful shutdown. The destructor then joins the server thread, which waits
+    /// for calls already in flight, so that join runs on `executor`, never on the caller's UI
+    /// thread — a request the UI has not drained yet would otherwise block the loop that
+    /// would drain it, until the server's wait expires.
+    pub fn stop(&self, executor: &BackgroundExecutor) {
+        let Some(server) = self.take() else {
+            return;
+        };
+        while let Some(call) = server.try_recv() {
+            drop(call);
+        }
+        executor.spawn(async move { drop(server) }).detach();
     }
 }
 
