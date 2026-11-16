@@ -37,6 +37,51 @@ fn doctor_ok(s: &mut Store) {
     assert!(r.is_ok(), "{:#?}", r.problems);
 }
 
+/// Appendix B `bare_url`: a `#fragment` in a bare URL is no tag. A graph indexed by the
+/// older grammar holds that edge; opening it rebuilds the index once, so the backlink goes
+/// and `doctor` stays clean.
+#[test]
+fn opening_a_graph_drops_tag_edges_an_older_grammar_found_in_urls() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.utopia");
+    let (page, intro) = {
+        let mut s = Store::open(&path).unwrap();
+        let page = s.create_page("Reading").unwrap();
+        let intro = s.create_page("intro").unwrap();
+        let b = write(&mut s, &page, "https://x.y/#intro");
+        assert_eq!(s.backlink_count(&intro).unwrap(), 0, "no tag in a URL");
+        // What the older grammar projected, and no record of the grammar.
+        s.conn()
+            .execute(
+                "INSERT INTO ref(src_block_id, src_page_id, dst_kind, dst_page_id, \
+                 dst_title_key, anchor_start, anchor_end) VALUES (?1, ?2, 'page', ?3, 'intro', 11, 17)",
+                [&b.0, &page.0, &intro.0],
+            )
+            .unwrap();
+        s.conn()
+            .execute("DELETE FROM local_state WHERE key='inline_grammar'", [])
+            .unwrap();
+        assert_eq!(s.backlink_count(&intro).unwrap(), 1);
+        (page, intro)
+    };
+    let mut s = Store::open(&path).unwrap();
+    assert_eq!(
+        s.backlink_count(&intro).unwrap(),
+        0,
+        "the stale edge is gone"
+    );
+    assert_eq!(
+        texts(&mut s, &page),
+        [("https://x.y/#intro".to_string(), 0)]
+    );
+    doctor_ok(&mut s);
+    assert_eq!(
+        s.local_get("inline_grammar").unwrap().as_deref(),
+        Some("2"),
+        "once"
+    );
+}
+
 /// DESIGN.md §3.2: the sidebar's PAGES list shows a reference count per page. One grouped
 /// query must agree with [`Store::backlink_count`] for every page, and leave out pages
 /// nothing points at.

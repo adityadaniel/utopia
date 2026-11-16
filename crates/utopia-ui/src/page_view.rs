@@ -3218,7 +3218,9 @@ impl PageView {
         let styled =
             StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
         let layout = styled.layout().clone();
-        let same = rendered.text.as_ref() == text;
+        // A click puts the caret where it landed when the text shows its source as is
+        // (an external link's arrow aside); otherwise at the end.
+        let same = rendered.mirrors(text);
         let end = prefix + text.len();
         let row2 = row.clone();
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
@@ -3259,7 +3261,7 @@ impl PageView {
                     }
                     if let Some(r) = &row2 {
                         let caret = match ix {
-                            Ok(i) | Err(i) if same => (prefix + i).min(end),
+                            Ok(i) | Err(i) if same => (prefix + rendered.source_offset(i)).min(end),
                             _ => end,
                         };
                         cx.stop_propagation();
