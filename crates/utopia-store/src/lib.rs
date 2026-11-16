@@ -49,7 +49,6 @@ pub use project::{display_title, resolve_page_key};
 pub use query::*;
 pub use schema::SCHEMA_VERSION;
 pub use tasks::{Task, TaskGroup};
-pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
 use writer::{Job, PageJob, Persister, TrashOp};
@@ -935,21 +934,6 @@ impl Store {
             in_flight: None,
             promoted: false,
         }
-    }
-
-    /// Anchor a caret in a block so it survives remote merges (§6.5).
-    pub fn caret_cursor(
-        &mut self,
-        page: &PageId,
-        block: &BlockId,
-        offset: usize,
-    ) -> Option<DocCursor> {
-        self.load_doc(page).ok()?.doc.cursor_for(block, offset)
-    }
-
-    /// Where an anchored caret is now (byte offset in the block's text).
-    pub fn resolve_caret(&mut self, page: &PageId, cursor: &DocCursor) -> Option<usize> {
-        self.load_doc(page).ok()?.doc.resolve_cursor(cursor)
     }
 
     /// The current tree of a page (loads its shard on first use).
