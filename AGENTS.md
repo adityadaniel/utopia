@@ -271,6 +271,7 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `crates/utopia-sync` | Sync client: `Transport` trait, `SyncEngine` (prepare → `exchange` → apply), `HttpTransport`, `FolderTransport`, `e2e::Encrypted`, `realtime::listen`, in-memory reference relay | `utopia-core`, `utopia-doc`, `utopia-store`, `utopia-proto` |
 | `crates/utopia-syncd` | Relay server (axum, §12.8): per-page logs, dedupe, auth, quota, snapshots, WebSocket notices; `lan` = in-process relay + mDNS. **No CRDT dependency** | `utopia-proto`, `rusqlite` |
 | `crates/utopia-api` | Local automation API (loopback HTTP, bearer token) and `utopia://` link parsing; `handle(store, Op)` is the one implementation shared with plugins | `utopia-core`, `utopia-store`, `axum` |
+| `crates/utopia-mcp` | MCP server on stdio for assistant clients (PRD §13.8): the JSON-RPC wire for the two protocol eras, the tool catalog, the outline format with its id marker, and the `Direct` headless backend. No `gpui`, no async runtime | `utopia-api`, `utopia-store`, `utopia-core` |
 | `crates/utopia-plugin` | WASM plugin sandbox (wasmi: fuel, memory cap, permissioned API calls) | `utopia-api`, `utopia-store`, `wasmi` |
 | `crates/utopia-ui` | GPUI components: block editor (IME via `EntityInputHandler`), outline view, chips, panels, sidebar, background sync runner, graph view, PDF viewer (PDFKit on macOS), Settings window (keybinding editor, shortcut sheet, Help tour) | `utopia-core`, `utopia-store`, `utopia-sync`, `utopia-plugin`, `gpui` |
 | `crates/utopia-app` | Binary: window, keymap, actions, app assembly, CLI subcommands, startup probe, screenshot scripts, API/link inbox, unlock screen | everything above |
@@ -279,7 +280,8 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `xtask` | Dev tasks: `bench` (budgets), `profile-merge`, `bundle`, `mobile`, `help-shots` | anything |
 
 Dependency direction is one-way: `app → ui → (plugin → api) → store → doc → core`;
-`ffi → sync → store`. If you find yourself importing upward, move the type down instead.
+`app → mcp → api`; `ffi → sync → store`. If you find yourself importing upward, move the type
+down instead.
 
 ## Architecture rules (do not break these)
 

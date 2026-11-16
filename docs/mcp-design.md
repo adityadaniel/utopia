@@ -252,8 +252,11 @@ Each modern request carries these keys in `params._meta`:
 
 - A request without a necessary key gets error `-32602`.
 - A version that the server does not support gets error `-32022` with
-  `"data": {"supported": [...], "requested": "<version>"}`. The list has each version
-  that the server supports.
+  `"data": {"supported": [...], "requested": "<version>"}`. The list has each version that
+  can be asked for in this request shape, which is `2026-07-28`; `server/discover`'s
+  `supportedVersions` has every revision the server speaks (all five). A handshake
+  revision cannot be asked for with the `_meta` of 2026-07-28, so offering it there would
+  only cause a second refusal.
 - Each result has `"resultType": "complete"`. The server never answers `input_required`.
 - Each result has `_meta["io.modelcontextprotocol/serverInfo"]` with the name and the
   version of the server.
@@ -295,6 +298,12 @@ The legacy rules:
 
 - **`read_page`** accepts a title, an alias, `today`, `yesterday`, or an ISO date. It
   returns an indented Markdown outline. Each line ends with the block id.
+- **The id marker** is `{id:01J8Z3K9V2}`, at the end of the line (at the end of a block's
+  last line, when its text runs over several). It cannot be Utopia markup: a marker written
+  as `((id))` is a block reference, `[[id]]` a page link and `#id` a tag, so an agent that
+  sent a line back would create one. A single `{` is literal text to the inline parser, so
+  `{id:…}` is inert in a block that an agent writes back. Slice 3.1 (PR 7) strips the
+  marker from each line that `append_blocks` receives.
 - A day without a page returns an empty outline, not an error (FR-1.2). A read never makes
   a page. `Op::Journal` answers 404 for such a day today
   (`crates/utopia-api/src/lib.rs:291`). The tool changes that answer into an empty
@@ -406,6 +415,12 @@ an agent never writes to a graph that the owner did not select.
   that is not marked read-only.
 - The documentation does not say which protocol era Codex and Claude Desktop use. Do a
   test with each client in slice 1.4.
+- Measured on 2026-11-16 by slice 1.3 against a scratch graph (the `stderr` line of
+  `serve`, in `docs/verification/feat-mcp-read-tools/real-clients.md`): Claude Code 2.1.319
+  uses 2026-07-28 (`clientInfo.name` is `claude-code`), so it sends `server/discover`;
+  Codex 0.169.0 uses the handshake with 2025-06-18 (`clientInfo.name` is
+  `codex-mcp-client`). Claude Desktop is still unknown. Slice 1.4 repeats both runs against
+  `utopia mcp` itself.
 
 ## 7. Tests and verification
 
@@ -552,7 +567,9 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 - **Not measured:** the cost to open the store for each headless call.
 - **Not examined:** what occurs when an agent updates the block that has the caret.
   `UpdateBlock` has this behaviour today. Slice 3.4 examines it.
-- **Not known:** the protocol era that Codex and Claude Desktop use. Slice 1.4 records it.
+- **Not known:** the protocol era that Claude Desktop uses. Claude Code (2026-07-28) and
+  Codex (2025-06-18 handshake) were measured in slice 1.3 and are in §6; slice 1.4 records
+  Claude Desktop and repeats the other two against `utopia mcp`.
 - **A cancel does not reverse a write.** See §3.1.
 - **Stdio only.** A client that cannot start a local process cannot connect in the first
   version.

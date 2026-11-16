@@ -973,12 +973,13 @@ utopia/
 │   ├── utopia-sync/    # client: outbox, pull loop, backoff, Transport trait
 │   ├── utopia-ui/      # GPUI components: bullet row, virtual list, chips, panels
 │   ├── utopia-app/     # bin: window, keymap, actions, app assembly
+│   ├── utopia-mcp/     # MCP server on stdio for assistant clients (§13.8)
 │   ├── utopia-ffi/     # UniFFI surface for mobile/CLI (P2)
 │   └── utopia-syncd/   # server bin (axum) — separate deployment
 └── xtask/               # packaging, notarization, fixtures, benches
 ```
 
-Dependency direction: `app → ui → core`; `core` never depends on `store` (store depends on core types); `doc` depends on `core` + `loro`; `store` depends on `core` + `doc` (to project). Keep `loro` out of `core` so the domain stays testable without CRDT semantics.
+Dependency direction: `app → ui → core`; `core` never depends on `store` (store depends on core types); `doc` depends on `core` + `loro`; `store` depends on `core` + `doc` (to project); `mcp` depends on `api` + `store` + `core` (it is the MCP front end of the automation API, §13.8). Keep `loro` out of `core` so the domain stays testable without CRDT semantics.
 
 ### 13.2 The CRDT boundary (deliberately narrow)
 
