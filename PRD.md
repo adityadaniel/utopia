@@ -95,6 +95,10 @@ The data model is exposed through a Datalog-style query API, which is why the co
 - E2E encrypted sync (designed for in §11.7, shipped in v1.1).
 - AI features of any kind.
 
+Assistant access over MCP (§13.8, P2) does not change the last line. Utopia contains no
+model and makes no call to a model. It lets an AI client that the owner installs read and
+write the graph, and it is off by default.
+
 ### 2.3 Product principles
 
 1. **The block is the atom.** No document-level operations that bypass blocks. Everything addressable, everything referenceable.
@@ -148,6 +152,7 @@ The data model is exposed through a Datalog-style query API, which is why the co
 | Full-text search | ✅ | titles only | ✅ blocks (FTS5) | semantic |
 | Global quick capture | quick capture | — | ✅ (hotkey) | mobile share sheet |
 | Local automation API | ✅ (in-app JS API) | — | — | ✅ (local HTTP) |
+| Assistant access (MCP) | — | — | — | ✅ (local stdio server, off by default; §13.8) |
 | Multiplayer | ✅ | — | — | maybe never |
 | Extensions / `roam/js` | ✅ | — | — | ✅ (WASM sandbox?) |
 | PDF highlights | ✅ | — | — | ✅ |
@@ -160,7 +165,7 @@ The data model is exposed through a Datalog-style query API, which is why the co
 
 - **P0 (must ship, v1.0):** Daily notes · Bullet outliner · Backlinks · Reference nodes · **tags-as-pages** · **date links** · **rename/merge** · **right sidebar with stacked pages** · local persistence · undo/redo · quick jump by page title · export.
 - **P1 (v1.1):** search (FTS5), todos/headings/quotes/code block types, slash menu, unlinked references + promote-to-link, reference filters, attributes + page metadata header, templates (journal + page), extract-block-to-page, Roam import, block embeds, quick capture hotkey, split panes (since replaced by stacked panes, §9.2.1).
-- **P2 (v1.2+):** mobile client, E2E sync, queries, graph view, attachments, PDF, plugin runtime, local HTTP API.
+- **P2 (v1.2+):** mobile client, E2E sync, queries, graph view, attachments, PDF, plugin runtime, local HTTP API, assistant access over MCP (§13.8).
 
 ### 4.3 Validated workflows (from practitioner usage)
 
@@ -1065,6 +1070,32 @@ GPUI is pre-1.0 (`gpui 0.2.2`, Apache-2.0, published Oct 2025) and has no rich i
 | Updates (P2) | Signed appcast / self-hosted feed |
 | Packaging | `cargo-dist` or `cargo-bundle` → `.dmg`, `.msi`, `.AppImage`; notarization via `notarytool` |
 
+### 13.8 Assistant access over MCP (MC)
+
+An AI client that the owner installs reads and writes the graph through the Model Context
+Protocol. The first clients are Claude Desktop, Claude Code and Codex. `utopia mcp` is a
+stdio server that the client starts. It adds no write path: each tool call is a
+`utopia_api::Op` that runs through `utopia_api::handle`, so undo, references and sync
+behave as they do for the editor. Utopia contains no model and makes no call to a model
+(§2.2). The design, the decisions and the phases are in `docs/mcp-design.md`.
+
+| Id | Requirement |
+|---|---|
+| MC-1 | Access is Off by default. With an access file that is missing, malformed or of an unknown version, no tool reads or writes the graph. Each call returns an error that names Settings → Assistants. No environment variable and no client flag turns access on. |
+| MC-2 | The level `read` permits the read tools only. The level `write` permits all tools. The process that runs the operation enforces the level from `Op::kind()`. `--read-only` lowers the level for one client and cannot raise it. |
+| MC-3 | Each tool call is one `utopia_api::Op` that `utopia_api::handle` runs (rule 13). After each write tool, `doctor` is clean (§10.4). |
+| MC-4 | Only one process has a graph open for writes. A second process sends its work to the owner or stops with a message. An owner that stops, also by a crash, leaves no lock. |
+| MC-5 | When the app is closed and `when_closed` is off, each call fails with "Open Utopia". When `when_closed` is on, the call runs without the app, does not sync, and never shows a prompt. |
+| MC-6 | `utopia mcp` is an MCP server on stdio for the handshake revisions (2025-11-25 and earlier) and for 2026-07-28. `stdout` carries protocol messages only. The server sends no request to the client. It exits when `stdin` closes. |
+| MC-7 | The read tools are `search`, `list_pages`, `read_page`, `read_block`, `get_backlinks` and `run_query`. A read never makes a page (FR-1.2): a day without a page gives an empty outline. A result stays in the size budget and tells the agent how to read the remainder. |
+| MC-8 | The write tools are `append_blocks`, `update_block`, `move_block` and `delete_block`. `append_blocks` commits one transaction. `delete_block` makes a tombstone (rule 5). |
+| MC-9 | A write from an agent is one step on the undo stack of the app (FR-2.12). |
+| MC-10 | `update_block` with an `if_rev` that does not agree with the block fails and writes nothing (§2.3.7). |
+| MC-11 | Page text goes only into tool results. It never goes into a tool description or into the `instructions` text. |
+| MC-12 | Settings → Assistants shows the level, the `when_closed` switch and one copy control for each client. It says that text an assistant reads goes to that assistant and to its provider. The settings are local and never sync (rule 9). |
+| MC-13 | `utopia mcp` needs `--graph`. It never selects a graph by the start-up order of the app, so an agent cannot write to a graph that the owner did not name. |
+| MC-14 | `server/discover` and `initialize` answer in less than 1 s and open no store. The cost of one headless call is in `xtask bench` (§15.1). Its budget is set after the first measurement. |
+
 ---
 
 ## 14. Mobile strategy
@@ -1148,6 +1179,7 @@ Daily note (today only) · bullet capture · page/block refs (insert) · backlin
 - Sync tokens stored in the OS keychain, never in `graph.db`.
 - Server sees ciphertext only once E2E lands.
 - The E2E key-check marker (`setup_e2e_check`, a fixed plaintext sealed under the graph key) is an **offline verifier**: anyone holding the graph file or a rolling backup can test passphrase guesses against it at the Argon2 cost, without the relay. That is the same oracle a relay's ciphertext gives, and the file already holds the notes, so the exposure is passphrase reuse elsewhere; the marker is what makes a copied graph or a lost Keychain item unable to re-key silently (§12.6). A distinct, higher-cost derivation for the marker alone would not remove the oracle (the relay's ciphertext still is one), so the cost stays shared with payload encryption and the trade-off is documented here instead.
+- Assistant access (§13.8) is off by default. When the owner turns it on, text that an assistant reads goes to that assistant and to its model provider. Utopia itself makes no network call for this. Settings says so adjacent to the control that turns access on (MC-12).
 
 ### 15.7 Platform support
 
@@ -1255,6 +1287,7 @@ Indicative for a 1–2 engineer team; the point is ordering and exit criteria, n
 | PDF highlights | Embedded PDF + annotations | P2 |
 | `roam/js`, Depot | WASM plugin sandbox | P2 (maybe never) |
 | In-app automation API | Local HTTP API + `utopia://` | P2 |
+| — | Assistant access over MCP: a stdio server that an AI client starts (§13.8) | P2 |
 | Mobile app | Native shell | P2 |
 
 ### B. Markdown subset (normative)
