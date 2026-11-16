@@ -686,7 +686,7 @@ fn fit(prefix: &str, entries: Vec<Entry>) -> String {
     let room = BUDGET.saturating_sub(prefix.len() + RESERVE);
     let mut kept = 0;
     for e in &entries {
-        let full = compose(e);
+        let full = compose(e, None);
         if out.len() - prefix.len() + full.len() <= room {
             out.push_str(&full);
             kept += 1;
@@ -694,50 +694,74 @@ fn fit(prefix: &str, entries: Vec<Entry>) -> String {
             break;
         }
     }
-    let mut cut_block = false;
+    let mut cut_short: Option<&Entry> = None;
     if kept == 0 && !entries.is_empty() {
-        let full = compose(&entries[0]);
-        let at = floor_char_boundary(&full, room);
-        out.push_str(full[..at].trim_end());
-        out.push_str(" …\n");
-        cut_block = true;
+        out.push_str(&compose(&entries[0], Some(room)));
+        cut_short = Some(&entries[0]);
         kept = 1;
     }
-    if kept == entries.len() {
+    let left = &entries[kept..];
+    if left.is_empty() && cut_short.is_none() {
         return out;
     }
-    let left = &entries[kept..];
     let blocks = left.iter().filter(|e| e.block.is_some()).count();
     let first = left.iter().find_map(|e| e.block.as_deref());
     out.push('\n');
-    match first {
-        Some(id) => out.push_str(&format!(
-            "({} block{} not shown{}. Read the rest with read_block(\"{id}\").)\n",
-            blocks,
-            if blocks == 1 { "" } else { "s" },
-            if cut_block {
-                " after the block above was cut short"
-            } else {
-                ": this result reached the 24 KB budget"
-            }
-        )),
-        None => out.push_str(&format!(
-            "({} line{} not shown: this result reached the 24 KB budget. Ask for fewer \
-             results.)\n",
-            left.len(),
-            if left.len() == 1 { "" } else { "s" }
-        )),
+    let mut note = String::from("(24 KB budget: ");
+    if let Some(entry) = cut_short {
+        match entry.block.as_deref() {
+            Some(id) => note.push_str(&format!(
+                "block \"{id}\" is longer than one result, so its text is cut short"
+            )),
+            None => note.push_str("the first line is cut short"),
+        }
+        if !left.is_empty() {
+            note.push_str(" and ");
+        }
     }
+    if !left.is_empty() {
+        if let Some(first) = first {
+            note.push_str(&format!(
+                "{blocks} block{} not shown. Read one of them with read_block(\"{first}\" \
+                 to see the rest of that subtree).",
+                if blocks == 1 { "" } else { "s" }
+            ));
+        } else {
+            note.push_str(&format!(
+                "{} line{} not shown. Ask for fewer results.",
+                left.len(),
+                if left.len() == 1 { "" } else { "s" }
+            ));
+        }
+    }
+    note.push_str(")\n");
+    out.push_str(&note);
     out
 }
 
-fn compose(e: &Entry) -> String {
+/// One entry, as it is written. `max` cuts the entry's own text to that many bytes, keeping
+/// the id marker whole: the marker is what lets a reader name the block it partly sees.
+fn compose(e: &Entry, max: Option<usize>) -> String {
+    let body = e.text.trim_end_matches('\n');
     match &e.block {
-        Some(id) => format!(
-            "{} {MARKER_PREFIX}{id}{MARKER_SUFFIX}\n",
-            e.text.trim_end_matches('\n')
-        ),
-        None => e.text.clone(),
+        Some(id) => {
+            let marker = format!(" {MARKER_PREFIX}{id}{MARKER_SUFFIX}");
+            match max {
+                None => format!("{body}{marker}\n"),
+                Some(max) => {
+                    let room = max.saturating_sub(marker.len() + 2);
+                    let at = floor_char_boundary(body, room);
+                    format!("{} …{marker}\n", body[..at].trim_end())
+                }
+            }
+        }
+        None => match max {
+            None => e.text.clone(),
+            Some(max) => {
+                let at = floor_char_boundary(body, max.saturating_sub(2));
+                format!("{} …\n", body[..at].trim_end())
+            }
+        },
     }
 }
 
@@ -854,17 +878,24 @@ mod tests {
         }
     }
 
+    /// MC-7: the one cut that is not at a block boundary keeps the id marker and says so,
+    /// even when the block is the only entry.
     #[test]
     fn a_cut_never_splits_a_marker_or_a_character() {
-        let mut entries = Vec::new();
         let mut doc = Doc::default();
         doc.block(format!("- {}\n", "é".repeat(BUDGET)), "01A");
-        entries.extend(doc.entries);
-        let text = fit("", entries);
+        let text = fit("", doc.entries);
         assert!(text.len() <= BUDGET, "{}", text.len());
         assert!(text.ends_with("\n"));
         // The head is valid UTF-8 (it is a &str), and the cut landed on a boundary.
         assert!(text.starts_with("- ééé"));
+        assert!(
+            text.lines().next().unwrap().ends_with("{id:01A}"),
+            "{}",
+            text.lines().next().unwrap()
+        );
+        assert_eq!(text.matches('…').count(), 1, "one cut marker: {text:.120}");
+        assert!(text.contains("cut short"), "{}", &text[text.len() - 120..]);
     }
 
     /// `search` keeps pages and blocks apart, and a block line carries its id.

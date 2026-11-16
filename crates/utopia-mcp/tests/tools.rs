@@ -295,6 +295,41 @@ fn mc_7_a_large_page_is_cut_and_says_how_to_read_the_rest() {
     assert!(rest.contains(&format!("{{id:{id}}}")), "{rest}");
 }
 
+/// MC-7: a block bigger than the budget keeps its id marker and says that it was cut, even
+/// when it is the only block in the result.
+#[test]
+fn mc_7_an_oversized_block_keeps_its_marker_and_says_it_was_cut() {
+    let graph = Graph::new();
+    let mut store = graph.open();
+    let body = "y".repeat(30 * 1024);
+    let id = utopia_api::handle(
+        &mut store,
+        utopia_api::Op::AppendBlock {
+            title: "Huge Block".into(),
+            text: body,
+            parent: None,
+            create: true,
+        },
+    )
+    .expect("a block")
+    .body["id"]
+        .as_str()
+        .expect("an id")
+        .to_string();
+    drop(store);
+
+    let (text, is_error) = call(&graph, "read_page", json!({"page": "Huge Block"}));
+    assert!(!is_error, "{text}");
+    assert!(text.len() <= utopia_mcp::tools::BUDGET, "{}", text.len());
+    let first = text.lines().next().expect("a first line");
+    assert!(
+        first.ends_with(&format!("{{id:{id}}}")),
+        "the marker survives the cut: {first}"
+    );
+    assert!(text.contains("cut"), "the cut is reported: {text}");
+    assert!(text.contains("longer than one result"), "{text}");
+}
+
 /// MC-11: the catalog and the guide are the same for two graphs with different contents.
 #[test]
 fn mc_11_the_catalog_does_not_depend_on_the_graph() {
