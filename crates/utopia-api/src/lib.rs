@@ -559,10 +559,17 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
                 ));
             }
             // One command group for the text, the kind and `checked` (MC-9), so one undo
-            // takes the whole call off. `update_block` shapes the text the way the commit
-            // below would, so the commit rewrites nothing and opens no second group.
+            // takes the whole call off. Only new text can name a link that a page must be
+            // made for, and `update_block` already shaped that text the way `commit_block`
+            // would: committing a kind or `checked` change would shape text the agent never
+            // sent (the owner's own, still uncommitted and not NFC or not healed yet) in a
+            // second, coalescing group, which is not one undo step and can join the group
+            // the owner is typing into. A kind change alone leaves links alone, as the
+            // editor's own kind change does.
             store.update_block(&page, &id, text.as_deref(), kind, checked)?;
-            store.commit_block(&page, &id)?;
+            if text.is_some() {
+                store.commit_block(&page, &id)?;
+            }
             store.flush()?;
             Ok(Outcome {
                 body: block_json(store, &page, &id, false)?,
