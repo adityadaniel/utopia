@@ -529,10 +529,11 @@ fn schema_update_block() -> Value {
             "text": {
                 "type": "string",
                 "description": "The block's new text, in Utopia markup ([[Page]], #tag, \
-                                ((block-id)), key:: value). Send the text itself: an outline \
-                                line's - , [ ] , ## and > prefixes show its kind, which \
-                                `kind` and `checked` set, and its {id:…} marker is ignored. \
-                                Leave it out to keep the text the block has.",
+                                ((block-id)), key:: value). A line copied from read_page or \
+                                read_block may be sent as it was shown: its {id:…} marker \
+                                and the outline's - , [ ] , ## and > prefixes are taken off, \
+                                and `kind` and `checked` set the kind. Leave it out to keep \
+                                the text the block has.",
             },
             "kind": {
                 "type": "string",
@@ -679,16 +680,47 @@ fn run_update_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, To
 
 /// A `text` argument as the block should hold it (PRD §13.8 MC-8, design §4).
 ///
-/// The id marker of the outline format comes off, exactly as it does for `append_blocks`
-/// (handoff §5), so a line copied from `read_block` does not leave `{id:01J…}` in the owner's
-/// note — where it would also make the returned `rev` describe junk. The newline that ended
-/// the copied line comes off too: a block's text does not carry the outline's line breaks.
-/// The line's `- `, `[ ] `, `## ` and `> ` prefixes are kept, which is the limit design §10
-/// records for `append_blocks` as well; the schema tells an agent to send the text alone.
+/// The id marker of the outline format always comes off, exactly as it does for
+/// `append_blocks` (handoff §5), and so does the newline that ended a copied line: a block's
+/// text carries neither the marker nor the outline's line breaks.
+///
+/// The outline's own punctuation — `- `, then the `[ ] `, `[x] `, `> ` or `#` prefix
+/// [`block_line`] writes for a kind — comes off the first line **only when that line carried
+/// the marker**, i.e. when it is a line `read_page` or `read_block` wrote and an agent sent
+/// it back. Those prefixes show the block's kind, which `kind` and `checked` set, so a copied
+/// line lands as the text and not as markup. A text without a marker is the caller's own and
+/// is left exactly as given, including a leading `- ` or `>`: nothing guesses at characters
+/// the agent may have meant (rule 5). `append_blocks` has no such split — `parse_outline`
+/// requires the `- ` — so its limit stays as design §10 records it.
 fn block_text(text: String) -> String {
-    strip_id_markers(&text)
-        .trim_end_matches(['\n', '\r'])
-        .to_string()
+    let copied = text
+        .lines()
+        .next()
+        .is_some_and(|line| strip_id_markers(line) != line);
+    let text = strip_id_markers(&text);
+    let text = text.trim_end_matches(['\n', '\r']);
+    match copied {
+        true => strip_outline_prefix(text).to_string(),
+        false => text.to_string(),
+    }
+}
+
+/// [`block_text`] on a copied line: the indentation, the `- ` and the kind prefix that
+/// [`block_line`] writes, leaving the block's text.
+fn strip_outline_prefix(line: &str) -> &str {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let Some(rest) = rest.strip_prefix("- ") else {
+        // A copied empty block is the line `- {id:…}`, and taking the marker off leaves the
+        // bare dash: an empty text, which the call refuses rather than writing "-".
+        return if rest == "-" { "" } else { line };
+    };
+    // Longest first, so a level-3 heading does not read as a level-2 one.
+    for prefix in ["[ ] ", "[x] ", "> ", "### ", "## ", "# "] {
+        if let Some(text) = rest.strip_prefix(prefix) {
+            return text;
+        }
+    }
+    rest
 }
 
 /// The day a `page` argument names, if it names one: `today`, `yesterday` or an ISO date.
@@ -1488,19 +1520,37 @@ mod tests {
         );
     }
 
-    /// MC-8: the `text` of `update_block` loses the outline's id marker and the newline a
-    /// copied line ends with, and keeps everything else — the line's `- `, `[ ] `, `## ` and
-    /// `> ` prefixes too, which is the limit design §10 records for both write tools.
+    /// MC-8: a line copied from `read_block` arrives as the block's text — the outline's
+    /// `- ` and kind prefix, the marker and the newline are the reader's, not the block's.
     #[test]
-    fn mc_8_the_update_text_loses_its_marker_and_trailing_newline() {
-        assert_eq!(block_text("buy milk {id:01J8Z3K9V2}".into()), "buy milk");
-        assert_eq!(block_text("buy milk {id:01J8Z3K9V2}\n".into()), "buy milk");
-        assert_eq!(block_text("one\ntwo {id:01A}\r\n".into()), "one\ntwo");
-        assert_eq!(block_text("[ ] buy milk".into()), "[ ] buy milk");
-        // A marker in the middle of a line is text, as it is for `append_blocks`.
-        assert_eq!(block_text("see {id:01A} here".into()), "see {id:01A} here");
-        // A line that was only its marker leaves nothing, which the call refuses.
-        assert_eq!(block_text(" {id:01A}".into()), "");
+    fn mc_8_the_update_text_loses_the_outline_and_keeps_the_text() {
+        for (sent, want) in [
+            ("buy milk {id:01J8Z3K9V2}", "buy milk"),
+            ("buy milk {id:01J8Z3K9V2}\n", "buy milk"),
+            ("- buy milk {id:01A}", "buy milk"),
+            ("- [ ] buy milk {id:01A}", "buy milk"),
+            ("- [x] buy milk {id:01A}\r\n", "buy milk"),
+            ("- > buy milk {id:01A}", "buy milk"),
+            ("- # buy milk {id:01A}", "buy milk"),
+            ("- ## buy milk {id:01A}", "buy milk"),
+            ("- ### buy milk {id:01A}", "buy milk"),
+            // A nested block's line carries its indentation.
+            ("  - [ ] buy milk {id:01A}", "buy milk"),
+            // A marker in the middle of a line is text, as it is for `append_blocks`.
+            ("see {id:01A} here", "see {id:01A} here"),
+            // A text the agent wrote itself is left exactly as given, a leading dash too.
+            ("- buy milk", "- buy milk"),
+            ("[ ] buy milk", "[ ] buy milk"),
+            ("one\ntwo {id:01A}\r\n", "one\ntwo"),
+            // A marker on a later line leaves the first line's prefix alone: only a line the
+            // outline wrote, with its marker on it, is the outline's.
+            ("- [ ] one\ntwo {id:01A}", "- [ ] one\ntwo"),
+            // A text that was only a copied line leaves nothing, which the call refuses.
+            ("- {id:01A}", ""),
+            (" {id:01A}", ""),
+        ] {
+            assert_eq!(block_text(sent.into()), want, "{sent:?}");
+        }
     }
 
     #[test]
