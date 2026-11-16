@@ -15,6 +15,7 @@ anyhow.workspace = true
 gpui.workspace = true
 utopia-api.workspace = true
 utopia-core.workspace = true
+utopia-mcp.workspace = true
 utopia-store.workspace = true
 utopia-sync.workspace = true
 utopia-syncd = { path = "../utopia-syncd" }
@@ -27,6 +28,7 @@ png = "0.17"
 raw-window-handle = "0.6"
 
 [dev-dependencies]
+serde_json.workspace = true
 tempfile.workspace = true
 # Drives `Root`/`AppState` through GPUI's test platform (the quit path, the Settings
 # window's handle) without a screen.

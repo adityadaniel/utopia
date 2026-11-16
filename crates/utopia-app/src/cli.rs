@@ -16,6 +16,12 @@ usage:
   utopia capture <text…>                 append a line to today's note (bind to any OS shortcut);
                                          when Utopia has the graph open, the open app writes it
   utopia serve-api <file.utopia> [addr]  run the local automation API without the app
+  utopia mcp --graph <file.utopia> [--read-only]
+                                         MCP server on stdio for an AI client (§13.8); the
+                                         graph is necessary, and --read-only lowers the
+                                         assistant access level for that client
+  utopia mcp config <claude-code|claude-desktop|codex> [--graph <file.utopia>]
+                                         print the setup entry for that AI client
   utopia encrypt <file.utopia>          encrypt the graph at rest (or change its passphrase)
   utopia decrypt <file.utopia>          remove encryption at rest
   utopia utopia://page/<title>          open a utopia:// link (page, journal, block, search, capture)

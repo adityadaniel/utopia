@@ -4,6 +4,7 @@
 mod api_launch;
 mod cli;
 mod hotkey;
+mod mcp;
 mod paths;
 mod shot;
 mod sync_setup;
@@ -894,6 +895,7 @@ fn main() -> anyhow::Result<()> {
             let addr = args.get(2).map_or("127.0.0.1:0", String::as_str);
             cli::serve_api(graph.as_ref(), addr, &paths::config_dir())
         }
+        Some("mcp") => mcp::run(&args[1..]),
         Some(url) if url.starts_with("utopia://") => {
             PENDING_URLS
                 .lock()
