@@ -435,6 +435,27 @@ fn mc_7_read_block_continues_after_the_last_block() {
     assert_eq!(seen, all, "the subtree reads the same blocks as the page");
 }
 
+/// MC-7: a continuation that names no block in the result is a failure for the model to
+/// read, not a silently empty outline (a stale id after an edit is the likely cause).
+#[test]
+fn mc_7_a_cursor_that_names_no_block_is_a_failure() {
+    let graph = Graph::new();
+    for (tool, args) in [
+        (
+            "read_page",
+            json!({"page": "Project X", "after": "01J8Z3K9V2AAAAAAAAAAAAAAAA"}),
+        ),
+        (
+            "read_block",
+            json!({"id": graph.root, "after": "01J8Z3K9V2AAAAAAAAAAAAAAAA"}),
+        ),
+    ] {
+        let (text, is_error) = call(&graph, tool, args);
+        assert!(is_error, "{tool}: {text}");
+        assert!(text.contains("nothing to continue after"), "{tool}: {text}");
+    }
+}
+
 /// MC-7: a block bigger than the budget keeps its id marker and says that it was cut, even
 /// when it is the only block in the result.
 #[test]
