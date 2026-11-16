@@ -413,6 +413,32 @@ fn bench(ui: bool) -> Result<()> {
         res?;
         r.ms("Paste 500 Markdown lines (AC-2.5)", 400.0, d);
 
+        // AC-2.5, MC-8: the same outline through the assistant path — `Op::AppendOutline`,
+        // which an `append_blocks` tool call becomes. One commit and one undo step.
+        let mcp_page = s.create_page("MCP append target")?;
+        let md: String = (0..500)
+            .map(|i| format!("{}- appended {i}\n", "  ".repeat(i % 4)))
+            .collect();
+        let (res, d) = time(|| -> Result<()> {
+            utopia_api::handle(
+                &mut s,
+                utopia_api::Op::AppendOutline {
+                    title: "MCP append target".into(),
+                    markdown: md.clone(),
+                    parent: None,
+                    create: true,
+                },
+            )
+            .map_err(|e| anyhow::anyhow!("append_blocks failed: {}", e.message))?;
+            s.sync_index()?;
+            Ok(())
+        });
+        res?;
+        if s.page_state(&mcp_page)?.live_count() != 500 {
+            bail!("append_blocks put the wrong number of blocks on the page");
+        }
+        r.ms("Append 500 Markdown lines (AC-2.5, MC-8)", 400.0, d);
+
         // AC-4.7: rename onto an existing title merges 1,000 blocks.
         let a = s.create_page("Apple Watch")?;
         let b = s.create_page("applewatch")?;

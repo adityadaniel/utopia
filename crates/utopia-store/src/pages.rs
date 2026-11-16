@@ -11,7 +11,7 @@ use utopia_core::date::{iso, parse_unambiguous_date};
 use utopia_core::inline::{extract_refs, heal_tags, rewrite_page_refs, unlink_page_refs};
 use utopia_core::text::{diff, nfc};
 use utopia_core::title::{clean_title, normalize_title};
-use utopia_core::{BlockId, BlockKind, Command, DomainError, PageId, PageKind, PageState};
+use utopia_core::{outline, BlockId, BlockKind, Command, DomainError, PageId, PageKind, PageState};
 use utopia_doc::PageDoc;
 
 use crate::project::resolve_page_key;
@@ -514,19 +514,102 @@ impl Store {
             new = healed;
         }
         let rewritten = new != text && self.set_block_text(page, block, &new, None, None)?;
+        self.create_link_pages(page, block, &new, open_link)?;
+        Ok(rewritten)
+    }
+
+    /// Create a page for each `[[link]]`, tag or date the block's text names and no page
+    /// resolves (W3, FR-1.10). A code block names nothing. This is the commit half of
+    /// [`Store::commit_block`], shared with [`Store::append_outline`] so text an agent
+    /// appends makes the same pages text the owner types does.
+    fn create_link_pages(
+        &mut self,
+        page: &PageId,
+        block: &BlockId,
+        text: &str,
+        open_link: Option<usize>,
+    ) -> Result<()> {
         let kind = self.page_state(page)?.block(block).map(|b| b.kind);
-        if kind != Some(BlockKind::Code) {
-            for r in extract_refs(&new) {
-                if !r.is_page_like() || Some(r.range.start) == open_link {
-                    continue;
-                }
-                let key = normalize_title(&r.target);
-                if resolve_page_key(&self.conn, &key, &self.date_format)?.is_none() {
-                    self.create_page(&r.target)?;
-                }
+        if kind == Some(BlockKind::Code) {
+            return Ok(());
+        }
+        for r in extract_refs(text) {
+            if !r.is_page_like() || Some(r.range.start) == open_link {
+                continue;
+            }
+            let key = normalize_title(&r.target);
+            if resolve_page_key(&self.conn, &key, &self.date_format)?.is_none() {
+                self.create_page(&r.target)?;
             }
         }
-        Ok(rewritten)
+        Ok(())
+    }
+
+    /// Append an indented Markdown outline in one commit and one undo step (PRD §13.8 MC-8,
+    /// MC-9; FR-2.10): an agent's `append_blocks` and any other caller of
+    /// `Op::AppendOutline`. The blocks go last, under `parent` or at the end of the page.
+    ///
+    /// The text is shaped as a committed block is, so a link typed by an agent behaves like
+    /// one typed by the owner: NFC, the hashtag longest-match rule, and a page for each new
+    /// `[[link]]`, tag and date (W3, FR-1.10). Every block edit is in the one plan, so one
+    /// `undo` takes the whole outline off (FR-2.12). FR-2.9's depth ceiling is checked by the
+    /// planner before anything is applied; `Op::AppendOutline` in `utopia-api` checks the
+    /// block count and parses, so a refused outline writes nothing.
+    ///
+    /// `items` are `(depth, text)` exactly as `markdown::parse_outline` gives them.
+    pub fn append_outline(
+        &mut self,
+        page: &PageId,
+        parent: Option<&BlockId>,
+        items: &[(usize, String)],
+    ) -> Result<Vec<BlockId>> {
+        // `heal_tags` reads live titles from the index, and `create_link_pages` decides
+        // what to write from it too (rule 2).
+        self.sync_index()?;
+        let mut shaped: Vec<(usize, String)> = Vec::with_capacity(items.len());
+        for (depth, text) in items {
+            let mut text = nfc(text);
+            if let Some(healed) = heal_tags(&text, |p| self.is_live_title(p)) {
+                text = healed;
+            }
+            shaped.push((*depth, text));
+        }
+        // A page whose only block is empty (a fresh page or journal day for the owner's
+        // first write) takes the first line in that block, as `AppendBlock` fills it.
+        let st = self.page_state(page)?;
+        let roots = st.live_roots();
+        let anchor = match (parent, roots.as_slice()) {
+            (None, [only]) if st.block(only).is_some_and(|b| b.text.is_empty()) => {
+                (!st.has_live_children(only)).then(|| only.clone())
+            }
+            _ => None,
+        };
+        let plan =
+            outline::append_outline(st, parent, anchor.as_ref(), &shaped).map_err(|e| match e {
+                DomainError::TooDeep => StoreError::Invalid(format!(
+                    "an outline can be at most {} levels deep",
+                    outline::MAX_DROP_DEPTH
+                )),
+                other => other.into(),
+            })?;
+        // The blocks the outline lands in, in document order: a reused anchor first, then
+        // each inserted block (the plan inserts nothing for the anchor it is given).
+        let mut appended: Vec<BlockId> = anchor.into_iter().collect();
+        appended.extend(plan.cmds.iter().filter_map(|c| match c {
+            Command::InsertBlock { id, .. } => Some(id.clone()),
+            _ => None,
+        }));
+        self.seal_undo();
+        self.execute_plan(page, plan, None)?;
+        for id in &appended {
+            let text = self
+                .page_state(page)?
+                .block(id)
+                .map(|b| b.text.clone())
+                .unwrap_or_default();
+            self.create_link_pages(page, id, &text, None)?;
+        }
+        Ok(appended)
     }
 
     /// Rename (FR-3.6, FR-4.12, FR-4.13, §5.5). Returns the surviving page: `page` itself,
