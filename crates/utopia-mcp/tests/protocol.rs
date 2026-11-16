@@ -76,7 +76,8 @@ fn mc_6_a_legacy_script_from_initialize_to_a_tool_call() {
             "read_block",
             "get_backlinks",
             "run_query",
-            "append_blocks"
+            "append_blocks",
+            "update_block"
         ]
     );
     assert!(
@@ -163,7 +164,7 @@ fn mc_6_a_modern_script_from_discover_to_a_tool_call() {
     assert_eq!(list["resultType"], "complete");
     assert_eq!(list["ttlMs"], 3_600_000);
     assert_eq!(list["cacheScope"], "public");
-    assert_eq!(list["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(list["tools"].as_array().unwrap().len(), 8);
     assert_eq!(
         list["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
         "utopia"

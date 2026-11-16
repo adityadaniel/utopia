@@ -30,6 +30,10 @@
 //! from the graph's access file (`<config>/mcp/<graph_key>.json`, [`access::access_file`])
 //! with [`ApiServer::set_level`]. A body that is not an [`Op`] answers 400.
 //!
+//! [`Op::UpdateBlock`] also takes `kind`, `checked` and `if_rev` for the MCP bridge (PRD
+//! §13.8 MC-8, MC-10); the REST route above keeps sending `text` and nothing else, so its
+//! answer does not change.
+//!
 //! The owner writes `{"url", "token"}` to `<config>/api/<graph_key>.json`
 //! ([`discovery_file`], mode 0600), one file for each graph. [`Client`] reads it and calls
 //! the owner from another process (`utopia capture`, decision D10).
@@ -49,7 +53,8 @@
 //! | 503 | the app is not running: the queue was gone, or it stopped before running the call | unchanged; retry later |
 //! | 504 | the request gave up waiting: "nothing was written", or "it may be applied" when the owner had already started the call | as the message says |
 //!
-//! An [`ApiError`] status (400, 404, 500) comes from the operation itself.
+//! An [`ApiError`] status (400, 404, 409, 500) comes from the operation itself. A 409 is
+//! `Op::UpdateBlock`'s `if_rev` refusing to overwrite a block that changed after it was read.
 
 use std::future::Future as _;
 use std::net::SocketAddr;
@@ -71,7 +76,7 @@ use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::oneshot;
-use utopia_core::{outline, title::normalize_title, BlockId, PageId};
+use utopia_core::{outline, title::normalize_title, BlockId, BlockKind, PageId};
 use utopia_store::{resolve_page_key, RefQuery, Store, StoreError};
 
 pub mod access;
@@ -124,9 +129,33 @@ pub enum Op {
         #[serde(default)]
         subtree: bool,
     },
+    /// Change one block (PRD §13.8 MC-8, MC-9, MC-10; FR-2.13): its text, its kind and
+    /// whether a to-do is done, in one call and one undo step. Every part is optional, so
+    /// the JSON plugins and `PATCH /v1/blocks/{id}` send today — `{"op": "update_block",
+    /// "id", "text"}` — keeps its meaning, and an absent part leaves that part of the block
+    /// alone.
     UpdateBlock {
         id: String,
-        text: String,
+        /// The block's new text. Absent leaves the text alone; the empty string still
+        /// empties the block, as it does through the REST route (the MCP tool refuses an
+        /// empty one, because wiping a block is never what an agent's turn is for).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        text: Option<String>,
+        /// The new kind: `bullet`, `numbered`, `todo`, `quote`, `code`, `heading`, or
+        /// `h1`/`h2`/`h3` to pick a heading's level. `heading` keeps the level of a block
+        /// that already is a heading and makes any other block a heading 1. An unknown
+        /// name is refused, never read as a bullet.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
+        /// Whether a to-do is done (FR-2.13). Only a to-do has this state, so the block must
+        /// be one already or become one in the same call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checked: Option<bool>,
+        /// The short hash [`block_rev`] gives the text the caller read, as `read_block`
+        /// returns it. If the block's text is not that, the call fails and writes nothing
+        /// (MC-10, §2.3.7).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        if_rev: Option<String>,
     },
     Journal {
         date: String,
@@ -330,6 +359,37 @@ pub fn block_rev(text: &str) -> String {
     utopia_store::sha256_hex(text.as_bytes())[..12].to_string()
 }
 
+/// The `kind` argument of [`Op::UpdateBlock`] as a [`BlockKind`]. The names are the ones
+/// [`block_json`] writes for `kind`, plus `h1`/`h2`/`h3` for the `heading` field it gives
+/// beside a heading, and they are matched without case. An unknown name is refused instead
+/// of read as a bullet: a write that changes a block to something other than what it was
+/// asked to change is worse than no write at all (rule 5).
+fn parse_kind(kind: &str, current: BlockKind) -> Result<BlockKind, ApiError> {
+    Ok(match kind.trim().to_ascii_lowercase().as_str() {
+        "bullet" => BlockKind::Bullet,
+        "numbered" => BlockKind::Numbered,
+        "todo" => BlockKind::Todo,
+        "quote" => BlockKind::Quote,
+        "code" => BlockKind::Code,
+        "heading" => BlockKind::Heading(match current {
+            BlockKind::Heading(level) => level,
+            _ => 1,
+        }),
+        "h1" => BlockKind::Heading(1),
+        "h2" => BlockKind::Heading(2),
+        "h3" => BlockKind::Heading(3),
+        _ => {
+            return Err(ApiError::new(
+                400,
+                format!(
+                    "unknown block kind {kind:?}: use bullet, numbered, todo, quote, code, \
+                     heading, h1, h2 or h3"
+                ),
+            ))
+        }
+    })
+}
+
 fn page_json(store: &mut Store, page: &PageId) -> Result<Value, ApiError> {
     let fmt = store.date_format().clone();
     let st = store.page_state(page)?.clone();
@@ -441,17 +501,62 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
                 changed: vec![page],
             })
         }
-        Op::UpdateBlock { id, text } => {
+        Op::UpdateBlock {
+            id,
+            text,
+            kind,
+            checked,
+            if_rev,
+        } => {
             let id = BlockId(id);
             let page = store
                 .block_row(&id)?
                 .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?
                 .page_id;
-            if !store.page_state(&page)?.is_live(&id) {
+            let st = store.page_state(&page)?;
+            let Some(block) = st.block(&id).filter(|_| st.is_live(&id)) else {
                 return Err(ApiError::new(404, format!("no block {id}")));
+            };
+            let (text_now, kind_now) = (block.text.clone(), block.kind);
+            // MC-10: the check reads the block before the first write, so a rev that does not
+            // agree leaves the graph exactly as it was.
+            if let Some(want) = &if_rev {
+                let have = block_rev(&text_now);
+                // Case and stray whitespace are forgiven: a model that pasted the rev with
+                // its own spelling still means the text it read.
+                if want.trim().to_ascii_lowercase() != have {
+                    return Err(ApiError::new(
+                        409,
+                        format!(
+                            "the block changed since it was read: its rev is {have}, not \
+                             {want}. Read the block again with read_block, then send the \
+                             text and rev it gives you. Nothing was written."
+                        ),
+                    ));
+                }
             }
-            store.seal_undo();
-            store.set_block_text(&page, &id, &text, None, None)?;
+            let kind = match &kind {
+                Some(k) => Some(parse_kind(k, kind_now)?),
+                None => None,
+            };
+            if text.is_none() && kind.is_none() && checked.is_none() {
+                return Err(ApiError::new(
+                    400,
+                    "nothing to change: send `text`, `kind` or `checked`",
+                ));
+            }
+            let after = kind.unwrap_or(kind_now);
+            if checked.is_some() && after != BlockKind::Todo {
+                return Err(ApiError::new(
+                    400,
+                    "`checked` applies to a to-do: send kind \"todo\" in the same call to \
+                     make the block one",
+                ));
+            }
+            // One command group for the text, the kind and `checked` (MC-9), so one undo
+            // takes the whole call off. `update_block` shapes the text the way the commit
+            // below would, so the commit rewrites nothing and opens no second group.
+            store.update_block(&page, &id, text.as_deref(), kind, checked)?;
             store.commit_block(&page, &id)?;
             store.flush()?;
             Ok(Outcome {
@@ -1070,7 +1175,14 @@ async fn update_block(
     UrlPath(id): UrlPath<String>,
     Json(b): Json<TextBody>,
 ) -> Response {
-    call(c, h, Op::UpdateBlock { id, text: b.text }).await
+    let op = Op::UpdateBlock {
+        id,
+        text: Some(b.text),
+        kind: None,
+        checked: None,
+        if_rev: None,
+    };
+    call(c, h, op).await
 }
 
 async fn journal(State(c): State<Ctx>, h: HeaderMap, UrlPath(date): UrlPath<String>) -> Response {
@@ -1833,9 +1945,22 @@ mod tests {
             (
                 Op::UpdateBlock {
                     id: "b1".into(),
-                    text: "t".into(),
+                    text: Some("t".into()),
+                    kind: None,
+                    checked: None,
+                    if_rev: None,
                 },
                 json!({"op": "update_block", "id": "b1", "text": "t"}),
+            ),
+            (
+                Op::UpdateBlock {
+                    id: "b1".into(),
+                    text: None,
+                    kind: Some("todo".into()),
+                    checked: Some(true),
+                    if_rev: Some("0123456789ab".into()),
+                },
+                json!({"op": "update_block", "id": "b1", "kind": "todo", "checked": true, "if_rev": "0123456789ab"}),
             ),
             (
                 Op::Journal {

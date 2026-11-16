@@ -61,7 +61,7 @@ fn with_ids(graph: &Graph) -> Vec<(&'static str, Value, &'static str)> {
 }
 
 /// One call per write tool, with arguments that change the graph.
-fn every_write_tool() -> Vec<(&'static str, Value)> {
+fn every_write_tool(graph: &Graph) -> Vec<(&'static str, Value)> {
     vec![
         (
             "append_blocks",
@@ -70,6 +70,10 @@ fn every_write_tool() -> Vec<(&'static str, Value)> {
         (
             "append_blocks",
             json!({"page": "Project X", "markdown": "- appended by an assistant\n"}),
+        ),
+        (
+            "update_block",
+            json!({"id": graph.ana_link, "text": "written by an assistant"}),
         ),
     ]
 }
@@ -83,7 +87,7 @@ fn mc_1_no_tool_works_with_access_off() {
     let calls: Vec<(&'static str, Value)> = with_ids(&graph)
         .into_iter()
         .map(|(name, args, _)| (name, args))
-        .chain(every_write_tool())
+        .chain(every_write_tool(&graph))
         .collect();
     for (name, args) in calls {
         let (text, is_error) = text_of(&call_as(&graph, Level::Off, true, name, &args));
@@ -592,7 +596,7 @@ fn mc_11_the_catalog_does_not_depend_on_the_graph() {
         a[2]["result"]["instructions"], a[0]["result"]["instructions"],
         "one guide for both eras"
     );
-    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 7);
+    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 8);
 }
 
 /// A tool call that fails on its arguments is still a `result` with `isError`, not an
@@ -626,6 +630,11 @@ fn mc_1_an_access_change_applies_to_the_next_call() {
 /// One `tools/call` at `level`, with the app closed and `when_closed` on.
 fn call_at(graph: &Graph, level: Level, name: &str, args: Value) -> (String, bool) {
     text_of(&call_as(graph, level, true, name, &args))
+}
+
+/// One `update_block` call at the level `write`, with the app closed.
+fn update(graph: &Graph, args: Value) -> (String, bool) {
+    call_at(graph, Level::Write, "update_block", args)
 }
 
 /// MC-2, MC-8: at the level `read` the write tool fails and writes nothing; at `write` the
@@ -837,4 +846,220 @@ fn mc_8_a_uniformly_indented_outline_keeps_its_siblings() {
     };
     assert!(line("one").starts_with("- one {id:"), "{}", line("one"));
     assert!(line("two").starts_with("- two {id:"), "{}", line("two"));
+}
+
+/// The `rev:` line a `read_block` or an `update_block` answer carries.
+fn rev_of(text: &str) -> String {
+    text.lines()
+        .find_map(|l| l.strip_prefix("rev: "))
+        .unwrap_or_else(|| panic!("a rev line: {text}"))
+        .trim_end()
+        .to_string()
+}
+
+/// MC-10, §2.3.7: an `if_rev` that does not agree with the block makes the call fail with
+/// no write, and the error tells the agent to read the block again. The rev the block does
+/// have is the one `read_block` gave, and sending that one writes.
+#[test]
+fn mc_10_update_block_refuses_a_rev_that_does_not_agree() {
+    let graph = Graph::new();
+    let (read, is_error) = call_at(&graph, Level::Read, "read_block", json!({"id": graph.root}));
+    assert!(!is_error, "{read}");
+    let rev = rev_of(&read);
+    let (text, is_error) = update(
+        &graph,
+        json!({"id": graph.root, "text": "overwritten", "if_rev": "000000000000"}),
+    );
+    assert!(is_error, "{text}");
+    assert!(
+        text.contains("read_block"),
+        "the error says to read the block again: {text}"
+    );
+    assert!(
+        text.contains(&rev),
+        "it names the rev the block has: {text}"
+    );
+    assert!(text.contains("Nothing was written"), "{text}");
+
+    // Nothing changed, and the projections agree with the shards (rule 2).
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(page.contains("Plan the launch"), "{page}");
+    assert!(!page.contains("overwritten"), "{page}");
+    let mut store = graph.open();
+    let report = store.doctor().expect("doctor runs");
+    assert!(report.is_ok(), "doctor: {report:?}");
+    drop(store);
+
+    // The rev that agrees writes, and the answer carries the new one.
+    let (text, is_error) = update(
+        &graph,
+        json!({"id": graph.root, "text": "shipping notes", "if_rev": rev}),
+    );
+    assert!(!is_error, "{text}");
+    assert!(text.contains("- shipping notes {id:"), "{text}");
+    let new = rev_of(&text);
+    assert_ne!(new, rev, "the answer carries the new rev");
+    let (read, _) = call_at(&graph, Level::Read, "read_block", json!({"id": graph.root}));
+    assert_eq!(
+        rev_of(&read),
+        new,
+        "the rev of the answer and the rev read_block gives are one hash"
+    );
+}
+
+/// MC-8: `update_block` sets a block's kind and ticks a to-do, and the page reads that way
+/// afterwards. Doctor is clean after the calls (rule 2).
+#[test]
+fn mc_8_update_block_changes_the_kind_and_ticks_a_to_do() {
+    let graph = Graph::new();
+    let (text, is_error) = update(
+        &graph,
+        json!({"id": graph.ana_link, "kind": "todo", "checked": true}),
+    );
+    assert!(!is_error, "{text}");
+    assert!(
+        text.contains("- [x] Ask [[Ana]] for the copy {id:"),
+        "the answer shows the to-do as the page will: {text}"
+    );
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(
+        page.contains("  - [x] Ask [[Ana]] for the copy {id:"),
+        "{page}"
+    );
+
+    // Unticking sends `checked` alone: the kind stays.
+    let (text, is_error) = update(&graph, json!({"id": graph.ana_link, "checked": false}));
+    assert!(!is_error, "{text}");
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(
+        page.contains("  - [ ] Ask [[Ana]] for the copy {id:"),
+        "{page}"
+    );
+
+    // A heading, in the outline format's own spelling.
+    let (text, is_error) = update(&graph, json!({"id": graph.root, "kind": "h2"}));
+    assert!(!is_error, "{text}");
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(page.contains("- ## Plan the launch {id:"), "{page}");
+
+    let mut store = graph.open();
+    let report = store.doctor().expect("doctor runs");
+    assert!(report.is_ok(), "doctor: {report:?}");
+}
+
+/// MC-2: at the level `read` the second write tool is refused and writes nothing.
+#[test]
+fn mc_2_update_block_is_refused_at_read() {
+    let graph = Graph::new();
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "update_block",
+        json!({"id": graph.root, "text": "zebra"}),
+    );
+    assert!(is_error, "{text}");
+    assert!(text.contains("read access only"), "{text}");
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(page.contains("Plan the launch"), "{page}");
+    assert!(!page.contains("zebra"), "{page}");
+}
+
+/// MC-8: the tool refuses what it cannot write — an empty `text` (it never wipes a block), a
+/// call that names nothing to change, a kind that does not exist and `checked` on a bullet.
+/// Nothing is written and the block still reads as it did.
+#[test]
+fn mc_8_update_block_refuses_a_call_it_cannot_write() {
+    let graph = Graph::new();
+    for (args, want) in [
+        (json!({"id": graph.root, "text": "  "}), "empty"),
+        (
+            json!({"id": graph.root}),
+            "nothing for update_block to change",
+        ),
+        (
+            json!({"id": graph.root, "kind": "toodo"}),
+            "unknown block kind",
+        ),
+        (json!({"id": graph.root, "checked": true}), "todo"),
+        (
+            json!({"id": "01J8Z3K9V2AAAAAAAAAAAAAAAA", "text": "nowhere"}),
+            "no block",
+        ),
+    ] {
+        let (text, is_error) = update(&graph, args.clone());
+        assert!(is_error, "{args}: {text}");
+        assert!(text.contains(want), "{args}: {want:?} in {text}");
+    }
+    let (page, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(page.contains("- Plan the launch {id:"), "{page}");
+    let mut store = graph.open();
+    assert!(store.doctor().expect("doctor runs").is_ok());
+}
+
+/// MC-11: the two write tools' descriptions say what they do, and neither carries page
+/// text. The `update_block` schema names the kinds the op accepts.
+#[test]
+fn mc_11_update_block_is_described_without_page_text() {
+    let graph = Graph::new();
+    let reply = support::run(
+        vec![
+            initialize(1, "2025-11-25"),
+            support::request(2, "tools/list", json!({})),
+        ],
+        graph.backend(),
+        Options::new(),
+    );
+    let tools = reply[1]["result"]["tools"].as_array().expect("a list");
+    let tool = tools
+        .iter()
+        .find(|t| t["name"] == "update_block")
+        .expect("update_block is in the catalog");
+    let description = tool["description"].as_str().expect("a description");
+    assert!(description.contains("if_rev"), "{description}");
+    assert!(description.contains("undo"), "{description}");
+    let kinds = tool["inputSchema"]["properties"]["kind"]["enum"]
+        .as_array()
+        .expect("the kinds")
+        .clone();
+    for kind in ["bullet", "todo", "quote", "code", "heading", "h2"] {
+        assert!(
+            kinds.contains(&json!(kind)),
+            "{kind} is one of the kinds: {kinds:?}"
+        );
+    }
+    assert_eq!(tool["annotations"]["destructiveHint"], json!(true));
+    assert_eq!(tool["annotations"]["idempotentHint"], json!(true));
+    assert_eq!(tool["annotations"]["readOnlyHint"], json!(false));
+    // MC-11: no page text in the description, the same as for every other tool.
+    assert!(!description.contains("Plan the launch"), "{description}");
 }
