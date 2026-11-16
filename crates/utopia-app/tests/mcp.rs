@@ -446,6 +446,21 @@ fn live_ids(graph: &Path, title: &str) -> Vec<String> {
         .collect()
 }
 
+/// The last live block of `title`, polling for up to 10 s: a write the owner (`serve-api`)
+/// runs is committed by its writer after the answer, so a reader of the file can be early.
+fn wait_for_live_id(graph: &Path, title: &str) -> Option<String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(id) = live_ids(graph, title).pop() {
+            return Some(id);
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 /// MC-9, MC-5: the delete answer says who can undo it. A headless call drops its store (and
 /// the undo stack with it), so it must not offer a `Cmd+Z`; a call the owner runs is one step
 /// on the app's stack and says so. PR 9's review: the answer promised the undo either way.
@@ -488,9 +503,10 @@ fn mc_9_the_delete_answer_says_who_can_undo_it() {
     ));
     let (text, is_error) = text_of(&server.read());
     assert!(!is_error, "{text}");
-    let owner_target = live_ids(&s.graph, "Zebra")
-        .pop()
-        .expect("the block the owner just added");
+    // The owner writes in the background: wait for the block to reach the graph file rather
+    // than read it at once (CI machines are slower than the append's answer).
+    let owner_target = wait_for_live_id(&s.graph, "Zebra")
+        .expect("the block the owner just added reaches the graph file");
     server.send(tool_call(
         3,
         "delete_block",
