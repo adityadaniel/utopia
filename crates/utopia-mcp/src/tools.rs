@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use serde_json::{json, Map, Value};
-use utopia_api::{block_rev, Op, OpKind};
+use utopia_api::{block_rev, strip_id_markers, Op, OpKind};
 use utopia_core::date::{iso, parse_iso, relative_date};
 
 use crate::backend::{Backend, BackendError};
@@ -529,8 +529,10 @@ fn schema_update_block() -> Value {
             "text": {
                 "type": "string",
                 "description": "The block's new text, in Utopia markup ([[Page]], #tag, \
-                                ((block-id)), key:: value). Leave it out to keep the text the \
-                                block has.",
+                                ((block-id)), key:: value). Send the text itself: an outline \
+                                line's - , [ ] , ## and > prefixes show its kind, which \
+                                `kind` and `checked` set, and its {id:…} marker is ignored. \
+                                Leave it out to keep the text the block has.",
             },
             "kind": {
                 "type": "string",
@@ -644,7 +646,18 @@ fn run_append_blocks(backend: &dyn Backend, args: &Args<'_>) -> Result<String, T
 
 fn run_update_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
     let id = args.string("id")?;
-    let text = args.optional_text("text")?;
+    let text = match args.optional_text("text")?.map(block_text) {
+        // A line that was nothing but its marker leaves no text: wiping the block is not
+        // what an agent's turn is for, so it is refused like an empty `text` is.
+        Some(t) if t.trim().is_empty() => {
+            return Err(ToolError::Failed(
+                "The `text` argument is empty once the outline's {id:…} marker is taken off: \
+                 send the block's new text, or leave `text` out to keep the text it has."
+                    .to_string(),
+            ))
+        }
+        other => other,
+    };
     let kind = args.optional_string("kind")?;
     let checked = args.optional_boolean("checked")?;
     let if_rev = args.optional_string("if_rev")?;
@@ -662,6 +675,20 @@ fn run_update_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, To
         if_rev,
     })?;
     Ok(render_update(&body))
+}
+
+/// A `text` argument as the block should hold it (PRD §13.8 MC-8, design §4).
+///
+/// The id marker of the outline format comes off, exactly as it does for `append_blocks`
+/// (handoff §5), so a line copied from `read_block` does not leave `{id:01J…}` in the owner's
+/// note — where it would also make the returned `rev` describe junk. The newline that ended
+/// the copied line comes off too: a block's text does not carry the outline's line breaks.
+/// The line's `- `, `[ ] `, `## ` and `> ` prefixes are kept, which is the limit design §10
+/// records for `append_blocks` as well; the schema tells an agent to send the text alone.
+fn block_text(text: String) -> String {
+    strip_id_markers(&text)
+        .trim_end_matches(['\n', '\r'])
+        .to_string()
 }
 
 /// The day a `page` argument names, if it names one: `today`, `yesterday` or an ISO date.
@@ -1459,6 +1486,21 @@ mod tests {
             render_update(&heading).contains("\n- ## Plan {id:01B}\n"),
             "a heading keeps the outline format's prefix"
         );
+    }
+
+    /// MC-8: the `text` of `update_block` loses the outline's id marker and the newline a
+    /// copied line ends with, and keeps everything else — the line's `- `, `[ ] `, `## ` and
+    /// `> ` prefixes too, which is the limit design §10 records for both write tools.
+    #[test]
+    fn mc_8_the_update_text_loses_its_marker_and_trailing_newline() {
+        assert_eq!(block_text("buy milk {id:01J8Z3K9V2}".into()), "buy milk");
+        assert_eq!(block_text("buy milk {id:01J8Z3K9V2}\n".into()), "buy milk");
+        assert_eq!(block_text("one\ntwo {id:01A}\r\n".into()), "one\ntwo");
+        assert_eq!(block_text("[ ] buy milk".into()), "[ ] buy milk");
+        // A marker in the middle of a line is text, as it is for `append_blocks`.
+        assert_eq!(block_text("see {id:01A} here".into()), "see {id:01A} here");
+        // A line that was only its marker leaves nothing, which the call refuses.
+        assert_eq!(block_text(" {id:01A}".into()), "");
     }
 
     #[test]

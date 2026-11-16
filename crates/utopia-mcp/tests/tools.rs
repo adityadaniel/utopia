@@ -1005,6 +1005,10 @@ fn mc_8_update_block_refuses_a_call_it_cannot_write() {
             json!({"id": graph.root, "kind": "toodo"}),
             "unknown block kind",
         ),
+        (
+            json!({"id": graph.root, "text": " {id:01J8Z3K9V2}"}),
+            "marker",
+        ),
         (json!({"id": graph.root, "checked": true}), "todo"),
         (
             json!({"id": "01J8Z3K9V2AAAAAAAAAAAAAAAA", "text": "nowhere"}),
@@ -1081,8 +1085,14 @@ fn mc_8_update_block_takes_the_id_marker_off_the_text_it_is_sent() {
         line.ends_with(&format!("{{id:{}}}", graph.root)),
         "the line carries the marker: {line}"
     );
-    // One word changed and the line sent back as it was shown, newline and all.
-    let sent = format!("{}\n", line.replace("Plan the launch", "Plan the shipment"));
+    // One word changed and the line's text sent back with the marker and the newline that
+    // ended it (the line's `- ` and kind prefixes are the reader's, not the block's: the
+    // limit design §10 records for both write tools).
+    let sent = format!(
+        "{}\n",
+        line.trim_start_matches("- ")
+            .replace("Plan the launch", "Plan the shipment")
+    );
     let (answer, is_error) = update(&graph, json!({"id": graph.root, "text": sent}));
     assert!(!is_error, "{answer}");
 
