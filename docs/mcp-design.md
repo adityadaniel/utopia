@@ -408,7 +408,9 @@ an agent never writes to a graph that the owner did not select.
 | Claude Desktop | Add `"utopia": {"command": "<bin>", "args": ["mcp", "--graph", "<file>"]}` below `mcpServers` in `~/Library/Application Support/Claude/claude_desktop_config.json`. Start Claude Desktop again. |
 | Codex | `codex mcp add utopia -- <bin> mcp --graph <file>`. This writes `[mcp_servers.utopia]` to `~/.codex/config.toml`. |
 
-- `utopia mcp config <client>` prints the correct entry with the real path of the binary.
+- `utopia mcp config <client>` prints the correct entry with the real path of the binary. A
+  relative `--graph` is resolved against the directory the command runs in, so the entry
+  never depends on the working directory of the client that reads it (MC-13).
 - A new Settings tab, **Assistants**, shows the two settings and one copy control for each
   client. It uses the tokens in `DESIGN.md`.
 - The Claude Code row agrees with the Anthropic documentation. Options such as `--scope`

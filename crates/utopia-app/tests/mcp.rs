@@ -551,6 +551,39 @@ fn mc_13_the_config_entry_names_this_binary_and_the_graph() {
     assert!(!out.status.success(), "an unknown client is refused");
 }
 
+/// MC-13: the entry pins the graph the owner named, so the path it carries cannot mean a
+/// different file later. A relative `--graph` is resolved against the directory the owner
+/// typed it in, not against the directory the AI client happens to start the server in.
+#[test]
+fn mc_13_the_config_entry_pins_an_absolute_graph() {
+    use utopia_mcp::SetupClient;
+    let s = Scratch::new();
+    let out = s
+        .utopia()
+        .current_dir(&s.root)
+        .args(["mcp", "config", "codex", "--graph", "Notes.utopia"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "config: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let entry = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // The child resolves the path from its own working directory, which macOS reports
+    // without the `/var` → `/private/var` symlink the temp dir was created under.
+    let root = std::fs::canonicalize(&s.root).unwrap();
+    let expected = SetupClient::Codex.entry(
+        &PathBuf::from(env!("CARGO_BIN_EXE_utopia")),
+        Some(&root.join("Notes.utopia")),
+    );
+    assert_eq!(entry, expected, "the entry carries the absolute path");
+    assert!(
+        !entry.contains("--graph Notes.utopia"),
+        "a relative path would follow the client's working directory: {entry}"
+    );
+}
+
 /// MC-14: start-up opens no store, and `server/discover` and `initialize` answer in under a
 /// second. A graph path that does not exist is the sharpest check of "no store": opening it
 /// would create the file.

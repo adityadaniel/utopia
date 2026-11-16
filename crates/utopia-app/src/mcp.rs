@@ -92,9 +92,25 @@ fn config(args: &[String]) -> Result<()> {
     // An entry without a graph is still shown, with a `<file.utopia>` placeholder: the
     // owner may copy it before choosing the graph.
     let parsed = parse(&args[1..], false)?;
+    let graph = match parsed.graph {
+        Some(graph) => Some(absolute(&graph)?),
+        None => None,
+    };
     let bin = std::env::current_exe().context("the path of this binary")?;
-    println!("{}", client.entry(&bin, parsed.graph.as_deref()));
+    println!("{}", client.entry(&bin, graph.as_deref()));
     Ok(())
+}
+
+/// The entry is used later, by a client that starts the server from whatever directory it
+/// likes, so the graph it pins must not be relative (MC-13): resolve a relative `--graph`
+/// against the directory the owner typed it in. Nothing here opens or requires the file.
+fn absolute(graph: &Path) -> Result<PathBuf> {
+    if graph.is_absolute() {
+        return Ok(graph.to_path_buf());
+    }
+    Ok(std::env::current_dir()
+        .context("the working directory")?
+        .join(graph))
 }
 
 /// The arguments both forms share.
@@ -185,6 +201,22 @@ mod tests {
         assert!(err.contains("--graph"), "{err}");
         let err = run(&args(&["--read-only"])).unwrap_err().to_string();
         assert!(err.contains("--graph"), "{err}");
+    }
+
+    /// MC-13: the entry pins the graph. A relative path is resolved against the owner's
+    /// working directory, because the client that reads the entry starts the server
+    /// somewhere else.
+    #[test]
+    fn mc_13_a_graph_path_is_made_absolute() {
+        assert_eq!(
+            absolute(Path::new("/tmp/g.utopia")).unwrap(),
+            PathBuf::from("/tmp/g.utopia")
+        );
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(
+            absolute(Path::new("Notes.utopia")).unwrap(),
+            here.join("Notes.utopia")
+        );
     }
 
     #[test]
