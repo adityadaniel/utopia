@@ -480,3 +480,41 @@ fn mc_8_a_deleted_block_cannot_be_deleted_or_moved_again() {
     assert_eq!(s.undo_depth(), depth, "nothing was written");
     assert!(!live(&mut s, &gone));
 }
+
+/// MC-8, FR-2.9: a subtree that has already left the page is history, not depth. After part
+/// of a chain moves to another page, the rows it left behind stay as `moved_to` nodes; the
+/// block that is still here is one level deep, and moving it into another page must be
+/// measured on what is actually live, not on the chain it used to hang from.
+#[test]
+fn mc_8_a_moved_away_subtree_does_not_count_towards_the_depth_ceiling() {
+    let mut s = store();
+    // Twelve levels, the deepest FR-2.9 allows.
+    let deep = chain(&mut s, "Deep", utopia_core::outline::MAX_DROP_DEPTH);
+    // The chain below the root leaves the page; its nodes stay in this shard's history.
+    call(
+        &mut s,
+        json!({"op": "move_block", "id": deep[1], "page": "Reading"}),
+    )
+    .expect("eleven levels into another page's top level");
+
+    // What is left on "Deep" is one block: moving it under a root of another page is two
+    // levels, not twelve.
+    let host = append(&mut s, "Project X", "host", None);
+    call(
+        &mut s,
+        json!({"op": "move_block", "id": deep[0], "page": "Project X", "parent": host}),
+    )
+    .expect("a one-block subtree fits under a root");
+
+    assert_eq!(
+        rows(&mut s, "Project X"),
+        vec![("host".to_string(), 0), ("level 0".to_string(), 1)]
+    );
+    assert_eq!(
+        rows(&mut s, "Deep"),
+        Vec::<(String, usize)>::new(),
+        "the page that held the history has nothing live left"
+    );
+    let report = s.doctor().expect("doctor runs");
+    assert!(report.is_ok(), "doctor: {report:?}");
+}

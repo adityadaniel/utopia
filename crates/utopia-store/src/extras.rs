@@ -405,13 +405,18 @@ impl Store {
         }
         let ids = s.subtree(block, false);
         // FR-2.9's ceiling applies to a drop into another page too, exactly as
-        // `outline::move_to` applies it on one page: the subtree keeps its shape, so it
-        // lands `own` levels lower than it is now.
+        // `outline::move_to` applies it on one page: the subtree keeps its shape, so it lands
+        // `own` levels lower than it is now. It is measured on the blocks that are live — the
+        // same set `move_to` measures — because a subtree that already left this page keeps
+        // its rows as `moved_to` history (the loop below skips them) and a tombstone has no
+        // depth to push: counting them refused a one-block subtree that would land two levels
+        // down because the chain it used to hang from was still in the shard.
         let d = self.page_state(dst)?.clone();
         let base = parent.map_or(0, |p| d.depth(p) + 1);
         let own = s.depth(block);
         let max_rel = ids
             .iter()
+            .filter(|b| s.is_live(b))
             .map(|b| s.depth(b).saturating_sub(own))
             .max()
             .unwrap_or(0);
