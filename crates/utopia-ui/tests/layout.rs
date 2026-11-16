@@ -3,12 +3,15 @@
 
 use chrono::NaiveDate;
 use gpui::{px, size, AppContext as _, Bounds, Entity, Pixels, TestAppContext, VisualTestContext};
+use utopia_api::{Access, Level};
 use utopia_core::outline;
 use utopia_core::{BlockId, BlockKind, Command, PageId};
 use utopia_store::{EditOpts, Store};
 use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
+use utopia_ui::assistants::{AssistantsHandle, AssistantsSetup, Bridge};
 use utopia_ui::pane_stack::{Click, Origin};
+use utopia_ui::settings::{SettingsView, Tab};
 use utopia_ui::theme::{
     Theme, BLOCK_TEXT_LEFT, CHILD_INDENT, CONTENT_PADDING_X, DAY_GAP, DAY_HEADER_PAD_TOP,
     NARROW_INDENT, REFERENCE, SIDEBAR_WIDTH,
@@ -4356,4 +4359,99 @@ fn graph_panel_keeps_its_viewport_across_an_index_refresh(cx: &mut TestAppContex
         zoomed,
         "a refresh keeps the viewport"
     );
+}
+
+/// MC-12 (ST-1, ST-5): Settings → Assistants is one 720 px column centred in the pane beside
+/// the tab rail, as every other pane is; the level buttons sit on one row and the bridge state
+/// below them, so nothing overflows the card.
+#[gpui::test]
+fn mc_12_the_assistants_tab_is_one_centred_column(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    // Long enough that the Claude Code command wraps over three lines: that is where the
+    // card used to paint its note over the next card.
+    let graph = dir
+        .path()
+        .join("a-long-graph-name-that-makes-the-client-entry-wrap-over-three-lines.utopia");
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        let view = cx.new(|cx| {
+            AssistantsSetup::new(
+                Access {
+                    level: Level::Write,
+                    when_closed: true,
+                },
+                Bridge::Running("http://127.0.0.1:4321".into()),
+                None,
+                graph.clone(),
+                std::path::PathBuf::from("/Applications/Utopia.app/Contents/MacOS/utopia"),
+                cx,
+            )
+        });
+        cx.set_global(AssistantsHandle(view));
+    });
+    let path = dir.path().to_path_buf();
+    let (_view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Assistants, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    let pane = bounds(cx, "settings-assistants-pane");
+    let level = bounds(cx, "settings-assistants-level");
+    let off = bounds(cx, "settings-assistants-level-off");
+    let write = bounds(cx, "settings-assistants-level-write");
+    let closed = bounds(cx, "settings-assistants-when-closed");
+    let bridge = bounds(cx, "settings-assistants-bridge");
+    let copy = bounds(cx, "settings-assistants-copy-codex");
+    let privacy = bounds(cx, "settings-assistants-privacy");
+
+    // The level row is the 720 px card, centred in the pane beside the rail; its controls
+    // sit inside the row's 16 px insets.
+    let width = f32::from(level.size.width);
+    assert!((width - 720.).abs() < 1.5, "{level:?}");
+    let left = f32::from(level.origin.x) - f32::from(pane.origin.x);
+    let right = f32::from(pane.size.width) - left - width;
+    assert!(
+        (left - right).abs() < 2.,
+        "the column is centred in the pane: {left} left, {right} right"
+    );
+
+    // The three levels share a row, in order, and fit inside it.
+    assert!((f32::from(off.origin.y) - f32::from(write.origin.y)).abs() < 1.5);
+    assert!(write.origin.x > off.origin.x);
+    assert!(
+        f32::from(write.origin.x + write.size.width)
+            <= f32::from(level.origin.x + level.size.width),
+        "the last level fits in the row: {write:?} in {level:?}"
+    );
+    // The privacy sentence and the bridge state are the level's own card rows, beneath it
+    // (MC-12); then the switch, then the client cards.
+    assert!(privacy.origin.y > level.origin.y);
+    assert!(bridge.origin.y > privacy.origin.y);
+    assert!(closed.origin.y > bridge.origin.y);
+    assert!(copy.origin.y > closed.origin.y);
+    assert!((f32::from(privacy.size.width) - width).abs() < 1.5);
+    assert!((f32::from(bridge.size.width) - width).abs() < 1.5);
+    assert!(
+        f32::from(copy.origin.x) >= f32::from(level.origin.x)
+            && f32::from(copy.origin.x + copy.size.width)
+                <= f32::from(level.origin.x + level.size.width),
+        "the copy control is inside the column: {copy:?} in {level:?}"
+    );
+
+    // A long entry wraps, and the row still holds the note under it: the card grows by the
+    // wrapped lines instead of painting the note over the next card.
+    for client in ["claude-code", "claude-desktop", "codex"] {
+        let row = bounds_of(cx, format!("settings-assistants-client-{client}"));
+        let entry = bounds_of(cx, format!("settings-assistants-entry-{client}"));
+        let note = bounds_of(cx, format!("settings-assistants-note-{client}"));
+        assert!(
+            entry.origin.y + entry.size.height <= note.origin.y,
+            "{client}: the entry ends above its note: {entry:?}, {note:?}"
+        );
+        assert!(
+            note.origin.y + note.size.height <= row.origin.y + row.size.height,
+            "{client}: the note is inside its row: {note:?} in {row:?}"
+        );
+    }
 }

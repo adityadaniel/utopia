@@ -6,9 +6,56 @@
 //! socket for scripts but cannot raise what `/v1/op` permits (MC-1). With the level Off and
 //! no `UTOPIA_API`, there is no server and no socket.
 
+use std::cell::RefCell;
 use std::path::Path;
+use std::rc::Rc;
 
-use utopia_api::{access, Access, ApiServer, Level};
+use utopia_api::{access, Access, ApiCall, ApiServer, Level};
+
+/// The loopback API of the open graph, in one shared slot.
+///
+/// The inbox loop reads the slot every tick instead of capturing the `Option` at load:
+/// Settings → Assistants starts, stops and re-levels the API while the app runs (MC-12), so
+/// a server that starts later must still have its calls drained.
+#[derive(Clone, Default)]
+pub struct ApiSlot(Rc<RefCell<Option<ApiServer>>>);
+
+impl ApiSlot {
+    pub fn new(server: Option<ApiServer>) -> Self {
+        Self(Rc::new(RefCell::new(server)))
+    }
+
+    /// The next queued call, when a server runs.
+    pub fn try_recv(&self) -> Option<ApiCall> {
+        self.0.borrow().as_ref()?.try_recv()
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.0.borrow().is_some()
+    }
+
+    pub fn url(&self) -> Option<String> {
+        self.0.borrow().as_ref().map(ApiServer::url)
+    }
+
+    /// Change what `/v1/op` permits from now on, on the server that runs.
+    pub fn set_level(&self, level: Level) {
+        if let Some(server) = self.0.borrow().as_ref() {
+            server.set_level(level);
+        }
+    }
+
+    /// Put a server in the slot, returning the one it replaced. The replaced server stops as
+    /// it drops, and its port is free again when this returns.
+    pub fn replace(&self, server: Option<ApiServer>) -> Option<ApiServer> {
+        self.0.replace(server)
+    }
+
+    /// Stop the server: dropping it shuts the listener down.
+    pub fn take(&self) -> Option<ApiServer> {
+        self.0.take()
+    }
+}
 
 /// What [`plan`] decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -156,5 +203,31 @@ mod tests {
             plan(None, load_access(&config, &graph)).map(|l| l.level),
             Some(Level::Read)
         );
+    }
+
+    /// MC-12: the slot is what the inbox loop reads, so a server that Settings starts after
+    /// the graph loaded is drained too. Stopping it gives the port back.
+    #[test]
+    fn mc_12_the_inbox_sees_a_server_started_after_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("g.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let config = dir.path().join("config");
+        let slot = ApiSlot::new(None);
+        assert!(!slot.is_running());
+        assert_eq!(slot.url(), None);
+        assert!(slot.try_recv().is_none());
+
+        let server = serve("127.0.0.1:0", Level::Read, &config, &graph).unwrap();
+        let url = server.url();
+        assert!(slot.replace(Some(server)).is_none());
+        assert!(slot.is_running());
+        assert_eq!(slot.url(), Some(url.clone()));
+        assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+        assert!(slot.try_recv().is_none(), "nothing was sent yet");
+        assert!(utopia_api::discovery_file(&config, &graph).is_file());
+
+        assert!(slot.take().is_some());
+        assert!(!slot.is_running());
     }
 }

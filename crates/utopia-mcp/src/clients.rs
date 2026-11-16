@@ -36,6 +36,15 @@ impl Client {
         }
     }
 
+    /// The name Settings shows above the entry. The command takes [`Self::name`].
+    pub const fn label(self) -> &'static str {
+        match self {
+            Client::ClaudeCode => "Claude Code",
+            Client::ClaudeDesktop => "Claude Desktop",
+            Client::Codex => "Codex",
+        }
+    }
+
     /// Read a name back. An unknown name is `None`, so the command can say what it takes.
     pub fn parse(name: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|c| c.name() == name.trim())

@@ -277,7 +277,7 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `crates/utopia-api` | Local automation API (loopback HTTP, bearer token) and `utopia://` link parsing; `handle(store, Op)` is the one implementation shared with plugins | `utopia-core`, `utopia-store`, `axum` |
 | `crates/utopia-mcp` | MCP server on stdio for assistant clients (PRD §13.8): the JSON-RPC wire for the two protocol eras, the tool catalog, the outline format with its id marker, the `Direct` headless backend, the `Remote` backend for the open app's API, the rule that picks one for each call, and the setup text for each client. No `gpui`, no async runtime | `utopia-api`, `utopia-store`, `utopia-core` |
 | `crates/utopia-plugin` | WASM plugin sandbox (wasmi: fuel, memory cap, permissioned API calls) | `utopia-api`, `utopia-store`, `wasmi` |
-| `crates/utopia-ui` | GPUI components: block editor (IME via `EntityInputHandler`), outline view, chips, panels, sidebar, background sync runner, graph view, PDF viewer (PDFKit on macOS), Settings window (keybinding editor, shortcut sheet, Help tour) | `utopia-core`, `utopia-store`, `utopia-sync`, `utopia-plugin`, `utopia-mcp`, `gpui` |
+| `crates/utopia-ui` | GPUI components: block editor (IME via `EntityInputHandler`), outline view, chips, panels, sidebar, background sync runner, graph view, PDF viewer (PDFKit on macOS), Settings window (keybinding editor, shortcut sheet, Assistants tab, Help tour) | `utopia-core`, `utopia-store`, `utopia-sync`, `utopia-plugin`, `utopia-api`, `utopia-mcp`, `gpui` |
 | `crates/utopia-app` | Binary: window, keymap, actions, app assembly, CLI subcommands, startup probe, screenshot scripts, API/link inbox, unlock screen | everything above |
 | `crates/utopia-ffi` | Mobile core: UniFFI surface over the store and sync (§14) | `utopia-store`, `utopia-sync`, `uniffi` |
 | `mobile/ios` | SwiftUI shell (`UtopiaMobile`) and the Swift binding check | the generated bindings |
@@ -384,12 +384,16 @@ Implemented:
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
   snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.
-- **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with five tabs —
+- **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with six tabs —
   **Keybindings**, where every action can be rebound by pressing the keys and the change
   applies at once; **Shortcuts**, the cheat sheet of everything bound; **Appearance**, the font
   (System, or IBM Plex Sans bundled under the OFL in `crates/utopia-ui/assets/fonts`; code stays
   Menlo), applied to every window at once and kept in `settings.json`; **Sync**, per-graph
-  transport setup, Keychain credentials, connection testing and device pairing; and **Help**, a tour of
+  transport setup, Keychain credentials, connection testing and device pairing; **Assistants**,
+  the graph's MCP access level (Off, Read, Read and write), the `when_closed` switch, the setup
+  entry to copy into Claude Code, Claude Desktop or Codex, and whether the bridge runs — a
+  change saves `<config>/mcp/<graph key>.json` and starts, stops or re-levels the loopback API
+  with no restart (PRD §13.8 MC-12); and **Help**, a tour of
   the features with screenshots captured from the app (`cargo run -p xtask -- help-shots`).
   `utopia_ui::actions::CATALOG` is the one source of truth: default keys plus the label,
   category and help text for each action, so the editor, the cheat sheet and the installed
