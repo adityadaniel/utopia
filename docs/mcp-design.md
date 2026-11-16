@@ -4,8 +4,8 @@ Status: design, written on 2026-11-10. The owner answered each decision on 2026-
 (§1.1). It is built up to slice 2.2: the owner lock, `POST /v1/op` and the access file, the
 `utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
 subcommand and the headless path, Settings → Assistants, and this documentation. Slice 3.1
-adds the first write tool, `append_blocks`; `update_block`, `move_block` and `delete_block`
-(§8.4) are not built.
+adds the first write tool, `append_blocks`, and slice 3.2 the second, `update_block` (PR 8);
+`move_block` and `delete_block` (§8.4) are not built.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
@@ -302,7 +302,7 @@ The legacy rules:
 | `get_backlinks` | read | `Backlinks` | exists |
 | `run_query` | read | `Query` | exists |
 | `append_blocks` | write | new `AppendOutline` | exists (slice 3.1) |
-| `update_block` | write | `UpdateBlock` | add `kind`, `checked`, `if_rev` |
+| `update_block` | write | `UpdateBlock` | exists (slice 3.2); adds `kind`, `checked`, `if_rev` |
 | `move_block` | write | new `MoveBlock` | new |
 | `delete_block` | write | new `DeleteBlock` | new |
 
@@ -326,11 +326,22 @@ The legacy rules:
   is that day's page (FR-1.2). One call adds at most 2,000 blocks and no line may be deeper
   than 12 levels (FR-2.9); a larger or deeper outline is refused with `isError` and nothing
   is written, not even the page.
+- **`update_block`** changes one block: its `text`, its `kind` (bullet, numbered, to-do,
+  quote, code or a heading) and `checked`, any of which may be absent, which leaves that
+  part of the block alone. `kind` takes the names `block_json` writes — `bullet`,
+  `numbered`, `todo`, `quote`, `code`, `heading` — plus `h1`, `h2` and `h3` for a heading's
+  level; `heading` keeps the level of a block that already is one. An unknown name is
+  refused rather than read as a bullet. `checked` is a to-do's state, so the block must be
+  one or become one in the same call. The whole call is one undo step (MC-9) whatever parts
+  of it change, and its answer gives the block and its new `rev`.
 - **`move_block`** uses `outline::move_to` and `Store::move_block_to_page`.
 - **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), and undo
   restores it.
-- **`if_rev`** is an optional short hash of the text that the agent read. If the block
-  changed after the read, the call fails and the agent reads again (§2.3.7).
+- **`if_rev`** is an optional short hash of the text that the agent read, as `read_block`
+  returns it (one function, `block_rev`, in `utopia-api`). If the block changed after the
+  read, the call fails with no write, and the error names the rev the block has and says to
+  read it again (§2.3.7, MC-10). A `rev` is a hash of the text only, so an `if_rev` says
+  nothing about a change of kind or `checked`.
 - Each tool sets all four hints (§4.1). The Codex `writes` approval mode and the Claude
   permission prompts use these hints.
 - `Op::kind()` (`crates/utopia-api/src/lib.rs:134`) must classify each new variant, or the
@@ -592,20 +603,37 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 ## 10. Limits
 
 - **No sync when the app is closed.** See §2.3.
-- **Three of the four write tools do not exist yet.** Slice 3.1 added `append_blocks`; the
-  level `Read and write` permits it, and `/v1/op` permits every write op. `tools/list` offers
-  the six read tools and `append_blocks`. Slices 3.2 and 3.3 add `update_block` with `kind`,
-  `checked` and `if_rev`, and `move_block` and `delete_block`.
+- **Two of the four write tools do not exist yet.** Slices 3.1 and 3.2 added `append_blocks`
+  and `update_block`; the level `Read and write` permits them, and `/v1/op` permits every
+  write op. `tools/list` offers the six read tools and the two of them. Slice 3.3 adds
+  `move_block` and `delete_block`.
 - **`append_blocks` writes every line as a bullet.** The outline is read with
   `markdown::parse_outline`, which takes off the list markers but not the `[ ] `, `[x] `,
   `## ` and `> ` prefixes that `read_page` writes for a to-do, a heading and a quote: those
-  stay in the block's text. Slice 3.2's `update_block` with `kind` and `checked` is the way
-  to set a block's kind through the bridge until then.
+  stay in the block's text. `update_block` with `kind` and `checked` sets a block's kind
+  and its done state through the bridge, and leaves the text as it is.
 - **A refused `append_blocks` writes nothing.** It does not even create the page `create`
   would have made, and it records no undo step.
+- **`update_block` writes the block and then the pages its new `[[links]]` make**, in that
+  order and as two commits, which is how the editor commits a block. The call is one undo
+  step, and a page that cannot be made answers an error rather than losing the text.
+- **`update_block` cannot empty a block through MCP.** The tool refuses an empty `text`,
+  because wiping the only copy of a block's words is never an agent turn's intent; the op
+  and `PATCH /v1/blocks/{id}` still accept one, so nothing that works today changes. A
+  `[[link]]` in the new text makes its page, so an update is not "text only".
+- **An `if_rev` covers the text, not the block.** `rev` is a hash of the block's text
+  (`block_rev`), so a block whose kind or `checked` state changed under the agent still
+  agrees with the rev it read: a call carrying a stale `text` from that read can overwrite
+  the shape the owner gave it. The text, which is the words, is still protected (MC-10).
 - **`serve-api` reads the access file once**, when it starts, so a level changed while it
   runs applies to `/v1/op` when it restarts. The app re-levels its own server at once
   (MC-12); the two processes' levels can differ in between.
+- **Codex with its default `approval: never` refuses `update_block`.** The tool is marked
+  `destructiveHint: true` (§4.1), and a policy that cannot ask cannot approve it: the call
+  fails with "MCP tool call requires approval, but approval policy is never" and nothing is
+  written. `append_blocks`, which is not destructive, runs under that default. A Codex user
+  needs an approval policy that can ask, or `--approve-for-me`, for the destructive tools.
+  Measured on 2026-11-16 with Codex 0.169.0 (`docs/verification/feat-mcp-update-block/`).
 - **Encrypted graphs on the headless path** need a passphrase that the process can read
   without a prompt.
 - **The headless call costs 1.4 ms** (median of 7, release, `xtask bench` on the
