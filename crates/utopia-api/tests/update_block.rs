@@ -5,6 +5,9 @@
 //! The op is built from JSON, as `/v1/op` and a plugin send it, so the wire shape is under
 //! test in each call and not only in the serialization table.
 
+use std::sync::mpsc;
+use std::time::Duration;
+
 use serde_json::{json, Value};
 use utopia_api::{block_rev, handle, ApiError, Op, Outcome};
 use utopia_core::{BlockId, BlockKind, PageId};
@@ -316,4 +319,119 @@ fn mc_8_the_old_json_still_parses() {
     )
     .expect("a text-only call");
     assert_eq!(fields(&mut s, &id).0, "two");
+}
+
+/// MC-8, rule 2: an update that follows an append finds the block the append just made.
+///
+/// The app's store is *debounced*: a commit is handed to the writer thread and an index read
+/// does not wait for it, so the `block` projection can lag a call behind. `Op::UpdateBlock`
+/// learns the block's page with `block_row`, one of those reads: without a `sync_index`
+/// first, the agent's `append_blocks` and then `update_block` on a new id answers "no block"
+/// for a block that exists. Nothing holds the write lock in the app; this test holds it only
+/// to make the window deterministic.
+#[test]
+fn mc_8_an_update_right_after_an_append_finds_the_new_block() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    let path = dir.path().join("g.utopia");
+    let mut s = Store::open(&path).expect("open the scratch graph");
+    s.create_page("Project X").expect("a page");
+    s.sync_index().expect("index");
+    // The desktop UI's mode (`AppState`): commits go to the writer, reads do not wait.
+    s.set_debounced(true).expect("debounced");
+
+    // A second store holds the database's write lock, so the append's commit sits in the
+    // writer for as long as the next call takes: the window the app has every time.
+    let (held, is_held) = mpsc::channel();
+    let holder = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            let store = Store::open(&path).expect("the second connection");
+            store
+                .conn()
+                .execute_batch("BEGIN IMMEDIATE")
+                .expect("the write lock");
+            held.send(()).expect("tell the test the lock is held");
+            std::thread::sleep(Duration::from_millis(300));
+            store
+                .conn()
+                .execute_batch("COMMIT")
+                .expect("release the writer");
+        })
+    };
+    is_held.recv().expect("the lock is held");
+
+    let appended = update(
+        &mut s,
+        json!({"op": "append_outline", "title": "Project X", "markdown": "- water the plants\n"}),
+    )
+    .expect("the append is queued")
+    .body;
+    let id = appended["first"]
+        .as_str()
+        .expect("the new block")
+        .to_string();
+    // The very next call, as an agent makes it: the block exists in the shard and in the
+    // writer's queue, not yet in the index the caller reads.
+    let body = update(
+        &mut s,
+        json!({"op": "update_block", "id": id, "kind": "todo", "checked": true}),
+    )
+    .expect("the block the append made is found")
+    .body;
+    assert_eq!(body["kind"], "todo", "the call reached the new block");
+    holder.join().expect("the holder finished");
+
+    s.set_debounced(false).expect("strict again");
+    assert_eq!(
+        fields(&mut s, &id),
+        ("water the plants".into(), BlockKind::Todo, true)
+    );
+    assert!(s.doctor().expect("doctor runs").is_ok());
+}
+
+/// MC-9, FR-2.12: a call that changes only the kind or the done state is one step on the
+/// undo stack, and it touches only what it was asked to.
+///
+/// A commit after such a call would shape the block's text — NFC and the hashtag rule —
+/// with nobody asking it to: the owner's own not-yet-committed text would be rewritten (in a
+/// second, coalescing group, which can also join the owner's typing) and one Cmd+Z would
+/// take more than the agent's change.
+#[test]
+fn mc_9_a_kind_only_call_is_one_step_and_leaves_the_text_alone() {
+    let mut s = store();
+    let id = block(&mut s, "buy milk");
+    update(
+        &mut s,
+        json!({"op": "update_block", "id": id, "kind": "todo"}),
+    )
+    .expect("a to-do");
+    // The owner is mid-edit: a decomposed accent a commit would rewrite to NFC. No commit
+    // has run on it yet.
+    let page: PageId = s.find_page("Project X").unwrap().unwrap();
+    s.set_block_text(&page, &BlockId(id.clone()), "cafe\u{301} notes", None, None)
+        .expect("the owner's text");
+    let depth = s.undo_depth();
+    update(
+        &mut s,
+        json!({"op": "update_block", "id": id, "checked": true}),
+    )
+    .expect("ticked");
+
+    assert_eq!(
+        s.undo_depth(),
+        depth + 1,
+        "one call is one undo step (MC-9)"
+    );
+    assert_eq!(
+        fields(&mut s, &id).0,
+        "cafe\u{301} notes",
+        "the agent's call did not rewrite text it never sent"
+    );
+    assert!(fields(&mut s, &id).2, "the tick landed");
+    s.undo().expect("undo runs");
+    assert_eq!(
+        fields(&mut s, &id),
+        ("cafe\u{301} notes".to_string(), BlockKind::Todo, false),
+        "one undo takes the tick off and nothing else"
+    );
 }

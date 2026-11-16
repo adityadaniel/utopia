@@ -1063,3 +1063,49 @@ fn mc_11_update_block_is_described_without_page_text() {
     // MC-11: no page text in the description, the same as for every other tool.
     assert!(!description.contains("Plan the launch"), "{description}");
 }
+
+/// MC-8, design §4: the id marker of the outline format is taken off the text an agent sends
+/// back, as `append_blocks` does (handoff §5). The natural flow is `read_block` → copy its
+/// line → `update_block`; the marker, and a trailing newline from copying the line, must not
+/// land in the owner's note — and the answer's `rev` must cover the text that landed.
+#[test]
+fn mc_8_update_block_takes_the_id_marker_off_the_text_it_is_sent() {
+    let graph = Graph::new();
+    let (read, is_error) = call_at(&graph, Level::Read, "read_block", json!({"id": graph.root}));
+    assert!(!is_error, "{read}");
+    let line = read
+        .lines()
+        .find(|l| l.starts_with("- Plan the launch"))
+        .unwrap_or_else(|| panic!("the root's line: {read}"));
+    assert!(
+        line.ends_with(&format!("{{id:{}}}", graph.root)),
+        "the line carries the marker: {line}"
+    );
+    // One word changed and the line sent back as it was shown, newline and all.
+    let sent = format!("{}\n", line.replace("Plan the launch", "Plan the shipment"));
+    let (answer, is_error) = update(&graph, json!({"id": graph.root, "text": sent}));
+    assert!(!is_error, "{answer}");
+
+    // What is stored is the text, not the outline's or the copy's extras.
+    let mut store = graph.open();
+    let page = store
+        .find_page("Project X")
+        .expect("a lookup")
+        .expect("the page");
+    let st = store.page_state(&page).expect("the page state");
+    let stored = st
+        .block(&utopia_core::BlockId(graph.root.clone()))
+        .expect("the block")
+        .text
+        .clone();
+    assert_eq!(
+        stored, "Plan the shipment",
+        "the marker and the newline are gone"
+    );
+    // And the rev the answer gives is the one that stored text hashes to.
+    assert_eq!(
+        rev_of(&answer),
+        utopia_api::block_rev("Plan the shipment"),
+        "the rev describes the text that was written"
+    );
+}

@@ -509,6 +509,11 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
             if_rev,
         } => {
             let id = BlockId(id);
+            // Rule 2: the block's row is read to learn its page, and in the app the store is
+            // debounced, so an index read does not wait for the writer. Without this the agent's
+            // `append_blocks` and then `update_block` on an id it was just given answers "no
+            // block" while the append is still being committed.
+            store.sync_index()?;
             let page = store
                 .block_row(&id)?
                 .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?
