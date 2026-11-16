@@ -16,7 +16,7 @@ use gpui::{
     Global, Menu, MenuItem, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle,
     WindowOptions,
 };
-use utopia_store::Store;
+use utopia_store::{OwnerLock, Store};
 use utopia_ui::actions::*;
 use utopia_ui::app_state::AppState;
 use utopia_ui::appearance::UiFontExt;
@@ -173,6 +173,10 @@ enum RootState {
     /// The graph is encrypted at rest and no stored passphrase opened it (P2).
     Locked {
         path: PathBuf,
+        /// Kept while the passphrase is asked for (MC-4): a second `try_acquire` in this
+        /// process would fail against its own lock, and another process must not take the
+        /// graph between two attempts. `None` only while an attempt has taken it out.
+        owner: Option<OwnerLock>,
         input: Entity<LineInput>,
         error: Option<String>,
         _sub: Subscription,
@@ -201,6 +205,10 @@ struct Running {
     /// `None` once the main window has gone: there is no editor left to finish.
     root: Option<gpui::WeakEntity<Root>>,
     app: Entity<AppState>,
+    /// This process owns the graph for as long as its store lives (MC-4), which is past the
+    /// window closing: the quit path still flushes through `app`. Declared after `app`, so
+    /// the store handle goes first. The kernel releases the lock when the process exits.
+    _owner: Option<OwnerLock>,
 }
 
 impl Global for Running {}
@@ -267,7 +275,7 @@ impl Root {
                 let key = utopia_store::is_encrypted(&path)
                     .then(|| paths::db_passphrase(&path))
                     .flatten();
-                Self::load_graph(path, key, &config, &mode, window, cx)
+                Self::load_graph(path, key, None, &config, &mode, window, cx)
             }
             None => Self::onboarding(window, cx),
         };
@@ -334,13 +342,14 @@ impl Root {
         let key = utopia_store::is_encrypted(&path)
             .then(|| paths::db_passphrase(&path))
             .flatten();
-        self.open_graph_with(path, key, window, cx);
+        self.open_graph_with(path, key, None, window, cx);
     }
 
-    /// Ask for the passphrase of an encrypted graph.
+    /// Ask for the passphrase of an encrypted graph, holding its owner lock meanwhile.
     fn locked(
         path: PathBuf,
         error: Option<String>,
+        owner: OwnerLock,
         window: &mut Window,
         cx: &mut Context<Root>,
     ) -> RootState {
@@ -356,13 +365,18 @@ impl Root {
             move |this, input, e: &LineInputEvent, window, cx| {
                 if let LineInputEvent::Submit { .. } = e {
                     let pass = input.read(cx).text().to_string();
-                    this.open_graph_with(p2.clone(), Some(pass), window, cx);
+                    let owner = match &mut this.state {
+                        RootState::Locked { owner, .. } => owner.take(),
+                        _ => None,
+                    };
+                    this.open_graph_with(p2.clone(), Some(pass), owner, window, cx);
                 }
             },
         );
         input.update(cx, |i, _| i.focus(window));
         RootState::Locked {
             path,
+            owner: Some(owner),
             input,
             error,
             _sub: sub,
@@ -374,27 +388,47 @@ impl Root {
         &mut self,
         path: PathBuf,
         key: Option<String>,
+        owner: Option<OwnerLock>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state = Self::load_graph(path, key, &self.config, &self.mode, window, cx);
+        self.state = Self::load_graph(path, key, owner, &self.config, &self.mode, window, cx);
         cx.notify();
     }
 
     /// Open `path` and everything [`Ready`] owns, returning the state to show. One function
     /// builds the Ready state, so there is no path that half-enters it (issue 3).
+    ///
+    /// MC-4: the owner lock comes first, and the store is not opened without it. `owner` is
+    /// the lock this process already holds for `path` (the unlock screen trying again);
+    /// otherwise it is taken here, trying for [`cli::OWNER_WAIT`]. This blocks the first
+    /// frame for at most that long, and only while another process owns the graph.
     fn load_graph(
         path: PathBuf,
         key: Option<String>,
+        owner: Option<OwnerLock>,
         config: &Path,
         mode: &RunMode,
         window: &mut Window,
         cx: &mut Context<Root>,
     ) -> RootState {
+        let owner = match owner {
+            Some(owner) => owner,
+            None => match OwnerLock::acquire_within(&path, cli::OWNER_WAIT) {
+                Ok(Some(owner)) => owner,
+                Ok(None) => {
+                    eprintln!("utopia: {}: {}", cli::ALREADY_OPEN, path.display());
+                    return RootState::Failed(cli::ALREADY_OPEN.to_string());
+                }
+                Err(e) => {
+                    return RootState::Failed(format!("Could not open {}: {e}", path.display()))
+                }
+            },
+        };
         match Store::open_with_key(&path, key.as_deref()) {
             Err(utopia_store::StoreError::Encrypted) => {
                 let error = key.map(|_| "That passphrase does not open this graph.".to_string());
-                Self::locked(path, error, window, cx)
+                Self::locked(path, error, owner, window, cx)
             }
             Ok(store) => {
                 paths::remember_graph(config, &path);
@@ -505,6 +539,7 @@ impl Root {
                 cx.set_global(Running {
                     root: Some(cx.weak_entity()),
                     app: app.clone(),
+                    _owner: Some(owner),
                 });
                 RootState::Ready(Ready {
                     ws,
@@ -994,6 +1029,7 @@ mod tests {
             cx.set_global(Running {
                 root: None,
                 app: app.clone(),
+                _owner: None,
             })
         });
         cx.update(quit_app);
