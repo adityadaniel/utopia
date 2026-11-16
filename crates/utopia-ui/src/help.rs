@@ -8,6 +8,17 @@
 use gpui::{Image, ImageFormat};
 use std::sync::Arc;
 
+/// One embedded capture. The box is given both a width and a height from [`ratio`], because
+/// gpui only learns an image's own size a frame after layout, and a width alone leaves the
+/// element at its intrinsic height for that first frame.
+///
+/// [`ratio`]: HelpShot::ratio
+pub struct HelpShot {
+    pub png: &'static [u8],
+    /// Height divided by width, of the capture after `xtask help-shots` downscales it.
+    pub ratio: f32,
+}
+
 /// One section of the tour.
 pub struct HelpTopic {
     pub title: &'static str,
@@ -18,12 +29,26 @@ pub struct HelpTopic {
     /// Catalog action names whose shortcuts drive this feature.
     pub actions: &'static [&'static str],
     /// Embedded PNG, captured from the app with mock data.
-    pub shot: Option<&'static [u8]>,
+    pub shot: Option<HelpShot>,
 }
 
+/// A capture of the main window: 1200 × 798 once downscaled.
 macro_rules! shot {
     ($name:literal) => {
-        Some(include_bytes!(concat!("../assets/help/", $name, ".png")).as_slice())
+        Some(HelpShot {
+            png: include_bytes!(concat!("../assets/help/", $name, ".png")).as_slice(),
+            ratio: 798. / 1200.,
+        })
+    };
+}
+
+/// A capture of the Settings window (1100 × 760 points): 1200 × 864 once downscaled.
+macro_rules! settings_shot {
+    ($name:literal) => {
+        Some(HelpShot {
+            png: include_bytes!(concat!("../assets/help/", $name, ".png")).as_slice(),
+            ratio: 864. / 1200.,
+        })
     };
 }
 
@@ -200,6 +225,28 @@ pub const TOPICS: &[HelpTopic] = &[
         shot: None,
     },
     HelpTopic {
+        title: "Assistant Access",
+        summary: "An AI client can read this graph, once you let it. Off until you say so.",
+        body: &[
+            "Utopia can hand a graph to an AI client such as Claude Code, Claude Desktop or \
+             Codex, over the Model Context Protocol: the client starts `utopia mcp` itself and \
+             talks to it. Access is off until you turn it on in Settings → Assistants. Each \
+             graph has its own setting, and the setting is local, so it never travels with the \
+             graph or through sync.",
+            "At Read an assistant can search and read pages. Read and write is the level for \
+             changes; the tools that make them arrive after the reading ones. Either way a \
+             call runs through the same code as an edit here, so undo, references and sync \
+             behave as they do for you.",
+            "Copy the entry for your client out of the tab and paste it into that client's \
+             configuration. With the window open the call runs in it; with Utopia closed it \
+             runs only if Run while Utopia is closed is on, and then it does not sync until the \
+             next launch. Text an assistant reads goes to that assistant and to its provider: \
+             Utopia itself calls no model and makes no network call for this.",
+        ],
+        actions: &[],
+        shot: settings_shot!("assistants"),
+    },
+    HelpTopic {
         title: "Changing These Shortcuts",
         summary: "Every shortcut in the app can be rebound.",
         body: &[
@@ -217,18 +264,17 @@ pub const TOPICS: &[HelpTopic] = &[
     },
 ];
 
-/// Decode a topic's screenshot for gpui. `None` when the topic has no picture, or when the
-/// embedded bytes are the 1x1 placeholder used before captures are generated.
-pub fn shot_image(topic: &HelpTopic) -> Option<Arc<Image>> {
-    let bytes = topic.shot?;
+/// Decode a topic's screenshot for gpui, with its height per unit of width. `None` when the
+/// topic has no picture, or when the embedded bytes are the 1x1 placeholder used before
+/// captures are generated.
+pub fn shot_image(topic: &HelpTopic) -> Option<(Arc<Image>, f32)> {
+    let shot = topic.shot.as_ref()?;
     // A real capture is thousands of bytes; the placeholder is ~70.
-    if bytes.len() < 256 {
+    if shot.png.len() < 256 {
         return None;
     }
-    Some(Arc::new(Image::from_bytes(
-        ImageFormat::Png,
-        bytes.to_vec(),
-    )))
+    let image = Arc::new(Image::from_bytes(ImageFormat::Png, shot.png.to_vec()));
+    Some((image, shot.ratio))
 }
 
 #[cfg(test)]
@@ -274,9 +320,26 @@ mod tests {
             "Attachments And PDFs",
             "Quick Capture",
             "Sync, Export And Encryption",
+            "Assistant Access",
             "Changing These Shortcuts",
         ] {
             assert!(titles.contains(&expected), "no topic for {expected}");
+        }
+    }
+
+    /// Every topic that has a picture has a real capture, not the 1x1 placeholder used before
+    /// `xtask help-shots` has run, and declares a landscape ratio the help box can draw.
+    #[test]
+    fn every_picture_is_a_real_capture() {
+        for t in TOPICS {
+            let Some(shot) = &t.shot else { continue };
+            assert!(shot.png.len() > 256, "{} has a placeholder", t.title);
+            assert!(
+                shot.ratio > 0.2 && shot.ratio < 1.0,
+                "{} declares ratio {}",
+                t.title,
+                shot.ratio
+            );
         }
     }
 }

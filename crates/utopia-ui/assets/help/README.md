@@ -12,8 +12,13 @@ project, a person and a few days of notes that link them), drives the real windo
 `UTOPIA_SHOT_SCRIPT` and downscales each capture to 1200 px wide.
 
 The app captures its own window, so no Screen Recording permission is needed. The Settings
-window is a separate window and the shot script drives one window only, which is why no
-Help topic shows a picture of Settings.
+window is a separate window; the script reaches it with `target last` (after `keys cmd-,`),
+which is how the Assistants topic gets a picture of Settings → Assistants. The app is run
+from a bundle-shaped copy at `target/help-shots/Utopia.app/Contents/MacOS/utopia`, so the
+client entries in that picture do not name `target/debug`.
+
+Every capture is downscaled to 1200 px wide; `help.rs` carries each one's height ratio, so a
+Settings capture (1200 × 864) is not squeezed into the main window's shape (1200 × 798).
 
 Review the captures by eye after regenerating: colours, typography and layout are not
 covered by tests (see AGENTS.md, "Known limits").
