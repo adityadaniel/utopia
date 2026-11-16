@@ -7920,3 +7920,26 @@ fn fr_2_17_the_caret_between_closing_brackets_is_not_in_the_title(cx: &mut TestA
     assert_eq!(page_titles(&app, cx), vec!["Guiding Activity".to_string()]);
     assert_eq!(rows(&app, &page, cx)[0].0, "[[Guiding Activity]");
 }
+
+/// A bare URL in a block at rest is a link (Appendix B `bare_url`): a click opens it in
+/// the browser instead of putting the caret in the block.
+#[gpui::test]
+fn a_bare_url_opens_from_a_block_at_rest(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    let url = "https://example.com/a/long/path/to/read";
+    cx.simulate_input(url);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let block = app.update(cx, |app, _| {
+        app.store.page_state(&page).unwrap().live_preorder()[0]
+            .0
+            .clone()
+    });
+    let sel: &'static str = Box::leak(format!("text-{}", block.0).into_boxed_str());
+    let text = cx.debug_bounds(sel).expect("the block shows as text");
+    assert_eq!(cx.opened_url(), None);
+    cx.simulate_click(text.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url().as_deref(), Some(url));
+}

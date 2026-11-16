@@ -1261,7 +1261,7 @@ Indicative for a 1–2 engineer team; the point is ordering and exit criteria, n
 
 ```ebnf
 inline      = text | bold | italic | strike | highlight | code
-            | page_ref | block_ref | tag | link ;
+            | page_ref | block_ref | tag | link | bare_url ;
 bold        = "**", text, "**" ;
 italic      = "_",  text, "_"  ;
 strike      = "~~", text, "~~" ;
@@ -1272,6 +1272,7 @@ block_ref   = "((", ulid, "))" ;
 tag         = "#", tag_name | "#[[", title, "]]" ;
 tag_name    = ( letter | digit | "_" | "-" )+ ;
 link        = "[", text, "](", url, ")" ;
+bare_url    = ( "http://" | "https://" ), url_char+ ;   (* not after a letter or digit *)
 ```
 
 Rules:
@@ -1283,6 +1284,9 @@ Rules:
 6. `tag_name` may contain spaces **only** through the commit-time longest-match rule (§6.5) or the explicit `#[[Title]]` form; the stored canonical form for a multi-word tag is always `#[[Title]]`.
 7. A `title` that parses as an unambiguous date resolves to that day's page (§10.3.1); the literal text the user typed is preserved in the source.
 8. `[[` and `((` inside `code` are never references.
+9. A `bare_url` runs to the next whitespace, `<`, `>` or backtick, less trailing `.,:;!?'"*_~^`
+   and any `)` or `]` it does not open. It is opaque like `code`: a `#` or `_` inside it is
+   never a tag or emphasis. It renders as a link to itself.
 
 ### C. Command surface (`utopia-core`)
 

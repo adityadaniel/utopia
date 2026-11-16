@@ -292,6 +292,17 @@ fn atom_at(s: &str, i: usize, end: usize) -> Option<(Inline, usize)> {
                 close + 2,
             ))
         }
+        b'h' | b'H' => {
+            let next = bare_url_end(s, i, end)?;
+            Some((
+                Inline::Link {
+                    text: s[i..next].to_string(),
+                    url: s[i..next].to_string(),
+                    range: i..next,
+                },
+                next,
+            ))
+        }
         b'#' => {
             if prev_char(s, i).is_some_and(|c| c.is_alphanumeric() || c == '#') {
                 return None;
@@ -363,6 +374,48 @@ fn mark_at(s: &str, i: usize, end: usize) -> Option<Mark> {
     } else {
         None
     }
+}
+
+/// Where a bare `http://` / `https://` URL starting at `i` ends (Appendix B `bare_url`,
+/// after GFM's extended autolinks): at the next whitespace, `<` or `>`, less trailing
+/// punctuation and any `)` or `]` that closes nothing inside it, so "(see https://x.y)."
+/// links only `https://x.y`. A URL is opaque like code (rule 4): a `#` or `_` in it is
+/// never a tag or emphasis, so `/#section` adds no edge and `a_b_c` is not italic.
+fn bare_url_end(s: &str, i: usize, end: usize) -> Option<usize> {
+    if prev_char(s, i).is_some_and(|c| c.is_alphanumeric()) {
+        return None;
+    }
+    let rest = &s[i..end];
+    let scheme = ["https://", "http://"].into_iter().find(|p| {
+        rest.get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p))
+    })?;
+    let len = rest
+        .find(|c: char| c.is_whitespace() || c == '<' || c == '>' || c == '`')
+        .unwrap_or(rest.len());
+    let mut url = &rest[..len];
+    while let Some(last) = url.chars().next_back() {
+        let trailing = match last {
+            '.' | ',' | ':' | ';' | '!' | '?' | '\'' | '"' | '*' | '_' | '~' | '^' => true,
+            ')' => url.matches(')').count() > url.matches('(').count(),
+            ']' => url.matches(']').count() > url.matches('[').count(),
+            _ => false,
+        };
+        if !trailing {
+            break;
+        }
+        url = &url[..url.len() - last.len_utf8()];
+    }
+    (url.len() > scheme.len()).then_some(i + url.len())
+}
+
+/// Whether a link leaves the app: anything but an attachment, a PDF page or a
+/// `utopia://` deep link (FR-4.10), which all open inside Utopia.
+pub fn is_external_url(url: &str) -> bool {
+    !["blob:", "pdfpage:", "utopia:"].iter().any(|p| {
+        url.get(..p.len())
+            .is_some_and(|h| h.eq_ignore_ascii_case(p))
+    })
 }
 
 fn find_close(s: &str, from: usize, end: usize, mark: Mark) -> Option<usize> {
@@ -837,5 +890,94 @@ mod tests {
                 (RefKind::Tag, "タグ".into())
             ]
         );
+    }
+
+    fn urls(s: &str) -> Vec<String> {
+        fn walk(nodes: &[Inline], out: &mut Vec<String>) {
+            for n in nodes {
+                match n {
+                    Inline::Link { url, .. } => out.push(url.clone()),
+                    Inline::Emph { children, .. } => walk(children, out),
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&parse(s), &mut out);
+        out
+    }
+
+    /// Appendix B `bare_url`: a pasted `https://…` is a link without `[text](url)`.
+    #[test]
+    fn a_bare_url_is_a_link() {
+        let t = "read https://example.com/a?b=1 later";
+        assert_eq!(
+            parse(t),
+            vec![
+                Inline::Text("read ".into()),
+                Inline::Link {
+                    text: "https://example.com/a?b=1".into(),
+                    url: "https://example.com/a?b=1".into(),
+                    range: 5..30,
+                },
+                Inline::Text(" later".into()),
+            ]
+        );
+        assert_eq!(urls("HTTP://X.Y"), ["HTTP://X.Y"]);
+        assert_eq!(urls("http://x.y"), ["http://x.y"]);
+        // Not a URL: no host, another scheme, or inside a word or code.
+        for t in ["https://", "ftp://x.y", "xhttps://x.y", "`https://x.y`"] {
+            assert_eq!(urls(t), Vec::<String>::new(), "{t}");
+        }
+        // A Markdown link's url is not linked twice.
+        assert_eq!(urls("[site](https://x.y)"), ["https://x.y"]);
+    }
+
+    /// Sentence punctuation after a URL, and a bracket that closes around it, stay text.
+    #[test]
+    fn a_bare_url_leaves_trailing_punctuation_out() {
+        assert_eq!(urls("see https://x.y."), ["https://x.y"]);
+        assert_eq!(urls("(see https://x.y)."), ["https://x.y"]);
+        assert_eq!(urls("is it https://x.y/?"), ["https://x.y/"]);
+        assert_eq!(
+            urls("https://en.wikipedia.org/wiki/Rust_(language)"),
+            ["https://en.wikipedia.org/wiki/Rust_(language)"]
+        );
+        assert_eq!(urls("**https://x.y**"), ["https://x.y"]);
+        assert!(matches!(
+            &parse("**https://x.y**")[0],
+            Inline::Emph {
+                mark: Mark::Bold,
+                ..
+            }
+        ));
+        assert_eq!(urls("<https://x.y>"), ["https://x.y"]);
+    }
+
+    /// A URL is opaque (rule 4): its `#fragment` is no tag and its underscores no italics,
+    /// so commit-time healing never rewrites a URL into `#[[…]]`.
+    #[test]
+    fn a_bare_url_holds_no_tags_or_emphasis() {
+        let t = "https://x.y/#intro and https://x.y/a_b_c_ #real";
+        assert_eq!(refs(t), vec![(RefKind::Tag, "real".into())]);
+        assert_eq!(urls(t), ["https://x.y/#intro", "https://x.y/a_b_c"]);
+        assert_eq!(heal_tags("https://x.y/#a b", |p| p == "a b"), None);
+        assert_eq!(plain_text("go https://x.y/#a"), "go https://x.y/#a");
+        assert_eq!(find_mentions("https://x.y/ana ana", "ana"), vec![16..19]);
+    }
+
+    #[test]
+    fn external_urls_leave_the_app() {
+        for u in ["https://x.y", "http://x.y", "mailto:a@b.c"] {
+            assert!(is_external_url(u), "{u}");
+        }
+        for u in [
+            "blob:abc",
+            "pdfpage:abc#2",
+            "utopia://page/x",
+            "UTOPIA://page/x",
+        ] {
+            assert!(!is_external_url(u), "{u}");
+        }
     }
 }

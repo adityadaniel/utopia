@@ -16,6 +16,9 @@ use crate::theme::{
     Theme, LINK_RING_WIDTH, RADIUS_LINK_RING, RADIUS_TAG, TAG_HEIGHT, TAG_PADDING_X,
 };
 
+/// Drawn after the text of a link that leaves the app (a thin space, then ↗).
+pub const EXTERNAL_ARROW: &str = "\u{2009}↗";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
     /// Page title as typed; resolution happens in the store.
@@ -40,6 +43,8 @@ pub struct Rendered {
     pub links: Vec<(Range<usize>, LinkTarget)>,
     /// `#tag` runs, drawn as chips by [`LinkText`] (DESIGN.md §3.1).
     pub chips: Vec<Range<usize>>,
+    /// Runs drawn with no source text behind them ([`EXTERNAL_ARROW`]), in order.
+    pub added: Vec<Range<usize>>,
 }
 
 impl Rendered {
@@ -48,6 +53,47 @@ impl Rendered {
             .iter()
             .find(|(r, _)| r.start <= ix && ix < r.end)
             .map(|(_, l)| l)
+    }
+
+    /// Whether the text is `src` itself plus only the [`Rendered::added`] runs (no markup
+    /// was taken out), so a click maps back to a source offset ([`Rendered::source_offset`]).
+    pub fn mirrors(&self, src: &str) -> bool {
+        if self.added.is_empty() {
+            return self.text.as_ref() == src;
+        }
+        let kept: usize = self.text.len() - self.added.iter().map(|r| r.len()).sum::<usize>();
+        if kept != src.len() {
+            return false;
+        }
+        let mut at = 0;
+        let mut s = 0;
+        for r in self
+            .added
+            .iter()
+            .chain([&(self.text.len()..self.text.len())])
+        {
+            let part = &self.text[at..r.start];
+            if src.get(s..s + part.len()) != Some(part) {
+                return false;
+            }
+            s += part.len();
+            at = r.end;
+        }
+        true
+    }
+
+    /// The source offset under rendered offset `ix`, for text that
+    /// [`mirrors`](Rendered::mirrors) its source. Inside an added run it is the run's start.
+    pub fn source_offset(&self, ix: usize) -> usize {
+        let mut shift = 0;
+        for r in &self.added {
+            if r.end <= ix {
+                shift += r.len();
+            } else if r.start < ix {
+                return r.start - shift;
+            }
+        }
+        ix - shift
     }
 }
 
@@ -78,6 +124,7 @@ struct Builder<'a> {
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, LinkTarget)>,
     chips: Vec<Range<usize>>,
+    added: Vec<Range<usize>>,
 }
 
 impl Builder<'_> {
@@ -218,7 +265,19 @@ impl Builder<'_> {
                         color: Some(self.theme.link),
                         wavy: false,
                     });
-                    let r = self.push(text, st);
+                    let mut r = self.push(text, st);
+                    if utopia_core::inline::is_external_url(url) {
+                        // A link that leaves the app ends in ↗, so it reads differently
+                        // from a page link before it is clicked. The arrow is part of the
+                        // link (it opens it too) but not underlined.
+                        let arrow = HighlightStyle {
+                            color: Some(self.theme.link),
+                            ..self.style(m)
+                        };
+                        let a = self.push(EXTERNAL_ARROW, arrow);
+                        r.end = a.end;
+                        self.added.push(a);
+                    }
                     self.links.push((r, LinkTarget::Url(url.clone())));
                 }
             }
@@ -286,6 +345,7 @@ pub fn render_self(
         highlights: Vec::new(),
         links: Vec::new(),
         chips: Vec::new(),
+        added: Vec::new(),
     };
     // `Key:: value` shows the key as a label (P1 attributes).
     let body = match utopia_core::inline::attribute(src) {
@@ -306,6 +366,7 @@ pub fn render_self(
         highlights: b.highlights,
         links: b.links,
         chips: b.chips,
+        added: b.added,
     }
 }
 
@@ -820,5 +881,51 @@ mod tests {
     #[test]
     fn long_chip_is_truncated() {
         assert_eq!(chip_label(&"x".repeat(50)).chars().count(), 41);
+    }
+
+    /// A link that leaves the app ends in ↗; the arrow opens it too, is not underlined, and
+    /// is the only text the display adds, so a click still finds its source offset.
+    #[test]
+    fn an_external_link_ends_in_an_up_right_arrow() {
+        let t = Theme::light();
+        let src = "go https://x.y now";
+        let r = render(src, &t, &mut |_| ChipState::Missing);
+        assert_eq!(
+            r.text.as_ref(),
+            format!("go https://x.y{EXTERNAL_ARROW} now")
+        );
+        let url = LinkTarget::Url("https://x.y".into());
+        let arrow = r.text.find('↗').unwrap();
+        assert_eq!(r.link_at(3), Some(&url));
+        assert_eq!(r.link_at(arrow), Some(&url), "the arrow opens the link");
+        assert_eq!(r.link_at(arrow + '↗'.len_utf8()), None);
+        let underlined: Vec<_> = r
+            .highlights
+            .iter()
+            .filter(|(_, s)| s.underline.is_some())
+            .map(|(range, _)| &r.text[range.clone()])
+            .collect();
+        assert_eq!(underlined, ["https://x.y"]);
+        assert!(r.mirrors(src));
+        let after = r.text.find(" now").unwrap();
+        assert_eq!(r.source_offset(after), src.find(" now").unwrap());
+        assert_eq!(
+            r.source_offset(arrow + 1),
+            "go https://x.y".len(),
+            "inside the arrow"
+        );
+        assert_eq!(r.source_offset(2), 2);
+
+        let md = render("[site](https://x.y)", &t, &mut |_| ChipState::Missing);
+        assert_eq!(md.text.as_ref(), format!("site{EXTERNAL_ARROW}"));
+        assert!(!md.mirrors("[site](https://x.y)"), "markup was taken out");
+        // Links that stay in the app get no arrow.
+        let r = render("[p](utopia://page/x)", &t, &mut |_| ChipState::Missing);
+        assert_eq!(r.text.as_ref(), "p");
+        let h = "a".repeat(64);
+        let r = render(&format!("[f.txt](blob:{h})"), &t, &mut |_| {
+            ChipState::Missing
+        });
+        assert_eq!(r.text.as_ref(), "📎 f.txt");
     }
 }
