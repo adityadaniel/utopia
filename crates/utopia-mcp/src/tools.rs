@@ -440,7 +440,7 @@ fn run_read_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, Tool
     let mut doc = Doc::outline(&format!("rev: {rev}\n\n"));
     let mut walk = Cursor::new(after.as_deref());
     outline_node(&body, 0, &mut walk, &mut doc);
-    walk.check(&id)?;
+    walk.check()?;
     Ok(doc.finish())
 }
 
@@ -529,14 +529,15 @@ impl<'a> Cursor<'a> {
 
     /// A cursor that names a block this result does not hold is a mistake, not an empty
     /// page: say so instead of answering nothing.
-    fn check(&self, id: &str) -> Result<(), ToolError> {
+    fn check(&self) -> Result<(), ToolError> {
         if self.found {
             return Ok(());
         }
+        // `after` is only `None` when nothing was asked for, and then `found` is true.
         Err(ToolError::Failed(format!(
             "There is no block \"{}\" in this result, so there is nothing to continue \
              after.",
-            self.after.unwrap_or(id)
+            self.after.unwrap_or_default()
         )))
     }
 }
@@ -563,7 +564,7 @@ fn render_outline(page: &Value, after: Option<&str>) -> Result<String, ToolError
     for node in page["blocks"].as_array().into_iter().flatten() {
         outline_node(node, 0, &mut walk, &mut doc);
     }
-    walk.check("")?;
+    walk.check()?;
     Ok(doc.finish())
 }
 

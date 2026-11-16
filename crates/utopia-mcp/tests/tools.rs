@@ -308,6 +308,25 @@ fn mc_7_a_large_page_is_cut_and_says_how_to_read_the_rest() {
     );
 }
 
+/// Append one block under `parent` (`None` puts it at the top level) and give its id back.
+fn append_block(graph: &Graph, page: &str, text: &str, parent: Option<String>) -> String {
+    let mut store = graph.open();
+    utopia_api::handle(
+        &mut store,
+        utopia_api::Op::AppendBlock {
+            title: page.to_string(),
+            text: text.to_string(),
+            parent,
+            create: true,
+        },
+    )
+    .expect("append a block")
+    .body["id"]
+        .as_str()
+        .expect("an id")
+        .to_string()
+}
+
 /// The block ids of an outline, in order.
 fn block_ids(text: &str) -> Vec<String> {
     text.lines()
@@ -350,6 +369,70 @@ fn mc_7_the_cut_says_how_to_read_every_removed_block() {
         }
     }
     assert_eq!(seen.len(), 600, "every block of the page is reachable");
+}
+
+/// MC-7: `read_block` follows the same continuation, so a subtree bigger than a result is
+/// read in parts too.
+#[test]
+fn mc_7_read_block_continues_after_the_last_block() {
+    let graph = Graph::new();
+    let mut store = graph.open();
+    let page = store.create_page("Nested").expect("a page");
+    drop(store);
+    let root = append_block(&graph, "Nested", "root", None);
+    let kids = append_block(&graph, "Nested", "kids", Some(root.clone()));
+    {
+        // A `paste` of many lines under `kids` makes them siblings of `kids`, one level
+        // down from `root`: a subtree with more blocks than one result holds.
+        let mut store = graph.open();
+        let st = store.page_state(&page).expect("the page state").clone();
+        let markdown: String = (0..400)
+            .map(|i| format!("- child {i} {}\n", "z".repeat(20)))
+            .collect();
+        let plan =
+            utopia_core::outline::paste(&st, &utopia_core::BlockId(kids.clone()), 0..0, &markdown)
+                .expect("a plan");
+        store.execute_plan(&page, plan, None).expect("the paste");
+        store.sync_index().expect("index");
+    }
+
+    // What the whole page holds, read the same way.
+    let mut all: Vec<String> = Vec::new();
+    let mut after_page: Option<String> = None;
+    for call_number in 0..20 {
+        let (text, is_error) = call(
+            &graph,
+            "read_page",
+            json!({"page": "Nested", "after": after_page}),
+        );
+        assert!(!is_error, "page call {call_number}: {text}");
+        all.extend(block_ids(&text));
+        match continuation(&text) {
+            Some(next) => after_page = Some(next),
+            None => break,
+        }
+    }
+    assert!(all.len() > 300, "{} blocks on the page", all.len());
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
+    for call_number in 0..20 {
+        let (text, is_error) = call(&graph, "read_block", json!({"id": root, "after": after}));
+        assert!(!is_error, "call {call_number}: {text}");
+        assert!(text.len() <= utopia_mcp::tools::BUDGET);
+        for id in block_ids(&text) {
+            assert!(
+                !seen.contains(&id),
+                "call {call_number} returned block {id} again"
+            );
+            seen.push(id);
+        }
+        match continuation(&text) {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, all, "the subtree reads the same blocks as the page");
 }
 
 /// MC-7: a block bigger than the budget keeps its id marker and says that it was cut, even
