@@ -17,6 +17,7 @@ click only lands on a frame that was painted. Screenshots are downscaled to 1200
 | `read-write-light.png` | The tab at Read and write in the light theme: the level is selected and the bridge line reads "The bridge runs at http://127.0.0.1:59272." — the API started from the click, with no restart. |
 | `off-dark.png` | The same tab at Off in the dark theme (the same tokens, contrast-checked). |
 | `read-write-dark.png` | Read and write in the dark theme, with the bridge running at its own address. |
+| `when-closed-light.png` | The `when_closed` switch on (light). Clicking it saved `"when_closed": true` in the same access file; the level stayed Off, so no socket started, which is the rule (`Action::SetLevel`/`Nothing` never follow `when_closed`). |
 
 The screenshots come from the app capturing its own window, so the real window server was
 used; a black PNG would have meant a locked screen (it did not happen).
@@ -48,6 +49,10 @@ checked against the discovery file the app writes (`<config>/api/<graph key>.jso
 `UTOPIA_API` was not set for any of these runs, so Off really dropped the server; the
 `api_launch::plan` unit test covers the other branch (Off with `UTOPIA_API` keeps the socket
 at level Off).
+
+The `when_closed` switch was clicked in its own run: the access file became
+`{"version":1,"access":"off","when_closed":true}` — the switch is saved, and it does not
+start a socket by itself (a setting for a call that runs with the app closed, MC-5).
 
 ## Real clients (one run each, server given on the command line)
 
