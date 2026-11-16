@@ -12,7 +12,7 @@ use utopia_core::command::PageMetaPatch;
 use utopia_core::date::parse_unambiguous_date;
 use utopia_core::inline::{extract_refs, find_mentions, page_link_text};
 use utopia_core::title::{clean_title, normalize_title};
-use utopia_core::{BlockId, BlockKind, Command, PageId, PageState};
+use utopia_core::{outline, BlockId, BlockKind, Command, PageId, PageState};
 
 use crate::project::{display_title, resolve_page_key};
 use crate::{EditOpts, Result, Store, StoreError};
@@ -404,6 +404,20 @@ impl Store {
             return Err(StoreError::NotFound(format!("block {block}")));
         }
         let ids = s.subtree(block, false);
+        // FR-2.9's ceiling applies to a drop into another page too, exactly as
+        // `outline::move_to` applies it on one page: the subtree keeps its shape, so it
+        // lands `own` levels lower than it is now.
+        let d = self.page_state(dst)?.clone();
+        let base = parent.map_or(0, |p| d.depth(p) + 1);
+        let own = s.depth(block);
+        let max_rel = ids
+            .iter()
+            .map(|b| s.depth(b).saturating_sub(own))
+            .max()
+            .unwrap_or(0);
+        if base + max_rel >= outline::MAX_DROP_DEPTH {
+            return Err(StoreError::Domain(utopia_core::DomainError::TooDeep));
+        }
         let mut dst_cmds = Vec::new();
         for id in &ids {
             let b = s.block(id).expect("subtree member");
@@ -465,6 +479,49 @@ impl Store {
         )?;
         self.seal_undo();
         Ok(())
+    }
+
+    /// Move one block and its live subtree within its own page (PRD §13.8 MC-8, MC-9;
+    /// FR-2.9): `Op::MoveBlock` when the target page is the page the block is already on.
+    /// One undo step, like the editor's drag. A drop into the block's own subtree
+    /// ([`utopia_core::DomainError::CycleDetected`]) or one that would push a descendant past
+    /// [`outline::MAX_DROP_DEPTH`] fails before anything is written. Returns the number of
+    /// live blocks that moved.
+    pub fn move_block(
+        &mut self,
+        page: &PageId,
+        block: &BlockId,
+        parent: Option<&BlockId>,
+        after: Option<&BlockId>,
+    ) -> Result<usize> {
+        let (plan, moved) = {
+            let st = self.page_state(page)?;
+            let plan = outline::move_to(st, block, parent, after)?;
+            let moved = st.subtree(block, true).len();
+            (plan, moved)
+        };
+        self.seal_undo();
+        self.execute_plan(page, plan, None)?;
+        self.seal_undo();
+        Ok(moved)
+    }
+
+    /// Tombstone a block and its live subtree (PRD §13.8 MC-8; rule 5, §6.5):
+    /// `Op::DeleteBlock`. The rows keep their ids, so a `((reference))` to any of them still
+    /// resolves and reads "deleted block", and one undo puts the subtree back. Returns the
+    /// number of live blocks that became tombstones.
+    pub fn delete_block(&mut self, page: &PageId, block: &BlockId) -> Result<usize> {
+        let now = self.now();
+        let (plan, deleted) = {
+            let st = self.page_state(page)?;
+            let plan = outline::delete_subtree(st, block, now)?;
+            let deleted = st.subtree(block, true).len();
+            (plan, deleted)
+        };
+        self.seal_undo();
+        self.execute_plan(page, plan, None)?;
+        self.seal_undo();
+        Ok(deleted)
     }
 
     /// Extract block to page (FR-2.18): the block and its subtree move (same ids) to the
