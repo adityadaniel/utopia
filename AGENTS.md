@@ -422,7 +422,10 @@ Implemented:
   with `kind`, `checked` and `if_rev`: one call, one undo step, and a stale `if_rev` writes
   nothing, MC-10), and `move_block` / `delete_block` (`Op::MoveBlock` within a page or into
   another one, `Op::DeleteBlock` as a tombstone: each one undo step, MC-8, MC-9; a move keeps
-  every id, so `((references))` still resolve).
+  every id, so `((references))` still resolve). Real clients have written through both paths
+  (slice 3.4): Claude Code on the modern era through `/v1/op` in the open app, and Codex on
+  the 2025-06-18 handshake on the headless path
+  (`docs/verification/docs-mcp-write-check/`).
 - **v1.2+ / P2 (§4.2, Appendix A):** query blocks (`{{query: …}}`, Roam syntax, SQL-backed, `/Query`)
   with queryable `key:: value` attributes; graph view (Cmd+Shift+G, force-directed, local/global,
   journal toggle); attachments (drop files or `/Attach a file`, image previews, file chips,
@@ -499,6 +502,14 @@ Known limits (pick these up deliberately, don't paper over them):
   `approval: never` refuses `update_block` and `delete_block`, because both carry
   `destructiveHint: true`: a Codex run needs `--approve-for-me` or an approval policy that can
   ask (§10). `append_blocks` and `move_block` are not destructive and run under it.
+- MCP: an agent's `update_block` on the block the owner has the caret in replaces that line
+  and keeps the caret: the editor shows the agent's text, the next typed character lands
+  after it, and no keystroke is dropped (measured in the real app, slice 3.4; the UI tests
+  `mc_10_a_write_to_the_caret_block_keeps_the_caret` and
+  `mc_10_a_stale_if_rev_keeps_the_typed_text_while_the_caret_is_in_the_block` pin it). The
+  text typed before the call is replaced unless the call carried an `if_rev` from before it,
+  which is refused with 409 and writes nothing. An input-method composition is the one case
+  where the composed text wins over the agent's write (from the code, not measured).
 - Stacked panes (DESIGN.md §4.3): gpui has no `position: sticky`, so `pane_stack::Geometry`
   places each pane; when the window cannot hold every spine plus a whole pane, the oldest
   spines fold under one another at the left edge (the newest pane always shows whole).
