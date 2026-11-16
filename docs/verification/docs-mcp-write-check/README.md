@@ -47,11 +47,13 @@ a JSON-RPC line on `stdin` while the app held the owner lock, so the write ran i
 through `POST /v1/op` (MC-4, MC-12):
 
 ```bash
+# CARGO_TARGET_DIR is the shared target directory (AGENTS.md); every command below uses it.
+BIN="$CARGO_TARGET_DIR/debug/utopia"
 UTOPIA_CONFIG_DIR=target/verify-write-check/config-caret \
 UTOPIA_SHOT_SCRIPT="wait 2500; type owner typed this: ; wait 2000; \
   shot …/1-caret-before.png; wait 9000; shot …/2-caret-after-update.png; \
   type !; wait 700; shot …/3-caret-after-typing.png" \
-  target/debug/utopia --graph target/verify-write-check/Caret.utopia
+  "$BIN" --graph target/verify-write-check/Caret.utopia
 ```
 
 ```json
@@ -86,8 +88,8 @@ What the editor does, and why no character is lost:
 
 - Every keystroke is written to the store at once (`BlockEditor::persist` →
   `Store::set_block_text`), so when the call runs, the store already holds what the owner
-  typed; the app's store is debounced only in when the commit reaches the writer, not in
-  what the in-memory shard says.
+  typed. Debounced mode only delays when a commit reaches the writer and the index; the
+  in-memory shard, which the call reads, has the keystroke.
 - The call replaces the block's text — that is what `update_block` does, the same as
   selecting the line and typing over it — and the app announces the changed page, the editor
   re-reads it (`sync_from_store`) and puts the caret back with its CRDT anchor. Nothing the
@@ -131,8 +133,8 @@ claude --mcp-config target/verify-write-check/clients/claude-mcp.json --strict-m
                          "env":{"UTOPIA_CONFIG_DIR":"…/clients/config"}}}}
 ```
 
-which is `exec /…/target/debug/utopia mcp --graph /…/clients/Demo.utopia` with its `stderr`
-appended to a file. The era came out of that file, in 17 s:
+which is `exec "$BIN" mcp --graph /…/clients/Demo.utopia` with its `stderr` appended to a
+file. The era came out of that file, in 17 s:
 
 ```text
 utopia mcp: era=modern protocol=2026-07-28 client="claude-code" version="2.1.319"
@@ -161,7 +163,7 @@ given for this run only with `-c` overrides (no `~/.codex/config.toml` change):
 
 ```bash
 codex exec -C target/verify-write-check/clients -s read-only \
-  -c 'mcp_servers.utopia.command="…/target/debug/utopia"' \
+  -c "mcp_servers.utopia.command=\"$BIN\"" \
   -c 'mcp_servers.utopia.args=["mcp","--graph","…/clients/Demo.utopia"]' \
   -c 'mcp_servers.utopia.env.UTOPIA_CONFIG_DIR="…/clients/config"' \
   'Use the utopia MCP tools. Call read_page for the page "Home". Then call append_blocks
