@@ -807,3 +807,29 @@ fn mc_8_append_blocks_round_trips_the_outline_format() {
     let mut store = graph.open();
     assert!(store.doctor().expect("doctor runs").is_ok());
 }
+
+/// MC-8: an outline whose lines all carry the same indentation reads as siblings. The tool
+/// must pass the text through as it was sent: trimming reaches only the first line, which
+/// would make the second line its child.
+#[test]
+fn mc_8_a_uniformly_indented_outline_keeps_its_siblings() {
+    let graph = Graph::new();
+    let markdown = "  - one\n  - two\n";
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "Project X", "markdown": markdown}),
+    );
+    assert!(!is_error, "{text}");
+    assert!(text.contains("Appended 2 blocks"), "{text}");
+    let (page, is_error) = call_at(&graph, Level::Read, "read_page", json!({"page": "Project X"}));
+    assert!(!is_error, "{page}");
+    let line = |want: &str| {
+        page.lines()
+            .find(|l| l.starts_with(&format!("- {want} ")) || *l == format!("- {want}"))
+            .unwrap_or_else(|| panic!("a top-level line {want:?}: {page}"))
+    };
+    assert!(line("one").starts_with("- one {id:"), "{}", line("one"));
+    assert!(line("two").starts_with("- two {id:"), "{}", line("two"));
+}

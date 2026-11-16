@@ -272,6 +272,25 @@ impl Args<'_> {
         }
     }
 
+    /// A text argument that keeps its whitespace. The markdown of `append_blocks` is
+    /// structure: `parse_outline` reads relative indentation as nesting, so trimming the
+    /// first line's indentation — the only one `trim` can reach — would turn siblings into a
+    /// parent and its child (MC-8). Emptiness is still judged without the whitespace.
+    fn text(&self, key: &str) -> Result<String, ToolError> {
+        match self.map.get(key) {
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
+            Some(Value::String(_)) => {
+                Err(ToolError::Failed(format!("The `{key}` argument is empty.")))
+            }
+            Some(other) => Err(ToolError::Failed(format!(
+                "The `{key}` argument must be a string, not {other}."
+            ))),
+            None => Err(ToolError::Failed(format!(
+                "The `{key}` argument is required."
+            ))),
+        }
+    }
+
     /// An optional string argument: absent and `null` both mean "not given".
     fn optional_string(&self, key: &str) -> Result<Option<String>, ToolError> {
         match self.map.get(key) {
@@ -517,7 +536,8 @@ fn run_run_query(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolE
 
 fn run_append_blocks(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
     let page = args.string("page")?;
-    let markdown = args.string("markdown")?;
+    // Not `string()`: the outline's indentation is its nesting (MC-8).
+    let markdown = args.text("markdown")?;
     let parent = args.optional_string("parent")?;
     let create = args.boolean("create", false)?;
     // A day goes to the store as its ISO date: the store resolves a date title to that day's
@@ -1175,6 +1195,47 @@ mod tests {
         assert_eq!(
             call(&Never, false, "search", &json!([])).unwrap_err(),
             ToolError::Failed("The arguments of a tool call must be a JSON object.".into())
+        );
+    }
+
+    /// MC-8: the Markdown argument reaches the parser exactly as it was sent. Trimming it
+    /// takes the indentation off the first line only, which turns two siblings into a parent
+    /// and its child.
+    #[test]
+    fn mc_8_the_markdown_argument_keeps_its_indentation() {
+        struct Captured(std::sync::Mutex<Option<Op>>);
+        impl Backend for Captured {
+            fn call(&self, op: Op) -> Result<Value, BackendError> {
+                *self.0.lock().expect("the captured op") = Some(op);
+                Ok(json!({"title": "A", "blocks": 2, "first": "01A", "last": "01B"}))
+            }
+        }
+        let backend = Captured(std::sync::Mutex::new(None));
+        let markdown = "  - one\n  - two\n";
+        call(
+            &backend,
+            false,
+            "append_blocks",
+            &json!({"page": "A", "markdown": markdown}),
+        )
+        .unwrap();
+        match backend.0.lock().expect("the captured op").clone() {
+            Some(Op::AppendOutline { markdown: sent, .. }) => {
+                assert_eq!(sent, markdown, "the outline as it was written");
+            }
+            other => panic!("expected an append_outline op, got {other:?}"),
+        }
+        // Whitespace-only text is still empty.
+        let err = call(
+            &backend,
+            false,
+            "append_blocks",
+            &json!({"page": "A", "markdown": " \n  "}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Failed(m) if m.contains("`markdown`")),
+            "{err:?}"
         );
     }
 
