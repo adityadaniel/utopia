@@ -188,12 +188,15 @@ explains why a lock on the database file itself is not possible on macOS.
 For one tool call: take the lock, open the `Store`, run `handle`, flush, close the store,
 release the lock.
 
-- It uses `cli::open_store` (`crates/utopia-app/src/cli.rs:54`), so an encrypted graph
-  gets its passphrase from `UTOPIA_DB_PASSPHRASE` or the Keychain. If there is no
-  passphrase, the call fails with a clear message. It never shows a prompt, because
-  `stdin` is the protocol channel.
+- It opens the graph the way `cli::open_store` (`crates/utopia-app/src/cli.rs`) does, except
+  that it never prompts: the passphrase of an encrypted graph comes from
+  `UTOPIA_DB_PASSPHRASE` or the Keychain, and without one the call fails with a clear
+  message, because `stdin` is the protocol channel. (Slice 1.4 made this its own opener,
+  `open_graph` in `crates/utopia-app/src/mcp.rs`: `open_store` asks for a passphrase when it
+  finds none.)
 - It does not sync. Writes go to the outbox and the app sends them at its next start.
-- The cost to open the store for each call is not measured. Phase 1 adds it to `xtask bench`.
+- Slice 1.4 measured the cost of one call on the bench graph: 1.4 ms, median of 7, in
+  release. `xtask bench` fails above 50 ms (§10).
 
 ### 2.4 Changes to existing code
 
@@ -349,8 +352,9 @@ change that.
 - Claude Code gives a warning for a tool result above 10,000 tokens. Its limit is 25,000
   tokens (`MAX_MCP_OUTPUT_TOKENS`). Codex cuts a result at its own budget
   (`tools.<tool>.output_token_limit`).
-- Each read tool cuts its result at 24 KB of UTF-8 text. This is a first value. Slice 1.4
-  (§8.2) adjusts it with the real clients.
+- Each read tool cuts its result at 24 KB of UTF-8 text. Slice 1.4 (§8.2) measured it with
+  the real clients: the biggest result they received was far below it, and 24 KB is about
+  6,000 tokens, under the 10,000-token warning, so the value stands.
 - The cut is at a block boundary. The result gives the number of blocks that it did not
   return and the call that returns them. For the two outline tools that call is the same
   tool again with `after`, the id of the last block the result shows: the outline is in
@@ -417,14 +421,24 @@ an agent never writes to a graph that the owner did not select.
 - The Codex documentation gives a start-up limit of 10 s (`startup_timeout_sec`) and a
   tool limit of 60 s (`tool_timeout_sec`). The `writes` approval mode asks for each tool
   that is not marked read-only.
-- The documentation does not say which protocol era Codex and Claude Desktop use. Do a
-  test with each client in slice 1.4.
-- Measured on 2026-11-16 by slice 1.3 against a scratch graph (the `stderr` line of
-  `serve`, in `docs/verification/feat-mcp-read-tools/real-clients.md`): Claude Code 2.1.319
-  uses 2026-07-28 (`clientInfo.name` is `claude-code`), so it sends `server/discover`;
-  Codex 0.169.0 uses the handshake with 2025-06-18 (`clientInfo.name` is
-  `codex-mcp-client`). Claude Desktop is still unknown. Slice 1.4 repeats both runs against
-  `utopia mcp` itself.
+- The era each client uses, measured on 2026-11-16 by slice 1.4 against `utopia mcp` on a
+  scratch graph (the one `stderr` line `serve` writes for the first request; the runs are in
+  `docs/verification/feat-mcp-subcommand/real-clients.md`):
+
+  | Client | Era | `stderr` |
+  |---|---|---|
+  | Claude Code 2.1.319 | 2026-07-28 (`server/discover`) | `era=modern protocol=2026-07-28 client="claude-code" version="2.1.319"` |
+  | Claude Code, `MCP_PROTOCOL_NEGOTIATION=legacy` | 2025-11-25 handshake | `era=legacy protocol=2025-11-25 client="claude-code" version="2.1.319"` |
+  | Codex 0.169.0 | 2025-06-18 handshake | `era=legacy protocol=2025-06-18 client="codex-mcp-client" version="0.169.0"` |
+
+  Each one read the graph with the app closed (`when_closed` on) and with the app open
+  (through `/v1/op`). Claude Desktop needs an entry in its config file and a restart, so the
+  owner adds the entry and runs that test; it is the one era still unknown.
+- Where the line goes: Claude Code writes a stdio server's `stderr` to
+  `~/.claude/debug/<session>.txt` in `--debug` runs, and Codex shows it with
+  `RUST_LOG=debug`. Codex does not pass its own environment to a stdio server, so a run
+  against a scratch config directory needs the entry's `env` table
+  (`mcp_servers.utopia.env.UTOPIA_CONFIG_DIR`); Claude Code passes the environment through.
 
 ## 7. Tests and verification
 
@@ -568,12 +582,16 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 - **No sync when the app is closed.** See §2.3.
 - **Encrypted graphs on the headless path** need a passphrase that the process can read
   without a prompt.
-- **Not measured:** the cost to open the store for each headless call.
+- **The headless call costs 1.4 ms** (median of 7, release, `xtask bench` on the
+  100k-block graph: read the access file, take the owner lock, open the store, one `search`,
+  close). `xtask bench` fails above 50 ms. Nothing is kept open between calls, so a write
+  from the headless path is durable when the call returns, but it does not sync (above).
 - **Not examined:** what occurs when an agent updates the block that has the caret.
   `UpdateBlock` has this behaviour today. Slice 3.4 examines it.
-- **Not known:** the protocol era that Claude Desktop uses. Claude Code (2026-07-28) and
-  Codex (2025-06-18 handshake) were measured in slice 1.3 and are in §6; slice 1.4 records
-  Claude Desktop and repeats the other two against `utopia mcp`.
+- **Claude Desktop has not been run** against `utopia mcp`. Its entry needs a config file
+  and a restart, so the owner adds the entry (§6) and runs the test. Claude Code
+  (2026-07-28, and 2025-11-25 with `MCP_PROTOCOL_NEGOTIATION=legacy`) and Codex (2025-06-18
+  handshake) were measured against `utopia mcp` in slice 1.4 and are in §6.
 - **A cancel does not reverse a write.** See §3.1.
 - **Stdio only.** A client that cannot start a local process cannot connect in the first
   version.
