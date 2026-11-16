@@ -159,3 +159,64 @@ the app bundle so the printed path is the bundle's):
 Add it below `mcpServers` in
 `~/Library/Application Support/Claude/claude_desktop_config.json`, start Claude Desktop
 again, and ask it to tick a to-do on a page of a scratch graph with `update_block`.
+
+## After the review fixes
+
+The review found three defects, all fixed on this branch, so the runs above were repeated
+with the fixed binary on fresh scratch graphs. Two of the fixes change this record:
+
+- `Op::UpdateBlock` now calls `sync_index()` first (an agent's `append_blocks` → `update_block`
+  could answer "no block" in the open app).
+- A kind- or `checked`-only call no longer commits the block, so it touches nothing but the
+  kind and the flag.
+- The tool now takes the outline's marker **and** — from a line that carried one — its `- `
+  and kind prefixes off `text`.
+
+**The app run** (`target/verify-shot2`, new seed) is byte-identical to the three captures in
+this directory after the same downscale (same MD5 for all three), so the pictures above stand
+for the fixed binary. That run sent `text` with the marker and a newline in it — `"Water the
+plants and the herbs {id:…}\n"` — and the block still read `Water the plants and the herbs`,
+with the same rev (`db010b2b4f04`) as the marker-free text in the run above.
+
+**Claude Code, before the prefix fix** (`target/verify-clients2`), asked to send the line it
+was shown, produced exactly the corruption the review predicted:
+
+```text
+Updated the block. It now reads:
+- [x] - [ ] Water the plants {id:01M7JABTAS92RW0Q9F24P4K1V7}
+rev: da5010ed0963
+
+The to-do is now checked, but the block's text came out wrong. The server removed the
+{id:...} marker from the text I sent but kept the outline's `- [ ] ` prefix. …
+```
+
+That is why the prefixes are stripped too, rather than only documented.
+
+**Claude Code, after the fixes** (`target/verify-clients3`), with the same prompt and the
+same instruction to send the line as shown:
+
+```text
+Updated the block. It now reads:
+- [x] Water the plants {id:01M7JAEPM4RKTE5XM0TPF5DVTJ}
+rev: 7ddd4ff0de21
+…
+The text I sent had the `- [ ] ` prefix and the `{id:...}` marker on it. Both were removed,
+so the block's text is still just "Water the plants".
+```
+
+`read_page Home` after it, and `utopia doctor`:
+
+```text
+- ## This week {id:01M7JAEPM4BNEQ6AYJ07CM2RJ1}
+  - [x] Water the plants {id:01M7JAEPM4RKTE5XM0TPF5DVTJ}
+  - [ ] Renew the passport {id:01M7JAEPM4N9189CCZW5XGJM36}
+
+12 live pages, 38 live blocks, 16 references
+ok: all invariants hold
+```
+
+**Codex was not re-run after the fixes**: the account hit its usage limit (it resets at
+21:32), and the run above was made before the fixes. Its call path is the one the fixed
+Claude Code run exercises (read → rev → `checked` + `if_rev`, no `text`), and the app run
+covers the text path, but the Codex half of this document is from the pre-fix binary and
+should be repeated when the limit clears.

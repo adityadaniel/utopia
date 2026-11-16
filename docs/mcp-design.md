@@ -333,7 +333,13 @@ The legacy rules:
   level; `heading` keeps the level of a block that already is one. An unknown name is
   refused rather than read as a bullet. `checked` is a to-do's state, so the block must be
   one or become one in the same call. The whole call is one undo step (MC-9) whatever parts
-  of it change, and its answer gives the block and its new `rev`.
+  of it change, and its answer gives the block and its new `rev`. A line copied from
+  `read_page` or `read_block` can be sent back as it was shown: the `{id:…}` marker, the
+  newline that ended the line, and — when the line carried a marker — the outline's `- ` and
+  kind prefixes (`[ ] `, `[x] `, `> `, `#`…`### `) come off `text` first, so the block gets
+  the text, not the outline's punctuation. Text the agent wrote itself is left exactly as
+  given, a leading `- ` included. A `text` that is nothing but a copied line is refused
+  rather than emptying the block.
 - **`move_block`** uses `outline::move_to` and `Store::move_block_to_page`.
 - **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), and undo
   restores it.
@@ -607,11 +613,15 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
   and `update_block`; the level `Read and write` permits them, and `/v1/op` permits every
   write op. `tools/list` offers the six read tools and the two of them. Slice 3.3 adds
   `move_block` and `delete_block`.
-- **`append_blocks` writes every line as a bullet.** The outline is read with
+- **`append_blocks` writes a line's kind prefixes as text.** The outline is read with
   `markdown::parse_outline`, which takes off the list markers but not the `[ ] `, `[x] `,
   `## ` and `> ` prefixes that `read_page` writes for a to-do, a heading and a quote: those
-  stay in the block's text. `update_block` with `kind` and `checked` sets a block's kind
-  and its done state through the bridge, and leaves the text as it is.
+  stay in the block's text, and `kind` and `checked` are the way to set a kind there.
+  `update_block` does strip them, but only from a line that carried the `{id:…}` marker —
+  a line the outline format wrote — because a text without a marker is the agent's own and
+  a block may legitimately start with `- ` or `>`. A copied multi-line block carries its
+  marker on the last line, so its first line's prefix stays: sending the text alone is what
+  both schemas say to do.
 - **A refused `append_blocks` writes nothing.** It does not even create the page `create`
   would have made, and it records no undo step.
 - **`update_block` writes the block and then the pages its new `[[links]]` make**, in that

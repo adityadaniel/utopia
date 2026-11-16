@@ -473,10 +473,12 @@ Known limits (pick these up deliberately, don't paper over them):
   the list again. `append_blocks` writes every line as a bullet: the `[ ] `, `## ` and `> `
   prefixes `read_page` writes for to-dos, headings and quotes stay in the block's text. An
   outline of more than 2,000 blocks, or deeper than 12 levels (FR-2.9), is refused and writes
-  nothing. `update_block` refuses an empty `text` (it never wipes a block), needs the block
-  to be a to-do or become one to set `checked`, and `heading` keeps the level of a block that
-  already is a heading. Its `if_rev` is a hash of the text only, so a change of kind or
-  done state under the agent does not make the rev stale.
+  nothing. `update_block` refuses an empty `text` (it never wipes a block), takes the
+  outline's marker, trailing newline and — from a line that carried a marker — the `- ` and
+  kind prefixes off the `text` it is sent (text the agent wrote itself is left as given),
+  needs the block to be a to-do or become one to set `checked`, and `heading` keeps the level
+  of a block that already is a heading. Its `if_rev` is a hash of the text only, so a change
+  of kind or done state under the agent does not make it stale.
 - MCP, app closed: a call does not sync (the write waits in the outbox for the next launch),
   and an encrypted graph needs a passphrase the process can read
   (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no
