@@ -10,6 +10,7 @@
 //! | `read_block` | `id`, `after` | [`Op::GetBlock`] with `subtree` |
 //! | `get_backlinks` | `page` | [`Op::Backlinks`] |
 //! | `run_query` | `query`, `limit` | [`Op::Query`] |
+//! | `append_blocks` | `page`, `markdown`, `parent`, `create` | [`Op::AppendOutline`] |
 //!
 //! Two rules shape the output. Page text appears only in results, never in a description or
 //! in [`INSTRUCTIONS`] (MC-11): those are constants of this file. And one result is cut at
@@ -43,10 +44,12 @@ use crate::backend::{Backend, BackendError};
 /// Claude Code, below its 25,000-token limit. Slice 1.4 adjusts it with the real clients.
 pub const BUDGET: usize = 24 * 1024;
 
-/// How an outline line names the block it came from, e.g. `{id:01J8Z3K9V2}`. PR 7 strips
-/// this marker from text an agent sends back; nothing else reads it.
-pub const MARKER_PREFIX: &str = "{id:";
-pub const MARKER_SUFFIX: &str = "}";
+/// How an outline line names the block it came from, e.g. `{id:01J8Z3K9V2}`. The one
+/// definition is in `utopia_api`, because `Op::AppendOutline` takes the marker off the text an
+/// agent sends back (PR 7, design §4); [`MARKER_PREFIX`] and [`MARKER_SUFFIX`] are how this
+/// file reads and writes it.
+pub const MARKER_PREFIX: &str = utopia_api::ID_MARKER_PREFIX;
+pub const MARKER_SUFFIX: &str = utopia_api::ID_MARKER_SUFFIX;
 
 /// The guide a client gets from `initialize` and `server/discover` (design §4). It is a
 /// constant: no page text, ever (MC-11).
@@ -62,6 +65,7 @@ Syntax in block text:
 An outline from read_page or read_block has one line for each block, indented two spaces
 per level, and each line ends with the block's id in the form {id:01J8Z3K9V2}. That marker
 is not markup and not a reference: keep it on the line, and use the id with read_block.
+append_blocks takes such an outline back, in the same format, and ignores those markers.
 
 A read never creates anything: a day with no page reads as an empty outline. A result
 longer than 24 KB is cut at a block boundary and ends with a line that says how many
@@ -97,6 +101,8 @@ struct Tool {
     kind: OpKind,
     /// `destructiveHint` (§4.1). The six read tools never destroy anything.
     destructive: bool,
+    /// `idempotentHint` (§4.1). `append_blocks` is not: calling it twice appends twice.
+    idempotent: bool,
     schema: fn() -> Value,
     run: fn(&dyn Backend, &Args<'_>) -> Result<String, ToolError>,
 }
@@ -110,6 +116,7 @@ const CATALOG: &[Tool] = &[
                       blocks; a block line ends with the block's id, which read_block takes.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_search,
         run: run_search,
     },
@@ -119,6 +126,7 @@ const CATALOG: &[Tool] = &[
                       include_daily is true.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_list_pages,
         run: run_list_pages,
     },
@@ -130,6 +138,7 @@ const CATALOG: &[Tool] = &[
                       cut at 24 KB names an `after` id: pass it back to read the next part.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_read_page,
         run: run_read_page,
     },
@@ -141,6 +150,7 @@ const CATALOG: &[Tool] = &[
                       names an `after` id: pass it back to read the next part.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_read_block,
         run: run_read_block,
     },
@@ -150,6 +160,7 @@ const CATALOG: &[Tool] = &[
                       the page each one is written on.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_get_backlinks,
         run: run_get_backlinks,
     },
@@ -160,8 +171,24 @@ const CATALOG: &[Tool] = &[
                       linking Project X), and return the matching blocks grouped by page.",
         kind: OpKind::Read,
         destructive: false,
+        idempotent: true,
         schema: schema_run_query,
         run: run_run_query,
+    },
+    Tool {
+        name: "append_blocks",
+        description: "Append blocks to a page, as an indented Markdown outline: one line for \
+                      each block, two spaces per level. The {id:…} markers of read_page are \
+                      ignored, so an outline read from a page can be sent back. `page` is a \
+                      title, an alias, `today`, `yesterday` or an ISO date; `create` makes \
+                      the page when it does not exist, and a date is that day's note. The \
+                      whole outline is one commit and one undo step, and at most 2000 blocks \
+                      in one call.",
+        kind: OpKind::Write,
+        destructive: false,
+        idempotent: false,
+        schema: schema_append_blocks,
+        run: run_append_blocks,
     },
 ];
 
@@ -180,7 +207,7 @@ pub fn list(read_only: bool) -> Vec<Value> {
                 "annotations": {
                     "readOnlyHint": t.kind == OpKind::Read,
                     "destructiveHint": t.destructive,
-                    "idempotentHint": true,
+                    "idempotentHint": t.idempotent,
                     "openWorldHint": false,
                 },
             })
@@ -233,6 +260,25 @@ impl Args<'_> {
     fn string(&self, key: &str) -> Result<String, ToolError> {
         match self.map.get(key) {
             Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+            Some(Value::String(_)) => {
+                Err(ToolError::Failed(format!("The `{key}` argument is empty.")))
+            }
+            Some(other) => Err(ToolError::Failed(format!(
+                "The `{key}` argument must be a string, not {other}."
+            ))),
+            None => Err(ToolError::Failed(format!(
+                "The `{key}` argument is required."
+            ))),
+        }
+    }
+
+    /// A text argument that keeps its whitespace. The markdown of `append_blocks` is
+    /// structure: `parse_outline` reads relative indentation as nesting, so trimming the
+    /// first line's indentation — the only one `trim` can reach — would turn siblings into a
+    /// parent and its child (MC-8). Emptiness is still judged without the whitespace.
+    fn text(&self, key: &str) -> Result<String, ToolError> {
+        match self.map.get(key) {
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(s.clone()),
             Some(Value::String(_)) => {
                 Err(ToolError::Failed(format!("The `{key}` argument is empty.")))
             }
@@ -394,6 +440,36 @@ fn schema_run_query() -> Value {
     })
 }
 
+fn schema_append_blocks() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "page": {
+                "type": "string",
+                "description": "The page to append to: a title or alias, `today`, `yesterday`, \
+                                or a date as YYYY-MM-DD.",
+            },
+            "markdown": {
+                "type": "string",
+                "description": "The blocks to append, one line each, indented two spaces per \
+                                level. `- ` starts a block; the rest of the line is its text. \
+                                The {id:…} markers of read_page are ignored.",
+            },
+            "parent": {
+                "type": "string",
+                "description": "The id of an existing block to append under. Absent appends at \
+                                the end of the page.",
+            },
+            "create": {
+                "type": "boolean",
+                "description": "Create the page when it does not exist. Default false.",
+            },
+        },
+        "required": ["page", "markdown"],
+        "additionalProperties": false,
+    })
+}
+
 // ---------------------------------------------------------------------------------------
 // The six read tools
 
@@ -458,6 +534,24 @@ fn run_run_query(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolE
     Ok(render_query(&body))
 }
 
+fn run_append_blocks(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
+    let page = args.string("page")?;
+    // Not `string()`: the outline's indentation is its nesting (MC-8).
+    let markdown = args.text("markdown")?;
+    let parent = args.optional_string("parent")?;
+    let create = args.boolean("create", false)?;
+    // A day goes to the store as its ISO date: the store resolves a date title to that day's
+    // page and makes it on this first write (FR-1.2), whatever the graph's date format is.
+    let title = day_of(&page).map(iso).unwrap_or(page);
+    let body = backend.call(Op::AppendOutline {
+        title,
+        markdown,
+        parent,
+        create,
+    })?;
+    Ok(render_append(&body))
+}
+
 /// The day a `page` argument names, if it names one: `today`, `yesterday` or an ISO date.
 /// Every other reading is a page title or an alias, through the graph's resolver.
 fn day_of(page: &str) -> Option<NaiveDate> {
@@ -474,8 +568,10 @@ fn day_of(page: &str) -> Option<NaiveDate> {
 // ---------------------------------------------------------------------------------------
 // One block line
 
-/// The `- ` line of one block, mirroring `utopia_core::markdown`'s export so that an agent
-/// that pastes an outline back gets the same kinds it read.
+/// The `- ` line of one block, mirroring `utopia_core::markdown`'s export: the `[ ] `,
+/// `## ` and `> ` prefix is how a reader sees the kind. `append_blocks` reads such a line as
+/// a bullet whose text starts with that prefix (`markdown::parse_outline` has no kind
+/// parsing), so a kind does not round-trip yet (design §10).
 fn block_line(node: &Value, depth: usize, text: &str) -> String {
     let pad = "  ".repeat(depth);
     let prefix = match node["kind"].as_str() {
@@ -693,6 +789,30 @@ fn render_query(body: &Value) -> String {
             total - hits.len(),
             if total - hits.len() == 1 { "" } else { "es" }
         ));
+    }
+    doc.finish()
+}
+
+/// What `append_blocks` answers: how much landed, and the ids at either end, so an agent can
+/// read the new blocks back without reading the whole page again.
+fn render_append(body: &Value) -> String {
+    let title = one_line(body["title"].as_str().unwrap_or_default());
+    let blocks = body["blocks"].as_u64().unwrap_or(0);
+    let first = body["first"].as_str().unwrap_or_default();
+    let last = body["last"].as_str().unwrap_or_default();
+    let mut doc = Doc::default();
+    doc.line(format!(
+        "Appended {blocks} block{} to \"{title}\".",
+        if blocks == 1 { "" } else { "s" }
+    ));
+    match (first.is_empty(), last.is_empty() || last == first) {
+        (false, false) => doc.line(format!(
+            "The first new block is {first} and the last is {last}; read_block takes either id."
+        )),
+        (false, true) => doc.line(format!(
+            "The new block is {first}; read_block takes that id."
+        )),
+        _ => {}
     }
     doc.finish()
 }
@@ -1051,6 +1171,16 @@ mod tests {
             ("read_block", json!({"id": ""})),
             ("get_backlinks", json!({})),
             ("run_query", json!({"query": "x", "limit": 101})),
+            ("append_blocks", json!({"page": "A"})),
+            ("append_blocks", json!({"page": "A", "markdown": "   "})),
+            (
+                "append_blocks",
+                json!({"page": "A", "markdown": "- x", "create": "yes"}),
+            ),
+            (
+                "append_blocks",
+                json!({"page": "A", "markdown": "- x", "parent": 7}),
+            ),
         ] {
             let err = call(&Never, false, tool, &args).unwrap_err();
             assert!(
@@ -1068,29 +1198,106 @@ mod tests {
         );
     }
 
+    /// MC-8: the Markdown argument reaches the parser exactly as it was sent. Trimming it
+    /// takes the indentation off the first line only, which turns two siblings into a parent
+    /// and its child.
+    #[test]
+    fn mc_8_the_markdown_argument_keeps_its_indentation() {
+        struct Captured(std::sync::Mutex<Option<Op>>);
+        impl Backend for Captured {
+            fn call(&self, op: Op) -> Result<Value, BackendError> {
+                *self.0.lock().expect("the captured op") = Some(op);
+                Ok(json!({"title": "A", "blocks": 2, "first": "01A", "last": "01B"}))
+            }
+        }
+        let backend = Captured(std::sync::Mutex::new(None));
+        let markdown = "  - one\n  - two\n";
+        call(
+            &backend,
+            false,
+            "append_blocks",
+            &json!({"page": "A", "markdown": markdown}),
+        )
+        .unwrap();
+        match backend.0.lock().expect("the captured op").clone() {
+            Some(Op::AppendOutline { markdown: sent, .. }) => {
+                assert_eq!(sent, markdown, "the outline as it was written");
+            }
+            other => panic!("expected an append_outline op, got {other:?}"),
+        }
+        // Whitespace-only text is still empty.
+        let err = call(
+            &backend,
+            false,
+            "append_blocks",
+            &json!({"page": "A", "markdown": " \n  "}),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&err, ToolError::Failed(m) if m.contains("`markdown`")),
+            "{err:?}"
+        );
+    }
+
     /// MC-11: the catalog and the guide are constants. Running a tool on a graph never
     /// changes them, and neither does a flag other than `--read-only`.
     #[test]
     fn mc_11_the_catalog_is_a_constant() {
         let a = list(false);
         assert_eq!(a, list(false));
-        assert_eq!(a.len(), 6);
+        assert_eq!(a.len(), 7, "the six read tools and append_blocks");
         for t in &a {
-            assert_eq!(
-                t["annotations"],
+            let name = t["name"].as_str().unwrap();
+            // Design §4.1: `destructiveHint` and `openWorldHint` default to true in the
+            // 2026-07-28 schema, so every tool sets all four hints.
+            let want = if name == "append_blocks" {
+                json!({"readOnlyHint": false, "destructiveHint": false,
+                       "idempotentHint": false, "openWorldHint": false})
+            } else {
                 json!({"readOnlyHint": true, "destructiveHint": false,
-                       "idempotentHint": true, "openWorldHint": false}),
-                "{}",
-                t["name"]
-            );
-            assert_eq!(t["inputSchema"]["type"], "object");
+                       "idempotentHint": true, "openWorldHint": false})
+            };
+            assert_eq!(t["annotations"], want, "{name}");
+            assert_eq!(t["inputSchema"]["type"], "object", "{name}");
         }
-        assert_eq!(
-            list(true),
-            a,
-            "only write tools are hidden, and there are none yet"
+        // MC-2: `--read-only` removes the write tool for this process.
+        let readonly = list(true);
+        assert_eq!(readonly.len(), 6);
+        assert!(
+            readonly.iter().all(|t| t["name"] != "append_blocks"),
+            "no write tool in a read-only list"
+        );
+        // The description states the limit the op enforces (MC-8).
+        let append = a.iter().find(|t| t["name"] == "append_blocks").unwrap();
+        assert!(
+            append["description"]
+                .as_str()
+                .unwrap()
+                .contains(&utopia_api::MAX_OUTLINE_BLOCKS.to_string()),
+            "{}",
+            append["description"]
         );
         assert!(!INSTRUCTIONS.is_empty());
+        assert!(INSTRUCTIONS.contains("append_blocks"), "the guide names it");
+    }
+
+    /// MC-8: what `append_blocks` answers: how much landed and the ids at either end, and
+    /// one block reads as one block.
+    #[test]
+    fn mc_8_the_append_result_names_what_landed() {
+        let body = json!({"title": "Project X", "blocks": 3,
+                          "first": "01A", "last": "01C"});
+        assert_eq!(
+            render_append(&body),
+            "Appended 3 blocks to \"Project X\".\n\
+             The first new block is 01A and the last is 01C; read_block takes either id.\n"
+        );
+        let one = json!({"title": "A day", "blocks": 1, "first": "01A", "last": "01A"});
+        assert_eq!(
+            render_append(&one),
+            "Appended 1 block to \"A day\".\n\
+             The new block is 01A; read_block takes that id.\n"
+        );
     }
 
     #[test]

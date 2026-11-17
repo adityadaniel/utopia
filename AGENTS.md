@@ -419,7 +419,9 @@ Implemented:
   24 KB with the call that continues it. Access is per graph and off by default (MC-1);
   `Op::kind()` is the one read/write classification. `utopia mcp config <client>` prints the
   entry that Settings → Assistants also copies, each pinning an absolute `--graph` (MC-13).
-  The four write tools are phase 3 and not built yet.
+  Of the four write tools, `append_blocks` is built (`Op::AppendOutline`: one outline, one
+  transaction and one undo step, the id markers stripped); `update_block`, `move_block` and
+  `delete_block` are not.
 - **v1.2+ / P2 (§4.2, Appendix A):** query blocks (`{{query: …}}`, Roam syntax, SQL-backed, `/Query`)
   with queryable `key:: value` attributes; graph view (Cmd+Shift+G, force-directed, local/global,
   journal toggle); attachments (drop files or `/Attach a file`, image previews, file chips,
@@ -466,9 +468,12 @@ Known limits (pick these up deliberately, don't paper over them):
 - The folder transport re-reads every file of a changed page (imports are idempotent) and
   never compacts, because it must not delete other devices' files.
 - Very large flat sibling lists (≫5k blocks under one parent) make each insert O(n).
-- MCP: the four write tools are not built, so the level Read and write permits no MCP tool
-  that changes a note. `tools/list` does not depend on the level (only `--read-only` removes
-  a write tool, and none exists yet), because legacy clients do not ask for the list again.
+- MCP: only one write tool exists (`append_blocks`), so the level Read and write permits no
+  MCP tool that edits or deletes a block yet. `tools/list` does not depend on the level (only
+  `--read-only` removes the write tool), because legacy clients do not ask for the list
+  again. `append_blocks` writes every line as a bullet: the `[ ] `, `## ` and `> ` prefixes
+  `read_page` writes for to-dos, headings and quotes stay in the block's text. An outline of
+  more than 2,000 blocks, or deeper than 12 levels (FR-2.9), is refused and writes nothing.
 - MCP, app closed: a call does not sync (the write waits in the outbox for the next launch),
   and an encrypted graph needs a passphrase the process can read
   (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no

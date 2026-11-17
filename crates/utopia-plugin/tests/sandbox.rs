@@ -84,6 +84,37 @@ fn writes_through_the_api_and_answers_the_editor() {
     ));
 }
 
+/// MC-8: a plugin that declared only `read` cannot append an outline — the permission check
+/// reads the same `Op::kind()` the MCP bridge and the API do, so a new write variant cannot
+/// slip past it. With `write` the same request lands as one page of one block.
+#[test]
+fn mc_8_a_plugin_without_write_permission_cannot_append_an_outline() {
+    let req = r#"{"op":"append_outline","title":"Sneaky","markdown":"- added by a plugin","create":true}"#;
+    let call = format!("(call $call (i32.const 0) (i32.const {}))", req.len());
+    let mut s = store();
+    let dir = plugin(&["read"], &[(0, req)], &call);
+    let r = Plugin::load(dir.path())
+        .unwrap()
+        .run(&mut s, "go", json!({}));
+    let err = r.output().unwrap().raw["error"].as_str().unwrap();
+    assert!(err.contains("permission denied"), "{err}");
+    assert!(
+        s.find_page("Sneaky").unwrap().is_none(),
+        "nothing was written"
+    );
+    assert!(r.changed.is_empty());
+
+    let dir = plugin(&["write"], &[(0, req)], &call);
+    let r = Plugin::load(dir.path())
+        .unwrap()
+        .run(&mut s, "go", json!({}));
+    let out = r.outcome.expect("the run finished");
+    assert_eq!(out.raw["ok"]["blocks"], 1, "{}", out.raw);
+    assert_eq!(r.changed.len(), 1, "the append touched its page");
+    let page = s.find_page("Sneaky").unwrap().unwrap();
+    assert_eq!(s.page_state(&page).unwrap().live_count(), 1);
+}
+
 #[test]
 fn permissions_gate_operations() {
     let write = r#"{"op":"capture","text":"sneaky"}"#;

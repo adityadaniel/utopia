@@ -60,13 +60,32 @@ fn with_ids(graph: &Graph) -> Vec<(&'static str, Value, &'static str)> {
         .collect()
 }
 
+/// One call per write tool, with arguments that change the graph.
+fn every_write_tool() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "append_blocks",
+            json!({"page": "Written", "markdown": "- one\n", "create": true}),
+        ),
+        (
+            "append_blocks",
+            json!({"page": "Project X", "markdown": "- appended by an assistant\n"}),
+        ),
+    ]
+}
+
 /// MC-1: with access Off (as a missing file means) no tool reads or writes, and each one
 /// says where the owner changes it.
 #[test]
 fn mc_1_no_tool_works_with_access_off() {
     let graph = Graph::new();
     let pages_before = graph.page_count();
-    for (name, args, _) in with_ids(&graph) {
+    let calls: Vec<(&'static str, Value)> = with_ids(&graph)
+        .into_iter()
+        .map(|(name, args, _)| (name, args))
+        .chain(every_write_tool())
+        .collect();
+    for (name, args) in calls {
         let (text, is_error) = text_of(&call_as(&graph, Level::Off, true, name, &args));
         assert!(is_error, "{name}: {text}");
         assert!(text.contains("Settings → Assistants"), "{name}: {text}");
@@ -77,6 +96,8 @@ fn mc_1_no_tool_works_with_access_off() {
         );
     }
     assert_eq!(graph.page_count(), pages_before, "nothing was written");
+    let store = graph.open();
+    assert!(store.find_page("Written").expect("a lookup").is_none());
 }
 
 /// MC-2: at `read` and at `write` every read tool works (the level permits by `Op::kind`).
@@ -143,14 +164,19 @@ fn mc_2_read_only_lowers_the_level_and_filters_the_list() {
     assert!(is_error);
     assert!(text.contains("Settings → Assistants"), "{text}");
 
-    // With the file at write, read-only still answers the read tools and lists the same
-    // six tools, because none of them writes yet.
+    // With the file at write, read-only answers the read tools and leaves the write tool
+    // out of the list (MC-2, design §5).
     graph.set_access(Level::Write, true);
     let reply = support::run(
         vec![
             initialize(1, "2025-11-25"),
             tool_call(2, "list_pages", json!({})),
             support::request(3, "tools/list", json!({})),
+            tool_call(
+                4,
+                "append_blocks",
+                json!({"page": "Project X", "markdown": "- from a read-only client\n"}),
+            ),
         ],
         graph.backend(),
         Options {
@@ -166,6 +192,9 @@ fn mc_2_read_only_lowers_the_level_and_filters_the_list() {
         .unwrap()
         .iter()
         .all(|t| t["annotations"]["readOnlyHint"] == json!(true)));
+    let (text, is_error) = text_of(&reply[3]);
+    assert!(is_error, "{text}");
+    assert!(text.contains("read-only"), "{text}");
 }
 
 /// MC-7: a read never makes a page. `read_page today` on a graph whose day has no page
@@ -563,7 +592,7 @@ fn mc_11_the_catalog_does_not_depend_on_the_graph() {
         a[2]["result"]["instructions"], a[0]["result"]["instructions"],
         "one guide for both eras"
     );
-    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 6);
+    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 7);
 }
 
 /// A tool call that fails on its arguments is still a `result` with `isError`, not an
@@ -592,4 +621,220 @@ fn mc_1_an_access_change_applies_to_the_next_call() {
     let reply = server.out.wait_for(3);
     assert!(!text_of(&reply[2]).1, "Read permits, with no restart");
     server.finish().expect("serve returns at end of input");
+}
+
+/// One `tools/call` at `level`, with the app closed and `when_closed` on.
+fn call_at(graph: &Graph, level: Level, name: &str, args: Value) -> (String, bool) {
+    text_of(&call_as(graph, level, true, name, &args))
+}
+
+/// MC-2, MC-8: at the level `read` the write tool fails and writes nothing; at `write` the
+/// same call lands.
+#[test]
+fn mc_8_append_blocks_is_refused_at_read_and_writes_nothing() {
+    let graph = Graph::new();
+    let before = graph.page_count();
+    let args = json!({"page": "Written", "markdown": "- one\n", "create": true});
+    let (text, is_error) = call_at(&graph, Level::Read, "append_blocks", args.clone());
+    assert!(is_error, "{text}");
+    assert!(text.contains("read access only"), "{text}");
+    assert!(text.contains("Nothing was written"), "{text}");
+    assert_eq!(graph.page_count(), before, "no page was made");
+    let mut store = graph.open();
+    assert!(store.find_page("Written").expect("a lookup").is_none());
+    assert!(store.doctor().expect("doctor runs").is_ok());
+    drop(store);
+
+    let (text, is_error) = call_at(&graph, Level::Write, "append_blocks", args);
+    assert!(!is_error, "{text}");
+}
+
+/// MC-8, MC-3: one `append_blocks` call appends the whole outline, in order and with its
+/// nesting, and `doctor` is clean afterwards (rule 2).
+#[test]
+fn mc_8_append_blocks_appends_an_outline_and_doctor_is_clean() {
+    let graph = Graph::new();
+    let before = graph.page_count();
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({
+            "page": "Project X",
+            "markdown": "- write the launch post {id:01J8Z3K9V2}\n  - ask [[Ana]] for the quote\n- send it\n",
+        }),
+    );
+    assert!(!is_error, "{text}");
+    assert!(
+        text.contains("Appended 3 blocks to \"Project X\""),
+        "{text}"
+    );
+    assert_eq!(graph.page_count(), before, "the page already existed");
+
+    let (page, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(!is_error, "{page}");
+    let at = |needle: &str| {
+        page.find(needle)
+            .unwrap_or_else(|| panic!("{needle} in the page: {page}"))
+    };
+    assert!(at("write the launch post") < at("ask [[Ana]] for the quote"));
+    assert!(at("ask [[Ana]] for the quote") < at("send it"));
+    assert!(
+        page.contains("\n  - ask [[Ana]] for the quote {id:"),
+        "one level in: {page}"
+    );
+    assert!(
+        !page.contains("01J8Z3K9V2"),
+        "the marker it was sent with is gone, and the block has its own id: {page}"
+    );
+    assert!(
+        page.contains("write the launch post {id:"),
+        "the line still ends with an id marker: {page}"
+    );
+    let mut store = graph.open();
+    assert!(store.doctor().expect("doctor runs").is_ok());
+}
+
+/// MC-8, W3/FR-1.10: a `[[link]]` in the appended text makes its page and its backlink, as
+/// the same text typed into a block does.
+#[test]
+fn mc_8_a_link_in_the_outline_gives_a_backlink() {
+    let graph = Graph::new();
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "Project X", "markdown": "- brief [[Zoe]] on the launch\n"}),
+    );
+    assert!(!is_error, "{text}");
+    let (backlinks, is_error) =
+        call_at(&graph, Level::Read, "get_backlinks", json!({"page": "Zoe"}));
+    assert!(!is_error, "{backlinks}");
+    assert!(
+        backlinks.contains("brief [[Zoe]] on the launch"),
+        "{backlinks}"
+    );
+    // The link made the page: reading it is an empty outline, not a failure.
+    let (zoe, is_error) = call_at(&graph, Level::Read, "read_page", json!({"page": "Zoe"}));
+    assert!(!is_error, "{zoe}");
+    assert_eq!(zoe, "", "the page exists and has no blocks");
+}
+
+/// MC-8, FR-1.2: `today` is the day's page, a day with no page gets one on its first write,
+/// and a page that does not resolve is not made unless `create` says so.
+#[test]
+fn mc_8_append_blocks_reaches_a_day_and_respects_create() {
+    let graph = Graph::new();
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "today", "markdown": "- another line for today\n"}),
+    );
+    assert!(!is_error, "{text}");
+    let (today, _) = call_at(&graph, Level::Read, "read_page", json!({"page": "today"}));
+    assert!(today.contains("Met [[Ana]] today"), "{today}");
+    assert!(today.contains("another line for today"), "{today}");
+
+    // A day that has no page yet: the first write makes it (FR-1.2).
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "2099-01-01", "markdown": "- the far future\n", "create": true}),
+    );
+    assert!(!is_error, "{text}");
+    let (day, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "2099-01-01"}),
+    );
+    assert!(!is_error, "{day}");
+    assert!(day.contains("the far future"), "{day}");
+
+    // `create` off: a page that does not resolve is a failure and nothing is made.
+    let pages = graph.page_count();
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "No such page", "markdown": "- x\n"}),
+    );
+    assert!(is_error, "{text}");
+    assert!(text.contains("no page titled"), "{text}");
+    assert_eq!(graph.page_count(), pages);
+    let store = graph.open();
+    assert!(store.find_page("No such page").expect("a lookup").is_none());
+}
+
+/// MC-8, design §4: an outline read from a page can be appended as it was shown — the id
+/// markers are taken off and the nesting is kept, so the copy reads like the original.
+#[test]
+fn mc_8_append_blocks_round_trips_the_outline_format() {
+    let graph = Graph::new();
+    let (outline, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(!is_error, "{outline}");
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "Copy of Project X", "markdown": outline, "create": true}),
+    );
+    assert!(!is_error, "{text}");
+    let (copy, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Copy of Project X"}),
+    );
+    assert!(!is_error, "{copy}");
+    assert_eq!(
+        utopia_api::strip_id_markers(&copy),
+        utopia_api::strip_id_markers(&outline),
+        "the same text at the same nesting, with the new blocks' own ids"
+    );
+    let mut store = graph.open();
+    assert!(store.doctor().expect("doctor runs").is_ok());
+}
+
+/// MC-8: an outline whose lines all carry the same indentation reads as siblings. The tool
+/// must pass the text through as it was sent: trimming reaches only the first line, which
+/// would make the second line its child.
+#[test]
+fn mc_8_a_uniformly_indented_outline_keeps_its_siblings() {
+    let graph = Graph::new();
+    let markdown = "  - one\n  - two\n";
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "Project X", "markdown": markdown}),
+    );
+    assert!(!is_error, "{text}");
+    assert!(text.contains("Appended 2 blocks"), "{text}");
+    let (page, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(!is_error, "{page}");
+    let line = |want: &str| {
+        page.lines()
+            .find(|l| l.starts_with(&format!("- {want} ")) || *l == format!("- {want}"))
+            .unwrap_or_else(|| panic!("a top-level line {want:?}: {page}"))
+    };
+    assert!(line("one").starts_with("- one {id:"), "{}", line("one"));
+    assert!(line("two").starts_with("- two {id:"), "{}", line("two"));
 }

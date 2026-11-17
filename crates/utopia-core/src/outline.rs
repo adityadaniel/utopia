@@ -390,9 +390,6 @@ pub fn paste(
         return Err(DomainError::NoOp);
     }
     let mut cmds = Vec::new();
-    // last[d]: the most recent block at depth d; parents[d]: its parent.
-    let mut last: Vec<BlockId> = Vec::new();
-    let mut parents: Vec<Option<BlockId>> = Vec::new();
     let mut rest = &items[..];
     let reuse_current = n.text.is_empty() && n.children.is_empty();
     if reuse_current {
@@ -405,20 +402,103 @@ pub fn paste(
         });
         rest = &items[1..];
     }
-    last.push(id.clone());
-    parents.push(n.parent.clone());
-    // Children of a freshly inserted block always start empty, so `after` for the first
-    // child is None; for the pre-existing current block it is its last child.
-    let mut first_child_after: Option<Option<BlockId>> = Some(st.last_child(Some(id), false));
-    let mut focus = (
-        id.clone(),
-        if reuse_current {
+    let (tail, inserted) = insert_after(st, id, n.parent.clone(), rest);
+    cmds.extend(tail);
+    let focus = inserted.unwrap_or(Focus {
+        block: id.clone(),
+        offset: if reuse_current {
             items[0].1.len()
         } else {
             n.text.len()
         },
-    );
-    for (depth, text) in rest {
+    });
+    Ok(Plan { cmds, focus: None }.focus(&focus.block, focus.offset))
+}
+
+/// Append an indented outline (PRD §13.8 MC-8 `append_blocks`): the blocks go last, under
+/// `parent` or at the end of the page, and nothing already on the page moves. `anchor` is an
+/// empty block that takes the outline's first line (the fresh page whose only block is empty,
+/// which `AppendBlock` fills the same way; `parent` is then ignored, since the anchor brings
+/// its own); `None` inserts a new empty block at the end first.
+///
+/// FR-2.9 caps depth at [`MAX_DROP_DEPTH`], the same ceiling [`move_to`] enforces: an outline
+/// that would go past it is refused instead of being clamped.
+pub fn append_outline(
+    st: &PageState,
+    parent: Option<&BlockId>,
+    anchor: Option<&BlockId>,
+    items: &[(usize, String)],
+) -> Result<Plan, DomainError> {
+    let Some((first, rest)) = items.split_first() else {
+        return Err(DomainError::NoOp);
+    };
+    let mut cmds = Vec::new();
+    let (anchor, anchor_parent) = match anchor {
+        Some(id) => (id.clone(), st.parent_of(id)),
+        None => {
+            if let Some(p) = parent {
+                node(st, p)?;
+            }
+            let id = BlockId::new();
+            cmds.push(Command::InsertBlock {
+                id: id.clone(),
+                parent: parent.cloned(),
+                after: st.last_child(parent, false),
+                text: String::new(),
+                kind: BlockKind::Bullet,
+            });
+            (id, parent.cloned())
+        }
+    };
+    let base = anchor_parent.as_ref().map_or(0, |p| st.depth(p) + 1);
+    if too_deep(items, base) {
+        return Err(DomainError::TooDeep);
+    }
+    cmds.push(Command::SetBlockText {
+        id: anchor.clone(),
+        edit: crate::command::TextEdit {
+            range: 0..0,
+            insert: first.1.clone(),
+        },
+    });
+    let (tail, inserted) = insert_after(st, &anchor, anchor_parent, rest);
+    cmds.extend(tail);
+    Ok(Plan {
+        cmds,
+        focus: Some(inserted.unwrap_or(Focus {
+            block: anchor,
+            offset: first.1.len(),
+        })),
+    })
+}
+
+/// Whether an outline of `(depth, text)` items would pass [`MAX_DROP_DEPTH`] when its first
+/// level sits at `base` — the depth of the page's top level (0) or one past the parent it is
+/// appended under (FR-2.9). `parse_outline` numbers the first level 0.
+pub fn too_deep(items: &[(usize, String)], base: usize) -> bool {
+    items
+        .iter()
+        .any(|(depth, _)| base + depth >= MAX_DROP_DEPTH)
+}
+
+/// The commands that put `items` after `anchor`, whose parent is `anchor_parent`: a depth-0
+/// item is a sibling of the anchor, a deeper one a child of the item before it. Returns where
+/// the caret lands, or `None` when there was nothing to insert (FR-2.10 `paste`, MC-8).
+fn insert_after(
+    st: &PageState,
+    anchor: &BlockId,
+    anchor_parent: Option<BlockId>,
+    items: &[(usize, String)],
+) -> (Vec<Command>, Option<Focus>) {
+    let mut cmds = Vec::new();
+    // last[d]: the most recent block at depth d; parents[d]: its parent.
+    let mut last: Vec<BlockId> = vec![anchor.clone()];
+    let mut parents: Vec<Option<BlockId>> = vec![anchor_parent];
+    // Children of a freshly inserted block always start empty, so `after` for the first
+    // child is None; for a pre-existing anchor it is its last child.
+    let mut first_child_after: Option<Option<BlockId>> = Some(st.last_child(Some(anchor), false));
+    let mut focus = None;
+    for (depth, text) in items {
         let d = (*depth).min(last.len());
         let new_id = BlockId::new();
         let (parent, after) = if d < last.len() {
@@ -426,7 +506,7 @@ pub fn paste(
             (parents[d].clone(), Some(last[d].clone()))
         } else {
             // First child of last[d-1].
-            let after = if last[d - 1] == *id {
+            let after = if last[d - 1] == *anchor {
                 first_child_after.take().flatten()
             } else {
                 None
@@ -444,9 +524,12 @@ pub fn paste(
         parents.truncate(d);
         last.push(new_id.clone());
         parents.push(parent);
-        focus = (new_id, text.len());
+        focus = Some(Focus {
+            block: new_id,
+            offset: text.len(),
+        });
     }
-    Ok(Plan { cmds, focus: None }.focus(&focus.0, focus.1))
+    (cmds, focus)
 }
 
 #[cfg(test)]
@@ -667,6 +750,110 @@ mod tests {
         let plan = paste(&st, &ids[0], 2..2, "--").unwrap();
         apply(&mut st, &plan);
         assert_eq!(st.block(&ids[0]).unwrap().text, "ke--ep");
+    }
+
+    /// The depth `n` outline `parse_outline` would give `- d0` … indented one level per line.
+    fn chain(n: usize) -> Vec<(usize, String)> {
+        (0..n).map(|d| (d, format!("d{d}"))).collect()
+    }
+
+    fn empty_page() -> (PageState, BlockId) {
+        let mut st = PageState::new("p".into(), PageMeta::default());
+        let root = BlockId::new();
+        st.apply(
+            &Command::InsertBlock {
+                id: root.clone(),
+                parent: None,
+                after: None,
+                text: String::new(),
+                kind: BlockKind::Bullet,
+            },
+            0,
+        )
+        .unwrap();
+        (st, root)
+    }
+
+    /// MC-8: an appended outline goes last, at the nesting it was written with, after the
+    /// page's own blocks and their children.
+    #[test]
+    fn mc_8_append_outline_goes_last_and_keeps_nesting() {
+        let (mut st, ids) = page_with(&[("keep", 0), ("kid", 1)]);
+        let plan =
+            append_outline(&st, None, None, &parse_outline("- one\n  - two\n- three\n")).unwrap();
+        let last = plan.focus.as_ref().expect("a caret").block.clone();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![
+                ("keep".into(), 0),
+                ("kid".into(), 1),
+                ("one".into(), 0),
+                ("two".into(), 1),
+                ("three".into(), 0)
+            ]
+        );
+        assert_eq!(st.block(&last).unwrap().text, "three");
+
+        // Under a parent the whole outline goes last under that block, before the page's
+        // later blocks.
+        let plan = append_outline(
+            &st,
+            Some(&ids[0]),
+            None,
+            &parse_outline("- under\n  - deeper\n"),
+        )
+        .unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![
+                ("keep".into(), 0),
+                ("kid".into(), 1),
+                ("under".into(), 1),
+                ("deeper".into(), 2),
+                ("one".into(), 0),
+                ("two".into(), 1),
+                ("three".into(), 0)
+            ]
+        );
+    }
+
+    /// MC-8: the empty first block of a fresh page takes the outline's first line instead of
+    /// leaving a blank block above it, as `AppendBlock` fills it.
+    #[test]
+    fn mc_8_an_anchor_block_takes_the_first_line() {
+        let (mut st, root) = empty_page();
+        let plan =
+            append_outline(&st, None, Some(&root), &parse_outline("- one\n  - two\n")).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![("one".into(), 0), ("two".into(), 1)],
+            "no empty block is left above the outline"
+        );
+        assert_eq!(st.block(&root).unwrap().text, "one");
+        assert_eq!(
+            append_outline(&st, None, Some(&root), &[]),
+            Err(DomainError::NoOp)
+        );
+    }
+
+    /// MC-8, FR-2.9: an outline that would go past [`MAX_DROP_DEPTH`] is refused, not
+    /// clamped, and the ceiling counts from the parent it is appended under.
+    #[test]
+    fn mc_8_an_outline_past_twelve_levels_is_refused() {
+        let (st, ids) = page_with(&[("root", 0)]);
+        assert!(append_outline(&st, None, None, &chain(MAX_DROP_DEPTH)).is_ok());
+        assert_eq!(
+            append_outline(&st, None, None, &chain(MAX_DROP_DEPTH + 1)),
+            Err(DomainError::TooDeep)
+        );
+        assert_eq!(
+            append_outline(&st, Some(&ids[0]), None, &chain(MAX_DROP_DEPTH)),
+            Err(DomainError::TooDeep),
+            "one level down, twelve more would be thirteen"
+        );
     }
 
     #[test]
