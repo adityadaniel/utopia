@@ -8,7 +8,7 @@ tools — `append_blocks` (slice 3.1), `update_block` (slice 3.2), `move_block` 
 `delete_block` (slice 3.3, PR 9) — and the write check with the real clients (slice 3.4,
 PR 10): Claude Code and Codex each wrote once on a scratch graph, and the block that has the
 caret was examined (§10). The Claude Desktop run still needs the owner, because it takes an
-entry in the owner's config file (§10).
+entry in the owner's config file (§10). `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 

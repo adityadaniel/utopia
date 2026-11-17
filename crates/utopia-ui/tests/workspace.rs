@@ -1665,6 +1665,31 @@ fn keystrokes_are_debounced_then_committed(cx: &mut TestAppContext) {
     });
 }
 
+/// Another device sets the text of `page`'s first block; sync delivers it.
+fn remote_edit(app: &Entity<AppState>, page: &PageId, text: &str, cx: &mut VisualTestContext) {
+    let block = app.update(cx, |app, _| {
+        app.store.page_state(page).unwrap().live_roots()[0].clone()
+    });
+    let update = app.update(cx, |app, _| {
+        app.store.sync_index().unwrap();
+        let bytes = app.store.export_since(page, &Default::default()).unwrap();
+        let mut remote = Store::open_in_memory().unwrap();
+        remote.import(page, &bytes).unwrap();
+        remote
+            .set_block_text(page, &block, text, None, None)
+            .unwrap();
+        remote.sync_index().unwrap();
+        remote.export_since(page, &Default::default()).unwrap()
+    });
+    app.update(cx, |app, cx| {
+        app.store.import(page, &update).unwrap();
+        app.changed(vec![page.clone()], true, cx);
+    });
+    cx.run_until_parked();
+}
+
+/// §6.5: text another device puts in before the caret does not move the caret off its
+/// text.
 #[gpui::test]
 fn caret_survives_remote_edits(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup(cx);
@@ -1672,27 +1697,30 @@ fn caret_survives_remote_edits(cx: &mut TestAppContext) {
     cx.simulate_input("hello world");
     cx.simulate_keystrokes("left left left left left");
     cx.run_until_parked();
-    // Another device inserts text at the start of the same block; sync delivers it.
-    let block = app.update(cx, |app, _| {
-        app.store.page_state(&page).unwrap().live_roots()[0].clone()
-    });
-    let update = app.update(cx, |app, _| {
-        app.store.sync_index().unwrap();
-        let bytes = app.store.export_since(&page, &Default::default()).unwrap();
-        let mut remote = Store::open_in_memory().unwrap();
-        remote.import(&page, &bytes).unwrap();
-        remote
-            .set_block_text(&page, &block, ">> hello world", None, None)
-            .unwrap();
-        remote.sync_index().unwrap();
-        remote.export_since(&page, &Default::default()).unwrap()
-    });
-    app.update(cx, |app, cx| {
-        app.store.import(&page, &update).unwrap();
-        app.changed(vec![page.clone()], true, cx);
-    });
-    cx.run_until_parked();
+    remote_edit(&app, &page, ">> hello world", cx);
     // The caret stayed before "world", not at the old byte offset.
+    cx.simulate_input("big ");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, ">> hello big world");
+}
+
+/// §6.5: the same after the caret got where it is by a selection. The editor used to keep
+/// a CRDT anchor for the caret, which the selection keys never moved, so the next store
+/// change put the caret back where the anchor was last set: the end of the block.
+#[gpui::test]
+fn caret_survives_remote_edits_after_a_selection(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("hello world");
+    cx.simulate_keystrokes("shift-left shift-left shift-left shift-left shift-left");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx), ("hello world".into(), 6));
+    remote_edit(&app, &page, ">> hello world", cx);
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        (">> hello world".into(), 9),
+        "the caret is still before `world`"
+    );
     cx.simulate_input("big ");
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, ">> hello big world");
@@ -6524,10 +6552,10 @@ fn ac_3_2_blurring_the_editor_commits_the_block(cx: &mut TestAppContext) {
 }
 
 /// AC-3.2, §6.5: a commit that rewrites the text under the caret (`[[tomorrow]]` → the
-/// day's title) moves the caret with it, so the CRDT anchor has to move too. Otherwise the
-/// next store update resolves the caret back to where the old link was, inside the new one.
+/// day's title) moves the caret with it, and the next store update leaves it there: it
+/// must not go back to where the old link was, inside the new one.
 #[gpui::test]
-fn ac_3_2_a_commit_reanchors_the_caret_it_moved(cx: &mut TestAppContext) {
+fn ac_3_2_the_caret_stays_where_a_commit_moved_it(cx: &mut TestAppContext) {
     use gpui::Focusable as _;
     let (app, ws, cx) = setup(cx);
     let page = today_page(&app, cx);
@@ -6544,8 +6572,8 @@ fn ac_3_2_a_commit_reanchors_the_caret_it_moved(cx: &mut TestAppContext) {
     let want = "f [[November 3rd, 2026]]";
     let (shown, caret) = text_and_caret(&ws, cx);
     assert_eq!((shown.as_str(), caret), (want, want.len()));
-    // A store-side edit appends at the end (a sync, another view, an undo): the anchored
-    // caret is still where the commit left it, at the end of the block.
+    // A store-side edit appends at the end (a sync, another view, an undo): the caret is
+    // still where the commit left it, at the end of the block.
     let text = format!("{want}!");
     app.update(cx, |app, cx| {
         let block = app.store.page_state(&page).unwrap().live_roots()[0].clone();
@@ -6562,6 +6590,103 @@ fn ac_3_2_a_commit_reanchors_the_caret_it_moved(cx: &mut TestAppContext) {
          inside the expanded link (caret {caret} of {})",
         text.len()
     );
+}
+
+/// AC-3.2, §6.5: the idle commit heals `#Modern Religion` into `#[[Modern Religion]]`
+/// (the hashtag longest-match rule), which puts four bytes in before a caret after the
+/// tag. The caret stays after the tag; it used to be left four bytes short, inside the
+/// title, and the next character typed went into the middle of the word.
+#[gpui::test]
+fn ac_3_2_the_caret_stays_after_a_tag_the_commit_healed(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    app.update(cx, |app, _| {
+        app.store.create_page("Modern Religion").unwrap();
+    });
+    cx.simulate_input("on #Modern Religion today");
+    cx.simulate_keystrokes("left left left left left left");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx).1, "on #Modern Religion".len());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    cx.run_until_parked();
+    let healed = "on #[[Modern Religion]] today";
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        (healed.into(), "on #[[Modern Religion]]".len()),
+        "the caret is still between the tag and ` today`"
+    );
+    cx.simulate_input("!");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "on #[[Modern Religion]]! today");
+}
+
+/// §6.2 (hit-testing maps x-offset → byte range): a click in a block that is not being
+/// edited starts the edit with the caret at the character under the pointer. The block
+/// draws its text without markup (`[[beta]]` shows `beta`), so the offset the click finds
+/// is not the offset in the block's text. With any markup in the block the caret used to
+/// go to the end of the block instead.
+#[gpui::test]
+fn a_click_puts_the_caret_under_the_pointer_in_a_block_with_markup(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    // Two rows that draw the same glyphs at the same places: a link only colours its
+    // title. The third row holds the caret, so the first two are drawn as text.
+    let plain = "alpha beta gamma delta";
+    let linked = "alpha [[beta]] gamma delta";
+    cx.simulate_input(plain);
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input(linked);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    let blocks = app.update(cx, |app, _| {
+        app.store.page_state(&page).unwrap().live_roots().to_vec()
+    });
+    assert_eq!(rows(&app, &page, cx)[1].0, linked);
+    let text_bounds = |block: &utopia_core::BlockId, cx: &mut VisualTestContext| {
+        let sel: &'static str = Box::leak(format!("text-{block}").into_boxed_str());
+        cx.debug_bounds(sel).expect("the row is drawn as text")
+    };
+    let click = |at: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+        cx.simulate_click(at, Modifiers::default());
+        cx.run_until_parked();
+    };
+    let top = text_bounds(&blocks[0], cx);
+    let bottom = text_bounds(&blocks[1], cx);
+    assert_eq!(
+        top.origin.x, bottom.origin.x,
+        "the rows start at the same x"
+    );
+
+    // Find a place inside `gamma delta` by clicking the plain row, where the rendered
+    // offset is the source offset.
+    let (dx, in_plain) = (4..40)
+        .map(|n| px(n as f32 * 6.))
+        .find_map(|dx| {
+            click(point(top.origin.x + dx, top.center().y), cx);
+            let (text, caret) = text_and_caret(&ws, cx);
+            assert_eq!(text, plain);
+            (caret > "alpha beta ".len() && caret < plain.len()).then_some((dx, caret))
+        })
+        .expect("some x is inside `gamma delta`");
+
+    // The same place in the row with the link is the same character, four bytes later.
+    click(point(bottom.origin.x + dx, bottom.center().y), cx);
+    assert_eq!(
+        text_and_caret(&ws, cx),
+        (linked.into(), in_plain + "[[]]".len()),
+        "the caret is before the character that was clicked, not at the end of the block"
+    );
+
+    // Past the end of the text is the end of the block; before the link nothing shifts.
+    click(point(top.origin.x, top.center().y), cx);
+    let bottom = text_bounds(&blocks[1], cx);
+    click(point(bottom.right() - px(4.), bottom.center().y), cx);
+    assert_eq!(text_and_caret(&ws, cx), (linked.into(), linked.len()));
+    click(point(top.origin.x, top.center().y), cx);
+    let bottom = text_bounds(&blocks[1], cx);
+    click(point(bottom.origin.x + px(1.), bottom.center().y), cx);
+    assert_eq!(text_and_caret(&ws, cx), (linked.into(), 0));
 }
 
 /// Accepting the suggestion (Tab or Enter) inserts the day's title directly.
@@ -6939,10 +7064,10 @@ fn p2_a_failed_plugin_run_announces_the_pages_it_wrote(cx: &mut TestAppContext) 
     );
 }
 /// §4.2 P2: a plugin that rewrites the block being edited through the API replaces the
-/// buffer under the editor. The caret's CRDT anchor and the autocomplete menu were derived
-/// from the old text, so both have to follow the text that is now there (machine issue 3).
+/// buffer under the editor. The autocomplete menu was derived from the old text, so it has
+/// to follow the text that is now there (machine issue 3).
 #[gpui::test]
-fn p2_a_plugin_rewrite_reanchors_the_editor(cx: &mut TestAppContext) {
+fn p2_a_plugin_rewrite_refreshes_the_editor(cx: &mut TestAppContext) {
     use std::rc::Rc;
 
     let (app, ws, cx) = setup(cx);
@@ -8059,4 +8184,27 @@ fn fr_2_17_the_caret_between_closing_brackets_is_not_in_the_title(cx: &mut TestA
     type_slowly(cx, &["]", "enter"]);
     assert_eq!(page_titles(&app, cx), vec!["Guiding Activity".to_string()]);
     assert_eq!(rows(&app, &page, cx)[0].0, "[[Guiding Activity]");
+}
+
+/// A bare URL in a block at rest is a link (Appendix B `bare_url`): a click opens it in
+/// the browser instead of putting the caret in the block.
+#[gpui::test]
+fn a_bare_url_opens_from_a_block_at_rest(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    let url = "https://example.com/a/long/path/to/read";
+    cx.simulate_input(url);
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let block = app.update(cx, |app, _| {
+        app.store.page_state(&page).unwrap().live_preorder()[0]
+            .0
+            .clone()
+    });
+    let sel: &'static str = Box::leak(format!("text-{}", block.0).into_boxed_str());
+    let text = cx.debug_bounds(sel).expect("the block shows as text");
+    assert_eq!(cx.opened_url(), None);
+    cx.simulate_click(text.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(cx.opened_url().as_deref(), Some(url));
 }

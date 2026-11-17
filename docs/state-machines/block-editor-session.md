@@ -3,18 +3,25 @@
 ## Status
 
 The session is one explicit value now. `EditorSession` (`editor.rs:249`) is
-`Idle | Editing(Editing)`, and `Editing` (`editor.rs:255`) owns the target, its CRDT
-`anchor`, the `pending` idle-commit task, the input method's queued `deferred` request and
-`pending_sync` together. None of them can exist without a target, the host reads the target
-through `BlockEditor::target()` (`editor.rs:371`), and ending a session is one assignment
-that drops all five. The tables and line numbers below describe the pre-fix code
+`Idle | Editing(Editing)`, and `Editing` (`editor.rs:255`) owns the target, the `pending`
+idle-commit task, the input method's queued `deferred` request and `pending_sync` together.
+None of them can exist without a target, the host reads the target through
+`BlockEditor::target()` (`editor.rs:371`), and ending a session is one assignment that
+drops all of them. The tables and line numbers below describe the pre-fix code
 (`main f5da7d1`); the states they list still hold, in the shapes named here.
+
+The CRDT caret `anchor` those tables list no longer exists. It was a second copy of the
+caret that every caret move had to refresh, and the moves that did not (the selection keys,
+a mouse drag) left it behind, so the next store change put the caret where the anchor was
+last set. `sync_from_store` and `commit_block` now carry the caret through the difference
+between the old text and the new one (`utopia_core::text::carry_caret`, PRD §6.5), which
+needs no state between edits.
 
 | Issue | State | Test, then fix |
 |---|---|---|
 | 1 "commit on blur" does not exist | **fixed** | `ac_3_2_blurring_the_editor_commits_the_block`; `focus_lost` (`editor.rs:750`) commits at once and drops the autocomplete menu, so the idle commit's `typing_link` wait can no longer leave an abandoned `[[tomorrow]]` unexpanded after a click into another pane. |
-| 2 `anchor` outlives `target` | **fixed, unrepresentable** | `Editing.anchor`; `end` (`editor.rs:446`), `detach` (`:510`) and `begin`'s vanished-block branch replace the session, so the two cannot part. No failing-first test: the only reader was behind the `target.is_some()` guard, so a stale anchor had no observable effect. A commit that rewrites the text under the caret now re-anchors too (`expand_relative_dates`, `editor.rs:941`; `ac_3_2_a_commit_reanchors_the_caret_it_moved`), so the anchor follows the caret and not only its block. |
-| 3 `run_plugin` replaces text without re-anchoring or refreshing the menu | **fixed** | `p2_a_plugin_rewrite_reanchors_the_editor`; both replacement paths now end in `settle` (`editor.rs:565-594`), which persists, moves the anchor and re-reads the trigger. |
+| 2 `anchor` outlives `target` | **removed** | the anchor is gone, so there is nothing to outlive the target or to fall behind the caret. `caret_survives_remote_edits`, `caret_survives_remote_edits_after_a_selection` (the stale anchor, failing first), `ac_3_2_the_caret_stays_where_a_commit_moved_it`, `ac_3_2_the_caret_stays_after_a_tag_the_commit_healed`. |
+| 3 `run_plugin` replaces text without re-anchoring or refreshing the menu | **fixed** | `p2_a_plugin_rewrite_refreshes_the_editor`; both replacement paths now end in `settle`, which persists and re-reads the trigger. |
 | 4 `idle` survives the `sync_from_store` `None` branch | **fixed, unrepresentable** | the task is `Editing.pending`, and `detach` replaces the whole session. No failing-first test: the old guard order made the surviving task a no-op, so nothing observable changed. |
 | 5 `edits` and `idle` encode one fact twice | **fixed** | the `edits` counter is gone; replacing `pending` (`editor.rs:833`) cancels the previous task, which is that same fact. |
 | 6 `commit_block` ignores IME `marked` | **fixed by the IME machine** (`block-editor-ime-composition.md`) | `commit_block` and `begin` defer while composing; `focus_lost` takes the marked text as committed first (`accept_composition`). |
