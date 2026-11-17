@@ -18,33 +18,31 @@ When a pull request opens or merges, change the table in §2. When the code show
 statement here or in the design is incorrect, correct the statement in the same pull
 request and say so in its description.
 
-## 2. State on 2026-11-16
+## 2. State on 2026-11-17
 
-The work is a chain of ten pull requests. Each one has the branch before it as its base.
-They are done one at a time, because each one changes code that the next one uses.
+The work was a chain of ten pull requests, each with the branch before it as its base. All
+ten are merged into `main`, one merge commit each, bottom-up, with `main`'s CI green after
+each merge. Before #68, `main` was merged into the rest of the chain; the only conflict was
+the status paragraph of `docs/mcp-design.md`.
 
-| PR | Slice | Branch | Base | State |
-|---|---|---|---|---|
-| #60 | Phase 0: decisions, plan, PRD §13.8 | `docs/mcp-plan` | `main` | Merged (`be84400`) |
-| #61 | 1.1 Owner lock | `feat/mcp-owner-lock` | `main` | Open. Head `fb2a3fd`. `make check`: 787 passed, 0 failed |
-| #62 | 1.2 `POST /v1/op`, access file, discovery file for each graph | `feat/mcp-op-route` | `feat/mcp-owner-lock` | Open. Head `045b8ec`. `make check`: 807 passed, 0 failed |
-| 3 | 1.3 `utopia-mcp` crate: protocol and six read tools | `feat/mcp-read-tools` | `feat/mcp-op-route` | Not started |
-| 4 | 1.4 `utopia mcp` subcommand, `Remote` backend, headless path | `feat/mcp-subcommand` | `feat/mcp-read-tools` | Not started |
-| 5 | 2.1 Settings → Assistants tab | `feat/mcp-assistants-tab` | `feat/mcp-subcommand` | Not started |
-| 6 | 2.2 Documentation | `docs/mcp-docs` | `feat/mcp-assistants-tab` | Not started |
-| 7 | 3.1 `append_blocks` | `feat/mcp-append-blocks` | `docs/mcp-docs` | Not started |
-| 8 | 3.2 `update_block` | `feat/mcp-update-block` | `feat/mcp-append-blocks` | Not started |
-| 9 | 3.3 `move_block`, `delete_block` | `feat/mcp-move-delete` | `feat/mcp-update-block` | Not started |
-| 10 | 3.4 Write check with the real clients | `docs/mcp-write-check` | `feat/mcp-move-delete` | Not started |
+| PR | Slice | Branch | State |
+|---|---|---|---|
+| #60 | Phase 0: decisions, plan, PRD §13.8 | `docs/mcp-plan` | Merged (`be84400`) |
+| #61 | 1.1 Owner lock | `feat/mcp-owner-lock` | Merged (`768a6f8`) |
+| #62 | 1.2 `POST /v1/op`, access file, discovery file for each graph | `feat/mcp-op-route` | Merged (`85a998d`) |
+| #65 | 1.3 `utopia-mcp` crate: protocol and six read tools | `feat/mcp-read-tools` | Merged (`73cd5bf`) |
+| #66 | 1.4 `utopia mcp` subcommand, `Remote` backend, headless path | `feat/mcp-subcommand` | Merged (`b7daca4`) |
+| #67 | 2.1 Settings → Assistants tab | `feat/mcp-assistants-tab` | Merged (`680a180`) |
+| #68 | 2.2 Documentation | `docs/mcp-docs` | Merged (`00a70df`) |
+| #69 | 3.1 `append_blocks` | `feat/mcp-append-blocks` | Merged (`4ffa2ea`) |
+| #70 | 3.2 `update_block` | `feat/mcp-update-block` | Merged (`fd070fb`) |
+| #71 | 3.3 `move_block`, `delete_block` | `feat/mcp-move-delete` | Merged (`cc485de`) |
+| #72 | 3.4 Write check with the real clients | `docs/mcp-write-check` | Merged (`115c42c`) |
 
-The owner approved the merge of #60 only. No code pull request is merged, and no agent
-merges one without the owner's word (§4.5).
+`make check` on `main` at `115c42c`: 965 passed, 0 failed. The branches are deleted.
 
-This file is on the branch `docs/mcp-handoff`, in a pull request with `main` as its base.
-It changes documentation only. Merge it first, so that `main` has the handoff. Until then,
-read it with `git show origin/docs/mcp-handoff:docs/mcp-handoff.md`.
-
-The newest branch of the chain is `feat/mcp-op-route`. PR 3 starts from it.
+Still open: the Claude Desktop run of the write check (§6, PR 10) needs the owner, because
+it takes an entry in the owner's config file. #72 has the exact entry and the steps.
 
 ## 3. Work done
 
