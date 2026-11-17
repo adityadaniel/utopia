@@ -127,6 +127,33 @@ pub fn diff(old: &str, new: &str) -> Option<TextEdit> {
     })
 }
 
+/// Where a caret at byte `caret` of `old` belongs in `new` (§6.5): the text changed under
+/// an editor (a commit's rewrite, an undo, a sync), and the caret stays with the text it
+/// was in. Computed from the two texts alone, through their single-range [`diff`], so
+/// there is no caret position to keep in step with the store between edits.
+///
+/// A caret before the change does not move; one after it moves by the change in length.
+/// One inside the replaced text keeps its place in that text when the replacement still
+/// holds it (`#Modern Religion` healed to `#[[Modern Religion]]`), and otherwise goes to
+/// the end of the replacement: nothing it was next to is left.
+pub fn carry_caret(old: &str, new: &str, caret: usize) -> usize {
+    let Some(edit) = diff(old, new) else {
+        return floor_char_boundary(new, caret);
+    };
+    let Range { start, end } = edit.range;
+    let carried = if caret >= end {
+        caret - end + start + edit.insert.len()
+    } else if caret <= start {
+        caret
+    } else {
+        match edit.insert.find(&old[start..end]) {
+            Some(kept) => caret + kept,
+            None => start + edit.insert.len(),
+        }
+    };
+    floor_char_boundary(new, carried)
+}
+
 /// Apply `edit` to `s`, validating bounds and char boundaries.
 pub fn apply_edit(s: &str, edit: &TextEdit) -> Option<String> {
     let Range { start, end } = edit.range.clone();
@@ -289,6 +316,36 @@ mod tests {
             assert_eq!(apply_edit(a, &e).unwrap(), b, "{a} -> {b}");
         }
         assert!(diff("same", "same").is_none());
+    }
+
+    /// §6.5: the caret stays with its text when the block changes under the editor.
+    #[test]
+    fn carry_caret_stays_with_its_text() {
+        // Text put in before the caret (a sync, a healed tag) moves it right.
+        let (old, new) = ("hello world", ">> hello world");
+        assert_eq!(&new[carry_caret(old, new, 6)..], "world");
+        let (old, new) = ("#Modern Religion x", "#[[Modern Religion]] x");
+        assert_eq!(&new[carry_caret(old, new, 16)..], " x");
+        // Text taken out before the caret (NFC, an undo) moves it left.
+        let (old, new) = ("cafe\u{301} au lait", "caf\u{e9} au lait");
+        assert_eq!(&new[carry_caret(old, new, 10)..], "lait");
+        // A change after the caret leaves it alone.
+        assert_eq!(carry_caret("hello world", "hello world!", 3), 3);
+        // The end of the block stays the end; a caret before `a` stays before `a`.
+        assert_eq!(carry_caret("abc", "abc!", 3), 4);
+        assert_eq!(carry_caret("abc", ">abc", 0), 1);
+        assert_eq!(carry_caret("abc def", "abc", 0), 0);
+        // Inside text that the replacement still holds: the same place in it.
+        let (old, new) = ("#Modern Religion x", "#[[Modern Religion]] x");
+        assert_eq!(&new[carry_caret(old, new, 8)..], "Religion]] x");
+        // Inside text that is gone: the end of what replaced it. Before it: no move.
+        assert_eq!(carry_caret("abcdef", "aXf", 3), 2);
+        assert_eq!(carry_caret("abc def", "abc", 6), 3);
+        assert_eq!(carry_caret("[[Al]]", "ab日", 4), "ab日".len());
+        assert_eq!(carry_caret("[[Al]]", "ab日", 0), 0);
+        // Never off a character boundary, and unchanged text is unchanged.
+        assert_eq!(carry_caret("日本x", "日本y", 1), 0);
+        assert_eq!(carry_caret("same", "same", 2), 2);
     }
 
     #[test]

@@ -80,14 +80,6 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// A caret anchored to a character in a block's text CRDT (§6.5): it follows that
-/// character through concurrent remote edits instead of a raw byte offset.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DocCursor {
-    pub block: BlockId,
-    encoded: Vec<u8>,
-}
-
 /// The narrow seam between the domain and the CRDT (§13.2).
 pub trait PageDoc: Sized {
     fn new(page_id: PageId, peer: u64) -> Self;
@@ -189,28 +181,6 @@ impl LoroPageDoc {
         self.doc
             .export(ExportMode::updates(from))
             .map_err(|e| DocError::Crdt(e.to_string()))
-    }
-
-    /// Anchor a caret at byte `offset` of `block`'s text.
-    pub fn cursor_for(&self, block: &BlockId, offset: usize) -> Option<DocCursor> {
-        let meta = self.tree().get_meta(*self.index.get(block)?).ok()?;
-        let text = text_of(&meta)?;
-        let s = text.to_string();
-        let offset = utopia_core::text::floor_char_boundary(&s, offset);
-        let pos = s[..offset].chars().count();
-        let cursor = text.get_cursor(pos, loro::cursor::Side::Middle)?;
-        Some(DocCursor {
-            block: block.clone(),
-            encoded: cursor.encode(),
-        })
-    }
-
-    /// Current byte offset of a caret anchored with [`LoroPageDoc::cursor_for`].
-    pub fn resolve_cursor(&self, c: &DocCursor) -> Option<usize> {
-        let cursor = loro::cursor::Cursor::decode(&c.encoded).ok()?;
-        let pos = self.doc.get_cursor_pos(&cursor).ok()?.current.pos;
-        let text = &self.state.block(&c.block)?.text;
-        Some(text.char_indices().nth(pos).map_or(text.len(), |(i, _)| i))
     }
 
     fn tid(&self, id: &BlockId) -> Result<TreeID> {

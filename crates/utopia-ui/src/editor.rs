@@ -312,9 +312,8 @@ impl Deferred {
 
 /// One editing session (§6.2, `docs/state-machines/block-editor-session.md`): the block
 /// that owns the caret together with everything that may only exist while it does. One
-/// value, so `target`, its CRDT anchor, the idle commit and the input method's queued
-/// request are created and dropped together and cannot disagree about whether a block is
-/// open.
+/// value, so `target`, the idle commit and the input method's queued request are created
+/// and dropped together and cannot disagree about whether a block is open.
 ///
 /// The variants are not boxed: the session was already stored inline as five separate
 /// fields, so the enum costs an editor entity nothing extra per edit.
@@ -328,8 +327,6 @@ pub enum EditorSession {
 #[derive(Debug)]
 pub struct Editing {
     target: EditTarget,
-    /// The caret anchored in the text CRDT, so remote edits don't move it (§6.5).
-    anchor: Option<utopia_store::DocCursor>,
     /// The idle commit an edit armed (AC-3.2). Replacing it cancels the old one.
     pending: Option<Task<()>>,
     /// What a host asked for while the input method was composing (§13.5).
@@ -349,7 +346,6 @@ impl Editing {
     fn new(target: EditTarget) -> Self {
         Self {
             target,
-            anchor: None,
             pending: None,
             deferred: None,
             pending_sync: false,
@@ -445,7 +441,6 @@ impl BlockEditor {
                 return;
             }
             target.page = e.to.clone();
-            this.anchor_caret(cx);
             cx.notify();
         });
         Self {
@@ -584,7 +579,6 @@ impl BlockEditor {
             self.field.move_to(c);
         }
         self.field.goal = goal;
-        self.anchor_caret(cx);
         window.focus(&self.focus);
         cx.notify();
     }
@@ -601,8 +595,8 @@ impl BlockEditor {
         }
         self.commit(cx);
         let was_editing = !matches!(self.session, EditorSession::Idle);
-        // Dropping the session drops the idle commit and the caret anchor with it: neither
-        // may outlive the block they belong to (machine issues 2 and 4).
+        // Dropping the session drops the idle commit with it: it may not outlive the block
+        // it belongs to (machine issue 4).
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
         if was_editing {
@@ -625,15 +619,12 @@ impl BlockEditor {
         }
         match self.stored_text(&t, cx) {
             Some(text) if text != self.field.text => {
-                // Changed underneath us (undo, rewrite, sync): keep the caret in range.
-                let anchored = self.session.editing_mut().and_then(|e| e.anchor.clone());
-                let anchored = anchored.and_then(|a| {
-                    self.app
-                        .update(cx, |app, _| app.store.resolve_caret(&t.page, &a))
-                });
-                let c = anchored.unwrap_or_else(|| self.field.cursor().min(text.len()));
+                // Changed underneath us (undo, rewrite, sync): the caret stays with the
+                // text it was in (§6.5). Worked out from the two texts, so no position has
+                // to be kept in step with the store between keystrokes and caret moves.
+                let caret = self.field.cursor();
+                let c = utopia_core::text::carry_caret(&self.field.text, &text, caret);
                 self.field.set_text(&text, c);
-                self.anchor_caret(cx);
                 // The buffer was replaced wholesale, so the menu's frozen range and items
                 // describe text that is gone (an undo, a remote edit, a plugin through the
                 // store). Re-derive it from the text that is here now (FR-2.17).
@@ -663,19 +654,6 @@ impl BlockEditor {
         self.ac = Autocomplete::Closed;
         cx.emit(EditorEvent::Blurred);
         cx.notify();
-    }
-
-    fn anchor_caret(&mut self, cx: &mut Context<Self>) {
-        let Some(t) = self.target().cloned() else {
-            return;
-        };
-        let caret = self.field.cursor();
-        let anchor = self.app.update(cx, |app, _| {
-            app.store.caret_cursor(&t.page, &t.block, caret)
-        });
-        if let Some(e) = self.session.editing_mut() {
-            e.anchor = anchor;
-        }
     }
 
     /// Run a plugin command on the block being edited and apply what it returns.
@@ -734,11 +712,10 @@ impl BlockEditor {
             }
         }
         if rewrote || run.changed.contains(&t.page) {
-            // A plugin replaced the buffer under the editor: persist what it asked for,
-            // move the CRDT caret with the new text and re-read the trigger. The anchor
-            // and the autocomplete menu were derived from the text that is gone (machine
-            // issue 3), and `settle` is the one path that makes a rewritten buffer
-            // consistent again (§13.5).
+            // A plugin replaced the buffer under the editor: persist what it asked for and
+            // re-read the trigger. The autocomplete menu was derived from the text that is
+            // gone (machine issue 3), and `settle` is the one path that makes a rewritten
+            // buffer consistent again (§13.5).
             let persisted = self.settle(cx);
             self.after_composition(window, cx, persisted);
         }
@@ -875,7 +852,6 @@ impl BlockEditor {
             }
         }
         let changed = self.persist(cx);
-        self.anchor_caret(cx);
         self.refresh_autocomplete(cx);
         changed
     }
@@ -1080,16 +1056,12 @@ impl BlockEditor {
                 .and_then(|st| st.block(&t.block).map(|b| b.text.clone()))
         });
         if let Some(after) = after.filter(|a| *a != before) {
-            let shift = after.len() as isize - before.len() as isize;
-            let c = if caret >= before.len() {
-                after.len()
-            } else {
-                (caret as isize + shift.min(0)).max(0) as usize
-            };
+            // The commit rewrote the text (NFC shortens it, a healed `#Multi Word` tag
+            // gains its `[[ ]]`): the caret stays with the text it was in, whichever way
+            // the length went (§6.5). Counting only a shrink left the caret short of its
+            // place by the brackets a healed tag put in before it.
+            let c = utopia_core::text::carry_caret(&before, &after, caret);
             self.field.set_text(&after, c);
-            // The commit may rewrite the text under the caret; the anchor has to move with
-            // it, or a remote edit lands the caret where the old text put it.
-            self.anchor_caret(cx);
             // An open menu's frozen range was measured on the text before the rewrite
             // (NFC normalization shortens `cafe` + U+0301 to `café`), so accepting it now
             // would replace the wrong bytes and eat the text that follows the query.
@@ -1133,12 +1105,9 @@ impl BlockEditor {
             Some((text, caret))
         });
         if let Some((text, caret)) = expanded {
+            // The rewrite moved the caret with it: the day's title is longer than the
+            // phrase it replaced, and a link the caret was in now ends past it.
             self.field.set_text(&text, caret);
-            // The rewrite moved the caret with it (the day's title is longer than the
-            // phrase it replaced, and a link the caret was in now ends past it), so the
-            // CRDT anchor must move too or the next store change resolves the caret back
-            // into the expanded link.
-            self.anchor_caret(cx);
             // A menu that was open described the phrase that was just replaced.
             self.refresh_autocomplete(cx);
             cx.notify();
@@ -1548,7 +1517,6 @@ impl BlockEditor {
     }
 
     fn moved(&mut self, cx: &mut Context<Self>) {
-        self.anchor_caret(cx);
         self.refresh_autocomplete(cx);
         cx.notify();
     }
@@ -2201,7 +2169,6 @@ impl BlockEditor {
             self.field.move_to(ix);
         }
         self.field.selecting = true;
-        self.anchor_caret(cx);
         self.refresh_autocomplete(cx);
         cx.notify();
     }

@@ -3218,7 +3218,6 @@ impl PageView {
         let styled =
             StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
         let layout = styled.layout().clone();
-        let same = rendered.text.as_ref() == text;
         let end = prefix + text.len();
         let row2 = row.clone();
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
@@ -3258,10 +3257,10 @@ impl PageView {
                         }
                     }
                     if let Some(r) = &row2 {
-                        let caret = match ix {
-                            Ok(i) | Err(i) if same => (prefix + i).min(end),
-                            _ => end,
-                        };
+                        // The click is answered in the rendered text; the caret goes into
+                        // the source, which markup makes longer (`[[Ana]]` shows `Ana`).
+                        let (Ok(i) | Err(i)) = ix;
+                        let caret = (prefix + rendered.source_offset(i)).min(end);
                         cx.stop_propagation();
                         this.edit(
                             r.page.clone(),
