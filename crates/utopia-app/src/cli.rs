@@ -2,9 +2,10 @@
 //! `utopia export <graph> <dir>` (G4).
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use utopia_store::Store;
+use utopia_store::{OwnerLock, Store};
 
 pub const USAGE: &str = "\
 usage:
@@ -26,6 +27,44 @@ URL and a per-launch bearer token are written to api.json in the config director
 
 sync (optional): set UTOPIA_SYNC_URL=<relay origin>, and optionally UTOPIA_SYNC_GRAPH=<id>
 and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\").";
+
+/// What a process that cannot become the graph's owner says (MC-4), in the window and on
+/// stderr.
+pub const ALREADY_OPEN: &str = "This graph is already open in Utopia";
+
+/// How long the app and the write commands try for the owner lock (docs/mcp-design.md
+/// §2.2): a headless call holds it for a short time.
+pub const OWNER_WAIT: Duration = Duration::from_secs(2);
+
+/// Become the graph's one writer (MC-4), or fail with [`ALREADY_OPEN`] after [`OWNER_WAIT`].
+pub fn take_owner(graph: &Path) -> Result<OwnerLock> {
+    match OwnerLock::acquire_within(graph, OWNER_WAIT)
+        .with_context(|| format!("locking {}", graph.display()))?
+    {
+        Some(lock) => Ok(lock),
+        None => bail!("{ALREADY_OPEN}: {}", graph.display()),
+    }
+}
+
+/// A store opened by its owner. The fields drop in order, so the store has closed before
+/// the lock is released.
+pub struct Owned {
+    pub store: Store,
+    _owner: OwnerLock,
+}
+
+/// Open a graph for writes (MC-4): the graph must exist, then the owner lock, then the store.
+/// Nothing is written when the lock stays held.
+pub fn open_owned(graph: &Path) -> Result<Owned> {
+    if !graph.exists() {
+        bail!("no graph at {}", graph.display());
+    }
+    let owner = take_owner(graph)?;
+    Ok(Owned {
+        store: open_store(graph)?,
+        _owner: owner,
+    })
+}
 
 /// Read a passphrase from the terminal without echoing it.
 fn prompt_secret(prompt: &str) -> Result<String> {
@@ -117,13 +156,17 @@ pub fn decrypt(graph: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `doctor` only reads; `doctor --rebuild` rewrites the projections, so it must own the
+/// graph (MC-4).
 pub fn doctor(graph: &Path, rebuild: bool) -> Result<bool> {
-    let mut store = open_store(graph)?;
-    if rebuild {
-        store.rebuild_index()?;
+    let report = if rebuild {
+        let mut owned = open_owned(graph)?;
+        owned.store.rebuild_index()?;
         println!("index rebuilt from page shards");
-    }
-    let report = store.doctor()?;
+        owned.store.doctor()?
+    } else {
+        open_store(graph)?.doctor()?
+    };
     println!(
         "{} live pages, {} live blocks, {} references",
         report.pages, report.blocks, report.refs
@@ -150,7 +193,8 @@ pub fn export(graph: &Path, dir: &Path) -> Result<()> {
 pub fn import_roam(graph: &Path, file: &Path) -> Result<()> {
     let json =
         std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-    // Importing may create the graph.
+    // Importing may create the graph, so the lock is taken before the file exists (MC-4).
+    let _owner = take_owner(graph)?;
     let mut store = if graph.exists() {
         open_store(graph)?
     } else {
@@ -165,7 +209,8 @@ pub fn capture(graph: &Path, text: &str) -> Result<()> {
     if text.trim().is_empty() {
         bail!("nothing to capture");
     }
-    let mut store = open_store(graph)?;
+    let mut owned = open_owned(graph)?;
+    let store = &mut owned.store;
     let (page, _) = store.capture(text.trim())?;
     let title = store.page_row(&page)?.map(|r| r.title).unwrap_or_default();
     println!("captured to {title}");
@@ -173,9 +218,9 @@ pub fn capture(graph: &Path, text: &str) -> Result<()> {
 }
 
 /// `utopia serve-api`: the automation API over a graph with no window, for scripts and
-/// servers. Runs until killed.
+/// servers. Runs until killed, and owns the graph for all of that time (MC-4).
 pub fn serve_api(graph: &Path, addr: &str, discovery: &Path) -> Result<()> {
-    let mut store = open_store(graph)?;
+    let mut owned = open_owned(graph)?;
     let server = utopia_api::serve(addr, utopia_api::new_token())?;
     server.write_discovery(discovery)?;
     println!(
@@ -185,7 +230,7 @@ pub fn serve_api(graph: &Path, addr: &str, discovery: &Path) -> Result<()> {
     );
     loop {
         if let Some(call) = server.recv_timeout(std::time::Duration::from_secs(1)) {
-            call.run(&mut store);
+            call.run(&mut owned.store);
         }
     }
 }

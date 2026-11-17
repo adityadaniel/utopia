@@ -17,6 +17,8 @@ mod doctor;
 mod export;
 pub use export::{write_export, ExportSnapshot};
 mod extras;
+mod owner;
+pub use owner::OwnerLock;
 mod pagegraph;
 mod pages;
 mod project;

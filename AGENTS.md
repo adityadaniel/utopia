@@ -72,6 +72,15 @@ the §10.4 invariants (exit 1 on problems); `export <file> <dir>` writes Markdow
 prompt); `serve-api <file> [addr]` runs the automation API without a window; a
 `utopia://…` argument opens that link.
 
+**One owner for each graph (MC-4).** A process that writes a graph first takes an exclusive
+`flock` on the `<graph>.owner` sidecar (`utopia_store::OwnerLock`, `.owner` appended to the
+canonical path; the file stays on disk on purpose). The app (before `Store::open_with_key`,
+held as long as its store), `serve-api` (its whole life), `capture`, `import-roam` and
+`doctor --rebuild` take it, trying for 2 s; if it stays held they write nothing and stop with
+"This graph is already open in Utopia" (the app shows it in the window). `doctor`, `export`
+and `Store::open` do not take it. The kernel releases it when a process stops, so a crash
+leaves no lock. A scratch graph next to an open real one still starts: the lock is per graph.
+
 **Looking at the UI.** `UTOPIA_SHOT_SCRIPT` drives the real window and captures it to PNG (an
 app may capture its own window without Screen Recording permission), e.g.
 
