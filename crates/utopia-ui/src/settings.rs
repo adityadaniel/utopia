@@ -1,4 +1,4 @@
-//! The Settings window (§9.1, `OpenSettings` / Cmd+,). Five tabs, in a list down the left
+//! The Settings window (§9.1, `OpenSettings` / Cmd+,). Six tabs, in a list down the left
 //! side as System Settings has it (ST-5):
 //!
 //! - **Appearance** — the font notes and the interface are set in (System or the bundled
@@ -19,6 +19,12 @@
 //!   "Connect another device" shows what the other instance needs, never a secret. The
 //!   pane itself is [`crate::sync_setup::SyncSetup`], installed by the app for the open
 //!   graph; without one (component tests) the tab shows the transport facts only.
+//! - **Assistants** — assistant access over MCP for this graph (PRD §13.8 MC-12): Off, Read
+//!   or Read and write, the `when_closed` switch, the setup entry to copy into each AI
+//!   client, and the state of the bridge. A change applies with no restart: the app saves
+//!   the access file and starts, stops or re-levels the loopback API. Local to this Mac and
+//!   this graph, never in the CRDT. The pane itself is [`crate::assistants::AssistantsSetup`],
+//!   installed by the app; without one (no graph open, component tests) the tab says so.
 //! - **Help** — a tour of the app's features, with screenshots taken from the app itself.
 //!
 //! Capture uses a gpui *keystroke interceptor* rather than a key-down handler on purpose:
@@ -62,6 +68,7 @@ pub enum Tab {
     Keybindings,
     Shortcuts,
     Sync,
+    Assistants,
     Help,
 }
 
@@ -72,6 +79,7 @@ impl Tab {
             Tab::Keybindings => "Keybindings",
             Tab::Shortcuts => "Shortcuts",
             Tab::Sync => "Sync",
+            Tab::Assistants => "Assistants",
             Tab::Help => "Help",
         }
     }
@@ -85,6 +93,8 @@ impl Tab {
             Tab::Keybindings => "⌘",
             Tab::Shortcuts => "☰",
             Tab::Sync => "↻",
+            // In IBM Plex Sans, unlike ⌘ or ☰: the tab list does not fall back for it.
+            Tab::Assistants => "⇄",
             Tab::Help => "?",
         }
     }
@@ -96,6 +106,7 @@ impl Tab {
             Tab::Keybindings => "keybindings",
             Tab::Shortcuts => "shortcuts",
             Tab::Sync => "sync",
+            Tab::Assistants => "assistants",
             Tab::Help => "help",
         }
     }
@@ -106,6 +117,7 @@ impl Tab {
             Tab::Keybindings,
             Tab::Shortcuts,
             Tab::Sync,
+            Tab::Assistants,
             Tab::Help,
         ]
     }
@@ -678,6 +690,7 @@ impl Render for SettingsView {
             Tab::Shortcuts => self.render_shortcuts(cx).into_any_element(),
             Tab::Appearance => self.render_appearance(cx).into_any_element(),
             Tab::Sync => self.render_sync(cx).into_any_element(),
+            Tab::Assistants => self.render_assistants(cx).into_any_element(),
             Tab::Help => self.render_help(cx).into_any_element(),
         };
         // One debug selector per element: the body names the font, the rail the density.
@@ -927,8 +940,9 @@ fn key_card_row<E: Styled + gpui::prelude::FluentBuilder>(
         .when(last, |d| d.border_b_1().rounded_b_lg())
 }
 
-/// The top of a key-list card: the category in a rounded, bordered strip.
-fn card_top(th: &Theme, label: &str) -> Div {
+/// The top of a card: the caption in a bordered strip. Used by every Settings pane that
+/// draws cards (the key list, Appearance, Assistants).
+pub(crate) fn card_top(th: &Theme, label: &str) -> Div {
     column()
         .debug_selector(move || format!("settings-card-{label}"))
         .bg(th.well)
@@ -966,10 +980,14 @@ fn key_pane(
         .track_scroll(handle)
 }
 
-/// A row of an Appearance card. Like the key list, the cards' rows are direct children of
-/// the scroll region (the header and the last row round the card's ends); a row is a touch
-/// tighter than a key row so all four preference cards fit one desktop screen.
-fn appearance_row<E: Styled + gpui::prelude::FluentBuilder>(row: E, last: bool, th: &Theme) -> E {
+/// One row of a Settings card (Appearance and Assistants). Like the key list, a card's rows
+/// are direct children of the scroll region (the header and the last row round the card's
+/// ends); a row is a touch tighter than a key row so the preference cards fit one screen.
+pub(crate) fn appearance_row<E: Styled + gpui::prelude::FluentBuilder>(
+    row: E,
+    last: bool,
+    th: &Theme,
+) -> E {
     row.w_full()
         .max_w(px(CONTENT_WIDTH))
         .mx_auto()
@@ -1694,6 +1712,33 @@ impl SettingsView {
             );
         }
         pane("help-detail", "help-detail").child(body)
+    }
+
+    /// Assistant access is provided by the app for the open graph (MC-12). Without it (no
+    /// graph open, component tests) the tab says what to do instead of drawing dead
+    /// controls.
+    fn render_assistants(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        if let Some(setup) = cx.try_global::<crate::assistants::AssistantsHandle>() {
+            return pane("settings-assistants-pane", "settings-assistants-pane")
+                .child(setup.0.clone())
+                .into_any_element();
+        }
+        let th = theme(cx).clone();
+        let density = appearance::density(cx);
+        let card = card(&th)
+            .debug_selector(|| "settings-assistants".into())
+            .child(card_title(&th, "Assistant access"))
+            .child(card_row(
+                div()
+                    .text_color(th.muted)
+                    .child("Open a graph to turn on assistant access."),
+                0,
+                &th,
+                density,
+            ));
+        pane("settings-assistants-pane", "settings-assistants-pane")
+            .child(card)
+            .into_any_element()
     }
 
     /// Setup is provided by the app for the open graph. Headless component tests can

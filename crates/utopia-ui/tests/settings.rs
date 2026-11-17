@@ -1,7 +1,14 @@
 //! The Settings keybinding editor (§9.1), driven through GPUI's headless test platform.
 
-use gpui::{px, size, TestAppContext};
+use std::cell::RefCell;
+use std::path::PathBuf;
+use std::rc::Rc;
+
+use gpui::{px, size, AppContext as _, TestAppContext};
+use utopia_api::{Access, Level};
+use utopia_mcp::SetupClient;
 use utopia_ui::actions::{active_keys, doc, install_keymap, platform_keys, Overrides, Quit};
+use utopia_ui::assistants::{AssistantsHandle, AssistantsSetup, Bridge, Request};
 use utopia_ui::settings::{SettingsView, Tab};
 use utopia_ui::theme::Theme;
 
@@ -385,13 +392,21 @@ fn side_tabs_switch_panes(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(1100.), px(760.)));
     cx.run_until_parked();
 
-    for key in ["appearance", "keybindings", "shortcuts", "sync", "help"] {
+    for key in [
+        "appearance",
+        "keybindings",
+        "shortcuts",
+        "sync",
+        "assistants",
+        "help",
+    ] {
         assert!(
             cx.debug_bounds(match key {
                 "appearance" => "settings-nav-appearance",
                 "keybindings" => "settings-nav-keybindings",
                 "shortcuts" => "settings-nav-shortcuts",
                 "sync" => "settings-nav-sync",
+                "assistants" => "settings-nav-assistants",
                 _ => "settings-nav-help",
             })
             .is_some(),
@@ -426,6 +441,15 @@ fn side_tabs_switch_panes(cx: &mut TestAppContext) {
     assert!(
         cx.debug_bounds("settings-sync").is_some(),
         "the Sync pane is drawn after the click"
+    );
+
+    let assistants = cx.debug_bounds("settings-nav-assistants").unwrap();
+    cx.simulate_click(assistants.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(view.read_with(cx, |v, _| v.tab()), Tab::Assistants);
+    assert!(
+        cx.debug_bounds("settings-assistants").is_some(),
+        "the Assistants pane is drawn after the click"
     );
 }
 
@@ -1800,4 +1824,191 @@ fn ac_13_5_sync_setup_fields_wait_for_the_input_method(cx: &mut TestAppContext) 
     view.update(cx, |v, cx| v.finish("Ready".into(), cx));
     assert_eq!(token.read_with(cx, |i, _| i.text().to_string()), "");
     assert_eq!(passphrase.read_with(cx, |i, _| i.text().to_string()), "");
+}
+
+/// Install the Assistants view the app would install for a graph, and collect the requests
+/// it emits. Returns the view and the subscription that must outlive the test.
+fn install_assistants(
+    cx: &mut TestAppContext,
+    graph: &std::path::Path,
+    notice: Option<String>,
+) -> (
+    gpui::Entity<AssistantsSetup>,
+    gpui::Subscription,
+    Rc<RefCell<Vec<Access>>>,
+) {
+    let requests: Rc<RefCell<Vec<Access>>> = Rc::default();
+    let sink = requests.clone();
+    let (view, sub) = cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+        let view = cx.new(|cx| {
+            AssistantsSetup::new(
+                Access::default(),
+                Bridge::Off,
+                notice,
+                graph.to_path_buf(),
+                PathBuf::from("/Applications/Utopia.app/Contents/MacOS/utopia"),
+                cx,
+            )
+        });
+        let sub = cx.subscribe(&view, move |_, request: &Request, _| {
+            sink.borrow_mut().push(request.access)
+        });
+        cx.set_global(AssistantsHandle(view.clone()));
+        (view, sub)
+    });
+    (view, sub, requests)
+}
+
+/// MC-12: Settings → Assistants shows the level, the `when_closed` switch, the privacy
+/// sentence and the bridge state, and a change is a request the app applies.
+#[gpui::test]
+fn mc_12_the_assistants_tab_shows_the_controls_and_requests_a_level(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("Notes.utopia");
+    let (setup, _sub, requests) = install_assistants(cx, &graph, None);
+    let path = dir.path().to_path_buf();
+    let (_view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Assistants, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    // The controls MC-12 asks for, drawn by the installed view (not the no-graph fallback).
+    for id in [
+        "settings-assistants-level-off",
+        "settings-assistants-level-read",
+        "settings-assistants-level-write",
+        "settings-assistants-privacy",
+        "settings-assistants-when-closed",
+        "settings-assistants-bridge",
+    ] {
+        assert!(cx.debug_bounds(id).is_some(), "{id} is drawn");
+    }
+    for id in [
+        "settings-assistants-copy-claude-code",
+        "settings-assistants-copy-claude-desktop",
+        "settings-assistants-copy-codex",
+    ] {
+        assert!(cx.debug_bounds(id).is_some(), "{id} is drawn");
+    }
+    assert_eq!(
+        setup.read_with(cx, |v, _| v.bridge_line()),
+        "The bridge is off."
+    );
+
+    // Off → Read is one request, and the control moves at once.
+    let read = cx.debug_bounds("settings-assistants-level-read").unwrap();
+    cx.simulate_click(read.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(requests.borrow().len(), 1, "one change, one request");
+    assert_eq!(requests.borrow()[0].level, Level::Read);
+    assert_eq!(setup.read_with(cx, |v, _| v.access.level), Level::Read);
+
+    // The switch is the second half of the same setting (MC-5).
+    let closed = cx.debug_bounds("settings-assistants-when-closed").unwrap();
+    cx.simulate_click(closed.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(requests.borrow().len(), 2);
+    assert_eq!(
+        requests.borrow()[1],
+        Access {
+            level: Level::Read,
+            when_closed: true
+        }
+    );
+
+    // What the app reports back: the saved setting and the running bridge.
+    setup.update(cx, |v, cx| {
+        v.applied(
+            Access {
+                level: Level::Read,
+                when_closed: true,
+            },
+            Bridge::Running("http://127.0.0.1:4321".into()),
+            None,
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        setup.read_with(cx, |v, _| v.bridge_line()),
+        "The bridge runs at http://127.0.0.1:4321."
+    );
+
+    // A bad access file is Off and says so instead of pretending nothing was set.
+    setup.update(cx, |v, cx| {
+        v.applied(
+            Access::default(),
+            Bridge::Off,
+            Some("assistant access is off: the file is malformed".into()),
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("settings-assistants-notice").is_some(),
+        "the notice is drawn"
+    );
+}
+
+/// MC-12/D6 A: one copy control for each client, and the text is the entry of PR 4, with
+/// this binary and this graph pinned (MC-13).
+#[gpui::test]
+fn mc_12_each_copy_control_copies_its_client_entry(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("Notes.utopia");
+    let bin = PathBuf::from("/Applications/Utopia.app/Contents/MacOS/utopia");
+    let (setup, _sub, _requests) = install_assistants(cx, &graph, None);
+    let path = dir.path().to_path_buf();
+    let (_view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Assistants, window, cx));
+    // Tall enough that all three client cards are inside the scroll viewport: only what is
+    // painted can receive a click.
+    cx.simulate_resize(size(px(1100.), px(1100.)));
+    cx.run_until_parked();
+
+    let entries = setup.read_with(cx, |v, _| v.entries());
+    assert_eq!(entries.len(), 3, "Claude Code, Claude Desktop, Codex");
+    for (client, text) in &entries {
+        assert!(
+            text.contains("/Applications/Utopia.app/Contents/MacOS/utopia"),
+            "{} names this binary: {text}",
+            client.name()
+        );
+        assert!(
+            text.contains(&graph.display().to_string()),
+            "{} pins the graph (MC-13): {text}",
+            client.name()
+        );
+    }
+
+    for (client, bounds_id, marker) in [
+        (
+            SetupClient::ClaudeCode,
+            "settings-assistants-copy-claude-code",
+            "claude mcp add",
+        ),
+        (
+            SetupClient::ClaudeDesktop,
+            "settings-assistants-copy-claude-desktop",
+            "\"args\": [\"mcp\"",
+        ),
+        (
+            SetupClient::Codex,
+            "settings-assistants-copy-codex",
+            "codex mcp add",
+        ),
+    ] {
+        let copy = cx.debug_bounds(bounds_id).unwrap();
+        cx.simulate_click(copy.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(setup.read_with(cx, |v, _| v.copied()), Some(client));
+        let copied = cx
+            .read_from_clipboard()
+            .and_then(|item| item.text())
+            .unwrap_or_default();
+        assert_eq!(copied, client.entry(&bin, Some(&graph)));
+        assert!(copied.contains(marker), "{client:?}: {copied}");
+    }
 }

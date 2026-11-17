@@ -2,6 +2,7 @@
 //! headless `doctor` / `export` commands.
 
 mod api_launch;
+mod assistants;
 mod cli;
 mod hotkey;
 mod mcp;
@@ -197,6 +198,9 @@ struct Ready {
     /// [`RunMode::Interactive`].
     _hotkey: Option<gpui::Task<()>>,
     _sync: Entity<sync_setup::Coordinator>,
+    /// Settings → Assistants: saves the access file and moves the loopback API with no
+    /// restart (MC-12).
+    _assistants: Entity<assistants::Coordinator>,
     /// `utopia://` links and the automation API (P2); always running while a graph is open.
     _inbox: gpui::Task<()>,
 }
@@ -487,8 +491,11 @@ impl Root {
                 // Links and the automation API run on the main thread against the same
                 // store the UI uses (P2: local HTTP API + utopia://). The API starts for
                 // `UTOPIA_API` or an assistant access level in the graph's access file
-                // (MC-1); with neither, there is no server.
-                let api = api_launch::start(config, &path);
+                // (MC-1); with neither, there is no server. It lives in a slot the inbox
+                // reads every tick, because Settings → Assistants may start or stop it
+                // while this app runs (MC-12).
+                let api = api_launch::ApiSlot::new(api_launch::start(config, &path));
+                let assistants = assistants::Coordinator::install(&path, config, api.clone(), cx);
                 let (ws2, app2) = (ws.clone(), app.clone());
                 let inbox = cx.spawn_in(window, async move |_, cx| loop {
                     cx.background_executor()
@@ -500,15 +507,13 @@ impl Root {
                             cx.activate(true);
                             follow_link(url, &ws2, window, cx);
                         }
-                        if let Some(server) = &api {
-                            while let Some(call) = server.try_recv() {
-                                app2.update(cx, |a, cx| {
-                                    let changed = call.run(&mut a.store);
-                                    if !changed.is_empty() {
-                                        a.changed(changed, true, cx);
-                                    }
-                                });
-                            }
+                        while let Some(call) = api.try_recv() {
+                            app2.update(cx, |a, cx| {
+                                let changed = call.run(&mut a.store);
+                                if !changed.is_empty() {
+                                    a.changed(changed, true, cx);
+                                }
+                            });
                         }
                     });
                     if r.is_err() {
@@ -526,6 +531,7 @@ impl Root {
                     ws,
                     _hotkey: hotkey,
                     _sync: sync,
+                    _assistants: assistants,
                     _inbox: inbox,
                 })
             }

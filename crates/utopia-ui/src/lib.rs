@@ -3,6 +3,7 @@
 pub mod actions;
 pub mod app_state;
 pub mod appearance;
+pub mod assistants;
 pub mod calendar;
 pub mod editor;
 pub mod field;
