@@ -12,7 +12,9 @@ anyhow.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
+utopia-api.workspace = true
 utopia-core.workspace = true
+utopia-mcp.workspace = true
 utopia-store.workspace = true
 utopia-sync.workspace = true
 utopia-syncd = { path = "../crates/utopia-syncd" }

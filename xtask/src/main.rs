@@ -10,6 +10,7 @@ use anyhow::{bail, Context, Result};
 use chrono::NaiveDate;
 use utopia_core::outline;
 use utopia_core::{BlockId, BlockKind, Command, PageId};
+use utopia_mcp::Backend as _;
 use utopia_store::{EditOpts, RefQuery, Store};
 
 struct Row {
@@ -490,6 +491,41 @@ fn bench(ui: bool) -> Result<()> {
     });
     res?;
     r.ms("Start → today's first block ready (data path)", 800.0, d);
+
+    // MC-14 (PRD §13.8, design §2.3): one headless assistant call, which is what `utopia
+    // mcp` does while the app is closed: read the access file, take the owner lock, open
+    // the store, run one `search` through `utopia_api::handle`, flush, close. The store is
+    // opened for each of the samples, as it is for each call.
+    let mcp_config = dir.path().join("mcp-config");
+    utopia_api::Access {
+        level: utopia_api::Level::Read,
+        when_closed: true,
+    }
+    .save(&utopia_api::access::access_file(&mcp_config, &path))?;
+    let backend = utopia_mcp::Router::for_graph(
+        &path,
+        &mcp_config,
+        Box::new({
+            let path = path.clone();
+            move || Store::open(&path).map_err(|e| e.to_string())
+        }),
+    );
+    let mut samples = Vec::new();
+    for _ in 0..7 {
+        let op = utopia_api::Op::Search {
+            q: "mindfulness".into(),
+            limit: 20,
+        };
+        let (res, d) = time(|| backend.call(op));
+        res.map_err(|e| anyhow::anyhow!("headless call failed: {e:?}"))?;
+        samples.push(d);
+    }
+    samples.sort();
+    r.ms(
+        "One headless assistant call, open store + search + close (MC-14)",
+        50.0,
+        samples[samples.len() / 2],
+    );
 
     // §15.1 memory: a separate process with three open pages.
     let exe = std::env::current_exe()?;

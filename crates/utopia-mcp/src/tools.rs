@@ -81,8 +81,9 @@ pub enum ToolError {
 impl From<BackendError> for ToolError {
     fn from(e: BackendError) -> Self {
         match e {
-            BackendError::Failed { message, .. } => ToolError::Failed(message),
-            BackendError::OwnedElsewhere { message } => ToolError::Failed(message),
+            BackendError::Failed { message, .. }
+            | BackendError::OwnedElsewhere { message }
+            | BackendError::NoOwnerApi { message } => ToolError::Failed(message),
         }
     }
 }
