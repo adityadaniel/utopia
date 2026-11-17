@@ -106,6 +106,10 @@ pub enum Op {
     },
     GetBlock {
         id: String,
+        /// Also return the block's live children, nested as `children` (the `read_block`
+        /// tool, PRD §13.8 MC-7). The default keeps the result every existing caller gets.
+        #[serde(default)]
+        subtree: bool,
     },
     UpdateBlock {
         id: String,
@@ -211,20 +215,60 @@ fn page_by_title(store: &Store, title: &str) -> Result<PageId, ApiError> {
         .ok_or_else(|| ApiError::new(404, format!("no page titled {title:?}")))
 }
 
-fn block_json(store: &mut Store, page: &PageId, id: &BlockId) -> Result<Value, ApiError> {
+fn block_json(
+    store: &mut Store,
+    page: &PageId,
+    id: &BlockId,
+    subtree: bool,
+) -> Result<Value, ApiError> {
     let st = store.page_state(page)?;
     let b = st
         .block(id)
         .filter(|_| st.is_live(id))
         .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?;
-    Ok(json!({
+    let mut body = json!({
         "id": id.as_str(),
         "page": page.as_str(),
         "text": b.text,
         "kind": b.kind.type_str(),
         "heading": b.kind.heading_level(),
         "checked": b.checked,
-    }))
+    });
+    if subtree {
+        body["children"] = Value::Array(
+            st.live_children(Some(id))
+                .iter()
+                .map(|c| block_node(st, c))
+                .collect(),
+        );
+    }
+    Ok(body)
+}
+
+/// One block and its live descendants, without the owning page (which the caller already
+/// knows: a subtree never crosses a page).
+fn block_node(st: &utopia_core::tree::PageState, id: &BlockId) -> Value {
+    let b = st.block(id).expect("live row exists");
+    json!({
+        "id": id.as_str(),
+        "text": b.text,
+        "kind": b.kind.type_str(),
+        "heading": b.kind.heading_level(),
+        "checked": b.checked,
+        "children": st
+            .live_children(Some(id))
+            .iter()
+            .map(|c| block_node(st, c))
+            .collect::<Vec<Value>>(),
+    })
+}
+
+/// The short hash of a block's text that `read_block` returns as `rev` and that
+/// `update_block` checks as `if_rev` (PRD §13.8 MC-10, §2.3.7). One function, so the two
+/// ends of the check cannot disagree. 12 hex digits: enough to notice an edit, short
+/// enough to read.
+pub fn block_rev(text: &str) -> String {
+    utopia_store::sha256_hex(text.as_bytes())[..12].to_string()
 }
 
 fn page_json(store: &mut Store, page: &PageId) -> Result<Value, ApiError> {
@@ -309,13 +353,13 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
                 .ok_or_else(|| ApiError::new(404, format!("no journal page for {d}")))?;
             read(page_json(store, &page)?)
         }
-        Op::GetBlock { id } => {
+        Op::GetBlock { id, subtree } => {
             let id = BlockId(id);
             let page = store
                 .block_row(&id)?
                 .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?
                 .page_id;
-            read(block_json(store, &page, &id)?)
+            read(block_json(store, &page, &id, subtree)?)
         }
         Op::Search { q, limit } => {
             let titles = store.search_titles(&q, limit)?;
@@ -334,7 +378,7 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
             let (page, block) = store.capture(&text)?;
             store.flush()?;
             Ok(Outcome {
-                body: block_json(store, &page, &block)?,
+                body: block_json(store, &page, &block, false)?,
                 changed: vec![page],
             })
         }
@@ -352,7 +396,7 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
             store.commit_block(&page, &id)?;
             store.flush()?;
             Ok(Outcome {
-                body: block_json(store, &page, &id)?,
+                body: block_json(store, &page, &id, false)?,
                 changed: vec![page],
             })
         }
@@ -396,7 +440,7 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
             store.commit_block(&page, &block)?;
             store.flush()?;
             Ok(Outcome {
-                body: block_json(store, &page, &block)?,
+                body: block_json(store, &page, &block, false)?,
                 changed: vec![page],
             })
         }
@@ -871,7 +915,7 @@ async fn append_block(
 }
 
 async fn get_block(State(c): State<Ctx>, h: HeaderMap, UrlPath(id): UrlPath<String>) -> Response {
-    call(c, h, Op::GetBlock { id }).await
+    call(c, h, Op::GetBlock { id, subtree: false }).await
 }
 
 #[derive(Deserialize)]
@@ -1077,6 +1121,86 @@ mod tests {
         }
     }
 
+    /// MC-7: `read_block` needs a block's subtree. The default answer stays the shape
+    /// every existing caller gets (no `children` key).
+    #[test]
+    fn mc_7_get_block_returns_a_subtree_only_when_asked() {
+        let (_dir, mut store) = store();
+        let append = |store: &mut Store, text: &str, parent: Option<String>| {
+            handle(
+                store,
+                Op::AppendBlock {
+                    title: "Test Page".into(),
+                    text: text.into(),
+                    parent,
+                    create: true,
+                },
+            )
+            .unwrap()
+            .body
+        };
+        let root = append(&mut store, "root", None);
+        let root_id = root["id"].as_str().unwrap().to_string();
+        let child = append(&mut store, "child", Some(root_id.clone()));
+        let child_id = child["id"].as_str().unwrap().to_string();
+        let leaf = append(&mut store, "leaf", Some(child_id.clone()));
+        let leaf_id = leaf["id"].as_str().unwrap().to_string();
+        assert_eq!(child["page"], root["page"], "same page");
+
+        let plain = handle(
+            &mut store,
+            Op::GetBlock {
+                id: root_id.clone(),
+                subtree: false,
+            },
+        )
+        .unwrap()
+        .body;
+        assert!(plain.get("children").is_none(), "no subtree unless asked");
+        assert_eq!(plain["text"], "root");
+
+        let sub = handle(
+            &mut store,
+            Op::GetBlock {
+                id: root_id.clone(),
+                subtree: true,
+            },
+        )
+        .unwrap()
+        .body;
+        assert_eq!(sub["children"][0]["id"], child_id.as_str());
+        assert_eq!(sub["children"][0]["text"], "child");
+        assert_eq!(sub["children"][0]["children"][0]["id"], leaf_id.as_str());
+        assert_eq!(
+            sub["children"][0]["children"][0]["children"],
+            json!([]),
+            "a leaf has an empty children list"
+        );
+        // A child read on its own is just its own subtree.
+        let from_child = handle(
+            &mut store,
+            Op::GetBlock {
+                id: child_id.clone(),
+                subtree: true,
+            },
+        )
+        .unwrap()
+        .body;
+        assert_eq!(from_child["children"][0]["text"], "leaf");
+        assert_eq!(from_child["children"][0]["children"], json!([]));
+    }
+
+    /// MC-10: `rev` is a short hash of the text, so an edit changes it and the same text
+    /// always gives the same value.
+    #[test]
+    fn mc_10_the_block_rev_tracks_the_text() {
+        assert_eq!(block_rev("one"), block_rev("one"));
+        assert_ne!(block_rev("one"), block_rev("one "));
+        assert_eq!(block_rev("one").len(), 12);
+        assert!(block_rev("one").chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(block_rev(""), block_rev("\n"));
+    }
+
     /// MC-3: the MCP bridge sends `Op` values over `/v1/op`, so each one must serialize to
     /// the JSON shape it reads, and read back as itself.
     #[test]
@@ -1113,8 +1237,18 @@ mod tests {
                 json!({"op": "append_block", "title": "A", "text": "t", "parent": null, "create": false}),
             ),
             (
-                Op::GetBlock { id: "b1".into() },
-                json!({"op": "get_block", "id": "b1"}),
+                Op::GetBlock {
+                    id: "b1".into(),
+                    subtree: false,
+                },
+                json!({"op": "get_block", "id": "b1", "subtree": false}),
+            ),
+            (
+                Op::GetBlock {
+                    id: "b1".into(),
+                    subtree: true,
+                },
+                json!({"op": "get_block", "id": "b1", "subtree": true}),
             ),
             (
                 Op::UpdateBlock {
