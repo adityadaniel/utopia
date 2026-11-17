@@ -58,9 +58,9 @@ const KEY_LIST_LEADING: usize = 2;
 /// Screenshots are shown at a fixed size. gpui derives an image's aspect ratio from the
 /// decoded bytes, but that lands a frame after layout, so a width alone leaves the element
 /// at its intrinsic height; giving both keeps the box the right shape from the first frame.
-/// Every capture is the same window, so one ratio covers them all (see `xtask help-shots`).
+/// The height comes from the capture's own ratio, because a capture of the Settings window
+/// is taller than one of the main window (see `xtask help-shots`).
 const HELP_SHOT_WIDTH: f32 = 640.;
-const HELP_SHOT_HEIGHT: f32 = HELP_SHOT_WIDTH * 798. / 1200.;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tab {
@@ -1694,7 +1694,7 @@ impl SettingsView {
         if !shortcuts.is_empty() {
             body = body.child(div().flex().flex_wrap().gap_3().pt_1().children(shortcuts));
         }
-        if let Some(image) = shot_image(t) {
+        if let Some((image, ratio)) = shot_image(t) {
             body = body.child(
                 div()
                     .debug_selector(|| "help-shot".into())
@@ -1704,7 +1704,7 @@ impl SettingsView {
                     .child(
                         img(image)
                             .w(px(HELP_SHOT_WIDTH))
-                            .h(px(HELP_SHOT_HEIGHT))
+                            .h(px(HELP_SHOT_WIDTH * ratio))
                             .rounded(px(crate::theme::RADIUS_CONTROL))
                             .border_1()
                             .border_color(th.line),

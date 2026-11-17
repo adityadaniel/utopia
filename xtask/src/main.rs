@@ -1379,8 +1379,10 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
 ///
 /// Builds the app, seeds a mock graph, then drives the real window with
 /// `UTOPIA_SHOT_SCRIPT` and captures it. The app captures its own window, so this needs no
-/// Screen Recording permission. The Settings window is a separate window and so cannot be
-/// captured by the script, which drives one window only; Help does not show one.
+/// Screen Recording permission. `target last` drives the Settings window, which is a second
+/// window; it is captured at the Assistants tab, whose client entries name the path of the
+/// running binary, so the app is started from a bundle-shaped copy rather than
+/// `target/debug/utopia`.
 fn help_shots() -> Result<()> {
     use std::process::Command as Proc;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1408,6 +1410,26 @@ fn help_shots() -> Result<()> {
     let out = root.join("crates/utopia-ui/assets/help");
     std::fs::create_dir_all(&out)?;
     let png = |name: &str| out.join(format!("{name}.png")).display().to_string();
+    // The Settings → Assistants entries name the binary that runs, and this picture is
+    // embedded in every build, so it must not show `target/debug`. A copy under a bundle
+    // shape reads like the install the owner has.
+    let bundle = scratch.join("Utopia.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundle)?;
+    let bin = bundle.join("utopia");
+    if bin.exists() {
+        std::fs::remove_file(&bin)?;
+    }
+    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .map(|p| if p.is_absolute() { p } else { root.join(p) })
+        .unwrap_or_else(|| root.join("target"));
+    let built = target.join("debug/utopia");
+    anyhow::ensure!(
+        std::fs::hard_link(&built, &bin).is_ok() || std::fs::copy(&built, &bin).is_ok(),
+        "could not place the app at {}",
+        bin.display()
+    );
     // One run, several captures: each `wait` gives the UI time to settle before `shot`.
     let script = [
         "wait 900".to_string(),
@@ -1441,15 +1463,21 @@ fn help_shots() -> Result<()> {
         "keys cmd-shift-g".to_string(),
         "wait 1200".to_string(),
         format!("shot {}", png("graph")),
+        // Settings → Assistants, for the topic that documents it. A click only lands on a
+        // frame that was painted, hence the throwaway capture before it; the Assistants row
+        // is the fifth of the tab list, at this point in an 1100 × 760 window.
+        "keys cmd-,".to_string(),
+        "wait 1500".to_string(),
+        "target last".to_string(),
+        "wait 700".to_string(),
+        format!("shot {}", scratch.join("settings-throwaway.png").display()),
+        "click 60 245".to_string(),
+        "wait 900".to_string(),
+        format!("shot {}", png("assistants")),
     ]
     .join("; ");
 
-    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .map(|p| if p.is_absolute() { p } else { root.join(p) })
-        .unwrap_or_else(|| root.join("target"));
-    let status = Proc::new(target.join("debug/utopia"))
+    let status = Proc::new(&bin)
         .current_dir(&root)
         .arg("--graph")
         .arg(&graph)
@@ -1458,7 +1486,7 @@ fn help_shots() -> Result<()> {
         .status()?;
     anyhow::ensure!(status.success(), "the app exited with {status}");
 
-    // Downscale so the binary does not carry six full-resolution Retina captures.
+    // Downscale so the binary does not carry full-resolution Retina captures.
     for name in [
         "daily-notes",
         "quick-jump",
@@ -1466,6 +1494,7 @@ fn help_shots() -> Result<()> {
         "search",
         "links",
         "graph",
+        "assistants",
     ] {
         let p = out.join(format!("{name}.png"));
         anyhow::ensure!(p.exists(), "{} was not captured", p.display());

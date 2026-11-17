@@ -1,8 +1,10 @@
 # MCP support: design
 
 Status: design, written on 2026-11-10. The owner answered each decision on 2026-11-16
-(§1.1). The implementation started on 2026-11-16. `docs/mcp-handoff.md` has the state of
-each pull request and a brief for each one that is not started.
+(§1.1). It is built up to slice 2.2: the owner lock, `POST /v1/op` and the access file, the
+`utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
+subcommand and the headless path, Settings → Assistants, and this documentation. The write
+tools (§8.4) are not built. `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
@@ -166,6 +168,7 @@ explains why a lock on the database file itself is not possible on macOS.
 | `utopia mcp`, for each tool call | Tries the lock and does not wait. |
 | → the lock is free | The headless path (§2.3), if `when_closed` permits it. |
 | → the lock is held | Sends the `Op` to the owner through the loopback API. |
+| → the lock is held and nothing answers there | Tries the lock once more for 2 s (a short CLI write may hold it), then says the graph is open but does not answer (§3.1, step 4). |
 
 - The lock is the truth. The discovery file is only an address.
 - The discovery file moves from `<config>/api.json` to
@@ -173,10 +176,12 @@ explains why a lock on the database file itself is not possible on macOS.
   holds `{url, token}` as it does today.
 - There is no handoff protocol. The kernel releases the lock when a process stops, so a
   crash leaves no stale lock.
-- The app takes the lock before `Store::open_with_key` (`crates/utopia-app/src/main.rs:394`).
+- The app takes the lock before `Store::open_with_key` (`crates/utopia-app/src/main.rs:413`).
   It tries again for 2 seconds, because a headless call holds the lock for a short time.
-- If the lock stays held, the app shows "This graph is already open in Utopia" and quits.
-  It does not open the store.
+- If the lock stays held, the app shows "This graph is already open in Utopia" in its window
+  and does not open the store.
+- The window stays open with that message, as it does for every other failure to open a
+  graph; it holds no store and no lock (slice 1.1).
 - `capture` and `import-roam` use the same rule: they send the work to the owner, or stop
   with the same message. `capture` goes to the owner as `Op::Capture` (D10). `import-roam`
   has no `Op`, so it stops when the lock is held.
@@ -583,6 +588,12 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 ## 10. Limits
 
 - **No sync when the app is closed.** See §2.3.
+- **The write tools do not exist yet.** The level `Read and write` can be set, and the route
+  enforces it (a write op sent to `/v1/op` is permitted at that level), but `tools/list`
+  offers the six read tools only. Slices 3.1 to 3.3 add the four write tools.
+- **`serve-api` reads the access file once**, when it starts, so a level changed while it
+  runs applies to `/v1/op` when it restarts. The app re-levels its own server at once
+  (MC-12); the two processes' levels can differ in between.
 - **Encrypted graphs on the headless path** need a passphrase that the process can read
   without a prompt.
 - **The headless call costs 1.4 ms** (median of 7, release, `xtask bench` on the
