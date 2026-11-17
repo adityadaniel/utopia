@@ -11,6 +11,7 @@
 //! | `get_backlinks` | `page` | [`Op::Backlinks`] |
 //! | `run_query` | `query`, `limit` | [`Op::Query`] |
 //! | `append_blocks` | `page`, `markdown`, `parent`, `create` | [`Op::AppendOutline`] |
+//! | `update_block` | `id`, `text`, `kind`, `checked`, `if_rev` | [`Op::UpdateBlock`] |
 //!
 //! Two rules shape the output. Page text appears only in results, never in a description or
 //! in [`INSTRUCTIONS`] (MC-11): those are constants of this file. And one result is cut at
@@ -35,7 +36,7 @@ use std::collections::HashMap;
 
 use chrono::NaiveDate;
 use serde_json::{json, Map, Value};
-use utopia_api::{block_rev, Op, OpKind};
+use utopia_api::{block_rev, strip_id_markers, Op, OpKind};
 use utopia_core::date::{iso, parse_iso, relative_date};
 
 use crate::backend::{Backend, BackendError};
@@ -70,7 +71,12 @@ append_blocks takes such an outline back, in the same format, and ignores those 
 A read never creates anything: a day with no page reads as an empty outline. A result
 longer than 24 KB is cut at a block boundary and ends with a line that says how many
 blocks are missing and gives an `after` id: pass that id back to the same call to read the
-next part.";
+next part.
+
+update_block changes one block: its text, its kind (bullet, numbered, to-do, quote, code
+or a heading) or whether a to-do is done. read_block gives the block's rev; send it back
+as if_rev and the call fails, writing nothing, when the block changed since you read it.
+Every update_block call is one undo step in Utopia.";
 
 /// What a tool call answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +195,20 @@ const CATALOG: &[Tool] = &[
         idempotent: false,
         schema: schema_append_blocks,
         run: run_append_blocks,
+    },
+    Tool {
+        name: "update_block",
+        description: "Change one block: its text, its kind (bullet, to-do, heading, …) or \
+                      whether a to-do is done. Send `if_rev` from read_block and the call \
+                      fails, writing nothing, when the block changed since you read it. The \
+                      whole change is one undo step, and the answer gives the block with its \
+                      new rev.",
+        kind: OpKind::Write,
+        // Design §4.1: it replaces a block's text, which is the only copy of those words.
+        destructive: true,
+        idempotent: true,
+        schema: schema_update_block,
+        run: run_update_block,
     },
 ];
 
@@ -311,6 +331,34 @@ impl Args<'_> {
             Some(Value::Bool(b)) => Ok(*b),
             Some(other) => Err(ToolError::Failed(format!(
                 "The `{key}` argument must be true or false, not {other}."
+            ))),
+        }
+    }
+
+    /// An optional true/false argument: absent and `null` both mean "not given".
+    fn optional_boolean(&self, key: &str) -> Result<Option<bool>, ToolError> {
+        match self.map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::Bool(b)) => Ok(Some(*b)),
+            Some(other) => Err(ToolError::Failed(format!(
+                "The `{key}` argument must be true or false, not {other}."
+            ))),
+        }
+    }
+
+    /// An optional text argument that keeps its whitespace, like [`Args::text`]. An empty
+    /// one is refused: emptying a block is not something these tools do, and a model that
+    /// meant to write a word should learn that it did not, not lose the block's text.
+    fn optional_text(&self, key: &str) -> Result<Option<String>, ToolError> {
+        match self.map.get(key) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(s)) if !s.trim().is_empty() => Ok(Some(s.clone())),
+            Some(Value::String(_)) => Err(ToolError::Failed(format!(
+                "The `{key}` argument is empty: send the block's new text, or leave `{key}` \
+                 out to keep the text it has."
+            ))),
+            Some(other) => Err(ToolError::Failed(format!(
+                "The `{key}` argument must be a string, not {other}."
             ))),
         }
     }
@@ -470,6 +518,51 @@ fn schema_append_blocks() -> Value {
     })
 }
 
+fn schema_update_block() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "The block's id, as an outline line's {id:…} marker gives it.",
+            },
+            "text": {
+                "type": "string",
+                "description": "The block's new text, in Utopia markup ([[Page]], #tag, \
+                                ((block-id)), key:: value). A line copied from read_page or \
+                                read_block may be sent as it was shown: its {id:…} marker \
+                                and the outline's - , [ ] , ## and > prefixes are taken off, \
+                                and `kind` and `checked` set the kind. Leave it out to keep \
+                                the text the block has.",
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["bullet", "numbered", "todo", "quote", "code", "heading",
+                         "h1", "h2", "h3"],
+                "description": "The block's new kind. `heading` keeps the level of a \
+                                heading and makes any other block a heading 1; h1, h2 and h3 \
+                                pick a level. Leave it out to keep the kind.",
+            },
+            "checked": {
+                "type": "boolean",
+                "description": "Whether a to-do is done. Only a to-do has this state: send \
+                                kind \"todo\" in the same call if the block is not one yet. \
+                                Leave it out to keep it.",
+            },
+            "if_rev": {
+                "type": "string",
+                "description": "The rev that read_block gave this block. When the block's \
+                                text changed since, the call fails and writes nothing, so a \
+                                concurrent edit is not overwritten: read the block again and \
+                                send the text and rev it gives you. Leave it out to write \
+                                regardless.",
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": false,
+    })
+}
+
 // ---------------------------------------------------------------------------------------
 // The six read tools
 
@@ -550,6 +643,84 @@ fn run_append_blocks(backend: &dyn Backend, args: &Args<'_>) -> Result<String, T
         create,
     })?;
     Ok(render_append(&body))
+}
+
+fn run_update_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
+    let id = args.string("id")?;
+    let text = match args.optional_text("text")?.map(block_text) {
+        // A line that was nothing but its marker leaves no text: wiping the block is not
+        // what an agent's turn is for, so it is refused like an empty `text` is.
+        Some(t) if t.trim().is_empty() => {
+            return Err(ToolError::Failed(
+                "The `text` argument is empty once the outline's {id:…} marker is taken off: \
+                 send the block's new text, or leave `text` out to keep the text it has."
+                    .to_string(),
+            ))
+        }
+        other => other,
+    };
+    let kind = args.optional_string("kind")?;
+    let checked = args.optional_boolean("checked")?;
+    let if_rev = args.optional_string("if_rev")?;
+    if text.is_none() && kind.is_none() && checked.is_none() {
+        return Err(ToolError::Failed(
+            "Send `text`, `kind` or `checked`: there is nothing for update_block to change."
+                .to_string(),
+        ));
+    }
+    let body = backend.call(Op::UpdateBlock {
+        id,
+        text,
+        kind,
+        checked,
+        if_rev,
+    })?;
+    Ok(render_update(&body))
+}
+
+/// A `text` argument as the block should hold it (PRD §13.8 MC-8, design §4).
+///
+/// The id marker of the outline format always comes off, exactly as it does for
+/// `append_blocks` (handoff §5), and so does the newline that ended a copied line: a block's
+/// text carries neither the marker nor the outline's line breaks.
+///
+/// The outline's own punctuation — `- `, then the `[ ] `, `[x] `, `> ` or `#` prefix
+/// [`block_line`] writes for a kind — comes off the first line **only when that line carried
+/// the marker**, i.e. when it is a line `read_page` or `read_block` wrote and an agent sent
+/// it back. Those prefixes show the block's kind, which `kind` and `checked` set, so a copied
+/// line lands as the text and not as markup. A text without a marker is the caller's own and
+/// is left exactly as given, including a leading `- ` or `>`: nothing guesses at characters
+/// the agent may have meant (rule 5). `append_blocks` has no such split — `parse_outline`
+/// requires the `- ` — so its limit stays as design §10 records it.
+fn block_text(text: String) -> String {
+    let copied = text
+        .lines()
+        .next()
+        .is_some_and(|line| strip_id_markers(line) != line);
+    let text = strip_id_markers(&text);
+    let text = text.trim_end_matches(['\n', '\r']);
+    match copied {
+        true => strip_outline_prefix(text).to_string(),
+        false => text.to_string(),
+    }
+}
+
+/// [`block_text`] on a copied line: the indentation, the `- ` and the kind prefix that
+/// [`block_line`] writes, leaving the block's text.
+fn strip_outline_prefix(line: &str) -> &str {
+    let rest = line.trim_start_matches([' ', '\t']);
+    let Some(rest) = rest.strip_prefix("- ") else {
+        // A copied empty block is the line `- {id:…}`, and taking the marker off leaves the
+        // bare dash: an empty text, which the call refuses rather than writing "-".
+        return if rest == "-" { "" } else { line };
+    };
+    // Longest first, so a level-3 heading does not read as a level-2 one.
+    for prefix in ["[ ] ", "[x] ", "> ", "### ", "## ", "# "] {
+        if let Some(text) = rest.strip_prefix(prefix) {
+            return text;
+        }
+    }
+    rest
 }
 
 /// The day a `page` argument names, if it names one: `today`, `yesterday` or an ISO date.
@@ -814,6 +985,18 @@ fn render_append(body: &Value) -> String {
         )),
         _ => {}
     }
+    doc.finish()
+}
+
+/// What `update_block` answers: the block as the page now shows it, and the `rev` that a
+/// second call can send back as `if_rev` without reading the block again (MC-10).
+fn render_update(body: &Value) -> String {
+    let id = body["id"].as_str().unwrap_or_default();
+    let text = body["text"].as_str().unwrap_or_default();
+    let mut doc = Doc::outline("Updated the block. It now reads:\n");
+    doc.block(block_line(body, 0, text), id);
+    doc.line(format!("rev: {}", block_rev(text)));
+    doc.line("Send that rev as `if_rev` to change this block again without reading it first.");
     doc.finish()
 }
 
@@ -1245,26 +1428,29 @@ mod tests {
     fn mc_11_the_catalog_is_a_constant() {
         let a = list(false);
         assert_eq!(a, list(false));
-        assert_eq!(a.len(), 7, "the six read tools and append_blocks");
+        assert_eq!(a.len(), 8, "the six read tools and the two write tools");
         for t in &a {
             let name = t["name"].as_str().unwrap();
             // Design §4.1: `destructiveHint` and `openWorldHint` default to true in the
             // 2026-07-28 schema, so every tool sets all four hints.
-            let want = if name == "append_blocks" {
-                json!({"readOnlyHint": false, "destructiveHint": false,
-                       "idempotentHint": false, "openWorldHint": false})
-            } else {
-                json!({"readOnlyHint": true, "destructiveHint": false,
-                       "idempotentHint": true, "openWorldHint": false})
+            let want = match name {
+                "append_blocks" => json!({"readOnlyHint": false, "destructiveHint": false,
+                                          "idempotentHint": false, "openWorldHint": false}),
+                "update_block" => json!({"readOnlyHint": false, "destructiveHint": true,
+                                         "idempotentHint": true, "openWorldHint": false}),
+                _ => json!({"readOnlyHint": true, "destructiveHint": false,
+                            "idempotentHint": true, "openWorldHint": false}),
             };
             assert_eq!(t["annotations"], want, "{name}");
             assert_eq!(t["inputSchema"]["type"], "object", "{name}");
         }
-        // MC-2: `--read-only` removes the write tool for this process.
+        // MC-2: `--read-only` removes the write tools for this process.
         let readonly = list(true);
         assert_eq!(readonly.len(), 6);
         assert!(
-            readonly.iter().all(|t| t["name"] != "append_blocks"),
+            readonly
+                .iter()
+                .all(|t| t["annotations"]["readOnlyHint"] == json!(true)),
             "no write tool in a read-only list"
         );
         // The description states the limit the op enforces (MC-8).
@@ -1279,6 +1465,14 @@ mod tests {
         );
         assert!(!INSTRUCTIONS.is_empty());
         assert!(INSTRUCTIONS.contains("append_blocks"), "the guide names it");
+        assert!(
+            INSTRUCTIONS.contains("update_block"),
+            "and the other write tool"
+        );
+        assert!(
+            INSTRUCTIONS.contains("if_rev"),
+            "and how it avoids an overwrite"
+        );
     }
 
     /// MC-8: what `append_blocks` answers: how much landed and the ids at either end, and
@@ -1298,6 +1492,65 @@ mod tests {
             "Appended 1 block to \"A day\".\n\
              The new block is 01A; read_block takes that id.\n"
         );
+    }
+
+    /// MC-8, MC-10: what `update_block` answers: the block as the page now shows it, then
+    /// the rev a second call can send back as `if_rev` without reading the block again.
+    #[test]
+    fn mc_8_the_update_result_carries_the_block_and_its_rev() {
+        let body = json!({"id": "01A", "text": "buy milk", "kind": "todo",
+                          "heading": null, "checked": true});
+        let text = render_update(&body);
+        assert_eq!(
+            text.lines().next(),
+            Some("Updated the block. It now reads:")
+        );
+        assert!(text.contains("\n- [x] buy milk {id:01A}\n"), "{text}");
+        assert!(
+            text.contains(&format!("\nrev: {}\n", block_rev("buy milk"))),
+            "{text}"
+        );
+        assert!(text.contains("if_rev"), "{text}");
+
+        let heading = json!({"id": "01B", "text": "Plan", "kind": "heading",
+                             "heading": 2, "checked": null});
+        assert!(
+            render_update(&heading).contains("\n- ## Plan {id:01B}\n"),
+            "a heading keeps the outline format's prefix"
+        );
+    }
+
+    /// MC-8: a line copied from `read_block` arrives as the block's text — the outline's
+    /// `- ` and kind prefix, the marker and the newline are the reader's, not the block's.
+    #[test]
+    fn mc_8_the_update_text_loses_the_outline_and_keeps_the_text() {
+        for (sent, want) in [
+            ("buy milk {id:01J8Z3K9V2}", "buy milk"),
+            ("buy milk {id:01J8Z3K9V2}\n", "buy milk"),
+            ("- buy milk {id:01A}", "buy milk"),
+            ("- [ ] buy milk {id:01A}", "buy milk"),
+            ("- [x] buy milk {id:01A}\r\n", "buy milk"),
+            ("- > buy milk {id:01A}", "buy milk"),
+            ("- # buy milk {id:01A}", "buy milk"),
+            ("- ## buy milk {id:01A}", "buy milk"),
+            ("- ### buy milk {id:01A}", "buy milk"),
+            // A nested block's line carries its indentation.
+            ("  - [ ] buy milk {id:01A}", "buy milk"),
+            // A marker in the middle of a line is text, as it is for `append_blocks`.
+            ("see {id:01A} here", "see {id:01A} here"),
+            // A text the agent wrote itself is left exactly as given, a leading dash too.
+            ("- buy milk", "- buy milk"),
+            ("[ ] buy milk", "[ ] buy milk"),
+            ("one\ntwo {id:01A}\r\n", "one\ntwo"),
+            // A marker on a later line leaves the first line's prefix alone: only a line the
+            // outline wrote, with its marker on it, is the outline's.
+            ("- [ ] one\ntwo {id:01A}", "- [ ] one\ntwo"),
+            // A text that was only a copied line leaves nothing, which the call refuses.
+            ("- {id:01A}", ""),
+            (" {id:01A}", ""),
+        ] {
+            assert_eq!(block_text(sent.into()), want, "{sent:?}");
+        }
     }
 
     #[test]

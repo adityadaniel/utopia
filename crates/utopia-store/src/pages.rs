@@ -567,6 +567,63 @@ impl Store {
         Ok(())
     }
 
+    /// Change a block's text, its kind and whether it is checked in **one** undo group
+    /// (PRD §13.8 MC-8, MC-9; FR-2.12, FR-2.13): `Op::UpdateBlock`. `None` leaves that part
+    /// of the block alone.
+    ///
+    /// The text is shaped as [`Store::commit_block`] shapes it — NFC and the hashtag
+    /// longest-match rule — before the commands are built, so the commit a caller runs next
+    /// finds nothing to rewrite: one call is one step on the undo stack whatever parts of it
+    /// change. A block that stops being a to-do is not left ticked, because only a to-do has
+    /// that state. Returns whether anything changed.
+    pub fn update_block(
+        &mut self,
+        page: &PageId,
+        block: &BlockId,
+        text: Option<&str>,
+        kind: Option<BlockKind>,
+        checked: Option<bool>,
+    ) -> Result<bool> {
+        // `heal_tags` reads live titles from the index (rule 2).
+        self.sync_index()?;
+        let st = self.page_state(page)?;
+        let Some(b) = st.block(block).filter(|_| st.is_live(block)) else {
+            return Err(StoreError::NotFound(format!("block {block}")));
+        };
+        let (old_text, old_kind, old_checked) = (b.text.clone(), b.kind, b.checked);
+        let kind = kind.unwrap_or(old_kind);
+        // A kind change carries `checked` with it: only a to-do has that state, so a block
+        // that stops being one is never left ticked.
+        let checked = checked.unwrap_or(if kind == old_kind { old_checked } else { false });
+        let mut cmds = Vec::new();
+        if let Some(t) = text {
+            let mut new = nfc(t);
+            if let Some(healed) = heal_tags(&new, |p| self.is_live_title(p)) {
+                new = healed;
+            }
+            if let Some(edit) = diff(&old_text, &new) {
+                cmds.push(Command::SetBlockText {
+                    id: block.clone(),
+                    edit,
+                });
+            }
+        }
+        if kind != old_kind || checked != old_checked {
+            cmds.push(Command::SetBlockKind {
+                id: block.clone(),
+                kind,
+                checked,
+            });
+        }
+        if cmds.is_empty() {
+            return Ok(false);
+        }
+        // `EditOpts::default()` leaves the group sealed, so an agent's change never
+        // coalesces into the text the owner was typing (FR-2.12).
+        self.execute(page, cmds, EditOpts::default())?;
+        Ok(true)
+    }
+
     /// Append an indented Markdown outline in one commit and one undo step (PRD §13.8 MC-8,
     /// MC-9; FR-2.10): an agent's `append_blocks` and any other caller of
     /// `Op::AppendOutline`. The blocks go last, under `parent` or at the end of the page.
