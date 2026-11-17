@@ -148,6 +148,146 @@ fn undo_redo_from_the_editor(cx: &mut TestAppContext) {
     assert!(r.iter().any(|(t, _)| t.contains('x')), "{r:?}");
 }
 
+/// The first live block of today's page, as a `Script` would address it.
+fn first_block(
+    app: &Entity<AppState>,
+    page: &PageId,
+    cx: &mut VisualTestContext,
+) -> utopia_core::BlockId {
+    app.update(cx, |app, _| {
+        app.store
+            .page_state(page)
+            .unwrap()
+            .live_roots()
+            .first()
+            .cloned()
+            .expect("the page has a block")
+    })
+}
+
+/// Run one agent operation the way the app's inbox does: `utopia_api::handle` on the app's
+/// own store (rule 13, MC-3), then announce the pages it changed so views and the editor
+/// catch up. Returns the pages, or the refusal's text.
+fn agent_call(
+    app: &Entity<AppState>,
+    op: utopia_api::Op,
+    cx: &mut VisualTestContext,
+) -> Result<Vec<PageId>, String> {
+    let r = app.update(cx, |app, _| {
+        utopia_api::handle(&mut app.store, op).map(|o| o.changed)
+    });
+    match r {
+        Ok(changed) => {
+            app.update(cx, |app, cx| app.changed(changed.clone(), true, cx));
+            cx.run_until_parked();
+            Ok(changed)
+        }
+        Err(e) => Err(e.message),
+    }
+}
+
+/// §2.3.7 and MC-10: an agent's `update_block` on the block the caret is in. The call
+/// replaces the line (`update_block` sets the text, as the owner selecting all and typing
+/// would), and the editor shows the new line without losing the caret: the next character
+/// typed lands in that block, after the agent's text. Slice 3.4 checked this in the real
+/// app (`docs/verification/docs-mcp-write-check/`); this keeps it from regressing.
+#[gpui::test]
+fn mc_10_a_write_to_the_caret_block_keeps_the_caret(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("owner typed this: ");
+    cx.run_until_parked();
+    let block = first_block(&app, &page, cx);
+
+    let changed = agent_call(
+        &app,
+        utopia_api::Op::UpdateBlock {
+            id: block.0.clone(),
+            text: Some("The assistant wrote this.".into()),
+            kind: None,
+            checked: None,
+            if_rev: None,
+        },
+        cx,
+    )
+    .expect("the update runs");
+    assert_eq!(
+        changed,
+        vec![page.clone()],
+        "a write says which page it changed"
+    );
+
+    // The editor is still editing that block and shows what the store now holds.
+    let editor = ws.update(cx, |w, _| w.editor());
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.target().map(|t| t.block.clone())),
+        Some(block),
+        "the caret is still in the block the agent wrote"
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.field_text().to_string()),
+        "The assistant wrote this."
+    );
+
+    // A character typed now is not lost: it lands after the agent's line, in the same block.
+    cx.simulate_input("!");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("The assistant wrote this.!", 0)]
+    );
+    assert!(
+        app.update(cx, |app, _| app.store.doctor().unwrap().is_ok()),
+        "MC-3: doctor is clean"
+    );
+}
+
+/// MC-10 (§2.3.7): with the caret in the block, the `if_rev` an agent read before the owner
+/// typed does not agree, so the call writes nothing, says to read the block again, and the
+/// typed characters stay exactly where they were — one more keystroke still lands after
+/// them. This is the caret case the write level leans on.
+#[gpui::test]
+fn mc_10_a_stale_if_rev_keeps_the_typed_text_while_the_caret_is_in_the_block(
+    cx: &mut TestAppContext,
+) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("owner typed this: ");
+    cx.run_until_parked();
+    let block = first_block(&app, &page, cx);
+
+    let refusal = agent_call(
+        &app,
+        utopia_api::Op::UpdateBlock {
+            id: block.0.clone(),
+            text: Some("The assistant overwrote it.".into()),
+            kind: None,
+            checked: None,
+            if_rev: Some("000000000000".into()),
+        },
+        cx,
+    )
+    .expect_err("a stale if_rev is refused");
+    assert!(refusal.contains("read_block"), "{refusal}");
+
+    // Nothing was written, and the editor still holds the text the owner typed.
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("owner typed this: ", 0)]
+    );
+    let editor = ws.update(cx, |w, _| w.editor());
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.field_text().to_string()),
+        "owner typed this: "
+    );
+    cx.simulate_input("!");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("owner typed this: !", 0)]
+    );
+}
+
 #[gpui::test]
 fn tag_suggestion_accepts_then_enter_splits(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup(cx);

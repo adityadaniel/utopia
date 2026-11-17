@@ -1,12 +1,14 @@
 # MCP support: design
 
 Status: design, written on 2026-11-10. The owner answered each decision on 2026-11-16
-(§1.1). It is built up to slice 3.3: the owner lock, `POST /v1/op` and the access file, the
+(§1.1). It is built up to slice 3.4: the owner lock, `POST /v1/op` and the access file, the
 `utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
-subcommand and the headless path, Settings → Assistants, this documentation, and the four
-write tools — `append_blocks` (slice 3.1), `update_block` (slice 3.2), `move_block` and
-`delete_block` (slice 3.3, PR 9). Slice 3.4, the write check with the real clients, is not
-done. `docs/mcp-handoff.md` has the state of each pull request.
+subcommand and the headless path, Settings → Assistants, this documentation, the four write
+tools — `append_blocks` (slice 3.1), `update_block` (slice 3.2), `move_block` and
+`delete_block` (slice 3.3, PR 9) — and the write check with the real clients (slice 3.4,
+PR 10): Claude Code and Codex each wrote once on a scratch graph, and the block that has the
+caret was examined (§10). The Claude Desktop run still needs the owner, because it takes an
+entry in the owner's config file (§10). `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
@@ -477,7 +479,10 @@ an agent never writes to a graph that the owner did not select.
 
   Each one read the graph with the app closed (`when_closed` on) and with the app open
   (through `/v1/op`). Claude Desktop needs an entry in its config file and a restart, so the
-  owner adds the entry and runs that test; it is the one era still unknown.
+  owner adds the entry and runs that test; it is the one era still unknown. Slice 3.4 saw
+  the same two eras again while writing: Claude Code 2026-07-28 through the open app, Codex
+  the 2025-06-18 handshake on the headless path
+  (`docs/verification/docs-mcp-write-check/`).
 - Where the line goes: Claude Code writes a stdio server's `stderr` to
   `~/.claude/debug/<session>.txt` in `--debug` runs, and Codex shows it with
   `RUST_LOG=debug`. Codex does not pass its own environment to a stdio server, so a run
@@ -547,6 +552,10 @@ Each slice needs 1.3. By D9 they come after 2.1.
 | 3.2 `update_block` | S | `UpdateBlock` gets `kind`, `checked` and `if_rev`. Each new field has a default, so the JSON that plugins and HTTP clients send today stays valid. | A block that changed after the read makes the call fail with no write. |
 | 3.3 `move_block`, `delete_block` | M | `Op::MoveBlock` and `Op::DeleteBlock`. | A move to a different page keeps the subtree. A delete makes a tombstone, and undo restores it. |
 | 3.4 Write check | S | One write from each client. An agent write to the block that has the caret (§10) is examined and the result is recorded. | Screenshots of the page before and after each write. |
+
+Slices 3.1 to 3.3 and the write check of 3.4 are done (PR 7 to PR 10). The check ran Claude
+Code and Codex as §6 gives them; the Claude Desktop run needs the owner's config file and
+is still open (§10).
 
 Each new `Op` variant is classified in `Op::kind()`, and
 `ops_classify_reads_and_writes_consistently` stays green. The plugin permission check uses
@@ -675,12 +684,32 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
   100k-block graph: read the access file, take the owner lock, open the store, one `search`,
   close). `xtask bench` fails above 50 ms. Nothing is kept open between calls, so a write
   from the headless path is durable when the call returns, but it does not sync (above).
-- **Not examined:** what occurs when an agent updates the block that has the caret.
-  `UpdateBlock` has this behaviour today. Slice 3.4 examines it.
+- **An agent's write to the block that has the caret keeps the caret** (slice 3.4, measured
+  in the real app on 2026-11-17). Every keystroke reaches the store at once, so the call
+  writes over the line the owner has typed so far — `update_block` sets the text, as the
+  owner selecting the line and typing over it would — and the app then re-reads the block:
+  the editor shows the agent's line, the caret stays in that block (its CRDT anchor), and
+  the next character typed lands after the agent's text. No typed character is dropped and
+  the session is not ended; nothing typed after the call is lost. The owner's earlier text
+  is replaced, which is what `if_rev` prevents: a call carrying the rev the agent read
+  before the typing is refused (409) and leaves the typed text exactly where it was. The
+  one place the store can fall behind the buffer is an input-method composition, and there
+  the composed text wins (`BlockEditor::settle`: block text is last-writer-wins), so the
+  agent's write, not a typed character, is the one replaced; that path is read from the
+  code, not measured here. The editor test
+  `mc_10_a_write_to_the_caret_block_keeps_the_caret` and the run in
+  `docs/verification/docs-mcp-write-check/` pin the measured part.
+- **The write check with the real clients** (slice 3.4, 2026-11-17). Claude Code 2.1.319
+  (2026-07-28, through the open app's `POST /v1/op`) and Codex 0.169.0 (2025-06-18
+  handshake, on the headless path with `when_closed` on) each made one write on a scratch
+  graph, with the server given for that run only; `doctor` was clean after both
+  (`docs/verification/docs-mcp-write-check/`). The eras are the ones §6 records, so the
+  write path changes nothing about the protocol.
 - **Claude Desktop has not been run** against `utopia mcp`. Its entry needs a config file
-  and a restart, so the owner adds the entry (§6) and runs the test. Claude Code
-  (2026-07-28, and 2025-11-25 with `MCP_PROTOCOL_NEGOTIATION=legacy`) and Codex (2025-06-18
-  handshake) were measured against `utopia mcp` in slice 1.4 and are in §6.
+  and a restart, so the owner adds the entry (§6) and runs the test — including one write,
+  as slice 3.4 did with the other two clients. Claude Code (2026-07-28, and 2025-11-25 with
+  `MCP_PROTOCOL_NEGOTIATION=legacy`) and Codex (2025-06-18 handshake) were measured against
+  `utopia mcp` in slice 1.4 and are in §6; slice 3.4 saw both eras again while writing.
 - **A cancel does not reverse a write.** See §3.1.
 - **Stdio only.** A client that cannot start a local process cannot connect in the first
   version.
