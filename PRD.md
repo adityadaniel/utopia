@@ -261,7 +261,7 @@ A **block** is `{ id, page_id, parent_id, position, depth, text, type, checked, 
 | FR-2.10 | Paste: single line → inline text; multi-line plain text → one block per line preserving relative indentation; pasted markdown → parsed into blocks + inline marks; pasted URL on selection → markdown link. |
 | FR-2.11 | Copy/cut of a collapsed or multi-selected subtree yields nested Markdown list syntax. |
 | FR-2.12 | Undo/redo is a per-page command stack, coalescing same-kind consecutive edits within 500 ms; survives window close (persisted per session). |
-| FR-2.13 | Block type switching (P1): bullet, numbered, todo, quote, code, heading 1–3. `todo` checkboxes are the first P1 item and may be pulled into M1 if the daily-note workflow demands it. |
+| FR-2.13 | Block type switching (P1): bullet, numbered, todo, quote, code, heading 1–3. `todo` checkboxes are the first P1 item and may be pulled into M1 if the daily-note workflow demands it. Enter in a to-do makes the new block a to-do too (the new block always takes the kind of the block it splits from); Backspace at offset 0 of a to-do, ticked or not, makes it a bullet first, and only the next Backspace merges (FR-2.5). |
 | FR-2.14 | A page renders only visible blocks; scroll performance must not degrade linearly with page size. |
 | FR-2.15 | **A hashtag is a page link.** `#mindfulness` and `[[mindfulness]]` produce the identical edge, the identical page, and the identical backlink. Typing `#` opens the same autocomplete as `[[`, and the canonical stored form is `#[[Title]]` for any multi-word title. The bare form is single-token (`#` + letters/digits/`-`/`_`); a bare multi-word phrase commits as a tag only under the longest-match rule in §6.5. Grammar: §20.B. |
 | FR-2.16 | Inline marks are part of the block source: `**bold**`, `_italic_`, `~~strike~~`, `^^highlight^^`, `` `code` ``. Marks never nest within themselves; unclosed delimiters render literally until healed on commit. |
@@ -1048,7 +1048,7 @@ GPUI is pre-1.0 (`gpui 0.2.2`, Apache-2.0, published Oct 2025) and has no rich i
 
 - One `BlockEditor` element implementing `EntityInputHandler` (IME, marked text) modeled on Zed's `editor` internals, but scoped to a single-line-ish block.
 - Custom shaping via `WindowTextSystem`; runs carry mark flags (bold/italic/code) and reference spans.
-- Grapheme-aware cursor/selection; `Cmd+A` selects block text; `Escape` blurs; `Up/Down` moves between blocks (keeping x-offset).
+- Grapheme-aware cursor/selection; `Cmd+A` selects block text; `Escape` blurs; `Up/Down` moves between blocks (keeping x-offset). A run of Up/Down keeps one column, the screen x where the run began, across lines and blocks of any depth; a short line on the way does not move the column, and any other caret move starts a new run.
 - Clipboard: our own serializer for subtree copy (Markdown), plus plain text.
 - **Spike required before M1** (see M0): IME (Japanese/Korean/Chinese), emoji ZWJ sequences, macOS dead keys, double-click word select, and `Cmd+←/→` line navigation.
 
