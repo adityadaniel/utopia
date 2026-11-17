@@ -183,7 +183,7 @@ pub fn reference_row<H: RefRowHost + 'static>(
                 }),
         );
         for (i, (ancestor, caption)) in hit.breadcrumb.iter().enumerate() {
-            let label: String = caption.chars().take(40).collect();
+            let label = path_label(caption);
             let label = if label.is_empty() {
                 "(empty)".to_string()
             } else {
@@ -316,4 +316,39 @@ pub fn reference_row<H: RefRowHost + 'static>(
             });
         })
         .into_any_element()
+}
+
+/// The most characters one part of a reference path shows (DESIGN.md §3.7).
+const PATH_PART_CHARS: usize = 40;
+
+/// One part of a reference path: the caption, or, when it is longer than
+/// [`PATH_PART_CHARS`], its words up to that length and "…" (DESIGN.md §3.7: never cut in
+/// the middle of a word without one).
+fn path_label(caption: &str) -> String {
+    if caption.chars().count() <= PATH_PART_CHARS {
+        return caption.to_string();
+    }
+    let head: String = caption.chars().take(PATH_PART_CHARS).collect();
+    let cut = head
+        .trim_end()
+        .rfind(char::is_whitespace)
+        .unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_label;
+
+    /// DESIGN.md §3.7: a long path part ends at a whole word with "…"; a short one is kept.
+    #[test]
+    fn a_long_path_part_ends_at_a_word_with_an_ellipsis() {
+        assert_eq!(path_label("Notes for tomorrow"), "Notes for tomorrow");
+        assert_eq!(
+            path_label("Sketched the outline of the beta announcement for the testers"),
+            "Sketched the outline of the beta…"
+        );
+        let word = "x".repeat(50);
+        assert_eq!(path_label(&word), format!("{}…", "x".repeat(40)));
+    }
 }

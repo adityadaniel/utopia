@@ -2721,7 +2721,8 @@ impl Workspace {
                     .flex_none()
                     .font_family(LABEL_MONO)
                     .text_size(px(COUNT.size))
-                    .text_color(th.muted)
+                    // §3.2: `ink_3`, not `muted`, which fails on an active row (§2.1).
+                    .text_color(th.ink_3)
                     .child(count.to_string()),
             )
             .on_mouse_down(
@@ -2877,7 +2878,7 @@ impl Workspace {
                     .font_family(crate::theme::LABEL_MONO)
                     .text_size(px(crate::theme::COUNT.size))
                     .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(th.muted)
+                    .text_color(th.ink_3)
                     .child(open_tasks.to_string()),
             )
             .on_click(cx.listener(|this, _, window, cx| this.go_tasks(&GoTasks, window, cx)));

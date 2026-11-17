@@ -13,7 +13,7 @@ use utopia_ui::assistants::{AssistantsHandle, AssistantsSetup, Bridge};
 use utopia_ui::pane_stack::{Click, Origin};
 use utopia_ui::settings::{SettingsView, Tab};
 use utopia_ui::theme::{
-    Theme, BLOCK_TEXT_LEFT, CHILD_INDENT, CONTENT_PADDING_X, DAY_GAP, DAY_HEADER_PAD_TOP,
+    Theme, BLOCK_TEXT_LEFT, CHILD_INDENT, CONTENT_PADDING_X, DAY_DIVIDER_BELOW, DAY_GAP,
     NARROW_INDENT, REFERENCE, SIDEBAR_WIDTH,
 };
 use utopia_ui::workspace::Workspace;
@@ -678,6 +678,12 @@ fn empty_day_rows_stack_and_write_expands_one(cx: &mut TestAppContext) {
         approx(first.size.height, 44.),
         "an empty day is one 44 px row: {first:?}"
     );
+    // §3.6: the row's hover reaches 8 px past the text, inside the column's padding.
+    let (left, _) = column(cx);
+    assert!(
+        approx(first.origin.x, left + CONTENT_PADDING_X - 8.),
+        "the row starts 8 px before the text: {first:?}"
+    );
     assert!(
         approx(second.origin.y - (first.origin.y + first.size.height), 4.),
         "4 px between empty rows: {first:?} {second:?}"
@@ -1028,7 +1034,14 @@ fn long_day_keeps_its_date_at_the_top(cx: &mut TestAppContext) {
         "the day is at the top of the feed: nothing is pinned"
     );
     let main = bounds(cx, "main-pane");
-    scroll_main(cx, -600.);
+    // DESIGN.md §3.5: while the day's own title is still in view, nothing is pinned.
+    scroll_main(cx, -20.);
+    assert_eq!(
+        ws.update(cx, |w, cx| w.main_sticky_day(cx)),
+        None,
+        "the real title is still visible: nothing is pinned yet"
+    );
+    scroll_main(cx, -580.);
     assert_eq!(
         ws.update(cx, |w, cx| w.main_sticky_day(cx)),
         Some(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()),
@@ -1039,7 +1052,15 @@ fn long_day_keeps_its_date_at_the_top(cx: &mut TestAppContext) {
         approx(pin.origin.y, content_top(cx)),
         "pinned to the top of the column below the top bar: {pin:?} {main:?}"
     );
-    assert!(pin.size.height >= px(30.), "a readable heading: {pin:?}");
+    assert!(
+        approx(pin.size.height, 45.),
+        "one compact 44 px row and its 1 px edge (§3.5): {pin:?}"
+    );
+    let title = bounds(cx, "sticky-day-title");
+    assert!(
+        approx(title.size.height, 26.),
+        "the title is the 17/26 compact day title: {title:?}"
+    );
     let (left, right) = column(cx);
     let (x0, x1) = (
         f32::from(pin.origin.x),
@@ -1370,7 +1391,7 @@ fn a_feed_day_collapses_its_references(cx: &mut TestAppContext) {
     let next = bounds(cx, "empty-day-2026-11-01");
     let gap =
         f32::from(next.origin.y) - (f32::from(header.origin.y) + f32::from(header.size.height));
-    let expected = DAY_GAP + 1. + DAY_HEADER_PAD_TOP;
+    let expected = DAY_GAP + 1. + DAY_DIVIDER_BELOW;
     assert!(
         gap <= expected + 1.,
         "the next day follows the collapsed card directly: {gap} vs {expected} ({header:?} {next:?})"
@@ -1380,6 +1401,20 @@ fn a_feed_day_collapses_its_references(cx: &mut TestAppContext) {
     assert!(
         header.size.height < px(58.),
         "the header keeps 12 px of padding, not 16: {header:?}"
+    );
+}
+
+/// DESIGN.md §3.7, FR-1.12: a day's references are all "Scheduled for this day", so the
+/// label is in the panel header, once, not on each group.
+#[gpui::test]
+fn a_days_references_say_scheduled_once_in_the_header(cx: &mut TestAppContext) {
+    let (cx, _, _) = setup_refs(cx, true);
+    first_hit(cx);
+    let header = bounds(cx, "refs-header");
+    let label = bounds(cx, "ref-type-label");
+    assert!(
+        label.origin.y >= header.origin.y && label.bottom() <= header.bottom() + px(0.5),
+        "the label sits in the panel header: {label:?} {header:?}"
     );
 }
 

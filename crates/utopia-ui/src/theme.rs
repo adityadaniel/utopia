@@ -2,18 +2,16 @@
 //! (§2.1); there is no third palette and nothing below this module may name a colour, a
 //! type size, a radius or a layout dimension of its own.
 //!
-//! The colour tokens are exactly DESIGN.md §2.1's list (`paper` … `status_progress`). A
-//! handful of roles the spec does not cover yet keep their own tokens at the bottom of
-//! [`Theme`] (danger, warning, success, the text selection, the code-block and banner
-//! fills, and the PDF overlays), because a call site may not invent a colour (§2's "don't
-//! hardcode values outside this list").
+//! The colour tokens are exactly DESIGN.md §2.1's table, light and dark, from `paper` to
+//! `pdf_selection`; a call site may not invent a colour (§2's "don't hardcode values
+//! outside this list").
 //! [`tests`] checks every text/background pair the spec implies at 4.5:1, and that the
 //! two non-text greys are never promoted to text.
 //!
 //! Type (§2.2) is a set of [`TypeRole`]s: size, line height and weight travel together,
 //! so a call site cannot pair a 36 px title with a 28 px line box. gpui 0.2.2 has no
 //! letter-spacing, and macOS glyph rendering is antialiased by the platform text system,
-//! so those two parts of §2.2 are not expressible here (see the phase report).
+//! so those two parts of §2.2 are not expressible here (DESIGN.md §7).
 //!
 //! Spatial tokens (§2.3, §2.4) are exported as `f32` points: the [spacing
 //! scale](SPACING), the radii, and the content column, sidebar and top bar dimensions.
@@ -158,8 +156,10 @@ pub const CONTENT_PADDING_TOP_PAGE: f32 = 56.;
 pub const CONTENT_PADDING_X: f32 = 40.;
 /// Air below the last block (§2.3).
 pub const CONTENT_PADDING_BOTTOM: f32 = 96.;
-/// Space above and below a day section in the feed, with a 1 px `line_soft` divider (§2.3).
+/// Space above a day section's 1 px `line_soft` divider in the feed (§2.3).
 pub const DAY_GAP: f32 = 40.;
+/// Space below that divider, before the day's header or its empty-day rows (§2.3).
+pub const DAY_DIVIDER_BELOW: f32 = 24.;
 
 // Stacked panes (§4.3).
 /// A pane's width: 560 px (the spec allows 480 to 720).
@@ -350,7 +350,6 @@ pub const REF_TYPE_PADDING_X: f32 = 7.;
 // Day header and empty day rows (§3.5, §3.6).
 /// The weekday line, tall enough for the Today pill.
 pub const DAY_CAPTION_LINE: f32 = 20.;
-pub const DAY_HEADER_PAD_TOP: f32 = 4.;
 /// The gap below a day title before its first block (§3.5).
 pub const DAY_HEADER_GAP: f32 = 16.;
 /// An empty day row is a click target, at least 44 px (§3.6).
@@ -359,6 +358,8 @@ pub const EMPTY_DAY_HEIGHT: f32 = 44.;
 pub const EMPTY_DAY_WEEKDAY_WIDTH: f32 = 92.;
 /// Empty day rows in one group sit 4 px apart (§3.6).
 pub const EMPTY_DAY_GAP: f32 = 4.;
+/// Every row hover reaches this far past the text on each side, radius 6 (§2.1, §3.6).
+pub const ROW_HOVER_BLEED: f32 = 8.;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Theme {
@@ -406,7 +407,7 @@ pub struct Theme {
     /// The "in progress" status dot; the only status colour so far.
     pub status_progress: Hsla,
 
-    // ---- roles DESIGN.md does not define yet -------------------------------------------
+    // ---- DESIGN.md §2.1, status, selection and overlay roles -----------------------------
     /// The text selection fill behind a highlighted range.
     pub selection: Hsla,
     /// A code block's card fill.
@@ -444,7 +445,7 @@ impl Theme {
             ink: rgb(0x1b1b19).into(),
             ink_2: rgb(0x3a3a35).into(),
             ink_3: rgb(0x57574f).into(),
-            muted: rgb(0x6f6f68).into(),
+            muted: rgb(0x6c6c65).into(),
             bullet: rgb(0x8a8a83).into(),
             disabled: rgb(0xb9b8b1).into(),
             link: rgb(0x2d5bd2).into(),
@@ -559,6 +560,30 @@ pub fn quiet_control(
         .text_color(th.ink_3)
         .cursor_pointer()
         .hover(|d| d.bg(th.hover).text_color(th.ink))
+        .child(label.into())
+}
+
+/// A [`quiet_control`] inside a row that has its own `hover` fill (an empty day row,
+/// DESIGN.md §3.4/§3.6): on the row's fill a `hover` hover would vanish, so it uses
+/// `selected`, and the button still reads as its own target.
+pub fn quiet_control_in_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    th: &Theme,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .h(px(GHOST_TEXT_HEIGHT))
+        .flex()
+        .items_center()
+        .px_2()
+        .rounded(px(RADIUS_CONTROL))
+        .border_1()
+        .border_color(transparent_black())
+        .text_size(px(SMALL.size))
+        .text_color(th.ink_3)
+        .cursor_pointer()
+        .hover(|d| d.bg(th.selected).text_color(th.ink))
         .child(label.into())
 }
 
@@ -868,7 +893,7 @@ mod tests {
             ("ink", th.ink, 0x1b1b19),
             ("ink_2", th.ink_2, 0x3a3a35),
             ("ink_3", th.ink_3, 0x57574f),
-            ("muted", th.muted, 0x6f6f68),
+            ("muted", th.muted, 0x6c6c65),
             ("bullet", th.bullet, 0x8a8a83),
             ("disabled", th.disabled, 0xb9b8b1),
             ("link", th.link, 0x2d5bd2),
@@ -924,6 +949,14 @@ mod tests {
                 ("ink", th.ink, "hover", th.hover),
                 ("ink", th.ink, "selected", th.selected),
                 ("ink", th.ink, "nav_hover", th.nav_hover),
+                // §3.2: sidebar counts sit on active and hovered rows.
+                ("ink_3", th.ink_3, "selected", th.selected),
+                ("ink_3", th.ink_3, "nav_hover", th.nav_hover),
+                ("ink_3", th.ink_3, "hover", th.hover),
+                // §3.4/§3.6: a quiet control and its row hover.
+                ("ink_3", th.ink_3, "line_soft", th.line_soft),
+                ("muted", th.muted, "hover", th.hover),
+                ("muted", th.muted, "nav_hover", th.nav_hover),
             ] {
                 let ratio = contrast(fg, bg);
                 assert!(
@@ -931,7 +964,7 @@ mod tests {
                     "{palette}: {fg_name} on {bg_name} is {ratio:.2}:1, below 4.5:1"
                 );
             }
-            // Roles DESIGN.md does not define yet, but which the app sets text in.
+            // §2.1 status roles the app sets text in.
             for (fg_name, fg) in [
                 ("danger", th.danger),
                 ("warning", th.warning),
