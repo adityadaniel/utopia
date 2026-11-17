@@ -173,7 +173,80 @@ Values read from screenshots are estimates (±2 pt).
 
 ---
 
-## 6. Design system (DESIGN.md and theme.rs)
+## 6. Page view: linked references and information architecture
+
+Run on 2026-11-17 against the `xtask seed-daily` graph, on the pages "Atlas Launch" (5 references) and "Ana Lovelace" (7 references, reached from Atlas Launch). The build was `fix/design-critique-daily-notes`, Single mode, 1280×852 pt, light mode. Values are read from the PNGs (±2 pt).
+
+**First glance:** the page title wins, which is right. The next action is to write in the body, and the body is clear. The problem is below it: the Linked references panel is about **610 pt tall for 12 lines of text (about 312 pt)**, so about half of it is chrome and empty space.
+
+![A page, top](design-critique/page-top-trail.png)
+
+![Linked references on Ana Lovelace](design-critique/page-linked-refs-ana.png)
+
+### C-REF-5 — The same day shows two different counts · Blocks · open
+- **Where:** Ana Lovelace, Linked references. The chip "November 17th, 2026 **5**" sits above the group "November 17th, 2026 **4**".
+- **Problem:** The chip is a co-reference filter (references that also mention that page), and the 5 includes a block from November 16th. It looks exactly like a summary of the group below it, with no label.
+- **Why:** Two numbers for one name make the reader distrust both.
+- **Fix:** Label the chip row ("Also mentions"), and show it only while filtering (see C-REF-7).
+
+### C-IA-1 — The top bar trail reads as a hierarchy · Blocks · open
+- **Where:** Top bar: "Daily Notes › Atlas Launch › Ana Lovelace".
+- **Problem:** The trail is the navigation history (the pane stack in Single mode, DESIGN.md §4.4), but the › separators read as a place in a tree, as if Ana Lovelace were inside Atlas Launch. Pages have no hierarchy in this app.
+- **Why:** It misleads about the structure of the graph, and it grows with each click.
+- **Fix:** In Single mode, show only the current page title next to Back, and put the history in a menu on Back. Or keep the trail with a separator that means "came from" (←), not "inside" (›). This is a spec change (§3.3, §4.4), so every screen changes together.
+
+### C-REF-6 — The sort menu says "Title" but sorts by date first · Blocks · open
+- **Where:** Linked references controls, "Title ▾".
+- **Problem:** `RefSort::Title` puts daily pages newest first, then other pages by title (FR-3.3). The label names only the second half.
+- **Fix:** Name the options for what they do: "Newest days first" and "Recently edited".
+
+### C-REF-7 — The filter controls are always open · Slows · open
+- **Where:** Linked references, between the header and the first group.
+- **Problem:** The filter field, "Any time", the sort menu and the co-reference chips are always shown. That is about 120 pt before the first reference, on a page with only 5 references. The "Filter" button only focuses the field that is already visible, so it duplicates it.
+- **Fix:** Keep the header to one row: heading, count, Filter. Show the controls only after Filter is pressed or while a filter is active. This saves about 90 pt.
+
+### C-REF-8 — Each group spends about 64 pt on chrome · Slows · open
+- **Where:** Every group in the panel.
+- **Problem:** A group header has 18 pt above its title, a 22 pt title line, 8 pt below it, then a 1 pt divider. The block rows add 2 pt each, and the panel adds 8 pt at its bottom. A group with one line of text ("Atlas Launch" on Ana's page) is about 90 pt tall for 26 pt of text.
+- **Why:** The references are the content. With half the panel empty, fewer references fit on a screen and you scroll more to compare them.
+- **Fix:** Group header 8 pt above and 4 pt below the title, on the 28 pt line grid, so a one-line group is about 56 pt. Keep the divider or the space between groups, not both.
+
+### C-REF-9 — A group title is not close to its own blocks · Slows · open
+- **Where:** Group title compared with the gap above and the gap below it.
+- **Problem:** From the divider to the title is about 34 pt, and from the title to its first block about 38 pt (centre to centre). The title sits half way between the groups, not with its blocks. There is also about 33 pt between the co-reference chips and the first group.
+- **Why:** Spacing is how people see grouping (tighter inside a group, wider between groups).
+- **Fix:** Title to first block 4–8 pt; divider to title 12 pt.
+
+### C-REF-10 — The path line repeats the group name · Slows · open
+- **Where:** "November 17th, 2026 › Sketched the outline of the beta…" inside the "November 17th, 2026" group.
+- **Problem:** The first part of the path is the page that the group header already names, directly above it.
+- **Fix:** Start the path at the first parent block when it is inside its own page's group. Keep the page part only where no group header names it (the right sidebar).
+
+### C-REF-11 — The panel's heading is quieter than its groups · Slows · open
+- **Where:** "Linked references" (13/600 `ink_2`) compared with the group titles (14/500 `link`).
+- **Problem:** Each group title is bigger and blue, so the panel's own heading is the quietest heading in it. With blue group titles, blue page links and blue date links, the panel spends the one loud colour (DESIGN.md §1.2) on almost every line.
+- **Fix:** Group titles in `ink` 14/600, blue only on hover (they stay links). This is a spec change (§3.7), shared with the feed panels.
+
+### C-PAGE-1 — Every property key has the "status" icon · Careless · open
+- **Where:** Properties bar: status, owner and role all have the dashed-circle icon.
+- **Problem:** The icon means "status" (§2.5), but it decorates every key, so it says nothing.
+- **Fix:** Dashed circle for `status` only; the person icon for a key whose value is a page link to a person; no icon for the others. A spec change (§3.8).
+
+### C-IA-2 — Linked and unlinked references look like different kinds of thing · Careless · open
+- **Where:** Bottom of the page.
+- **Problem:** Linked references are a card with a count. Unlinked references are a bare row outside the card, with no count until it is opened. They are two halves of one idea (who mentions this page).
+- **Fix:** The same level and the same style for both: one "References" area with two collapsible parts, each with its count.
+
+### C-REF-12 — "+1 more" looks like part of the last reference · Careless · open
+- **Where:** Under the third reference in a group with four.
+- **Problem:** It has the same indent and size as the path line and the children, so it reads as one more child of the last block, not as the group's hidden fourth reference.
+- **Fix:** A row of its own at the group level: "Show 1 more from November 17th, 2026".
+
+Not checked in this run: Panes mode, dark mode, the menus open, a long reference, and a zoomed block page ("Referenced by").
+
+---
+
+## 7. Design system (DESIGN.md and theme.rs)
 
 This run reviews the system, not a screen. The "render" is the set of screenshots above:
 most screen findings come from a gap in the spec. The code is disciplined: there are **0**
