@@ -41,6 +41,7 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
+    /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
     Navigate {
         up: bool,
         x: Option<Pixels>,
@@ -578,6 +579,8 @@ impl BlockEditor {
         } else if let Some(c) = caret {
             self.field.move_to(c);
         }
+        // A click or a jump starts a new column; a goal from Up/Down carries its own.
+        self.field.sticky = None;
         self.field.goal = goal;
         window.focus(&self.focus);
         cx.notify();
@@ -1476,6 +1479,20 @@ impl BlockEditor {
         if self.field.sel.is_empty() {
             if self.field.cursor() == 0 {
                 self.ac = Autocomplete::Closed;
+                // FR-2.13: Enter after a to-do makes another to-do; Backspace at its start
+                // first takes the checkbox off, and only the next one joins the block above.
+                if let Some(t) = self.target().cloned() {
+                    let kind = self.app.update(cx, |app, _| {
+                        app.store
+                            .page_state(&t.page)
+                            .ok()
+                            .and_then(|st| st.block(&t.block).map(|b| b.kind))
+                    });
+                    if kind == Some(BlockKind::Todo) {
+                        self.set_kind(&t, BlockKind::Bullet, false, cx);
+                        return cx.notify();
+                    }
+                }
                 return self.emit_after_commit(EditorEvent::MergeBackward, cx);
             }
             // `(|)` → `|`: the closer was put there by the opener, so it goes with it.
@@ -1949,13 +1966,14 @@ impl BlockEditor {
                 return;
             }
         }
-        match self.field.vertical(up, None) {
+        // §13.5: a run of Up/Down keeps one column, inside the block and across blocks.
+        let x = self.field.goal_x();
+        match self.field.vertical(up, x) {
             Some(ix) => {
-                self.field.move_to(ix);
+                self.field.move_vertically_to(ix, x);
                 self.moved(cx);
             }
             None => {
-                let x = self.field.caret_x();
                 self.emit_after_commit(EditorEvent::Navigate { up, x }, cx);
             }
         }

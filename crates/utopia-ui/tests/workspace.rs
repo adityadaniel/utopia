@@ -8208,3 +8208,114 @@ fn a_bare_url_opens_from_a_block_at_rest(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(cx.opened_url().as_deref(), Some(url));
 }
+
+/// FR-2.13: Enter at the end of a to-do opens another to-do; Backspace at the start of it
+/// takes the checkbox off first, and only the next Backspace joins the block above.
+#[gpui::test]
+fn fr_2_13_backspace_turns_a_new_to_do_into_a_bullet(cx: &mut TestAppContext) {
+    use utopia_core::BlockKind;
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("Buy milk");
+    cx.simulate_keystrokes("alt-enter");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("Buy milk", 0), ("", 0)]
+    );
+    assert_eq!(kind_of(&app, &page, 1, cx), (BlockKind::Todo, false));
+
+    cx.simulate_keystrokes("backspace");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("Buy milk", 0), ("", 0)]
+    );
+    assert_eq!(kind_of(&app, &page, 1, cx), (BlockKind::Bullet, false));
+    assert_eq!(kind_of(&app, &page, 0, cx), (BlockKind::Todo, false));
+    cx.simulate_input("note");
+    cx.run_until_parked();
+    assert_eq!(
+        rows_str(&rows(&app, &page, cx)),
+        vec![("Buy milk", 0), ("note", 0)]
+    );
+
+    // A bullet at its start joins the block above, as before.
+    cx.simulate_keystrokes("home backspace");
+    cx.run_until_parked();
+    assert_eq!(rows_str(&rows(&app, &page, cx)), vec![("Buy milknote", 0)]);
+    assert_eq!(caret(&ws, cx), "Buy milk".len());
+    assert_eq!(kind_of(&app, &page, 0, cx), (BlockKind::Todo, false));
+
+    // A ticked to-do loses its checkbox too.
+    cx.simulate_keystrokes("alt-enter");
+    cx.run_until_parked();
+    assert_eq!(kind_of(&app, &page, 0, cx), (BlockKind::Todo, true));
+    cx.simulate_keystrokes("home backspace");
+    cx.run_until_parked();
+    assert_eq!(kind_of(&app, &page, 0, cx), (BlockKind::Bullet, false));
+    assert_eq!(rows_str(&rows(&app, &page, cx)), vec![("Buy milknote", 0)]);
+}
+
+/// §13.5: a run of Up/Down keeps one column. A short block on the way takes the caret to
+/// its end, and the next long block gives the column back.
+#[gpui::test]
+fn up_and_down_keep_the_column_across_a_short_block(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("aaaaaaaaaa");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("aa");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("aaaaaaaaaa");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("left left left left");
+    cx.run_until_parked();
+    assert_eq!(caret(&ws, cx), 6);
+
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx), ("aa".into(), 2));
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 6));
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("down");
+    cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 6));
+
+    // Any other move starts a new column.
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("left");
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    assert_eq!(caret(&ws, cx), 1);
+    assert_eq!(rows(&app, &page, cx).len(), 3);
+}
+
+/// §13.5: the column is a place on screen, so moving between depths keeps the caret under
+/// the same point rather than the same distance from each block's own left edge.
+#[gpui::test]
+fn up_keeps_the_screen_column_across_an_indent(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup(cx);
+    let page = today_page(&app, cx);
+    cx.simulate_input("aaaaaaaaaaaaaaaa");
+    cx.simulate_keystrokes("enter tab");
+    cx.simulate_input("aaaaaaaaaaaaaaaa");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[1].1, 1, "the second block is a child");
+    cx.simulate_keystrokes("home right right");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("up");
+    cx.run_until_parked();
+    let (text, at) = text_and_caret(&ws, cx);
+    assert_eq!(text.len(), 16, "the caret moved into the parent");
+    assert!(
+        at > 2,
+        "the parent's caret sits further right by the indent: {at}"
+    );
+}

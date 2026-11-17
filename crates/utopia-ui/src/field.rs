@@ -15,7 +15,9 @@ use utopia_core::text as t;
 use crate::theme::theme;
 
 /// Where to put the caret once the next layout is known (Up/Down between blocks keeps
-/// the horizontal position, §13.5).
+/// the horizontal position, §13.5). The x is in window coordinates, so a block at another
+/// indent depth takes the caret at the same place on screen, not at the same distance
+/// from its own left edge.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Goal {
     FirstLine(Pixels),
@@ -64,6 +66,10 @@ pub struct TextField {
     pub multiline: bool,
     pub selecting: bool,
     pub goal: Option<Goal>,
+    /// The column a run of Up/Down keeps (window x) and the offset the last of those moves
+    /// left the caret at. Any other move puts the caret somewhere else, which ends the run:
+    /// a short line between two long ones no longer pulls the caret to its end for good.
+    pub sticky: Option<(Pixels, usize)>,
     layout: Option<TextLayout>,
     layout_text: String,
     bounds: Option<Bounds<Pixels>>,
@@ -117,6 +123,7 @@ impl TextField {
         let c = t::floor_char_boundary(&self.text, caret);
         self.sel = c..c;
         self.reversed = false;
+        self.sticky = None;
     }
 
     pub fn cursor(&self) -> usize {
@@ -160,6 +167,7 @@ impl TextField {
         let c = start + new.len();
         self.sel = c..c;
         self.reversed = false;
+        self.sticky = None;
     }
 
     pub fn prev_boundary(&self) -> usize {
@@ -304,14 +312,40 @@ impl TextField {
         t::floor_char_boundary(&self.text, ix)
     }
 
-    pub fn caret_x(&self) -> Option<Pixels> {
-        let b = self.bounds?;
-        Some(self.point_for(self.cursor())?.x - b.left())
+    /// The caret offset nearest `p` on its visual line. [`Self::index_at`] takes the glyph
+    /// that holds `p`, so an x that sits on the edge between two letters can fall into the
+    /// one on the left; Up/Down would then lose a column at every step.
+    pub fn nearest_index_at(&self, p: Point<Pixels>) -> usize {
+        let ix = self.index_at(p);
+        let next = t::next_grapheme(&self.text, ix);
+        let (Some(a), Some(b)) = (self.point_for(ix), self.point_for(next)) else {
+            return ix;
+        };
+        if next > ix && (a.y - b.y).abs() < px(1.) && (b.x - p.x).abs() < (p.x - a.x).abs() {
+            next
+        } else {
+            ix
+        }
     }
 
-    /// Caret index one visual line up/down, or `None` at the first/last line.
+    /// The window x Up/Down aims for: the column of the run of vertical moves the caret
+    /// is in, else where the caret is now.
+    pub fn goal_x(&self) -> Option<Pixels> {
+        match self.sticky {
+            Some((x, ix)) if self.sel.is_empty() && ix == self.cursor() => Some(x),
+            _ => Some(self.point_for(self.cursor())?.x),
+        }
+    }
+
+    /// Move the caret as one step of a run of Up/Down moves aimed at window x `x`.
+    pub fn move_vertically_to(&mut self, ix: usize, x: Option<Pixels>) {
+        self.move_to(ix);
+        self.sticky = x.map(|x| (x, self.cursor()));
+    }
+
+    /// Caret index one visual line up/down, aimed at window x `x` (else the caret's own),
+    /// or `None` at the first/last line.
     pub fn vertical(&self, up: bool, x: Option<Pixels>) -> Option<usize> {
-        let b = self.bounds?;
         let p = self.point_for(self.cursor())?;
         let lh = self.line_height();
         let first = self.point_for(0)?;
@@ -319,9 +353,9 @@ impl TextField {
         if (up && p.y <= first.y) || (!up && p.y >= last.y) {
             return None;
         }
-        let x = x.map_or(p.x, |x| b.left() + x);
+        let x = x.unwrap_or(p.x);
         let y = if up { p.y - lh / 2. } else { p.y + lh * 1.5 };
-        Some(self.index_at(point(x, y)))
+        Some(self.nearest_index_at(point(x, y)))
     }
 
     pub fn on_first_line(&self) -> bool {
@@ -358,11 +392,11 @@ impl TextField {
         }
         self.goal = None;
         let lh = self.line_height();
-        let ix = match goal {
-            Goal::FirstLine(x) => self.index_at(point(b.left() + x, b.top() + lh / 2.)),
-            Goal::LastLine(x) => self.index_at(point(b.left() + x, b.bottom() - lh / 2.)),
+        let (x, ix) = match goal {
+            Goal::FirstLine(x) => (x, self.nearest_index_at(point(x, b.top() + lh / 2.))),
+            Goal::LastLine(x) => (x, self.nearest_index_at(point(x, b.bottom() - lh / 2.))),
         };
-        self.move_to(ix);
+        self.move_vertically_to(ix, Some(x));
     }
 }
 
@@ -695,6 +729,22 @@ impl<V: FieldHost> Element for FieldElement<V> {
     ) -> Paint {
         Element::prepaint(&mut self.text, id, inspector_id, bounds, state, window, cx);
         let layout = self.text.layout().clone();
+        // Hand the field this frame's layout before the caret is placed: a goal left by
+        // Up/Down from the next block resolves now, so the caret is never drawn for one
+        // frame at the start or end of the block before it jumps to its column.
+        let shown = self.shown.clone();
+        let layout_now = layout.clone();
+        self.view.update(cx, |v, cx| {
+            let f = v.field_mut();
+            f.layout = Some(layout_now);
+            f.layout_text = shown;
+            f.bounds = Some(bounds);
+            let had_goal = f.goal.is_some();
+            f.resolve_goal();
+            if had_goal && f.goal.is_none() {
+                cx.notify();
+            }
+        });
         let th = theme(cx).clone();
         let f = self.view.read(cx).field();
         let lh = layout.line_height();
@@ -777,19 +827,6 @@ impl<V: FieldHost> Element for FieldElement<V> {
                 window.paint_quad(c);
             }
         }
-        let layout = self.text.layout().clone();
-        let shown = self.shown.clone();
-        self.view.update(cx, |v, cx| {
-            let f = v.field_mut();
-            f.layout = Some(layout);
-            f.layout_text = shown;
-            f.bounds = Some(bounds);
-            let had_goal = f.goal.is_some();
-            f.resolve_goal();
-            if had_goal && f.goal.is_none() {
-                cx.notify();
-            }
-        });
     }
 }
 
