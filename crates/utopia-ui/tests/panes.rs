@@ -540,11 +540,14 @@ fn sp_6_single_mode_rules_and_the_toggle(cx: &mut TestAppContext) {
         ws.update(cx, |_, cx| utopia_ui::appearance::view_mode(cx)),
         ViewMode::Panes
     );
-    // Trail in Single cuts back.
+    // Single shows only the current title (DESIGN.md §4.4: the entries before it are
+    // history, not a hierarchy); Back goes to the one before it.
     ws.update_in(cx, |w, window, cx| w.set_mode(ViewMode::Single, window, cx));
     cx.run_until_parked();
-    let t1 = cx.debug_bounds("trail-1").unwrap();
-    cx.simulate_click(t1.center(), Modifiers::default());
+    cx.debug_bounds("topbar-title")
+        .expect("Single names the current page alone");
+    let back = cx.debug_bounds("back").unwrap();
+    cx.simulate_click(back.center(), Modifiers::default());
     cx.run_until_parked();
     assert_eq!(tail(&ws, &c, cx), vec![0]);
 }

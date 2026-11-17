@@ -204,7 +204,8 @@ There is no "Recent days" list: the feed already shows the days.
 Back and forward icon buttons (forward is `--disabled` when there's nothing to go forward to), a title or breadcrumb, then actions on the right.
 
 - Daily Notes: title "Daily Notes", then a day navigation group (prev | Today | next) with a 1px `--line-strong` border, radius 8, 32px tall, then the view mode control (§3.9), then a toggle for the right panel.
-- Page view: breadcrumb "Pages / Atlas Launch" (parent in `--ink-3`, current page in `--ink` 500), then a favorite (star) button, a more (⋯) menu that holds Delete page, the view mode control and the right panel toggle.
+- Page view: the current page's title in `--ink` 500, then a more (⋯) menu that holds Delete page, the view mode control and the right panel toggle.
+- **Title or trail.** In Single mode the top bar shows only the current title. The pages before it are history, not a place the page sits in (pages have no hierarchy), so they are not drawn as a "›" trail. Back's tooltip names the page it goes to ("Back to Atlas Launch"). In Panes mode the top bar shows the trail of open panes (§4.3), because those panes are on screen side by side.
 
 1px `--line-soft` bottom border.
 
@@ -255,18 +256,26 @@ Every row of a group has the same height and the same gap, including the first: 
 
 ### 3.7 Linked references panel
 
+Spacing in this panel says what belongs together: a group title is close to its own references and far from the group above it. The references are the content; the chrome stays small.
+
 - Container: 1px `--line` border, radius 10, `--well` fill.
-- Header row (padding 12px 16px): "Linked references" heading plus a count badge. On a page view, an outline "Filter" button sits on the right. Inside Daily Notes, the header is a full-width button with a chevron that collapses the panel, and the heading is 13/600 `--ink-2`.
+- Header row (padding 8px 16px, about 45px tall): "Linked references" heading in UI 14/600 `--ink`, plus a count badge. On a page view, an outline "Filter" button sits on the right. Inside Daily Notes, the header is a full-width button with a chevron that collapses the panel.
+- **Controls only when asked for.** The filter field, the date menu ("Any time"), the sort menu and the co-reference chips are hidden until Filter is pressed. Filter opens them and puts the caret in the field; pressed again it closes them. While a filter is in force (text, a date range, a co-reference or a sort other than the default), they stay open, so a filter is never hidden. Filter has the `--selected` fill while they are open.
+- **Sort names say what the order is:** "Days, then A–Z" (daily pages newest first, then other pages by title; the default) and "Last edited".
+- **Co-reference chips are labelled.** The chip row starts with "Also mentions" in Caption `--ink-3`. A chip's number is how many references it would keep, which is not the same as a group's count, so the label is needed.
 - **On a daily page** (in the feed or opened as a page), every reference comes from another page: that is what "Scheduled for this day" means (PRD FR-1.12). The header shows the ref type label "Scheduled for this day" once, after the count. The groups below do not repeat it.
-- Groups: one per source page, separated by 1px `--line` dividers, padding 14px 0. The source page link is 14/500 `--link`, followed by the group's count badge only when the group has more than one reference.
+- Groups: one per source page, separated by 1px `--line` dividers. The group title is UI 14/500 `--ink` (not `--link`: the one loud colour stays for the links inside the references), followed by the group's count badge only when the group has more than one reference. The title row has 12px above it (4px for the first group, right under the header) and nothing below it, so the title sits with its own references. The row is a button that opens the page; it has the `--hover` fill on hover.
 - Referenced blocks render with the Reference block text style. Children keep their thread line. The current page's name inside a reference is shown as **bold `--ink` text, not a link** (linking to the page you're already on is pointless). Inside a day of the feed, the current page is that day: a link to the day is bold `--ink` too, in any date form that resolves to it.
-- A breadcrumb above a nested reference (the source page › its parent blocks) is Caption text in `--muted`; each part is a link. A part longer than 40 characters is cut at the last whole word and ends with "…"; it is never cut in the middle of a word without one. The path wraps when it is wider than the panel.
-- "Unlinked references" sits below as a collapsed row at least 44px tall with a 1px top divider and a chevron-right. Content is searched only when the row is expanded. Its header and rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) start on the same left edge as the reference groups above, and "Link all" sits on the header's right edge.
+- A path above a nested reference names its parent blocks, in Caption `--muted`; each part is a link. It does not start with the page: the group title right above already names it. A part longer than 40 characters is cut at the last whole word and ends with "…"; it is never cut in the middle of a word without one. The path wraps when it is wider than the panel.
+- **More references than the group shows** (more than 3): a row of its own at the group's level, after the last reference: a chevron-down and "Show 2 more from Atlas Launch" in 13px `--ink-3`, 28px tall, radius 6, `--hover` fill and `--ink` text on hover. It names the group, so it does not read as a child of the last reference.
+- **Unlinked references** is the other half of "who mentions this page", so it is the same kind of panel, 16px below the linked one: the same well, border and radius, a 44px header with a chevron, the heading "Unlinked references" in UI 14/600 `--ink`, and its count badge once it has been searched. It starts collapsed (rounded on all four corners) and is searched only when it is opened, so a closed panel has no count. Open, its rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) sit inside the panel with 16px side padding, and "Link all" sits on the header's right edge.
 
 | State | Look |
 |---|---|
 | Hover on a reference | `--hover` fill on the block, inside the panel border |
+| Hover on a group title row | `--hover` fill on the row |
 | Collapsed (feed) | Header only, rounded on all four corners |
+| Controls open | Filter has the `--selected` fill; the controls and the chips sit between the header and the first group |
 
 ### 3.8 Properties bar (page view)
 
@@ -281,7 +290,7 @@ Rules:
 Layout:
 - Placed 20px below the page title. Top and bottom 1px `--line-soft` borders, 6px vertical padding.
 - Each row: a 2-column grid, `140px | 1fr`, at least 36px tall, radius 6. Hover: `--hover` (the row extends 8px past the content on each side, so the text stays aligned with the title).
-- Key column: a 15px icon plus the key in 13px `--ink-3`, lowercase as typed.
+- Key column: a 15px icon slot plus the key in 13px `--ink-3`, lowercase as typed. The icon says what kind of value follows: the dashed circle only for `status`, the person icon for a single page link (drawn with an avatar), the list icon for `aliases`, and no icon for anything else. An empty slot keeps its width, so every key starts on the same edge.
 - Value column, drawn by type:
   - `status`: a pill, 26px tall, padding 0 10px, round, 1px `--line-strong` border, `--paper` fill, a 7px status dot, 13px `--ink`. The value is title-cased for display only.
   - Page link values (for example `owner`): a 22px round avatar with initials (`--tag-bg` / `--tag-ink`, 10px 600) plus the link in 14px `--link`.
@@ -331,7 +340,7 @@ Sidebar plus main area. The main area has the top bar and the content column. Da
 
 ### 4.2 Page view
 
-Sidebar (the page is highlighted in Pages) plus main area: top bar with breadcrumb, page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then Unlinked references.
+Sidebar (the page is highlighted in Pages) plus main area: top bar with the page's title (§3.3), page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then the Unlinked references panel 16px below that (§3.7).
 
 ### 4.3 Stacked panes (navigation model)
 
@@ -365,7 +374,7 @@ Both modes share one list: the pane stack. Single mode just shows its last item.
 - Single mode: one page fills the main area. The content column is centered with a max width of 760px. There are no spines, close buttons or "Close other panes" button.
 - A plain click navigates: it adds the target to the end of the list. If the target is already in the list, cut the list back to that entry instead of adding a duplicate.
 - ⌘-click opens the target as a pane: switch to Panes mode and add it at the end. This gives a quick way to "peek" a page next to the current one without changing the setting.
-- Back removes the last item. Clicking a title in the top bar trail goes back to that entry.
+- Back removes the last item. The top bar shows only the current title (§3.3), and Back's tooltip names the page it goes back to.
 - Switching modes keeps the list as it is. Single → Panes shows every entry as a pane, scrolled to the end. Panes → Single shows the last pane.
 
 Keyboard (both modes): ⌘W closes the focused pane, ⌥← and ⌥→ move focus between panes, and moving focus into a pane scrolls it fully into view.

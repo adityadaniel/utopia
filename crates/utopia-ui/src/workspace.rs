@@ -163,6 +163,14 @@ impl Render for Tip {
     }
 }
 
+impl Workspace {
+    fn back_tip(
+        label: SharedString,
+    ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+        move |_, cx| cx.new(|_| Tip::new(label.clone())).into()
+    }
+}
+
 fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     move |_, cx| cx.new(|_| Tip::new(text)).into()
 }
@@ -3416,7 +3424,7 @@ impl Workspace {
                             ix,
                             // The group header above names the page, and the sidebar is too
                             // narrow for LR-4's inline children.
-                            crate::reference::RefRow::alone(hit, &group.page.title),
+                            crate::reference::RefRow::alone(hit),
                             &th,
                             &self.app.read(cx).store,
                             &[],
@@ -3895,11 +3903,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The trail of open entries (§4.3): titles between chevron-right icons, the last in
-    /// `ink` 500 and the others `ink_3`. A title scrolls to its pane (Panes) or goes back
-    /// to it (Single, §4.4).
+    /// The trail of open panes (§4.3): titles between chevron-right icons, the last in
+    /// `ink` 500 and the others `ink_3`; a title scrolls to its pane. In Single mode the
+    /// earlier entries are history, not places the page sits in, so only the current
+    /// title shows and Back says where it goes (§4.4).
     fn trail(&self, th: &crate::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
         let n = self.stack.len();
+        let from = if self.mode == ViewMode::Single {
+            n.saturating_sub(1)
+        } else {
+            0
+        };
         let mut trail = div()
             .debug_selector(|| "breadcrumb".into())
             .flex()
@@ -3908,8 +3922,8 @@ impl Workspace {
             .min_w_0()
             .overflow_hidden()
             .text_size(px(UI.size));
-        for i in 0..n {
-            if i > 0 {
+        for i in from..n {
+            if i > from {
                 trail = trail.child(div().flex_none().child(icon(
                     Icon::ChevronRight,
                     ICON_SIZE,
@@ -3917,7 +3931,7 @@ impl Workspace {
                 )));
             }
             let last = i + 1 == n;
-            let sel = if n == 1 {
+            let sel = if n - from == 1 {
                 "topbar-title".to_string()
             } else {
                 format!("trail-{i}")
@@ -4016,6 +4030,13 @@ impl Workspace {
             (main.is_journal(), main.page(), main.is_draft())
         };
         let can_back = self.stack.len() > 1;
+        // Single mode shows no trail (§4.4), so Back names the page it goes to.
+        let back_label: SharedString = match can_back.then(|| self.stack.len() - 2) {
+            Some(prev) if self.mode == ViewMode::Single => {
+                format!("Back to {}", self.entry_title(prev, cx)).into()
+            }
+            _ => "Back".into(),
+        };
         let mut bar = div()
             .debug_selector(|| "top-bar".into())
             .min_h(px(TOP_BAR_MIN_HEIGHT))
@@ -4038,7 +4059,7 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .rounded(px(RADIUS_CONTROL))
-                    .tooltip(tip("Back"))
+                    .tooltip(Self::back_tip(back_label))
                     .child(icon(
                         Icon::ArrowLeft,
                         ICON_SIZE,

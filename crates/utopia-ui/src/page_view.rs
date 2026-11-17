@@ -49,10 +49,7 @@ const JOURNAL_BATCH: usize = 10;
 /// The reference filter field's preferred width (LR-1); it no longer stretches the column.
 const REF_FILTER_WIDTH: f32 = 240.;
 /// The narrowest the field gets before the pane is too small to show the controls at all.
-const REF_FILTER_MIN_WIDTH: f32 = 90.;
-/// The unlinked references header and rows start where a reference group's content does:
-/// inside the panel's 1 px border and its 20 px padding (DESIGN.md §3.7).
-const UNLINKED_INSET: f32 = 1. + crate::theme::SPACING[4];
+const REF_FILTER_MIN_WIDTH: f32 = 80.;
 /// Height of the pinned day header (DN-3, DESIGN.md §3.5): one compact row, the height of
 /// an empty day row, plus its 1 px bottom edge. It is pinned only once the day's own title
 /// has scrolled under it, so the two never show at once.
@@ -166,7 +163,6 @@ enum Item {
     /// children travel with it, so paint never reads the store (rule 3).
     Hit {
         hit: RefHit,
-        page_title: SharedString,
         /// The children shown inline, in outline order.
         children: Vec<(BlockId, String)>,
         /// Live children past the inline limit, behind the "+N more" chip.
@@ -177,6 +173,7 @@ enum Item {
     },
     More {
         page: PageId,
+        title: SharedString,
         hidden: usize,
     },
     NoRefs,
@@ -187,6 +184,8 @@ enum Item {
     Mention(Mention),
     /// The unlinked section is open and there is nothing left to link (LR-5).
     NoMentions,
+    /// The open unlinked panel's rounded bottom edge.
+    UnlinkedEnd,
     /// A day's title in the Daily Notes feed (`page` is None for a blank day).
     DayHeader {
         date: NaiveDate,
@@ -690,6 +689,9 @@ pub struct PageView {
     ref_children_cache_key: Option<(u64, usize)>,
     /// A reference control's menu is open (LR-1). Local view state, never persisted.
     controls_menu: Option<ControlMenu>,
+    /// The reference controls (filter field, date and sort menus, "Also mentions" chips)
+    /// are shown (DESIGN.md §3.7: only after Filter, or while a filter is in force).
+    controls_open: bool,
     open_embeds: HashSet<(BlockId, String)>,
     rename: Option<Entity<LineInput>>,
     filter: Entity<LineInput>,
@@ -928,6 +930,8 @@ impl PageView {
             cx.subscribe(&filter, |this, _, e: &LineInputEvent, cx| {
                 if let LineInputEvent::Changed(t) = e {
                     this.query.text = (!t.trim().is_empty()).then(|| t.clone());
+                    // Clearing the text keeps the controls open under the caret.
+                    this.controls_open |= this.query.text.is_some();
                     this.refs_key = None;
                     this.cycle
                         .invalidate(Invalidation::rows() | Invalidation::refs());
@@ -965,6 +969,7 @@ impl PageView {
             ref_children_cache: HashMap::new(),
             ref_children_cache_key: None,
             controls_menu: None,
+            controls_open: false,
             open_embeds: HashSet::new(),
             rename: None,
             filter,
@@ -1418,6 +1423,7 @@ impl PageView {
             return;
         };
         self.query = RefQuery::default();
+        self.controls_open = false;
         self.filter_titles.clear();
         self.unlinked = None;
         self.unlinked_open = false;
@@ -1962,6 +1968,7 @@ impl PageView {
                     Some(_) => items.push(Item::NoMentions),
                     None => {}
                 }
+                items.push(Item::UnlinkedEnd);
             }
         }
         self.replace_items(items, cx);
@@ -2203,6 +2210,19 @@ impl PageView {
         }
     }
 
+    /// A filter, a date range, a co-reference or a non-default sort is in force, so the
+    /// controls that show it must stay open (DESIGN.md §3.7).
+    fn filtering(&self) -> bool {
+        self.query.text.is_some()
+            || !self.query.also.is_empty()
+            || self.query.since.is_some()
+            || self.query.sort != RefSort::default()
+    }
+
+    fn controls_shown(&self) -> bool {
+        self.controls_open || self.filtering()
+    }
+
     fn push_refs(&mut self, items: &mut Vec<Item>, cx: &mut Context<Self>) {
         let shown = self.refs.shown();
         let title = if self.zoom().is_some() {
@@ -2217,7 +2237,7 @@ impl PageView {
             collapsed: false,
             scheduled: self.header.kind == PageKind::Daily && self.zoom().is_none(),
         });
-        if self.zoom().is_none() {
+        if self.zoom().is_none() && self.controls_shown() {
             items.push(Item::RefsControls);
         }
         if self.refs.groups.is_empty() {
@@ -2344,7 +2364,6 @@ impl PageView {
                 let hidden = kids.total.saturating_sub(kids.shown.len());
                 items.push(Item::Hit {
                     hit: h.clone(),
-                    page_title: g.page.title.clone().into(),
                     children: kids.shown,
                     hidden,
                     day_title: day_title.clone(),
@@ -2353,6 +2372,7 @@ impl PageView {
             if g.hits.len() > limit {
                 items.push(Item::More {
                     page: g.page.id.clone(),
+                    title: g.page.title.clone().into(),
                     hidden: g.hits.len() - limit,
                 });
             }
@@ -3766,7 +3786,7 @@ impl PageView {
     fn property_key_cell(
         &self,
         key: &str,
-        glyph: Icon,
+        glyph: Option<Icon>,
         key_w: f32,
         th: &crate::theme::Theme,
     ) -> Div {
@@ -3776,7 +3796,11 @@ impl PageView {
             .flex()
             .items_center()
             .gap_1()
-            .child(icon(glyph, PROPERTY_ICON, th.ink_3))
+            // A key without an icon keeps the slot, so every key starts on one edge.
+            .child(match glyph {
+                Some(glyph) => icon(glyph, PROPERTY_ICON, th.ink_3).into_any_element(),
+                None => div().size(px(PROPERTY_ICON)).flex_none().into_any_element(),
+            })
             .child(
                 div()
                     .min_w_0()
@@ -3812,7 +3836,7 @@ impl PageView {
             .gap_2()
             .hover(|d| d.bg(th.hover))
             .cursor_pointer()
-            .child(self.property_key_cell(&p.key, Icon::DashedCircle, key_w, &th))
+            .child(self.property_key_cell(&p.key, property_icon(p.kind), key_w, &th))
             .child(
                 // A flex value cell lets the status pill size to its text instead of
                 // filling the column like a block-level child (gpui divs are blocks).
@@ -3991,7 +4015,7 @@ impl PageView {
             .flex()
             .items_center()
             .gap_2()
-            .child(self.property_key_cell("aliases", Icon::List, key_w, &th))
+            .child(self.property_key_cell("aliases", Some(Icon::List), key_w, &th))
             .child(value)
             .into_any_element()
     }
@@ -4535,16 +4559,28 @@ impl PageView {
     /// never moves the references (ALL-3).
     fn render_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let sort_label = match self.query.sort {
-            RefSort::Title => "Title",
-            RefSort::Recency => "Recent",
-        };
+        let sort_label = sort_label(self.query.sort);
+        // DESIGN.md §3.7: the chips are a filter, not a summary of the groups below, so the
+        // row says what they do. A chip's number is the references it would keep.
         let mut chips = div()
             .debug_selector(|| "refs-chips".into())
             .flex()
             .flex_wrap()
             .gap_1()
-            .items_center();
+            .items_center()
+            .when(
+                !self.query.also.is_empty() || !self.suggestions.is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .debug_selector(|| "refs-chips-label".into())
+                            .mr_1()
+                            .text_size(px(crate::theme::CAPTION_SIZE))
+                            .text_color(th.ink_3)
+                            .child("Also mentions"),
+                    )
+                },
+            );
         for (i, f) in self.query.also.iter().enumerate() {
             let id = f.clone();
             let title = self
@@ -4566,6 +4602,7 @@ impl PageView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.query.also.retain(|p| *p != id);
                         this.refs_key = None;
+                        this.controls_open = true;
                         this.cycle
                             .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
@@ -4604,6 +4641,7 @@ impl PageView {
                         this.query.also.push(id.clone());
                         this.filter_titles.insert(id.clone(), t.clone());
                         this.refs_key = None;
+                        this.controls_open = true;
                         this.cycle
                             .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
@@ -4752,14 +4790,14 @@ impl PageView {
             ControlMenu::Sort => vec![
                 ControlChoice {
                     selector: "refs-sort-option-title",
-                    label: "Title",
+                    label: sort_label(RefSort::Title),
                     days: None,
                     sort: Some(RefSort::Title),
                     selected: self.query.sort == RefSort::Title,
                 },
                 ControlChoice {
                     selector: "refs-sort-option-recent",
-                    label: "Recent",
+                    label: sort_label(RefSort::Recency),
                     days: None,
                     sort: Some(RefSort::Recency),
                     selected: self.query.sort == RefSort::Recency,
@@ -4809,6 +4847,7 @@ impl PageView {
                     }
                     this.controls_menu = None;
                     this.refs_key = None;
+                    this.controls_open = true;
                     this.cycle
                         .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
@@ -5261,9 +5300,11 @@ impl PageView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(crate::theme::SMALL.size))
+                    // DESIGN.md §3.7: the panel's heading is 14/600 `ink`, so it is not
+                    // quieter than the group titles under it.
+                    .text_size(px(crate::theme::UI.size))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(th.ink_2);
+                    .text_color(th.ink);
                 match date {
                     Some(date) => {
                         let iso = utopia_core::date::iso(date);
@@ -5311,17 +5352,46 @@ impl PageView {
                             )
                             .when(scheduled, |d| d.child(scheduled_label(&th)))
                             .child(div().flex_1())
-                            .child(
-                                outline_button("refs-filter", "Filter", &th)
-                                    .debug_selector(|| "refs-filter".into())
+                            .child({
+                                // Filter opens the controls and puts the caret in the field;
+                                // pressed again it closes them, unless a filter is in force
+                                // (then it only focuses the field, which shows the filter).
+                                let open = self.controls_shown();
+                                outline_button("refs-filter-button", "Filter", &th)
+                                    .debug_selector(move || {
+                                        format!(
+                                            "refs-filter-button-{}",
+                                            if open { "open" } else { "closed" }
+                                        )
+                                    })
+                                    .when(open, |d| d.bg(th.selected))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.filter.update(cx, |f, _| f.focus(window));
-                                    })),
-                            );
+                                        if this.controls_shown() && !this.filtering() {
+                                            this.controls_open = false;
+                                            this.controls_menu = None;
+                                        } else {
+                                            this.controls_open = true;
+                                            this.filter.update(cx, |f, _| f.focus(window));
+                                        }
+                                        this.cycle.invalidate(Invalidation::rows());
+                                        cx.notify();
+                                    }))
+                            });
                     }
                 }
                 header.into_any_element()
             }
+            Item::UnlinkedEnd => div()
+                .debug_selector(|| "unlinked-end".into())
+                .mx(px(self.refs_pad()))
+                .h(px(crate::theme::SPACING[1]))
+                .bg(th.well)
+                .border_l_1()
+                .border_r_1()
+                .border_b_1()
+                .border_color(th.line)
+                .rounded_b(px(crate::theme::RADIUS_PANEL))
+                .into_any_element(),
             Item::RefsEnd => {
                 let pad = if self.compact {
                     crate::theme::SPACING[3]
@@ -5373,12 +5443,19 @@ impl PageView {
                     .border_color(th.line)
                     .when(!first, |d| d.border_t_1())
                     .px(px(crate::theme::SPACING[4]))
-                    .pt(px(crate::theme::SPACING[3] + 2.))
-                    .pb(px(crate::theme::SPACING[1]))
+                    // DESIGN.md §3.7: a group title sits with its own blocks: 12 below the
+                    // divider (4 under the panel header) and nothing more above its first
+                    // reference, whose row adds 2.
+                    .pt(px(if first {
+                        crate::theme::SPACING[0]
+                    } else {
+                        crate::theme::SPACING[2]
+                    }))
                     .cursor_pointer()
                     .hover(|s| s.bg(th.hover))
-                    // The source page link is 14/500 `link` (DESIGN.md §3.7); its count chip
-                    // follows only when there is more than one reference to count.
+                    // The source page is 14/500 `ink` (DESIGN.md §3.7): blue stays for the
+                    // links inside the references, and the row's hover says it opens. Its
+                    // count chip follows only when there is more than one reference to count.
                     .child(
                         div()
                             .flex()
@@ -5387,9 +5464,10 @@ impl PageView {
                             .child(
                                 div()
                                     .debug_selector(|| format!("group-title-{ix}"))
-                                    .text_size(px(crate::theme::TAG.size))
+                                    .text_size(px(crate::theme::UI.size))
+                                    .line_height(px(crate::theme::UI.line))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(th.link)
+                                    .text_color(th.ink)
                                     .child(page.title.clone()),
                             )
                             .when(count > 1, |d| {
@@ -5407,7 +5485,6 @@ impl PageView {
             }
             Item::Hit {
                 hit,
-                page_title,
                 children,
                 hidden,
                 day_title,
@@ -5431,7 +5508,6 @@ impl PageView {
                         ix,
                         crate::reference::RefRow {
                             hit: &hit,
-                            page_title: &page_title,
                             children: &children,
                             hidden,
                         },
@@ -5445,26 +5521,46 @@ impl PageView {
                     ))
                     .into_any_element()
             }
-            Item::More { page, hidden } => {
+            // DESIGN.md §3.7: the group's hidden references are a row of their own at the
+            // group's level, which names the group, not one more line of the last reference.
+            Item::More {
+                page,
+                title,
+                hidden,
+            } => {
                 let pad = if self.compact {
                     crate::theme::SPACING[3]
                 } else {
                     CONTENT_PADDING_X
                 };
                 div()
-                    .id(("more", ix))
                     .mx(px(pad))
                     .bg(th.well)
                     .border_l_1()
                     .border_r_1()
                     .border_color(th.line)
-                    .px(px(crate::theme::SPACING[4]))
-                    .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.link)
-                    .cursor_pointer()
-                    .child(format!("+{hidden} more"))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_expanded(page.clone(), cx)),
+                    .px(px(crate::theme::SPACING[4] - ROW_HOVER_BLEED))
+                    .pt(px(crate::theme::SPACING[0]))
+                    .pb(px(crate::theme::SPACING[1]))
+                    .child(
+                        div()
+                            .id(("more", ix))
+                            .debug_selector(move || format!("group-more-{hidden}"))
+                            .h(px(crate::theme::GHOST_TEXT_HEIGHT))
+                            .px(px(ROW_HOVER_BLEED))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
+                            .text_size(px(crate::theme::SMALL.size))
+                            .text_color(th.ink_3)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(th.hover).text_color(th.ink))
+                            .child(icon(Icon::ChevronDown, crate::icons::ICON_SIZE, th.ink_3))
+                            .child(format!("Show {hidden} more from {title}"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_expanded(page.clone(), cx)
+                            })),
                     )
                     .into_any_element()
             }
@@ -5487,28 +5583,29 @@ impl PageView {
                     .child("No linked references yet.")
                     .into_any_element()
             }
-            // DESIGN.md §3.7: a collapsed row at least 44 px tall with a top divider and a
-            // chevron-right. The mentions are searched when it is expanded, not before.
+            // DESIGN.md §3.7: the second half of "who mentions this page", so the same
+            // panel as Linked references: a 44 px well header with a chevron, the heading
+            // and its count, collapsed until opened. The mentions are searched when it is
+            // expanded, not before, so a closed panel has no count.
             Item::UnlinkedHeader { count, open } => div()
                 .id("unlinked-header")
                 .debug_selector(|| "unlinked-header".into())
-                .mt_4()
-                .mx(px(if self.compact {
-                    crate::theme::SPACING[3]
-                } else {
-                    CONTENT_PADDING_X
-                }))
+                .mt(px(crate::theme::SPACING[3]))
+                .mx(px(self.refs_pad()))
                 .h(px(UNLINKED_ROW_HEIGHT))
-                // DESIGN.md §3.7: on the same left edge as the reference groups above
-                // (their 1 px border plus 20 px of padding).
-                .px(px(UNLINKED_INSET))
-                .border_t_1()
+                .px(px(crate::theme::SPACING[3]))
+                .bg(th.well)
+                .border_1()
                 .border_color(th.line)
+                .when(!open, |d| d.rounded(px(crate::theme::RADIUS_PANEL)))
+                .when(open, |d| {
+                    d.rounded_t(px(crate::theme::RADIUS_PANEL)).border_b_0()
+                })
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(crate::theme::SMALL.size))
-                .text_color(th.ink_2)
+                .text_size(px(crate::theme::UI.size))
+                .text_color(th.ink)
                 .cursor_pointer()
                 .hover(|s| s.bg(th.hover))
                 .child(
@@ -5526,7 +5623,7 @@ impl PageView {
                 )
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("Unlinked references"),
                 )
                 .children(count.map(|c| {
@@ -5564,8 +5661,12 @@ impl PageView {
                     .id(("mention", ix))
                     .debug_selector(|| format!("mention-{ix}"))
                     .mx(px(self.refs_pad()))
-                    .px(px(UNLINKED_INSET))
-                    .py_0p5()
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .px(px(crate::theme::SPACING[4]))
+                    .py_1()
                     .flex()
                     .items_start()
                     .gap_2()
@@ -5620,13 +5721,37 @@ impl PageView {
             Item::NoMentions => div()
                 .debug_selector(|| "unlinked-empty".into())
                 .mx(px(self.refs_pad()))
-                .px(px(UNLINKED_INSET))
-                .py_0p5()
+                .bg(th.well)
+                .border_l_1()
+                .border_r_1()
+                .border_color(th.line)
+                .px(px(crate::theme::SPACING[4]))
+                .py_1()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
                 .child("No unlinked mentions")
                 .into_any_element(),
         }
+    }
+}
+
+/// The icon before a property key (DESIGN.md §3.8): it says what kind of value follows, so
+/// only `status` has the dashed circle, a single page link (drawn with an avatar) has the
+/// person, and plain text has none.
+fn property_icon(kind: PropertyKind) -> Option<Icon> {
+    match kind {
+        PropertyKind::Status => Some(Icon::DashedCircle),
+        PropertyKind::Linked => Some(Icon::Person),
+        PropertyKind::Plain => None,
+    }
+}
+
+/// The sort menu's name for each order (DESIGN.md §3.7): what it does, not the field it
+/// reads. `Title` puts daily pages first, newest first, then other pages by title (FR-3.3).
+fn sort_label(sort: RefSort) -> &'static str {
+    match sort {
+        RefSort::Title => "Days, then A–Z",
+        RefSort::Recency => "Last edited",
     }
 }
 

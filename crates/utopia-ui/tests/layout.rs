@@ -1334,10 +1334,14 @@ fn references_panel_is_a_bordered_well(cx: &mut TestAppContext) {
         approx(title.origin.x - header.origin.x, 16.),
         "12 x 16 header padding: 16 px on the left: {title:?} {header:?}"
     );
-    let filter = bounds(cx, "refs-filter");
+    let filter = bounds(cx, "refs-filter-button-closed");
     assert!(
         filter.right() <= header.right() + px(0.5),
         "the Filter button is at the header's right edge: {filter:?} {header:?}"
+    );
+    assert!(
+        cx.debug_bounds("refs-control-row").is_none(),
+        "the controls stay closed until Filter is pressed (DESIGN.md §3.7)"
     );
     let group = (0..40)
         .find_map(|ix| {
@@ -3750,7 +3754,25 @@ fn an_empty_body_gets_a_line_strong_bullet(cx: &mut TestAppContext) {
 
 /// A graph whose "Target" page has two referencing blocks, one of them also mentioning "Ana
 /// Lovelace", so the reference controls offer a co-reference chip with a count (LR-1).
+/// DESIGN.md §3.7: the reference controls are closed until Filter is pressed. Presses the
+/// Filter button of the view that still has them closed.
+fn open_ref_controls(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    let filter = bounds(cx, "refs-filter-button-closed");
+    cx.simulate_click(filter.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+
 fn setup_ref_controls(
+    cx: &mut TestAppContext,
+) -> (&mut VisualTestContext, Entity<Workspace>, PageId) {
+    let (cx, ws, target) = setup_ref_controls_closed(cx);
+    open_ref_controls(cx);
+    (cx, ws, target)
+}
+
+/// The same graph and page, with the controls still closed.
+fn setup_ref_controls_closed(
     cx: &mut TestAppContext,
 ) -> (&mut VisualTestContext, Entity<Workspace>, PageId) {
     cx.update(|cx| {
@@ -4019,30 +4041,28 @@ fn setup_nested_refs(
     (cx, ws, target, vec![risks, risky])
 }
 
-/// LR-3: a referencing block nested under "Risks" shows "Atlas Launch › Risks" as one caption
-/// line above it, and each part is its own click target.
+/// LR-3 with DESIGN.md §3.7: a referencing block nested under "Risks" shows "Risks" as one
+/// caption line above it, each part its own click target. The page is not repeated: the
+/// group header right above already names it.
 #[gpui::test]
 fn reference_shows_the_full_path_above_the_block(cx: &mut TestAppContext) {
     let (cx, _, _, _) = setup_nested_refs(cx);
     let hit = first_hit(cx);
     cx.run_until_parked();
-    let (page, ancestor) = (0..40)
+    let (ix, ancestor) = (0..40)
         .find_map(|ix| {
-            let page: &'static str = Box::leak(format!("hit-path-part-{ix}-0").into_boxed_str());
             let ancestor: &'static str =
                 Box::leak(format!("hit-path-part-{ix}-1").into_boxed_str());
-            Some((cx.debug_bounds(page)?, cx.debug_bounds(ancestor)?))
+            Some((ix, cx.debug_bounds(ancestor)?))
         })
         .expect("a path above the reference");
-    let path = cx
-        .debug_bounds("hit-path-7")
-        .or_else(|| {
-            (0..40).find_map(|ix| {
-                let sel: &'static str = Box::leak(format!("hit-path-{ix}").into_boxed_str());
-                cx.debug_bounds(sel)
-            })
-        })
-        .expect("a path line was rendered");
+    let page: &'static str = Box::leak(format!("hit-path-part-{ix}-0").into_boxed_str());
+    assert!(
+        cx.debug_bounds(page).is_none(),
+        "the group header names the page; the path does not repeat it"
+    );
+    let path: &'static str = Box::leak(format!("hit-path-{ix}").into_boxed_str());
+    let path = bounds(cx, path);
     assert!(
         path.origin.y + path.size.height <= hit.origin.y + px(0.5),
         "the path sits above the block: {path:?} {hit:?}"
@@ -4052,16 +4072,12 @@ fn reference_shows_the_full_path_above_the_block(cx: &mut TestAppContext) {
         "one caption line, not a stacked crumb list: {path:?}"
     );
     assert!(
-        ancestor.origin.x >= page.origin.x + page.size.width - px(1.),
-        "the ancestor follows the page name: {ancestor:?} {page:?}"
-    );
-    assert!(
-        approx(page.origin.y, f32::from(ancestor.origin.y)),
-        "both parts on the same line: {page:?} {ancestor:?}"
+        approx(ancestor.origin.x, f32::from(path.origin.x)),
+        "the path starts with the ancestor: {ancestor:?} {path:?}"
     );
     let (left, right) = column(cx);
     assert!(
-        f32::from(page.origin.x) >= left
+        f32::from(ancestor.origin.x) >= left
             && f32::from(ancestor.origin.x + ancestor.size.width) <= right + 0.5,
         "the path stays inside the column: {path:?} ({left}, {right})"
     );
@@ -4183,11 +4199,13 @@ fn selecting_a_co_reference_chip_filters_and_fills(cx: &mut TestAppContext) {
 /// the menu buttons past the pane.
 #[gpui::test]
 fn reference_controls_fit_the_sidebar_pane(cx: &mut TestAppContext) {
-    let (cx, ws, target) = setup_ref_controls(cx);
+    // The main view keeps its controls closed, so the only Filter to press is the sidebar's.
+    let (cx, ws, target) = setup_ref_controls_closed(cx);
     ws.update_in(cx, |w, window, cx| {
         w.open(target, None, None, true, window, cx)
     });
     let side = bounds(cx, "right-sidebar");
+    open_ref_controls(cx);
     let row = bounds(cx, "refs-control-row");
     assert!(
         row.origin.x >= side.origin.x && row.origin.x + row.size.width <= side.right() + px(0.5),
@@ -4229,6 +4247,7 @@ fn reference_controls_fit_a_stacked_pane(cx: &mut TestAppContext) {
     cx.simulate_resize(size(px(900.), px(700.)));
     cx.run_until_parked();
     let split = bounds(cx, "stack-pane-1");
+    open_ref_controls(cx);
     let row = bounds(cx, "refs-control-row");
     assert!(
         row.origin.x >= split.origin.x && row.origin.x + row.size.width <= split.right() + px(0.5),
@@ -4292,6 +4311,7 @@ fn setup_ref_token_counts(
     ws.update_in(cx, |w, window, cx| {
         w.open(target.clone(), None, None, false, window, cx)
     });
+    open_ref_controls(cx);
     (cx, ws, target)
 }
 
