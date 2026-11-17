@@ -5,7 +5,7 @@ Status: design, written on 2026-11-10. The owner answered each decision on 2026-
 `utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
 subcommand and the headless path, Settings → Assistants, and this documentation. Slice 3.1
 adds the first write tool, `append_blocks`; `update_block`, `move_block` and `delete_block`
-(§8.4) are not built.
+(§8.4) are not built. `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
