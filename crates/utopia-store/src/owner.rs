@@ -108,6 +108,41 @@ impl OwnerLock {
     }
 }
 
+/// The key of a graph in the config directory: the SHA-256 hex of its canonical path, or
+/// of the path as given when it cannot be canonicalized (it does not exist yet).
+///
+/// Per-graph local files are named by it: sync settings (`sync/<key>.json`), the
+/// assistant access setting (`mcp/<key>.json`, docs/mcp-design.md §5) and the API
+/// discovery file (`api/<key>.json`, §2.2). The value is frozen: changing it orphans every
+/// saved sync setting.
+pub fn graph_key(graph: &Path) -> String {
+    let canonical = graph.canonicalize().unwrap_or_else(|_| graph.to_path_buf());
+    crate::sha256_hex(canonical.to_string_lossy().as_bytes())
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn graph_key_is_the_sha256_of_the_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let graph = dir.path().join("g.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let canonical = std::fs::canonicalize(&graph).unwrap();
+        // The formula sync settings files were named by before this function existed.
+        let old = crate::sha256_hex(canonical.to_string_lossy().as_bytes());
+        assert_eq!(graph_key(&graph), old);
+        assert_eq!(graph_key(&dir.path().join(".").join("g.utopia")), old);
+        assert_eq!(graph_key(&graph).len(), 64);
+        let missing = dir.path().join("missing.utopia");
+        assert_eq!(
+            graph_key(&missing),
+            crate::sha256_hex(missing.to_string_lossy().as_bytes())
+        );
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

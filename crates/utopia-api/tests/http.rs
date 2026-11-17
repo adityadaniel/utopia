@@ -395,3 +395,376 @@ fn ac_4_1_a_call_dropped_before_it_ran_answers_not_running() {
         "the dropped call wrote nothing"
     );
 }
+
+impl Running {
+    /// Stop the owner and hand back its store, to look at what the calls did.
+    fn finish(mut self) -> Store {
+        self.stop.store(true, Ordering::SeqCst);
+        self.owner.take().unwrap().join().unwrap()
+    }
+}
+
+/// `POST /v1/op` with one op as JSON.
+#[allow(clippy::result_large_err)]
+fn op(r: &Running, body: Value) -> Result<ureq::Response, ureq::Error> {
+    req(r, "POST", "/v1/op").send_string_json(body)
+}
+
+/// The status and the `error` text of a refused call.
+fn refused(resp: Result<ureq::Response, ureq::Error>) -> (u16, String) {
+    match resp {
+        Ok(r) => panic!("expected a refusal, got {}", r.status()),
+        Err(ureq::Error::Status(code, r)) => {
+            let body: Value = serde_json::from_str(&r.into_string().unwrap()).unwrap();
+            (code, body["error"].as_str().unwrap_or_default().to_string())
+        }
+        Err(e) => panic!("{e}"),
+    }
+}
+
+const OFF: &str = "Assistant access is off for this graph. Turn it on in Utopia: Settings → Assistants. Nothing was read or written.";
+const READ_ONLY: &str = "This graph gives assistants read access only. Change it in Utopia: Settings → Assistants. Nothing was written.";
+
+/// The body of a written block, without what differs between two writes of it.
+fn shape(mut v: Value) -> Value {
+    let o = v.as_object_mut().unwrap();
+    o.remove("id");
+    o.remove("text");
+    v
+}
+
+/// MC-3 (docs/mcp-design.md §2.4): every op sent to `/v1/op` gives what its REST route
+/// gives, because both run the one `handle` through the one inbox.
+#[test]
+fn mc_3_each_op_through_v1_op_answers_as_its_rest_route() {
+    let r = start();
+    r.server.set_level(utopia_api::Level::Write);
+
+    // Writes: the REST route, then the same op through /v1/op on the same graph.
+    let a = ok(req(&r, "POST", "/v1/capture").send_string_json(json!({"text": "met [[Dana]]"})));
+    let b = ok(op(
+        &r,
+        json!({"op": "capture", "text": "met [[Dana]] again"}),
+    ));
+    assert_eq!(b["text"], "met [[Dana]] again");
+    assert_eq!(shape(a), shape(b), "capture");
+
+    let a = ok(req(&r, "POST", "/v1/pages/Reading%20list/blocks")
+        .send_string_json(json!({"text": "Books", "create": true})));
+    let b = ok(op(
+        &r,
+        json!({"op": "append_block", "title": "Reading list", "text": "Films", "create": true}),
+    ));
+    assert_eq!(b["text"], "Films");
+    let books = a["id"].as_str().unwrap().to_string();
+    assert_eq!(shape(a), shape(b), "append_block");
+
+    let a = ok(req(&r, "POST", "/v1/pages/Reading%20list/blocks")
+        .send_string_json(json!({"text": "Dune", "parent": books})));
+    let b = ok(op(
+        &r,
+        json!({"op": "append_block", "title": "Reading list", "text": "Emma", "parent": books}),
+    ));
+    let dune = a["id"].as_str().unwrap().to_string();
+    assert_eq!(shape(a), shape(b), "append_block under a parent");
+
+    let a = ok(req(&r, "PATCH", &format!("/v1/blocks/{dune}"))
+        .send_string_json(json!({"text": "Dune #toread [[Dana]]"})));
+    let b = ok(op(
+        &r,
+        json!({"op": "update_block", "id": dune, "text": "Dune #toread [[Dana]] #scifi"}),
+    ));
+    assert_eq!(a["id"], b["id"]);
+    assert_eq!(b["text"], "Dune #toread [[Dana]] #scifi");
+    assert_eq!(shape(a), shape(b), "update_block");
+
+    // Reads: the same graph state, so the bodies are equal.
+    let reads: Vec<(Value, Value)> = vec![
+        (
+            json!({"op": "list_pages"}),
+            ok(req(&r, "GET", "/v1/pages").call()),
+        ),
+        (
+            json!({"op": "list_pages", "daily": true}),
+            ok(req(&r, "GET", "/v1/pages?daily=true").call()),
+        ),
+        (
+            json!({"op": "get_page", "title": "Reading list"}),
+            ok(req(&r, "GET", "/v1/pages/Reading%20list").call()),
+        ),
+        (
+            json!({"op": "backlinks", "title": "Dana"}),
+            ok(req(&r, "GET", "/v1/pages/Dana/backlinks").call()),
+        ),
+        (
+            json!({"op": "get_block", "id": dune}),
+            ok(req(&r, "GET", &format!("/v1/blocks/{dune}")).call()),
+        ),
+        (
+            json!({"op": "journal", "date": "today"}),
+            ok(req(&r, "GET", "/v1/journal/today").call()),
+        ),
+        (
+            json!({"op": "search", "q": "dune", "limit": 20}),
+            ok(req(&r, "GET", "/v1/search?q=dune").call()),
+        ),
+        (
+            json!({"op": "query", "query": "{and: [[Dana]] #toread}", "limit": 100}),
+            ok(req(&r, "POST", "/v1/query")
+                .send_string_json(json!({"query": "{and: [[Dana]] #toread}"}))),
+        ),
+    ];
+    for (body, want) in reads {
+        let got = ok(op(&r, body.clone()));
+        assert_eq!(got, want, "{body}");
+    }
+    // Errors from the op itself keep their status.
+    assert_eq!(
+        status(op(&r, json!({"op": "get_page", "title": "Nowhere"}))),
+        404
+    );
+    assert_eq!(status(op(&r, json!({"op": "capture", "text": " "}))), 400);
+    let mut store = r.finish();
+    assert!(store.doctor().unwrap().is_ok());
+}
+
+/// MC-1: `/v1/op` passes the same request checks as every other route.
+#[test]
+fn mc_1_v1_op_needs_the_token_a_loopback_host_and_no_origin() {
+    let r = start();
+    r.server.set_level(utopia_api::Level::Write);
+    let body = json!({"op": "capture", "text": "zebra"}).to_string();
+    let url = format!("{}/v1/op", r.server.url());
+    let post = || ureq::post(&url).set("Content-Type", "application/json");
+    assert_eq!(status(post().send_string(&body)), 401, "no token");
+    assert_eq!(
+        status(
+            post()
+                .set("Authorization", "Bearer wrong-token!")
+                .send_string(&body)
+        ),
+        401
+    );
+    assert_eq!(
+        status(
+            post()
+                .set("Authorization", "Bearer secret-token")
+                .set("Origin", "https://evil.example")
+                .send_string(&body)
+        ),
+        403,
+        "browsers cannot call it"
+    );
+    assert_eq!(
+        status(
+            post()
+                .set("Authorization", "Bearer secret-token")
+                .set("Host", "evil.example")
+                .send_string(&body)
+        ),
+        403,
+        "DNS rebinding"
+    );
+    // A bad body is still refused for the token first: nothing is parsed before it.
+    assert_eq!(status(post().send_string("not json")), 401);
+    let store = r.finish();
+    assert_eq!(store.search_blocks("zebra", 10).unwrap().len(), 0);
+}
+
+/// MC-2: the level decides, by `Op::kind`, which ops `/v1/op` runs.
+#[test]
+fn mc_2_the_level_permits_ops_by_kind() {
+    use utopia_api::Level;
+    let r = start();
+    let read = json!({"op": "search", "q": "zebra"});
+    let write = json!({"op": "capture", "text": "zebra"});
+    // (level, read op, write op): Some(text) is a 403 with that text.
+    let table = [
+        (Level::Off, Some(OFF), Some(OFF)),
+        (Level::Read, None, Some(READ_ONLY)),
+        (Level::Write, None, None),
+    ];
+    for (level, read_refusal, write_refusal) in table {
+        r.server.set_level(level);
+        assert_eq!(r.server.level(), level);
+        for (body, refusal) in [(&read, read_refusal), (&write, write_refusal)] {
+            match refusal {
+                Some(text) => assert_eq!(
+                    refused(op(&r, body.clone())),
+                    (403, text.to_string()),
+                    "{level:?} {body}"
+                ),
+                None => {
+                    ok(op(&r, body.clone()));
+                }
+            }
+        }
+    }
+    // The REST routes do not follow the level.
+    r.server.set_level(Level::Off);
+    ok(req(&r, "GET", "/v1/search?q=zebra").call());
+    ok(req(&r, "POST", "/v1/capture").send_string_json(json!({"text": "zebra rest"})));
+    let store = r.finish();
+    // One capture at Write, one through REST at Off.
+    assert_eq!(store.search_blocks("zebra", 10).unwrap().len(), 2);
+}
+
+/// MC-1: a new server is at Off, so nothing reaches the store through `/v1/op` until the
+/// owner sets the level from the access file.
+#[test]
+fn mc_1_a_new_server_is_off() {
+    let r = start();
+    assert_eq!(r.server.level(), utopia_api::Level::Off);
+    assert_eq!(
+        refused(op(&r, json!({"op": "list_pages"}))),
+        (403, OFF.to_string())
+    );
+}
+
+/// MC-2, MC-3: at `read`, a refused write is never queued: the graph is unchanged and
+/// `doctor` is clean.
+#[test]
+fn mc_2_a_refused_write_leaves_the_graph_unchanged() {
+    let r = start();
+    r.server.set_level(utopia_api::Level::Write);
+    let page = ok(op(
+        &r,
+        json!({"op": "append_block", "title": "Kept", "text": "zebra one", "create": true}),
+    ));
+    let id = page["id"].as_str().unwrap().to_string();
+    r.server.set_level(utopia_api::Level::Read);
+    let before = ok(op(&r, json!({"op": "get_page", "title": "Kept"})));
+    let pages_before = ok(op(&r, json!({"op": "list_pages", "daily": true})));
+    for body in [
+        json!({"op": "capture", "text": "zebra two"}),
+        json!({"op": "append_block", "title": "Kept", "text": "zebra three"}),
+        json!({"op": "append_block", "title": "New page", "text": "zebra four", "create": true}),
+        json!({"op": "update_block", "id": id, "text": "zebra changed"}),
+    ] {
+        assert_eq!(
+            refused(op(&r, body.clone())),
+            (403, READ_ONLY.to_string()),
+            "{body}"
+        );
+    }
+    assert_eq!(
+        ok(op(&r, json!({"op": "get_page", "title": "Kept"}))),
+        before
+    );
+    assert_eq!(
+        ok(op(&r, json!({"op": "list_pages", "daily": true}))),
+        pages_before
+    );
+    let mut store = r.finish();
+    assert_eq!(store.search_blocks("zebra", 10).unwrap().len(), 1);
+    assert!(store.find_page("New page").unwrap().is_none());
+    assert!(store.doctor().unwrap().is_ok());
+}
+
+/// A body that is not an op answers 400 and runs nothing.
+#[test]
+fn mc_3_a_body_that_is_not_an_op_is_400() {
+    let r = start();
+    r.server.set_level(utopia_api::Level::Write);
+    for body in [
+        "not json",
+        "",
+        "[]",
+        r#"{"op": "drop_everything"}"#,
+        r#"{"op": "search"}"#,
+        r#"{"q": "x"}"#,
+        r#"{"op": "capture", "text": 5}"#,
+    ] {
+        let resp = req(&r, "POST", "/v1/op")
+            .set("Content-Type", "application/json")
+            .send_string(body);
+        assert_eq!(status(resp), 400, "{body:?}");
+    }
+    let store = r.finish();
+    assert!(store.list_pages(true).unwrap().is_empty());
+}
+
+/// docs/mcp-design.md §2.2: the discovery file of a graph, written by the owner and read by
+/// a client in another process, which then calls the owner.
+#[test]
+fn mc_4_the_client_calls_the_owner_named_in_the_discovery_file() {
+    use utopia_api::{discovery_file, read_discovery, Client, ClientError, Discovery, Op};
+    let r = start();
+    let dir = tempfile::tempdir().unwrap();
+    let graph = dir.path().join("g.utopia");
+    std::fs::write(&graph, b"").unwrap();
+    let config = dir.path().join("config");
+    let f = discovery_file(&config, &graph);
+    assert_eq!(
+        f,
+        config
+            .join("api")
+            .join(format!("{}.json", utopia_store::graph_key(&graph)))
+    );
+    r.server.write_discovery(&f).unwrap();
+    assert_eq!(
+        read_discovery(&f).unwrap(),
+        Discovery {
+            url: r.server.url(),
+            token: "secret-token".into()
+        }
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&f).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    let client = Client::from_discovery(&f).unwrap();
+    let b = client.capture("zebra by client").unwrap();
+    assert_eq!(b["text"], "zebra by client");
+    // The server's status and text arrive unchanged.
+    assert_eq!(
+        client.op(&Op::ListPages { daily: false }),
+        Err(ClientError::Status {
+            status: 403,
+            message: OFF.into()
+        })
+    );
+    r.server.set_level(utopia_api::Level::Read);
+    let s = client
+        .op(&Op::Search {
+            q: "zebra".into(),
+            limit: 5,
+        })
+        .unwrap();
+    assert_eq!(s["blocks"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        client.capture(" "),
+        Err(ClientError::Status {
+            status: 400,
+            message: "text is empty".into()
+        })
+    );
+    // A stale token is refused before anything is queued.
+    let stale = Client::new(Discovery {
+        url: r.server.url(),
+        token: "old-token".into(),
+    });
+    assert!(matches!(
+        stale.capture("zebra stale"),
+        Err(ClientError::Status { status: 401, .. })
+    ));
+    // Nothing listens at a stale address.
+    let addr = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let gone = Client::new(Discovery {
+        url: format!("http://{addr}"),
+        token: "secret-token".into(),
+    });
+    assert!(matches!(
+        gone.capture("zebra gone"),
+        Err(ClientError::NotListening(_))
+    ));
+    let store = r.finish();
+    assert_eq!(store.search_blocks("zebra", 10).unwrap().len(), 1);
+}
