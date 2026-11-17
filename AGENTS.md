@@ -383,7 +383,9 @@ Implemented:
   Done / All, ticks through the page's own command; it covers the stack like the graph view
   and gives it back when a page opens. `cargo run -p xtask -- seed-tasks <graph>` seeds its shots.
 - **Sync (§11.7, §12):** HTTP relay and client, background sync with status and merge notices,
-  snapshot compaction, Loro-cursor caret preservation, end-to-end encryption (Argon2id +
+  snapshot compaction, caret preservation across merges (§6.5: carried through the text
+  diff, `utopia_core::text::carry_caret`; the editor stores no caret anchor), end-to-end
+  encryption (Argon2id +
   XChaCha20-Poly1305), realtime WebSocket notices, folder transport, LAN relay with mDNS.
 - **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with six tabs —
   **Keybindings**, where every action can be rebound by pressing the keys and the change
@@ -489,6 +491,10 @@ Known limits (pick these up deliberately, don't paper over them):
   pane focus leaves. A scroller narrower than 560 px (both sidebars open in a small
   window) shrinks the pane to fit (`Geometry::fit`). In Single mode the hidden entries keep their views but
   are inactive (`PageView::set_active`): they rebuild when shown, not on every change.
+
+In progress: assistant access over MCP (PRD §13.8). `docs/mcp-handoff.md` has the state of
+each pull request, the procedure, and a brief for each pull request that is not started;
+`docs/mcp-design.md` is the design. Read the handoff file before you continue that work.
 
 Beyond the PRD's scope ladder there is nothing scheduled; new feature requests go through the
 PRD first (risk R8).
