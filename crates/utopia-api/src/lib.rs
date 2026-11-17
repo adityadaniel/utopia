@@ -157,6 +157,35 @@ pub enum Op {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         if_rev: Option<String>,
     },
+    /// Move one block and its live subtree (PRD §13.8 MC-8, MC-9; FR-2.9).
+    ///
+    /// `page` names the target page as `Op::GetPage` names one (a title, an alias or a date);
+    /// absent leaves the block on the page it is on. On its own page the move is
+    /// `outline::move_to`, and into another page `Store::move_block_to_page`; either way the
+    /// blocks keep their ids, so a `((reference))` to one still resolves, and the whole move
+    /// is one undo step. A drop into the block's own subtree and one that would push a
+    /// descendant past the depth ceiling fail with a domain error before anything is written.
+    ///
+    /// `parent` is the block the moved one becomes a child of; absent means the top level of
+    /// the target page, or — when `after` is given — the level of the block `after` names.
+    /// `after` is the sibling the moved block comes to sit behind; absent makes it the first
+    /// child of `parent`. A parent and an `after` that are not parent and child are refused
+    /// rather than guessed at.
+    MoveBlock {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        page: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after: Option<String>,
+    },
+    /// Tombstone one block and its live subtree (PRD §13.8 MC-8; rule 5):
+    /// `outline::delete_subtree` through [`Store::delete_block`]. The rows keep their ids, so
+    /// a `((reference))` to any of them reads "deleted block", and one undo restores them.
+    DeleteBlock {
+        id: String,
+    },
     Journal {
         date: String,
     },
@@ -250,6 +279,8 @@ impl Op {
             Op::AppendBlock { .. }
             | Op::AppendOutline { .. }
             | Op::UpdateBlock { .. }
+            | Op::MoveBlock { .. }
+            | Op::DeleteBlock { .. }
             | Op::Capture { .. } => OpKind::Write,
         }
     }
@@ -573,6 +604,120 @@ pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
             store.flush()?;
             Ok(Outcome {
                 body: block_json(store, &page, &id, false)?,
+                changed: vec![page],
+            })
+        }
+        // MC-8, MC-9: a move keeps every block id, so a `((reference))` to a moved block still
+        // resolves, and the whole move is one undo step. The position and the depth ceiling
+        // (FR-2.9) are checked before the first command, so a refused call leaves the tree
+        // exactly as it was.
+        Op::MoveBlock {
+            id,
+            page,
+            parent,
+            after,
+        } => {
+            // Rule 2: the block's row is read to learn its page, and the app's store is
+            // debounced, so an index read does not wait for the writer by itself.
+            store.sync_index()?;
+            let id = BlockId(id);
+            let src = store
+                .block_row(&id)?
+                .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?
+                .page_id;
+            if !store.page_state(&src)?.is_live(&id) {
+                return Err(ApiError::new(404, format!("no block {id}")));
+            }
+            let dst = match &page {
+                Some(title) => page_by_title(store, title)?,
+                None => src.clone(),
+            };
+            let mut parent = parent.map(BlockId);
+            let after = after.map(BlockId);
+            // The drop position has to be a place on the target page. A `parent` or `after`
+            // that is not there is refused rather than written into the tree, and an `after`
+            // whose own parent is not the `parent` sent would put the block somewhere neither
+            // of them names.
+            {
+                let st = store.page_state(&dst)?;
+                for (name, named) in [("parent", &parent), ("after", &after)] {
+                    if let Some(b) = named {
+                        if !st.is_live(b) {
+                            return Err(ApiError::new(
+                                404,
+                                format!("no block {b} to be the {name} of the move"),
+                            ));
+                        }
+                    }
+                }
+                if let Some(a) = &after {
+                    let level = st.parent_of(a);
+                    match &parent {
+                        // Without `parent`, `after` names the level too: the moved block sits
+                        // beside it, as the editor's own drag puts it.
+                        None => parent = level,
+                        Some(p) if level.as_ref() != Some(p) => {
+                            return Err(ApiError::new(
+                                400,
+                                format!("block {a} is not a child of block {p}"),
+                            ))
+                        }
+                        Some(_) => {}
+                    }
+                }
+            }
+            // The number of live blocks that move: the block and what is under it. A block
+            // the block already holds as a tombstone moves too but is not counted.
+            let moved = if dst == src {
+                store.move_block(&src, &id, parent.as_ref(), after.as_ref())?
+            } else {
+                let moved = store.page_state(&src)?.subtree(&id, true).len();
+                store.move_block_to_page(&src, &id, &dst, parent.as_ref(), after.as_ref())?;
+                moved
+            };
+            let fmt = store.date_format().clone();
+            let title = utopia_store::display_title(store.page_state(&dst)?, &fmt);
+            store.flush()?;
+            let mut changed = vec![dst.clone()];
+            if dst != src {
+                changed.push(src);
+            }
+            Ok(Outcome {
+                body: json!({
+                    "id": id.as_str(),
+                    "page": dst.as_str(),
+                    "title": title,
+                    "blocks": moved,
+                    "parent": parent.as_ref().map(BlockId::as_str),
+                    "after": after.as_ref().map(BlockId::as_str),
+                }),
+                changed,
+            })
+        }
+        // MC-8, rule 5: a delete is a tombstone, so the ids survive, a `((reference))` to one
+        // still resolves and reads "deleted block", and one undo puts the subtree back.
+        Op::DeleteBlock { id } => {
+            store.sync_index()?;
+            let id = BlockId(id);
+            let page = store
+                .block_row(&id)?
+                .ok_or_else(|| ApiError::new(404, format!("no block {id}")))?
+                .page_id;
+            if !store.page_state(&page)?.is_live(&id) {
+                // Already a tombstone: there is nothing to leave in its place.
+                return Err(ApiError::new(404, format!("no block {id}")));
+            }
+            let deleted = store.delete_block(&page, &id)?;
+            let fmt = store.date_format().clone();
+            let title = utopia_store::display_title(store.page_state(&page)?, &fmt);
+            store.flush()?;
+            Ok(Outcome {
+                body: json!({
+                    "id": id.as_str(),
+                    "page": page.as_str(),
+                    "title": title,
+                    "blocks": deleted,
+                }),
                 changed: vec![page],
             })
         }
@@ -1372,7 +1517,15 @@ mod tests {
                 OpKind::Write,
             ),
             (
+                op(json!({"op": "move_block", "id": block.as_str(), "page": "Test Page"})),
+                OpKind::Write,
+            ),
+            (
                 op(json!({"op": "capture", "text": "captured"})),
+                OpKind::Write,
+            ),
+            (
+                op(json!({"op": "delete_block", "id": block.as_str()})),
                 OpKind::Write,
             ),
         ];
@@ -1975,6 +2128,28 @@ mod tests {
                 json!({"op": "update_block", "id": "b1", "kind": "todo", "checked": true, "if_rev": "0123456789ab"}),
             ),
             (
+                Op::MoveBlock {
+                    id: "b1".into(),
+                    page: None,
+                    parent: None,
+                    after: None,
+                },
+                json!({"op": "move_block", "id": "b1"}),
+            ),
+            (
+                Op::MoveBlock {
+                    id: "b1".into(),
+                    page: Some("A".into()),
+                    parent: Some("b2".into()),
+                    after: Some("b3".into()),
+                },
+                json!({"op": "move_block", "id": "b1", "page": "A", "parent": "b2", "after": "b3"}),
+            ),
+            (
+                Op::DeleteBlock { id: "b1".into() },
+                json!({"op": "delete_block", "id": "b1"}),
+            ),
+            (
                 Op::Journal {
                     date: "today".into(),
                 },
@@ -2014,6 +2189,8 @@ mod tests {
                 | Op::AppendOutline { .. }
                 | Op::GetBlock { .. }
                 | Op::UpdateBlock { .. }
+                | Op::MoveBlock { .. }
+                | Op::DeleteBlock { .. }
                 | Op::Journal { .. }
                 | Op::Search { .. }
                 | Op::Query { .. }

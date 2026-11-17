@@ -419,10 +419,12 @@ Implemented:
   24 KB with the call that continues it. Access is per graph and off by default (MC-1);
   `Op::kind()` is the one read/write classification. `utopia mcp config <client>` prints the
   entry that Settings → Assistants also copies, each pinning an absolute `--graph` (MC-13).
-  Of the four write tools, `append_blocks` is built (`Op::AppendOutline`: one outline, one
-  transaction and one undo step, the id markers stripped) and so is `update_block`
-  (`Op::UpdateBlock` with `kind`, `checked` and `if_rev`: one call, one undo step, and a
-  stale `if_rev` writes nothing, MC-10); `move_block` and `delete_block` are not.
+  All four write tools are built: `append_blocks` (`Op::AppendOutline`: one outline, one
+  transaction and one undo step, the id markers stripped), `update_block` (`Op::UpdateBlock`
+  with `kind`, `checked` and `if_rev`: one call, one undo step, and a stale `if_rev` writes
+  nothing, MC-10), and `move_block` / `delete_block` (`Op::MoveBlock` within a page or into
+  another one, `Op::DeleteBlock` as a tombstone: each one undo step, MC-8, MC-9; a move keeps
+  every id, so `((references))` still resolve).
 - **v1.2+ / P2 (§4.2, Appendix A):** query blocks (`{{query: …}}`, Roam syntax, SQL-backed, `/Query`)
   with queryable `key:: value` attributes; graph view (Cmd+Shift+G, force-directed, local/global,
   journal toggle); attachments (drop files or `/Attach a file`, image previews, file chips,
@@ -469,20 +471,26 @@ Known limits (pick these up deliberately, don't paper over them):
 - The folder transport re-reads every file of a changed page (imports are idempotent) and
   never compacts, because it must not delete other devices' files.
 - Very large flat sibling lists (≫5k blocks under one parent) make each insert O(n).
-- MCP: two write tools exist (`append_blocks`, `update_block`), so the level Read and write
-  permits no MCP tool that moves or deletes a block yet. `tools/list` does not depend on the
-  level (only `--read-only` removes the write tools), because legacy clients do not ask for
-  the list again. `append_blocks` writes every line as a bullet: the `[ ] `, `## ` and `> `
-  prefixes `read_page` writes for to-dos, headings and quotes stay in the block's text. An
+- MCP: `tools/list` does not depend on the level (only `--read-only` removes the write
+  tools), because legacy clients do not ask for the list again. `append_blocks` writes every
+  line as a bullet: the `[ ] `, `## ` and `> ` prefixes `read_page` writes for to-dos,
+  headings and quotes stay in the block's text. An
   outline of more than 2,000 blocks, or deeper than 12 levels (FR-2.9), is refused and writes
   nothing. `update_block` refuses an empty `text` (it never wipes a block), takes the
   outline's marker, trailing newline and — from a line that carried a marker — the `- ` and
   kind prefixes off the `text` it is sent (text the agent wrote itself is left as given),
   needs the block to be a to-do or become one to set `checked`, and `heading` keeps the level
   of a block that already is a heading. Its `if_rev` is a hash of the text only, so a change
-  of kind or done state under the agent does not make it stale.
-- MCP, app closed: a call does not sync (the write waits in the outbox for the next launch),
-  and an encrypted graph needs a passphrase the process can read
+  of kind or done state under the agent does not make it stale; `move_block` and
+  `delete_block` take no `if_rev` at all, so they do not notice an edit between the agent's
+  read and its call. `move_block` without `parent` or `after` puts the block first on the
+  page, which is where `outline::move_to` puts it, and its answer says where it landed; a
+  move into the block's own subtree or past depth 12 (FR-2.9) fails with no write.
+  `delete_block` can empty a page: the last block of a page can become a tombstone.
+- MCP, app closed: a call does not sync (the write waits in the outbox for the next launch)
+  and leaves no undo step (the undo stack is the store's memory, and the store the call
+  opened is dropped before it answers, so `delete_block` says the app cannot undo it), and an
+  encrypted graph needs a passphrase the process can read
   (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no
   prompt is possible. A cancel keeps back the answer but does not reverse a write the owner
   already started. `serve-api` reads the access file once at start, so its `/v1/op` level
@@ -490,8 +498,9 @@ Known limits (pick these up deliberately, don't paper over them):
 - MCP: Claude Desktop has not been run against `utopia mcp` (its entry needs
   `claude_desktop_config.json` and a restart, so the owner adds it). Codex and Claude Code
   were, and their protocol eras are in `docs/mcp-design.md` §6. Codex's default
-  `approval: never` refuses `update_block`, because it carries `destructiveHint: true`: a
-  Codex run needs `--approve-for-me` or an approval policy that can ask (§10).
+  `approval: never` refuses `update_block` and `delete_block`, because both carry
+  `destructiveHint: true`: a Codex run needs `--approve-for-me` or an approval policy that can
+  ask (§10). `append_blocks` and `move_block` are not destructive and run under it.
 - Stacked panes (DESIGN.md §4.3): gpui has no `position: sticky`, so `pane_stack::Geometry`
   places each pane; when the window cannot hold every spine plus a whole pane, the oldest
   spines fold under one another at the left edge (the newest pane always shows whole).

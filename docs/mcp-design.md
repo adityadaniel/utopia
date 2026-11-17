@@ -1,11 +1,12 @@
 # MCP support: design
 
 Status: design, written on 2026-11-10. The owner answered each decision on 2026-11-16
-(§1.1). It is built up to slice 2.2: the owner lock, `POST /v1/op` and the access file, the
+(§1.1). It is built up to slice 3.3: the owner lock, `POST /v1/op` and the access file, the
 `utopia-mcp` crate with the two protocol eras and the six read tools, the `utopia mcp`
-subcommand and the headless path, Settings → Assistants, and this documentation. Slice 3.1
-adds the first write tool, `append_blocks`, and slice 3.2 the second, `update_block` (PR 8);
-`move_block` and `delete_block` (§8.4) are not built. `docs/mcp-handoff.md` has the state of each pull request.
+subcommand and the headless path, Settings → Assistants, this documentation, and the four
+write tools — `append_blocks` (slice 3.1), `update_block` (slice 3.2), `move_block` and
+`delete_block` (slice 3.3, PR 9). Slice 3.4, the write check with the real clients, is not
+done. `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 
@@ -202,6 +203,10 @@ release the lock.
   `open_graph` in `crates/utopia-app/src/mcp.rs`: `open_store` asks for a passphrase when it
   finds none.)
 - It does not sync. Writes go to the outbox and the app sends them at its next start.
+- It leaves no undo step in the app. The undo stack is the store's memory, and the store the
+  call opened is dropped before the answer is written, so `Cmd+Z` cannot reverse a headless
+  write (MC-9 applies when the app runs the call). `delete_block`'s answer says which of the
+  two happened instead of promising a recovery that is not there.
 - Slice 1.4 measured the cost of one call on the bench graph: 1.4 ms, median of 7, in
   release. `xtask bench` fails above 50 ms (§10).
 
@@ -303,8 +308,8 @@ The legacy rules:
 | `run_query` | read | `Query` | exists |
 | `append_blocks` | write | new `AppendOutline` | exists (slice 3.1) |
 | `update_block` | write | `UpdateBlock` | exists (slice 3.2); adds `kind`, `checked`, `if_rev` |
-| `move_block` | write | new `MoveBlock` | new |
-| `delete_block` | write | new `DeleteBlock` | new |
+| `move_block` | write | new `MoveBlock` | exists (slice 3.3) |
+| `delete_block` | write | new `DeleteBlock` | exists (slice 3.3) |
 
 - **`read_page`** accepts a title, an alias, `today`, `yesterday`, or an ISO date. It
   returns an indented Markdown outline. Each line ends with the block id.
@@ -340,9 +345,19 @@ The legacy rules:
   the text, not the outline's punctuation. Text the agent wrote itself is left exactly as
   given, a leading `- ` included. A `text` that is nothing but a copied line is refused
   rather than emptying the block.
-- **`move_block`** uses `outline::move_to` and `Store::move_block_to_page`.
-- **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), and undo
-  restores it.
+- **`move_block`** uses `outline::move_to` and `Store::move_block_to_page`. `page` names the
+  target page the way `read_page` names one; absent leaves the block where it is. `parent` is
+  the block it becomes a child of, `after` the sibling it comes to sit behind. Without
+  `parent` the level is `after`'s level (the editor's drag does the same), and with neither
+  the block becomes the first block of the page; the answer says where it landed, so an agent
+  that wanted the end of the page knows to send `after`. A `parent` or `after` that is not a
+  live block on the target page, and a `parent` and `after` that are not parent and child, are
+  refused rather than guessed at. The blocks keep their ids, so a `((reference))` to one still
+  resolves. A move into the block's own subtree, and one that would put a descendant at depth
+  12 or deeper (FR-2.9), fail with a domain error and write nothing.
+- **`delete_block`** uses `outline::delete_subtree`. It makes a tombstone (rule 5), so the id
+  stays and a `((reference))` to it still resolves and reads "deleted block", and undo
+  restores the subtree. The answer gives the number of blocks that became tombstones.
 - **`if_rev`** is an optional short hash of the text that the agent read, as `read_block`
   returns it (one function, `block_rev`, in `utopia-api`). If the block changed after the
   read, the call fails with no write, and the error names the rev the block has and says to
@@ -608,11 +623,19 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 
 ## 10. Limits
 
-- **No sync when the app is closed.** See §2.3.
-- **Two of the four write tools do not exist yet.** Slices 3.1 and 3.2 added `append_blocks`
-  and `update_block`; the level `Read and write` permits them, and `/v1/op` permits every
-  write op. `tools/list` offers the six read tools and the two of them. Slice 3.3 adds
-  `move_block` and `delete_block`.
+- **No sync and no undo step when the app is closed.** See §2.3. A headless write is
+  durable, but the app's `Cmd+Z` cannot reverse it: `delete_block`'s answer says so.
+- **All four write tools exist.** Slices 3.1 to 3.3 added `append_blocks`, `update_block`,
+  `move_block` and `delete_block`; the level `Read and write` permits them, and `/v1/op`
+  permits every write op. `tools/list` offers the six read tools and those four.
+- **A move without a position goes to the top.** `move_block` passes `parent` and `after`
+  straight to `outline::move_to` / `Store::move_block_to_page`, so a call with neither puts
+  the block first on the page rather than at its end; the answer says where it landed. An
+  agent that wants the end of a page sends the id of its last block as `after`.
+- **`move_block` and `delete_block` take no `if_rev`.** MC-10 guards `update_block`: a move
+  keeps the text it moves, and a delete is a tombstone that one undo reverses, so neither
+  overwrites the owner's words. A block whose text changed between the agent's read and its
+  call is still moved or deleted.
 - **`append_blocks` writes a line's kind prefixes as text.** The outline is read with
   `markdown::parse_outline`, which takes off the list markers but not the `[ ] `, `[x] `,
   `## ` and `> ` prefixes that `read_page` writes for a to-do, a heading and a quote: those
@@ -638,12 +661,14 @@ app on a scratch graph while the real graph is open. A cap on the app breaks tha
 - **`serve-api` reads the access file once**, when it starts, so a level changed while it
   runs applies to `/v1/op` when it restarts. The app re-levels its own server at once
   (MC-12); the two processes' levels can differ in between.
-- **Codex with its default `approval: never` refuses `update_block`.** The tool is marked
-  `destructiveHint: true` (§4.1), and a policy that cannot ask cannot approve it: the call
-  fails with "MCP tool call requires approval, but approval policy is never" and nothing is
-  written. `append_blocks`, which is not destructive, runs under that default. A Codex user
-  needs an approval policy that can ask, or `--approve-for-me`, for the destructive tools.
-  Measured on 2026-11-16 with Codex 0.169.0 (`docs/verification/feat-mcp-update-block/`).
+- **Codex with its default `approval: never` refuses `update_block` and
+  `delete_block`.** Both tools are marked `destructiveHint: true` (§4.1), and a policy that
+  cannot ask cannot approve them: the call fails with "MCP tool call requires approval, but
+  approval policy is never" and nothing is written. `append_blocks` and `move_block`, which
+  are not destructive, run under that default. A Codex user needs an approval policy that can
+  ask, or `--approve-for-me`, for the destructive tools. Measured with Codex 0.169.0 on
+  2026-11-16 for `update_block` (`docs/verification/feat-mcp-update-block/`) and for
+  `delete_block` (`docs/verification/feat-mcp-move-delete/`).
 - **Encrypted graphs on the headless path** need a passphrase that the process can read
   without a prompt.
 - **The headless call costs 1.4 ms** (median of 7, release, `xtask bench` on the

@@ -12,6 +12,8 @@
 //! | `run_query` | `query`, `limit` | [`Op::Query`] |
 //! | `append_blocks` | `page`, `markdown`, `parent`, `create` | [`Op::AppendOutline`] |
 //! | `update_block` | `id`, `text`, `kind`, `checked`, `if_rev` | [`Op::UpdateBlock`] |
+//! | `move_block` | `id`, `page`, `parent`, `after` | [`Op::MoveBlock`] |
+//! | `delete_block` | `id` | [`Op::DeleteBlock`] |
 //!
 //! Two rules shape the output. Page text appears only in results, never in a description or
 //! in [`INSTRUCTIONS`] (MC-11): those are constants of this file. And one result is cut at
@@ -76,7 +78,13 @@ next part.
 update_block changes one block: its text, its kind (bullet, numbered, to-do, quote, code
 or a heading) or whether a to-do is done. read_block gives the block's rev; send it back
 as if_rev and the call fails, writing nothing, when the block changed since you read it.
-Every update_block call is one undo step in Utopia.";
+Every update_block call is one undo step in Utopia.
+
+move_block moves one block and everything under it, within its page or to another page
+named by `page`. The blocks keep their ids, so a ((reference)) to one still resolves.
+delete_block removes one block and everything under it as a tombstone: a ((reference)) to
+it still resolves and reads the block as deleted, and the open app's undo restores the
+subtree. Both are one undo step when the app that holds the graph runs the call.";
 
 /// What a tool call answers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +217,36 @@ const CATALOG: &[Tool] = &[
         idempotent: true,
         schema: schema_update_block,
         run: run_update_block,
+    },
+    Tool {
+        name: "move_block",
+        description: "Move one block and everything under it: within its page, or to another \
+                      page when `page` names one. The blocks keep their ids, so a ((reference)) \
+                      to one of them still resolves. `parent` is the block it goes under and \
+                      `after` the sibling it comes to sit behind; without either it becomes \
+                      the first block of the page. A move into the block's own subtree, or one \
+                      that would go deeper than 12 levels, fails and writes nothing. One undo \
+                      step in Utopia.",
+        kind: OpKind::Write,
+        // Design §4.1: a move loses no text, so a client may run it without a prompt.
+        destructive: false,
+        idempotent: true,
+        schema: schema_move_block,
+        run: run_move_block,
+    },
+    Tool {
+        name: "delete_block",
+        description: "Delete one block and everything under it. Utopia keeps a tombstone: the \
+                      blocks keep their ids, so a ((reference)) to one still resolves and says \
+                      the block is deleted. One undo in the open app restores the whole \
+                      subtree, and the answer says whether that undo exists. It also says how \
+                      many blocks became tombstones.",
+        kind: OpKind::Write,
+        // Design §4.1: it takes blocks out of the page, so it is destructive.
+        destructive: true,
+        idempotent: true,
+        schema: schema_delete_block,
+        run: run_delete_block,
     },
 ];
 
@@ -450,10 +488,7 @@ fn schema_read_block() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": {
-                "type": "string",
-                "description": "The block's id, as an outline line's {id:…} marker gives it.",
-            },
+            "id": block_id_property(),
             "after": after_property(),
         },
         "required": ["id"],
@@ -522,10 +557,7 @@ fn schema_update_block() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "id": {
-                "type": "string",
-                "description": "The block's id, as an outline line's {id:…} marker gives it.",
-            },
+            "id": block_id_property(),
             "text": {
                 "type": "string",
                 "description": "The block's new text, in Utopia markup ([[Page]], #tag, \
@@ -558,6 +590,51 @@ fn schema_update_block() -> Value {
                                 regardless.",
             },
         },
+        "required": ["id"],
+        "additionalProperties": false,
+    })
+}
+
+fn block_id_property() -> Value {
+    json!({
+        "type": "string",
+        "description": "The block's id, as an outline line's {id:…} marker gives it.",
+    })
+}
+
+fn schema_move_block() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": block_id_property(),
+            "page": {
+                "type": "string",
+                "description": "The page to move it to: a title or alias, `today`, `yesterday`, \
+                                or a date as YYYY-MM-DD. The page must exist: a move never \
+                                makes one. Leave it out to move the block within the page it \
+                                is on.",
+            },
+            "parent": {
+                "type": "string",
+                "description": "The id of the block it becomes a child of. Leave it out to put \
+                                it at the top level of the page, or beside the block `after` \
+                                names.",
+            },
+            "after": {
+                "type": "string",
+                "description": "The id of the sibling it comes to sit behind. Leave it out to \
+                                make it the first child of `parent`.",
+            },
+        },
+        "required": ["id"],
+        "additionalProperties": false,
+    })
+}
+
+fn schema_delete_block() -> Value {
+    json!({
+        "type": "object",
+        "properties": {"id": block_id_property()},
         "required": ["id"],
         "additionalProperties": false,
     })
@@ -676,6 +753,32 @@ fn run_update_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, To
         if_rev,
     })?;
     Ok(render_update(&body))
+}
+
+fn run_move_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
+    let id = args.string("id")?;
+    // A day goes to the store as its ISO date, as `append_blocks` sends it: the store
+    // resolves a date to that day's page whatever the graph's date format is (FR-1.2).
+    let page = args
+        .optional_string("page")?
+        .map(|p| day_of(&p).map(iso).unwrap_or(p));
+    let parent = args.optional_string("parent")?;
+    let after = args.optional_string("after")?;
+    let body = backend.call(Op::MoveBlock {
+        id,
+        page,
+        parent,
+        after,
+    })?;
+    Ok(render_move(&body))
+}
+
+fn run_delete_block(backend: &dyn Backend, args: &Args<'_>) -> Result<String, ToolError> {
+    let id = args.string("id")?;
+    let body = backend.call(Op::DeleteBlock { id })?;
+    // MC-5, MC-9: only the process that keeps the store keeps the undo step, so only it can
+    // promise the owner a `Cmd+Z`.
+    Ok(render_delete(&body, backend.keeps_undo()))
 }
 
 /// A `text` argument as the block should hold it (PRD §13.8 MC-8, design §4).
@@ -997,6 +1100,69 @@ fn render_update(body: &Value) -> String {
     doc.block(block_line(body, 0, text), id);
     doc.line(format!("rev: {}", block_rev(text)));
     doc.line("Send that rev as `if_rev` to change this block again without reading it first.");
+    doc.finish()
+}
+
+/// What `move_block` answers: how much moved, where it landed, and the id to read it by.
+fn render_move(body: &Value) -> String {
+    let blocks = body["blocks"].as_u64().unwrap_or(0);
+    let title = one_line(body["title"].as_str().unwrap_or_default());
+    let id = body["id"].as_str().unwrap_or_default();
+    let mut doc = Doc::default();
+    match blocks {
+        0 | 1 => doc.line(format!("Moved the block to \"{title}\".")),
+        n => doc.line(format!(
+            "Moved {n} blocks to \"{title}\": the block and the {} under it.",
+            n - 1
+        )),
+    }
+    match (body["after"].as_str(), body["parent"].as_str()) {
+        (Some(after), _) => doc.line(format!("It is now after the block {after}.")),
+        (None, Some(parent)) => {
+            doc.line(format!("It is now the first child of the block {parent}."))
+        }
+        (None, None) => doc.line("It is now the first block of the page."),
+    }
+    doc.line(format!(
+        "The moved block is {id}, the same id it had on its old page; read_block takes it."
+    ));
+    doc.finish()
+}
+
+/// What `delete_block` answers: how many blocks became tombstones, that a reference still
+/// finds them, and whether there is a way back. `keeps_undo` says the call ran in the process
+/// that holds the store (the open app); a headless call dropped its store, and with it the
+/// undo stack, before it answered, so promising `Cmd+Z` there would name a recovery the owner
+/// cannot make (MC-5, MC-9).
+fn render_delete(body: &Value, keeps_undo: bool) -> String {
+    let blocks = body["blocks"].as_u64().unwrap_or(0);
+    let title = one_line(body["title"].as_str().unwrap_or_default());
+    let id = body["id"].as_str().unwrap_or_default();
+    let mut doc = Doc::default();
+    match blocks {
+        0 | 1 => doc.line(format!("Deleted the block on \"{title}\".")),
+        n => doc.line(format!(
+            "Deleted {n} blocks on \"{title}\": the block and the {} under it.",
+            n - 1
+        )),
+    }
+    doc.line(format!(
+        "They are tombstones, and block {id} keeps its id: a ((reference)) to it still \
+         resolves and shows a deleted block."
+    ));
+    match keeps_undo {
+        // The open app ran the call and still holds the store: its history has the group.
+        true => doc.line(
+            "Cmd+Z in Utopia restores the whole subtree while the app that ran this call is \
+             open; its undo history does not outlive a restart.",
+        ),
+        // `utopia mcp` ran it while Utopia was closed (MC-5): the store is gone, and the
+        // undo stack went with it. Say so instead of naming a Cmd+Z that does nothing.
+        false => doc.line(
+            "Utopia was closed when this call ran, so it left no undo step: the app cannot \
+             bring the subtree back.",
+        ),
+    }
     doc.finish()
 }
 
@@ -1364,6 +1530,12 @@ mod tests {
                 "append_blocks",
                 json!({"page": "A", "markdown": "- x", "parent": 7}),
             ),
+            ("move_block", json!({})),
+            ("move_block", json!({"id": ""})),
+            ("move_block", json!({"id": "01A", "page": 9})),
+            ("move_block", json!({"id": "01A", "after": true})),
+            ("delete_block", json!({})),
+            ("delete_block", json!({"id": 7})),
         ] {
             let err = call(&Never, false, tool, &args).unwrap_err();
             assert!(
@@ -1428,7 +1600,7 @@ mod tests {
     fn mc_11_the_catalog_is_a_constant() {
         let a = list(false);
         assert_eq!(a, list(false));
-        assert_eq!(a.len(), 8, "the six read tools and the two write tools");
+        assert_eq!(a.len(), 10, "the six read tools and the four write tools");
         for t in &a {
             let name = t["name"].as_str().unwrap();
             // Design §4.1: `destructiveHint` and `openWorldHint` default to true in the
@@ -1436,8 +1608,12 @@ mod tests {
             let want = match name {
                 "append_blocks" => json!({"readOnlyHint": false, "destructiveHint": false,
                                           "idempotentHint": false, "openWorldHint": false}),
-                "update_block" => json!({"readOnlyHint": false, "destructiveHint": true,
-                                         "idempotentHint": true, "openWorldHint": false}),
+                "update_block" | "delete_block" => json!({
+                    "readOnlyHint": false, "destructiveHint": true,
+                    "idempotentHint": true, "openWorldHint": false
+                }),
+                "move_block" => json!({"readOnlyHint": false, "destructiveHint": false,
+                                       "idempotentHint": true, "openWorldHint": false}),
                 _ => json!({"readOnlyHint": true, "destructiveHint": false,
                             "idempotentHint": true, "openWorldHint": false}),
             };
@@ -1467,11 +1643,15 @@ mod tests {
         assert!(INSTRUCTIONS.contains("append_blocks"), "the guide names it");
         assert!(
             INSTRUCTIONS.contains("update_block"),
-            "and the other write tool"
+            "and the second write tool"
         );
         assert!(
             INSTRUCTIONS.contains("if_rev"),
             "and how it avoids an overwrite"
+        );
+        assert!(
+            INSTRUCTIONS.contains("move_block") && INSTRUCTIONS.contains("delete_block"),
+            "the guide names the other two write tools"
         );
     }
 
@@ -1518,6 +1698,80 @@ mod tests {
             render_update(&heading).contains("\n- ## Plan {id:01B}\n"),
             "a heading keeps the outline format's prefix"
         );
+    }
+
+    /// MC-8: what `move_block` answers: how much moved, where it landed and the id to read
+    /// it by. Every position `outline::move_to` can take reads as a sentence.
+    #[test]
+    fn mc_8_the_move_result_says_where_the_block_landed() {
+        let body = json!({"id": "01A", "page": "p2", "title": "Reading", "blocks": 3,
+                          "parent": null, "after": null});
+        assert_eq!(
+            render_move(&body),
+            "Moved 3 blocks to \"Reading\": the block and the 2 under it.\n\
+             It is now the first block of the page.\n\
+             The moved block is 01A, the same id it had on its old page; read_block takes \
+             it.\n"
+        );
+        let one = json!({"id": "01A", "page": "p2", "title": "Reading", "blocks": 1,
+                         "parent": null, "after": "01B"});
+        assert_eq!(
+            render_move(&one),
+            "Moved the block to \"Reading\".\n\
+             It is now after the block 01B.\n\
+             The moved block is 01A, the same id it had on its old page; read_block takes \
+             it.\n"
+        );
+        let child = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 1,
+                           "parent": "01B", "after": null});
+        assert_eq!(
+            render_move(&child).lines().nth(1),
+            Some("It is now the first child of the block 01B.")
+        );
+    }
+
+    /// MC-8: what `delete_block` answers: how many blocks became tombstones, that the id
+    /// survives, and how the owner brings the subtree back.
+    #[test]
+    fn mc_8_the_delete_result_names_the_tombstone() {
+        let body = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 2});
+        assert_eq!(
+            render_delete(&body, true),
+            "Deleted 2 blocks on \"Project X\": the block and the 1 under it.\n\
+             They are tombstones, and block 01A keeps its id: a ((reference)) to it still \
+             resolves and shows a deleted block.\n\
+             Cmd+Z in Utopia restores the whole subtree while the app that ran this call is \
+             open; its undo history does not outlive a restart.\n"
+        );
+        let one = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 1});
+        assert_eq!(
+            render_delete(&one, true).lines().next(),
+            Some("Deleted the block on \"Project X\".")
+        );
+    }
+
+    /// MC-5, MC-9: the headless path drops its store, so the undo stack is gone before the
+    /// answer is written. The result says that instead of offering a `Cmd+Z` that does
+    /// nothing (PR 9's review).
+    #[test]
+    fn mc_9_the_delete_result_promises_undo_only_where_it_exists() {
+        let body = json!({"id": "01A", "page": "p1", "title": "Project X", "blocks": 2});
+        let headless = render_delete(&body, false);
+        assert!(
+            !headless.contains("Cmd+Z in Utopia restores"),
+            "no recovery the app cannot make: {headless}"
+        );
+        assert!(
+            headless.contains("left no undo step"),
+            "it says why: {headless}"
+        );
+        assert!(
+            headless.contains("tombstone"),
+            "the tombstone is still what it is: {headless}"
+        );
+        let owned = render_delete(&body, true);
+        assert!(owned.contains("Cmd+Z in Utopia restores"), "{owned}");
+        assert!(!owned.contains("left no undo step"), "{owned}");
     }
 
     /// MC-8: a line copied from `read_block` arrives as the block's text — the outline's

@@ -75,6 +75,8 @@ fn every_write_tool(graph: &Graph) -> Vec<(&'static str, Value)> {
             "update_block",
             json!({"id": graph.ana_link, "text": "written by an assistant"}),
         ),
+        ("move_block", json!({"id": graph.root, "page": "Ana"})),
+        ("delete_block", json!({"id": graph.root})),
     ]
 }
 
@@ -596,7 +598,7 @@ fn mc_11_the_catalog_does_not_depend_on_the_graph() {
         a[2]["result"]["instructions"], a[0]["result"]["instructions"],
         "one guide for both eras"
     );
-    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 8);
+    assert_eq!(a[1]["result"]["tools"].as_array().unwrap().len(), 10);
 }
 
 /// A tool call that fails on its arguments is still a `result` with `isError`, not an
@@ -1112,5 +1114,236 @@ fn mc_8_update_block_takes_the_id_marker_off_the_text_it_is_sent() {
         rev_of(&answer),
         utopia_api::block_rev("Plan the shipment"),
         "the rev describes the text that was written"
+    );
+}
+
+/// One `move_block` call at the level `write`, with the app closed.
+fn move_block(graph: &Graph, args: Value) -> (String, bool) {
+    call_at(graph, Level::Write, "move_block", args)
+}
+
+/// One `delete_block` call at the level `write`, with the app closed.
+fn delete_block(graph: &Graph, args: Value) -> (String, bool) {
+    call_at(graph, Level::Write, "delete_block", args)
+}
+
+/// MC-2: at the level `read` neither of the last two write tools works, and neither writes
+/// anything — the page still has the whole subtree, and `doctor` is clean (rule 2).
+#[test]
+fn mc_2_move_block_and_delete_block_are_refused_at_read() {
+    let graph = Graph::new();
+    let before = graph.page_count();
+    for (name, args) in [
+        ("move_block", json!({"id": graph.root, "page": "Ana"})),
+        ("delete_block", json!({"id": graph.root})),
+    ] {
+        let (text, is_error) = call_at(&graph, Level::Read, name, args);
+        assert!(is_error, "{name}: {text}");
+        assert!(text.contains("read access only"), "{name}: {text}");
+        assert!(text.contains("Nothing was written"), "{name}: {text}");
+
+        // Nothing moved and nothing became a tombstone: the subtree reads as it did, on its
+        // own page, and the block is still live there.
+        let (page, _) = call_at(
+            &graph,
+            Level::Read,
+            "read_page",
+            json!({"page": "Project X"}),
+        );
+        assert!(
+            page.contains(&format!("- Plan the launch {{id:{}}}", graph.root)),
+            "{name}: {page}"
+        );
+        assert!(page.contains("Ask [[Ana]] for the copy"), "{name}: {page}");
+        let mut store = graph.open();
+        assert!(store.doctor().expect("doctor runs").is_ok(), "{name}");
+    }
+    assert_eq!(graph.page_count(), before, "no page was made");
+}
+
+/// MC-8: `move_block` carries the subtree into another page, ids and all, so a
+/// `((reference))` to a moved block still resolves there; `doctor` is clean afterwards.
+#[test]
+fn mc_8_move_block_carries_the_subtree_to_another_page() {
+    let graph = Graph::new();
+    // A block on the target page that references the block about to arrive.
+    let (text, is_error) = call_at(
+        &graph,
+        Level::Write,
+        "append_blocks",
+        json!({"page": "Ana", "markdown": format!("- see (({})) here\n", graph.root)}),
+    );
+    assert!(!is_error, "{text}");
+
+    let (text, is_error) = move_block(&graph, json!({"id": graph.root, "page": "Ana"}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains("Moved 2 blocks to \"Ana\""), "{text}");
+    assert!(
+        text.contains(&format!("The moved block is {}", graph.root)),
+        "{text}"
+    );
+
+    // The target page holds the subtree, in its shape, ahead of what was there.
+    let (ana, is_error) = call_at(&graph, Level::Read, "read_page", json!({"page": "Ana"}));
+    assert!(!is_error, "{ana}");
+    let root_line = ana
+        .lines()
+        .find(|l| l.starts_with("- Plan the launch"))
+        .unwrap_or_else(|| panic!("the moved root: {ana}"));
+    assert!(
+        root_line.ends_with(&format!("{{id:{}}}", graph.root)),
+        "{root_line}"
+    );
+    assert!(
+        ana.contains("\n  - Ask [[Ana]] for the copy {id:"),
+        "its child came with it, one level in: {ana}"
+    );
+    let referring = ana
+        .lines()
+        .find(|l| l.contains("see "))
+        .unwrap_or_else(|| panic!("the referring block: {ana}"));
+    assert!(
+        referring.contains(&format!("(({}))", graph.root)),
+        "the reference's text is untouched: {referring}"
+    );
+
+    // The source page lost the subtree; the block still resolves, on its new page.
+    let (project, _) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(!project.contains("Plan the launch"), "{project}");
+    let (block, is_error) = call_at(&graph, Level::Read, "read_block", json!({"id": graph.root}));
+    assert!(!is_error, "the moved id still resolves: {block}");
+    assert!(block.contains("Plan the launch"), "{block}");
+
+    let mut store = graph.open();
+    let report = store.doctor().expect("doctor runs");
+    assert!(report.is_ok(), "doctor: {report:?}");
+}
+
+/// MC-8: `delete_block` leaves a tombstone, not a hole: the page no longer shows the subtree,
+/// and the blocks keep their ids, so a reference reads "deleted block" rather than "missing".
+/// One undo restores the subtree; it is asserted where the writing process still has the undo
+/// stack, in `crates/utopia-api/tests/move_delete.rs` (each headless tool call opens and
+/// closes its own store).
+#[test]
+fn mc_8_delete_block_tombstones_the_subtree_and_doctor_is_clean() {
+    let graph = Graph::new();
+    let (text, is_error) = delete_block(&graph, json!({"id": graph.root}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains("Deleted 2 blocks on \"Project X\""), "{text}");
+    assert!(
+        text.contains(&format!("block {} keeps its id", graph.root)),
+        "{text}"
+    );
+
+    let (project, is_error) = call_at(
+        &graph,
+        Level::Read,
+        "read_page",
+        json!({"page": "Project X"}),
+    );
+    assert!(!is_error, "{project}");
+    assert!(!project.contains("Plan the launch"), "{project}");
+    assert!(!project.contains("Ask [[Ana]] for the copy"), "{project}");
+    assert!(
+        project.contains("ship it"),
+        "the rest of the page is untouched: {project}"
+    );
+
+    let mut store = graph.open();
+    let report = store.doctor().expect("doctor runs");
+    assert!(report.is_ok(), "doctor: {report:?}");
+    // Rule 5: the row and the id stay, so a reference reads "deleted block", not "missing".
+    let id = utopia_core::BlockId(graph.root.clone());
+    let row = store
+        .block_row(&id)
+        .expect("a block lookup")
+        .expect("the row of the tombstone");
+    assert!(
+        !store
+            .page_state(&row.page_id)
+            .expect("the page state")
+            .is_live(&id),
+        "the reference reads a deleted block"
+    );
+}
+
+/// MC-11: the two new tools say what they do, carry no page text, and their schemas accept
+/// exactly the arguments the op takes.
+#[test]
+fn mc_11_the_move_and_delete_tools_are_described_without_page_text() {
+    let graph = Graph::new();
+    let reply = support::run(
+        vec![
+            initialize(1, "2025-11-25"),
+            support::request(2, "tools/list", json!({})),
+        ],
+        graph.backend(),
+        Options::new(),
+    );
+    let tools = reply[1]["result"]["tools"].as_array().expect("a list");
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t["name"] == name)
+            .unwrap_or_else(|| panic!("{name} is in the catalog"))
+    };
+
+    let mv = tool("move_block");
+    let description = mv["description"].as_str().expect("a description");
+    assert!(description.contains("undo"), "{description}");
+    assert!(description.contains("subtree"), "{description}");
+    // Design §4.1: a move loses no text, so it is not destructive.
+    assert_eq!(mv["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(mv["annotations"]["destructiveHint"], json!(false));
+    assert_eq!(mv["annotations"]["idempotentHint"], json!(true));
+    assert_eq!(mv["annotations"]["openWorldHint"], json!(false));
+    for key in ["id", "page", "parent", "after"] {
+        assert!(
+            mv["inputSchema"]["properties"][key].is_object(),
+            "move_block takes {key}: {}",
+            mv["inputSchema"]
+        );
+    }
+    assert_eq!(mv["inputSchema"]["required"], json!(["id"]));
+
+    let del = tool("delete_block");
+    let description = del["description"].as_str().expect("a description");
+    assert!(description.contains("tombstone"), "{description}");
+    assert!(description.contains("undo"), "{description}");
+    assert_eq!(del["annotations"]["readOnlyHint"], json!(false));
+    assert_eq!(del["annotations"]["destructiveHint"], json!(true));
+    assert_eq!(del["annotations"]["idempotentHint"], json!(true));
+    assert_eq!(del["annotations"]["openWorldHint"], json!(false));
+    assert_eq!(del["inputSchema"]["required"], json!(["id"]));
+
+    // MC-11: no page text in either description, as for every other tool.
+    for t in [mv, del] {
+        let description = t["description"].as_str().unwrap();
+        assert!(!description.contains("Plan the launch"), "{description}");
+        assert!(!description.contains("Ana"), "{description}");
+    }
+}
+
+/// MC-5, MC-9: a headless delete (`when_closed`, the app closed) opens a store for the one
+/// call and drops it, and the undo stack lives in that store's memory. The answer must not
+/// offer the owner a Cmd+Z that is not there: it says which of the two happened.
+#[test]
+fn mc_9_a_headless_delete_does_not_promise_an_undo_step() {
+    let graph = Graph::new();
+    let (text, is_error) = delete_block(&graph, json!({"id": graph.root}));
+    assert!(!is_error, "{text}");
+    assert!(text.contains("tombstone"), "{text}");
+    assert!(
+        !text.contains("Cmd+Z in Utopia restores"),
+        "the app has no undo step for a call it did not run: {text}"
+    );
+    assert!(
+        text.contains("no undo step"),
+        "it says the app cannot undo this call: {text}"
     );
 }
