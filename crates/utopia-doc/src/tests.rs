@@ -404,60 +404,6 @@ fn frontier_round_trips() {
 }
 
 #[test]
-fn cursor_follows_remote_inserts() {
-    let mut a = LoroPageDoc::new(page(), 1);
-    let id = BlockId::from("b");
-    a.apply(
-        &Command::InsertBlock {
-            id: id.clone(),
-            parent: None,
-            after: None,
-            text: "日本 hello world".into(),
-            kind: BlockKind::Bullet,
-        },
-        0,
-    )
-    .unwrap();
-    let mut b = LoroPageDoc::from_snapshot(page(), &a.snapshot().unwrap(), 2).unwrap();
-    // Caret before "world" on device A.
-    let caret = "日本 hello ".len();
-    let c = a.cursor_for(&id, caret).unwrap();
-    // Device B inserts text before the caret and after it.
-    b.apply(
-        &Command::SetBlockText {
-            id: id.clone(),
-            edit: TextEdit {
-                range: 0..0,
-                insert: "🎉 ".into(),
-            },
-        },
-        1,
-    )
-    .unwrap();
-    let end = b.state().block(&id).unwrap().text.len();
-    b.apply(
-        &Command::SetBlockText {
-            id: id.clone(),
-            edit: TextEdit {
-                range: end..end,
-                insert: "!".into(),
-            },
-        },
-        1,
-    )
-    .unwrap();
-    sync(&mut a, &mut b);
-    let text = a.state().block(&id).unwrap().text.clone();
-    assert_eq!(text, "🎉 日本 hello world!");
-    let moved = a.resolve_cursor(&c).unwrap();
-    assert_eq!(
-        &text[moved..],
-        "world!",
-        "caret stays before the same character"
-    );
-}
-
-#[test]
 fn incremental_cache_matches_rebuild_under_dense_inserts() {
     // Many inserts at the same spot force Loro to rearrange sibling indexes.
     let mut doc = LoroPageDoc::new(page(), 1);

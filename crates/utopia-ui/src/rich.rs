@@ -16,6 +16,9 @@ use crate::theme::{
     Theme, LINK_RING_WIDTH, RADIUS_LINK_RING, RADIUS_TAG, TAG_HEIGHT, TAG_PADDING_X,
 };
 
+/// Drawn after the text of a link that leaves the app (a thin space, then ↗).
+pub const EXTERNAL_ARROW: &str = "\u{2009}↗";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LinkTarget {
     /// Page title as typed; resolution happens in the store.
@@ -40,9 +43,38 @@ pub struct Rendered {
     pub links: Vec<(Range<usize>, LinkTarget)>,
     /// `#tag` runs, drawn as chips by [`LinkText`] (DESIGN.md §3.1).
     pub chips: Vec<Range<usize>>,
+    /// Every run of `text` with the source bytes it came from, in order.
+    spans: Vec<Span>,
+    source_len: usize,
+}
+
+/// A run of the rendered text and where it came from, for [`Rendered::source_offset`].
+#[derive(Debug, Clone)]
+struct Span {
+    shown: Range<usize>,
+    source: Range<usize>,
+    /// The shown bytes are the source bytes, one for one. Otherwise the run stands for
+    /// markup it does not spell out (a chip's label, `#[[a tag]]`), and only its two ends
+    /// have a place in the source. A run with no source behind it ([`EXTERNAL_ARROW`]) has
+    /// an empty source range: a caret in it goes where the run was added.
+    exact: bool,
 }
 
 impl Rendered {
+    /// The source offset of a caret at byte `ix` of the rendered text. Markup is stripped
+    /// from that text (`[[Ana]]` → `Ana`, `**x**` → `x`), so the two offsets agree only in
+    /// a block that has none: a click has to be translated, or it can only be answered
+    /// with the end of the block. The caret stays before the character it was before;
+    /// past the last one it is the end of the source.
+    pub fn source_offset(&self, ix: usize) -> usize {
+        match self.spans.iter().find(|s| ix < s.shown.end) {
+            Some(s) if s.exact => s.source.start + ix.saturating_sub(s.shown.start),
+            Some(s) if ix <= s.shown.start => s.source.start,
+            Some(s) => s.source.end,
+            None => self.source_len,
+        }
+    }
+
     pub fn link_at(&self, ix: usize) -> Option<&LinkTarget> {
         self.links
             .iter()
@@ -74,10 +106,15 @@ struct Builder<'a> {
     /// Normalized titles of the page the text is being read on (DESIGN.md §3.7): its own
     /// name is bold ink, not a link.
     self_titles: &'a [String],
+    /// The source being walked, and where it starts in the block's text (an attribute's
+    /// value starts after its `Key:: `).
+    src: &'a str,
+    base: usize,
     text: String,
     highlights: Vec<(Range<usize>, HighlightStyle)>,
     links: Vec<(Range<usize>, LinkTarget)>,
     chips: Vec<Range<usize>>,
+    spans: Vec<Span>,
 }
 
 impl Builder<'_> {
@@ -109,12 +146,74 @@ impl Builder<'_> {
         range
     }
 
-    fn walk(&mut self, nodes: &[Inline], m: Marks) {
-        for n in nodes {
+    /// Record that `shown` is the text node at `source` of [`Self::src`]. A text node is
+    /// the source verbatim, except that a backslash which escaped a character is dropped
+    /// (`\*` → `*`): the run is split there, so each piece is the source one for one.
+    fn span_text(&mut self, shown: Range<usize>, source: Range<usize>) {
+        let (text, src) = (&self.text[shown.clone()], &self.src[source.clone()]);
+        let mut pieces: Vec<(Range<usize>, Range<usize>)> = Vec::new();
+        let (mut d, mut s) = (0, 0);
+        let mut open: Option<(usize, usize)> = None;
+        for ch in text.chars() {
+            while s < src.len() && !src[s..].starts_with(ch) {
+                if let Some((d0, s0)) = open.take() {
+                    pieces.push((d0..d, s0..s));
+                }
+                s += src[s..].chars().next().map_or(1, char::len_utf8);
+            }
+            open.get_or_insert((d, s));
+            d += ch.len_utf8();
+            s = (s + ch.len_utf8()).min(src.len());
+        }
+        if let Some((d0, s0)) = open {
+            pieces.push((d0..d, s0..s));
+        }
+        let at = self.base + source.start;
+        self.spans.extend(pieces.into_iter().map(|(d, s)| Span {
+            shown: shown.start + d.start..shown.start + d.end,
+            source: at + s.start..at + s.end,
+            exact: true,
+        }));
+    }
+
+    /// Record that `shown` stands for the atom at `source` of [`Self::src`]: exactly, when
+    /// the atom spells the shown text out (a link's title, code), else by its ends alone.
+    fn span_atom(&mut self, shown: Range<usize>, source: Range<usize>) {
+        let label = &self.text[shown.clone()];
+        let spelled = self.src[source.clone()]
+            .find(label)
+            .filter(|_| !label.is_empty())
+            .map(|at| self.base + source.start + at);
+        let span = match spelled {
+            Some(start) => Span {
+                source: start..start + shown.len(),
+                shown,
+                exact: true,
+            },
+            None => Span {
+                shown,
+                source: self.base + source.start..self.base + source.end,
+                exact: false,
+            },
+        };
+        self.spans.push(span);
+    }
+
+    /// `within` is the range of [`Self::src`] that `nodes` were parsed from.
+    fn walk(&mut self, nodes: &[Inline], within: Range<usize>, m: Marks) {
+        let mut at = within.start;
+        for (k, n) in nodes.iter().enumerate() {
+            // A text node has no range of its own: it is the gap up to the next node.
+            let source = n.range().cloned().unwrap_or_else(|| {
+                let next = nodes.get(k + 1).and_then(Inline::range);
+                at..next.map_or(within.end, |r| r.start)
+            });
+            at = source.end;
             match n {
                 Inline::Text(t) => {
                     let st = self.style(m);
-                    self.push(t, st);
+                    let r = self.push(t, st);
+                    self.span_text(r, source);
                 }
                 Inline::Emph { mark, children, .. } => {
                     let mut m2 = m;
@@ -124,12 +223,14 @@ impl Builder<'_> {
                         Mark::Strike => m2.strike = true,
                         Mark::Highlight => m2.highlight = true,
                     }
-                    self.walk(children, m2);
+                    let dl = mark.delimiter().len();
+                    self.walk(children, source.start + dl..source.end - dl, m2);
                 }
                 Inline::Code { text, .. } => {
                     let mut st = self.style(m);
                     st.background_color = Some(self.theme.code_bg);
-                    self.push(text, st);
+                    let r = self.push(text, st);
+                    self.span_atom(r, source);
                 }
                 Inline::PageRef { title, .. } => {
                     if self.is_self(title) {
@@ -138,11 +239,13 @@ impl Builder<'_> {
                         let mut st = self.style(m);
                         st.color = Some(self.theme.ink);
                         st.font_weight = Some(FontWeight::BOLD);
-                        self.push(title, st);
+                        let r = self.push(title, st);
+                        self.span_atom(r, source);
                     } else {
                         let mut st = self.style(m);
                         st.color = Some(self.theme.link);
                         let r = self.push(title, st);
+                        self.span_atom(r.clone(), source);
                         self.links.push((r, LinkTarget::Page(title.clone())));
                     }
                 }
@@ -153,6 +256,7 @@ impl Builder<'_> {
                     let mut st = self.style(m);
                     st.color = Some(self.theme.tag_ink);
                     let r = self.push(&format!("#{title}"), st);
+                    self.span_atom(r.clone(), source);
                     self.links
                         .push((r.clone(), LinkTarget::Page(title.clone())));
                     self.chips.push(r);
@@ -185,6 +289,7 @@ impl Builder<'_> {
                         ..Default::default()
                     };
                     let r = self.push(&label, st);
+                    self.span_atom(r.clone(), source);
                     self.links.push((r, LinkTarget::Block(uid.clone())));
                 }
                 Inline::Embed { uid, .. } => {
@@ -201,6 +306,7 @@ impl Builder<'_> {
                         ..Default::default()
                     };
                     let r = self.push(&label, st);
+                    self.span_atom(r.clone(), source);
                     self.links.push((r, LinkTarget::Block(uid.clone())));
                 }
                 Inline::Link { text, url, .. } if url.starts_with("blob:") => {
@@ -208,6 +314,7 @@ impl Builder<'_> {
                     let mut st = self.style(m);
                     st.color = Some(self.theme.muted);
                     let r = self.push(&format!("📎 {text}"), st);
+                    self.span_atom(r.clone(), source);
                     self.links.push((r, LinkTarget::Url(url.clone())));
                 }
                 Inline::Link { text, url, .. } => {
@@ -218,7 +325,26 @@ impl Builder<'_> {
                         color: Some(self.theme.link),
                         wavy: false,
                     });
-                    let r = self.push(text, st);
+                    let mut r = self.push(text, st);
+                    self.span_atom(r.clone(), source.clone());
+                    if utopia_core::inline::is_external_url(url) {
+                        // A link that leaves the app ends in ↗, so it reads differently
+                        // from a page link before it is clicked. The arrow is part of the
+                        // link (it opens it too) but not underlined.
+                        let arrow = HighlightStyle {
+                            color: Some(self.theme.link),
+                            ..self.style(m)
+                        };
+                        let a = self.push(EXTERNAL_ARROW, arrow);
+                        r.end = a.end;
+                        // No source behind the arrow: a caret in it goes to the link's end.
+                        let at = self.base + source.end;
+                        self.spans.push(Span {
+                            shown: a,
+                            source: at..at,
+                            exact: false,
+                        });
+                    }
                     self.links.push((r, LinkTarget::Url(url.clone())));
                 }
             }
@@ -278,34 +404,51 @@ pub fn render_self(
     chip: &mut dyn FnMut(&str) -> ChipState,
     self_titles: &[String],
 ) -> Rendered {
+    // `Key:: value` shows the key as a label (P1 attributes).
+    let attr = utopia_core::inline::attribute(src);
+    let base = attr.as_ref().map_or(0, |(_, value)| value.start);
+    let body = &src[base..];
     let mut b = Builder {
         theme,
         chip,
         self_titles,
+        src: body,
+        base,
         text: String::new(),
         highlights: Vec::new(),
         links: Vec::new(),
         chips: Vec::new(),
+        spans: Vec::new(),
     };
-    // `Key:: value` shows the key as a label (P1 attributes).
-    let body = match utopia_core::inline::attribute(src) {
-        Some((key, value)) => {
-            let st = HighlightStyle {
-                font_weight: Some(FontWeight::BOLD),
-                color: Some(theme.muted),
-                ..Default::default()
-            };
-            b.push(&format!("{key}: "), st);
-            &src[value]
-        }
-        None => src,
-    };
-    b.walk(&parse(body), Marks::default());
+    if let Some((key, _)) = &attr {
+        let st = HighlightStyle {
+            font_weight: Some(FontWeight::BOLD),
+            color: Some(theme.muted),
+            ..Default::default()
+        };
+        let label = b.push(&format!("{key}: "), st);
+        // The label is the source's key and a separator that stands for its `:: `.
+        let at = src.find(key.as_str()).unwrap_or(0);
+        let (shown, source) = (label.start + key.len(), at + key.len());
+        b.spans.push(Span {
+            shown: label.start..shown,
+            source: at..source,
+            exact: true,
+        });
+        b.spans.push(Span {
+            shown: shown..label.end,
+            source: source..base,
+            exact: false,
+        });
+    }
+    b.walk(&parse(body), 0..body.len(), Marks::default());
     Rendered {
         text: b.text.into(),
         highlights: b.highlights,
         links: b.links,
         chips: b.chips,
+        spans: b.spans,
+        source_len: src.len(),
     }
 }
 
@@ -810,6 +953,53 @@ mod tests {
         );
     }
 
+    /// A click in a rendered block is answered in the rendered text, and the caret goes
+    /// into the source. With markup before it the two offsets differ; the click used to
+    /// be answered with the end of the block.
+    #[test]
+    fn a_rendered_offset_maps_to_the_source_under_it() {
+        let t = Theme::light();
+        let caret = |src: &str, shown_before: &str| {
+            let r = render(src, &t, &mut |_| ChipState::Live("a block".into()));
+            let ix = r.text.find(shown_before).expect(shown_before);
+            (r.text.to_string(), r.source_offset(ix))
+        };
+        // Plain text: the offsets are the same.
+        assert_eq!(caret("alpha beta", "ta").1, 8);
+        // After a link, a tag, emphasis and code: the caret is before the same character.
+        for (src, word) in [
+            ("Met [[Ana Lovelace]] about the plan", "lan"),
+            ("#project and #[[Modern Religion]] today", "day"),
+            ("a **bold** and _soft_ and ~~gone~~ word", "ord"),
+            ("run `cargo test` twice", "wice"),
+            ("see ((abc)) and {{embed: ((abc))}} here", "ere"),
+            ("read [the docs](https://example.com) first", "irst"),
+            (r"2 \* 3 \* 4 is [[Math]] done", "one"),
+            ("日本語 [[東京]] の天気", "天気"),
+        ] {
+            let (shown, at) = caret(src, word);
+            assert_eq!(&src[at..], word, "{src:?} shown as {shown:?}");
+        }
+        // Inside emphasis and code: the character under the click, inside the markup.
+        let src = "a **bold** word";
+        assert_eq!(&src[caret(src, "ld").1..], "ld** word");
+        let src = "run `cargo test` twice";
+        assert_eq!(&src[caret(src, "test").1..], "test` twice");
+        // An escaped character is one character on screen and two in the source.
+        let src = r"2 \* 3 \* 4";
+        assert_eq!(&src[caret(src, "3").1..], r"3 \* 4");
+        // An attribute's label: the key is the source's key, the value starts after `:: `.
+        let src = "Status:: in **progress** now";
+        assert_eq!(&src[caret(src, "tus").1..], "tus:: in **progress** now");
+        assert_eq!(&src[caret(src, "in ").1..], "in **progress** now");
+        assert_eq!(&src[caret(src, "now").1..], "now");
+        // Past the last character is the end of the source, closing markup included.
+        for src in ["ends in **bold**", "ends in [[a link]]", "", "Key:: "] {
+            let r = render(src, &t, &mut |_| ChipState::Missing);
+            assert_eq!(r.source_offset(r.text.len()), src.len(), "{src:?}");
+        }
+    }
+
     #[test]
     fn missing_chip_is_explicit() {
         let t = Theme::light();
@@ -820,5 +1010,52 @@ mod tests {
     #[test]
     fn long_chip_is_truncated() {
         assert_eq!(chip_label(&"x".repeat(50)).chars().count(), 41);
+    }
+
+    /// A link that leaves the app ends in ↗; the arrow opens it too, is not underlined, and
+    /// has no source behind it, so a caret in it goes to the end of the link's source.
+    #[test]
+    fn an_external_link_ends_in_an_up_right_arrow() {
+        let t = Theme::light();
+        let src = "go https://x.y now";
+        let r = render(src, &t, &mut |_| ChipState::Missing);
+        assert_eq!(
+            r.text.as_ref(),
+            format!("go https://x.y{EXTERNAL_ARROW} now")
+        );
+        let url = LinkTarget::Url("https://x.y".into());
+        let arrow = r.text.find('↗').unwrap();
+        assert_eq!(r.link_at(3), Some(&url));
+        assert_eq!(r.link_at(arrow), Some(&url), "the arrow opens the link");
+        assert_eq!(r.link_at(arrow + '↗'.len_utf8()), None);
+        let underlined: Vec<_> = r
+            .highlights
+            .iter()
+            .filter(|(_, s)| s.underline.is_some())
+            .map(|(range, _)| &r.text[range.clone()])
+            .collect();
+        assert_eq!(underlined, ["https://x.y"]);
+        let after = r.text.find(" now").unwrap();
+        assert_eq!(r.source_offset(after), src.find(" now").unwrap());
+        assert_eq!(
+            r.source_offset(arrow + 1),
+            "go https://x.y".len(),
+            "inside the arrow"
+        );
+        assert_eq!(r.source_offset(2), 2);
+
+        let md = render("[site](https://x.y)", &t, &mut |_| ChipState::Missing);
+        assert_eq!(md.text.as_ref(), format!("site{EXTERNAL_ARROW}"));
+        let arrow = md.text.find('↗').unwrap();
+        assert_eq!(md.source_offset(2), "[si".len());
+        assert_eq!(md.source_offset(arrow), "[site](https://x.y)".len());
+        // Links that stay in the app get no arrow.
+        let r = render("[p](utopia://page/x)", &t, &mut |_| ChipState::Missing);
+        assert_eq!(r.text.as_ref(), "p");
+        let h = "a".repeat(64);
+        let r = render(&format!("[f.txt](blob:{h})"), &t, &mut |_| {
+            ChipState::Missing
+        });
+        assert_eq!(r.text.as_ref(), "📎 f.txt");
     }
 }

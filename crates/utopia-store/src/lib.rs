@@ -51,7 +51,6 @@ pub use project::{display_title, resolve_page_key};
 pub use query::*;
 pub use schema::SCHEMA_VERSION;
 pub use tasks::{Task, TaskGroup};
-pub use utopia_doc::DocCursor;
 pub use writer::WriteTicket;
 
 use writer::{Job, PageJob, Persister, TrashOp};
@@ -240,7 +239,30 @@ impl Store {
         let mut store = Self::init(conn, Some(path.to_path_buf()))?;
         store._lock = Some(lock);
         store.persister = Persister::spawn(path, key)?;
+        store.upgrade_inline_grammar()?;
         Ok(store)
+    }
+
+    /// Re-project a graph whose index an older inline grammar made (rule 2: projections
+    /// are rebuildable). Grammar 2 reads a bare `https://…` as one opaque link (PRD
+    /// Appendix B), so a `#fragment` in it is no longer a tag edge; until the index is
+    /// rebuilt those edges would stay and `doctor` would report them. Only a graph with a
+    /// block that holds both `://` and `#` can differ, so the others skip the rebuild.
+    fn upgrade_inline_grammar(&mut self) -> Result<()> {
+        const KEY: &str = "inline_grammar";
+        const CURRENT: &str = "2";
+        if self.local_get(KEY)?.as_deref() == Some(CURRENT) {
+            return Ok(());
+        }
+        let stale: bool = self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM block WHERE instr(text, '://') AND instr(text, '#'))",
+            [],
+            |r| r.get(0),
+        )?;
+        if stale {
+            self.rebuild_index()?;
+        }
+        self.local_set(KEY, CURRENT)
     }
 
     pub fn open_in_memory() -> Result<Self> {
@@ -937,21 +959,6 @@ impl Store {
             in_flight: None,
             promoted: false,
         }
-    }
-
-    /// Anchor a caret in a block so it survives remote merges (§6.5).
-    pub fn caret_cursor(
-        &mut self,
-        page: &PageId,
-        block: &BlockId,
-        offset: usize,
-    ) -> Option<DocCursor> {
-        self.load_doc(page).ok()?.doc.cursor_for(block, offset)
-    }
-
-    /// Where an anchored caret is now (byte offset in the block's text).
-    pub fn resolve_caret(&mut self, page: &PageId, cursor: &DocCursor) -> Option<usize> {
-        self.load_doc(page).ok()?.doc.resolve_cursor(cursor)
     }
 
     /// The current tree of a page (loads its shard on first use).

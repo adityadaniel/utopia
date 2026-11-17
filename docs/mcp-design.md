@@ -6,7 +6,7 @@ Status: design, written on 2026-11-10. The owner answered each decision on 2026-
 subcommand and the headless path, Settings → Assistants, this documentation, and the four
 write tools — `append_blocks` (slice 3.1), `update_block` (slice 3.2), `move_block` and
 `delete_block` (slice 3.3, PR 9). Slice 3.4, the write check with the real clients, is not
-done.
+done. `docs/mcp-handoff.md` has the state of each pull request.
 Checked on 2026-11-16 against `main` (`f559022`), the MCP 2026-07-28 specification and the
 documentation of the three clients. §1.3 lists what the check changed.
 

@@ -104,6 +104,7 @@ Icon-only buttons must have an accessible label.
 - Todo: a real checkbox, 16px, `accent-color: --link`, with 10px gap before the text. Done todos: text `--muted` with a strikethrough.
 - Inline page link: `--link`, no underline, underline on hover.
 - Date link: same as page link (dates are pages).
+- External link (a web address, typed bare or as `[text](url)`): `--link`, underlined, followed by a thin space and `↗` in `--link` (not underlined), so it reads as leaving the app before it is clicked. The arrow is part of the link. Attachments and `utopia://` links stay in the app and get no arrow.
 - Tag: inline chip, height 22, padding 0 7px, radius 5, `--tag-bg` fill, `--tag-ink` text, 14px.
 - Ref type label (for example "Scheduled for this day"): height 20, padding 0 7px, radius 4, 1px `--line-strong` border, Mono 11px `--ink-3`, white fill.
 
