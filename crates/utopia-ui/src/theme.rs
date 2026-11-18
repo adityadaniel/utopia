@@ -426,6 +426,8 @@ pub struct Theme {
     /// PDF highlight overlays (independent of light/dark paper).
     pub pdf_highlight: Hsla,
     pub pdf_selection: Hsla,
+    /// The sheet under a PDF page: white in both themes, as the document is.
+    pub pdf_paper: Hsla,
 }
 
 impl Global for Theme {}
@@ -466,6 +468,7 @@ impl Theme {
             scrim: gpui::hsla(0., 0., 0., 0.18),
             pdf_highlight: gpui::hsla(0.14, 0.95, 0.55, 0.35),
             pdf_selection: gpui::hsla(0.6, 0.9, 0.55, 0.25),
+            pdf_paper: rgb(0xffffff).into(),
         }
     }
 
@@ -507,6 +510,7 @@ impl Theme {
             scrim: gpui::hsla(0., 0., 0., 0.42),
             pdf_highlight: gpui::hsla(0.14, 0.95, 0.55, 0.35),
             pdf_selection: gpui::hsla(0.6, 0.9, 0.55, 0.25),
+            pdf_paper: rgb(0xffffff).into(),
         }
     }
 
@@ -714,7 +718,8 @@ pub fn nav_row(
             d.bg(th.selected).font_weight(FontWeight::MEDIUM)
         })
         .cursor_pointer()
-        .hover(|d| d.bg(th.nav_hover))
+        // An active row keeps `selected` under the pointer (DESIGN.md §3.2).
+        .when(!active, |d| d.hover(|d| d.bg(th.nav_hover)))
         .when_some(glyph, |d, glyph| {
             d.child(icon(
                 glyph,
@@ -957,6 +962,27 @@ mod tests {
                 ("ink_3", th.ink_3, "line_soft", th.line_soft),
                 ("muted", th.muted, "hover", th.hover),
                 ("muted", th.muted, "nav_hover", th.nav_hover),
+                // §2.1 "On a fill": today's cell, a done checkbox, the workspace initial.
+                ("paper", th.paper, "link", th.link),
+                ("paper", th.paper, "ink", th.ink),
+                // §2.1 "Selected": the second text on a chosen row, and a link in it.
+                ("ink_2", th.ink_2, "selected", th.selected),
+                ("link", th.link, "selected", th.selected),
+                // Links inside a hovered row, a chip or a chosen option.
+                ("link", th.link, "hover", th.hover),
+                ("link", th.link, "nav_hover", th.nav_hover),
+                ("link", th.link, "line_soft", th.line_soft),
+                // §3.12, §3.13: marks and chips in block text.
+                ("ink", th.ink, "line_soft", th.line_soft),
+                ("ink", th.ink, "code_bg", th.code_bg),
+                ("muted", th.muted, "code_bg", th.code_bg),
+                ("ink", th.ink, "highlight_bg", th.highlight_bg),
+                ("ink", th.ink, "selection", th.selection),
+                // §3.17: banners and the flash of a row in Settings.
+                ("ink", th.ink, "banner_bg", th.banner_bg),
+                ("ink_3", th.ink_3, "banner_bg", th.banner_bg),
+                ("warning", th.warning, "banner_bg", th.banner_bg),
+                ("link", th.link, "banner_bg", th.banner_bg),
             ] {
                 let ratio = contrast(fg, bg);
                 assert!(
@@ -991,6 +1017,37 @@ mod tests {
                      bullets and disabled strokes, never text"
                 );
             }
+        }
+    }
+
+    /// DESIGN.md §2.1 names three fills `muted` is kept off, because the pair is under
+    /// 4.5:1 in at least one theme. If a palette change makes one pass in both, the rule
+    /// is stale: take it out of the spec instead of leaving a trap nobody can explain.
+    #[test]
+    fn the_fills_muted_is_kept_off_still_fail() {
+        let (l, d) = (Theme::light(), Theme::dark());
+        for (name, light, dark) in [
+            (
+                "selected",
+                contrast(l.muted, l.selected),
+                contrast(d.muted, d.selected),
+            ),
+            (
+                "line_soft",
+                contrast(l.muted, l.line_soft),
+                contrast(d.muted, d.line_soft),
+            ),
+            (
+                "banner_bg",
+                contrast(l.muted, l.banner_bg),
+                contrast(d.muted, d.banner_bg),
+            ),
+        ] {
+            assert!(
+                light.min(dark) < 4.5,
+                "muted on {name} passes in both themes ({light:.2}, {dark:.2}); DESIGN.md \
+                 §2.1 still forbids it"
+            );
         }
     }
 

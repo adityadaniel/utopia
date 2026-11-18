@@ -3629,7 +3629,7 @@ impl PageView {
                                 .ml_1()
                                 .px_1()
                                 .text_size(px(crate::theme::CAPTION_SIZE))
-                                .text_color(th.muted)
+                                .text_color(th.ink_3)
                                 .bg(th.line_soft)
                                 .rounded(px(crate::theme::RADIUS_CHIP))
                                 .child(format!("depth {}", r.depth)),
@@ -5023,7 +5023,7 @@ impl PageView {
                                     .child(
                                         div()
                                             .text_size(px(crate::theme::CAPTION_SIZE))
-                                            .text_color(th.muted)
+                                            .text_color(th.ink_3)
                                             .child(detail),
                                     ),
                             )
