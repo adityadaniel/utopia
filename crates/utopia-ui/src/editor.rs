@@ -579,8 +579,7 @@ impl BlockEditor {
         } else if let Some(c) = caret {
             self.field.move_to(c);
         }
-        // A click or a jump starts a new column; a goal from Up/Down carries its own.
-        self.field.sticky = None;
+        // Up/Down from the neighbouring block lands under the caret's x once laid out.
         self.field.goal = goal;
         window.focus(&self.focus);
         cx.notify();
@@ -1966,28 +1965,28 @@ impl BlockEditor {
                 return;
             }
         }
-        // §13.5: a run of Up/Down keeps one column, inside the block and across blocks.
-        let x = self.field.goal_x();
-        match self.field.vertical(up, x) {
+        // §13.5: each step aims at where the caret is now; no column is remembered.
+        match self.field.vertical(up) {
             Some(ix) => {
-                self.field.move_vertically_to(ix, x);
+                self.field.move_to(ix);
                 self.moved(cx);
             }
             None => {
+                let x = self.field.caret_window_x();
                 self.emit_after_commit(EditorEvent::Navigate { up, x }, cx);
             }
         }
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-        let to = self.field.vertical(true, None).unwrap_or(0);
+        let to = self.field.vertical(true).unwrap_or(0);
         self.field.select_to(to);
         cx.notify();
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         let len = self.field.text.len();
-        let to = self.field.vertical(false, None).unwrap_or(len);
+        let to = self.field.vertical(false).unwrap_or(len);
         self.field.select_to(to);
         cx.notify();
     }

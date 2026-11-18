@@ -8259,10 +8259,10 @@ fn fr_2_13_backspace_turns_a_new_to_do_into_a_bullet(cx: &mut TestAppContext) {
     assert_eq!(rows_str(&rows(&app, &page, cx)), vec![("Buy milknote", 0)]);
 }
 
-/// §13.5: a run of Up/Down keeps one column. A short block on the way takes the caret to
-/// its end, and the next long block gives the column back.
+/// §13.5: Up/Down remember no column. Each step aims at where the caret is now, so a short
+/// block on the way takes the caret to its end and the next long block keeps it there.
 #[gpui::test]
-fn up_and_down_keep_the_column_across_a_short_block(cx: &mut TestAppContext) {
+fn up_and_down_aim_at_the_caret_without_a_remembered_column(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup(cx);
     let page = today_page(&app, cx);
     cx.simulate_input("aaaaaaaaaa");
@@ -8278,22 +8278,16 @@ fn up_and_down_keep_the_column_across_a_short_block(cx: &mut TestAppContext) {
     cx.simulate_keystrokes("up");
     cx.run_until_parked();
     assert_eq!(text_and_caret(&ws, cx), ("aa".into(), 2));
+    // The column of the first move is not kept: the caret stays under the short line's end.
     cx.simulate_keystrokes("up");
     cx.run_until_parked();
-    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 6));
+    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 2));
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
+    assert_eq!(text_and_caret(&ws, cx), ("aa".into(), 2));
     cx.simulate_keystrokes("down");
     cx.run_until_parked();
-    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 6));
-
-    // Any other move starts a new column.
-    cx.simulate_keystrokes("up");
-    cx.run_until_parked();
-    cx.simulate_keystrokes("left");
-    cx.simulate_keystrokes("up");
-    cx.run_until_parked();
-    assert_eq!(caret(&ws, cx), 1);
+    assert_eq!(text_and_caret(&ws, cx), ("aaaaaaaaaa".into(), 2));
     assert_eq!(rows(&app, &page, cx).len(), 3);
 }
 
