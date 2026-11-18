@@ -367,7 +367,7 @@ impl PdfView {
             .relative()
             .w(px(PAGE_WIDTH))
             .h(px(height))
-            .bg(gpui::white())
+            .bg(th.pdf_paper)
             .border_1()
             .border_color(th.line)
             .cursor_crosshair()

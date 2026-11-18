@@ -360,8 +360,8 @@ down instead.
 Implemented:
 - **v1 / P0 (§4.2):** daily notes (the launch view is Roam's Daily Notes feed: every calendar
   day from today backwards, editable in place, each with its Linked References and no Unlinked
-  References; older days load as you scroll; the sidebar's recent days list only days with an
-  entry or a linked reference). A day becomes a page
+  References; older days load as you scroll; there is no recent days list, the mini calendar
+  marks the days that have notes, DESIGN.md §3.2). A day becomes a page
   on its first write, not on a visit (FR-1.2): `Store::draft_daily` keeps it in memory only
   (never projected, synced or seen by `doctor`) and the first `queue` of it writes the whole
   shard; a link to the date writes the draft, a remote copy of the day replaces it. Pages sit in a centred

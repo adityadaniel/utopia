@@ -27,8 +27,8 @@ use crate::theme::{
 const PAD_TOP: f32 = 20.;
 const PAD_X: f32 = 28.;
 const PAD_BOTTOM: f32 = 32.;
-/// Space above and below a group's divider; the first group sits 12 px under the title.
-const GROUP_GAP: f32 = 10.;
+/// Space above and below a group's divider, and above the first group (DESIGN.md §4.5).
+const GROUP_GAP: f32 = 12.;
 const FIRST_GROUP_GAP: f32 = 12.;
 /// The fold chevron's button, hung in the column's left padding.
 const FOLD_BUTTON: f32 = 24.;
@@ -336,7 +336,7 @@ impl TasksView {
                     body = body.child(
                         div()
                             .debug_selector(move || format!("tasks-heading-{gi}-{si}"))
-                            .mt(px(6.))
+                            .mt(px(crate::theme::SPACING[1]))
                             .text_size(px(SMALL.size))
                             .line_height(px(SMALL.line))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -461,7 +461,7 @@ impl TasksView {
             .mx(px(-HOVER_BLEED))
             .px(px(HOVER_BLEED))
             .rounded(px(RADIUS_CONTROL))
-            .hover(|d| d.bg(th.well))
+            .hover(|d| d.bg(th.hover))
             .flex()
             .items_start()
             .gap(px(TODO_GAP))

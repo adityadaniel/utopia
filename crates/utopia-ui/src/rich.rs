@@ -267,10 +267,12 @@ impl Builder<'_> {
                         ChipState::Live(t) => {
                             (format!(" {} ›", chip_label(&t)), self.theme.line_soft, None)
                         }
+                        // `ink_3`, not `muted`: `muted` on `line_soft` is under 4.5:1 in
+                        // the dark theme (DESIGN.md §2.1).
                         ChipState::Deleted => (
                             " deleted block ".to_string(),
                             self.theme.line_soft,
-                            Some(self.theme.muted),
+                            Some(self.theme.ink_3),
                         ),
                         ChipState::Missing => (
                             format!(" Missing block (({uid})) "),
@@ -280,7 +282,7 @@ impl Builder<'_> {
                         ChipState::Cyclic => (
                             " ↻ cyclic reference ".to_string(),
                             self.theme.line_soft,
-                            Some(self.theme.muted),
+                            Some(self.theme.ink_3),
                         ),
                     };
                     let st = HighlightStyle {
@@ -302,7 +304,7 @@ impl Builder<'_> {
                     };
                     let st = HighlightStyle {
                         background_color: Some(self.theme.line_soft),
-                        color: Some(self.theme.muted),
+                        color: Some(self.theme.ink_3),
                         ..Default::default()
                     };
                     let r = self.push(&label, st);

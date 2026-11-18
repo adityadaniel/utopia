@@ -1176,6 +1176,14 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Heading, Quote, Todo};
     let mut s = Store::open(path)?;
     let today = chrono::Local::now().date_naive();
+    // Date links use the graph's own title format, so they resolve to the daily pages.
+    let title = |d: NaiveDate| s.date_format().format(d);
+    let today_t = title(today);
+    let yesterday_t = title(today - chrono::Duration::days(1));
+    let kickoff = format!("Kickoff is on [[{today_t}]]");
+    let demo = format!("Prepare the demo for [[{today_t}]]");
+    let moved = format!("Moved the review with [[Ana Lovelace]] to [[{today_t}]]");
+    let check_in = format!("Check in after the review on [[{yesterday_t}]]");
 
     let atlas = s.create_page("Atlas Launch")?;
     insert_tree(
@@ -1188,6 +1196,10 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
             (1, Bullet, "A beta for twenty testers, invited by hand"),
             (1, Bullet, "Import from the old format"),
             (1, Todo, "Draft the release notes"),
+            // A page (not a day) linking today: a plain linked reference with children.
+            (0, Bullet, &kickoff),
+            (1, Bullet, "Room for twenty, with a screen"),
+            (1, Todo, "Send the invite to the testers"),
         ],
     )?;
 
@@ -1198,6 +1210,7 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
         &[
             (0, Bullet, "role:: reviewer on [[Atlas Launch]]"),
             (0, Bullet, "Prefers a written summary before a call"),
+            (0, Bullet, &check_in),
         ],
     )?;
     let reading = s.create_page("Reading")?;
@@ -1281,6 +1294,8 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
                 "Fade everything that is not a neighbour on hover",
             ),
             (0, Todo, "Reply to the testers' thread"),
+            // Plain-text mention: an unlinked reference on Ana Lovelace's page (FR-3.11).
+            (0, Bullet, "Lunch with Ana Lovelace, no agenda"),
             (0, Bullet, "Good day."),
         ],
     )?;
@@ -1295,6 +1310,8 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
             (1, Bullet, "Old files have to keep opening, no exceptions"),
             (0, Todo, "Ask [[Ana Lovelace]] to review it"),
             (0, Todo, "Book the room for the beta kickoff"),
+            // Another day linking today: a "Scheduled for this day" reference.
+            (0, Bullet, &moved),
         ],
     )?;
 
@@ -1306,6 +1323,9 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
         &[
             (0, Bullet, "Started sketching the [[Atlas Launch]] scope"),
             (0, Bullet, "[[Reading]] — two chapters on merge semantics"),
+            (0, Todo, &demo),
+            (1, Bullet, "Show the import of an old file first"),
+            (1, Bullet, "Then a merge between two laptops"),
         ],
     )?;
 

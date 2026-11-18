@@ -723,7 +723,8 @@ impl Render for SettingsView {
                     .cursor_pointer()
                     .text_size(px(crate::theme::CONTROL_SIZE))
                     .when(on, |d| d.bg(th.line_soft).text_color(th.link))
-                    .when(!on, |d| d.text_color(th.ink).hover(|x| x.bg(th.hover)))
+                    // The rail is `shelf`: its hover is `nav_hover` (DESIGN.md §2.1).
+                    .when(!on, |d| d.text_color(th.ink).hover(|x| x.bg(th.nav_hover)))
                     .child(
                         div()
                             .w(px(18.))
@@ -1256,7 +1257,9 @@ impl SettingsView {
                                 c.child(
                                     div()
                                         .text_size(px(crate::theme::CAPTION_SIZE))
-                                        .text_color(th.muted)
+                                        // `muted` fails on the flash's `banner_bg` in the
+                                        // dark theme (DESIGN.md §2.1).
+                                        .text_color(if flashed { th.ink_3 } else { th.muted })
                                         .child(d.help),
                                 )
                             }),
@@ -1423,7 +1426,9 @@ impl SettingsView {
                                 div()
                                     .ui_font_style(f)
                                     .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
+                                    // `muted` fails on the chosen row's `line_soft` fill in
+                                    // the dark theme (DESIGN.md §2.1).
+                                    .text_color(if on { th.ink_3 } else { th.muted })
                                     .child("Bob dug a big bog by the pond, quickly."),
                             ),
                     )
@@ -1490,7 +1495,7 @@ impl SettingsView {
                             .child(
                                 div()
                                     .text_size(px(crate::theme::CAPTION_SIZE))
-                                    .text_color(th.muted)
+                                    .text_color(if on { th.ink_3 } else { th.muted })
                                     .child(format!("{} px per level", d.step())),
                             ),
                     )

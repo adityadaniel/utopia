@@ -94,7 +94,8 @@ pub fn render<V: 'static>(
         );
     let names = div()
         .flex()
-        .children(["M", "T", "W", "T", "F", "S", "S"].iter().map(|n| {
+        // Sunday first, as `grid` lays the days out (the strip below does the same).
+        .children(["S", "M", "T", "W", "T", "F", "S"].iter().map(|n| {
             div()
                 .w(px(26.))
                 .text_size(px(crate::theme::CAPTION_SIZE))
@@ -165,7 +166,7 @@ impl<V> Copy for StripActions<V> {}
 
 /// The sidebar's mini calendar (DESIGN.md §3.2): month label with prev/next buttons, a
 /// Sunday-first 7-column grid, mono weekday labels, 30 px day cells. Today is a solid
-/// `link` cell with white text; a day with an entry carries a 4 px `link` dot under its
+/// `link` cell with `paper` text; a day with an entry carries a 4 px `link` dot under its
 /// number. Clicking a day opens that daily note. Display only: the days are existing daily
 /// pages (§5.5, rule 6), nothing is created by looking at the month.
 pub fn render_month_strip<V: 'static>(
@@ -241,7 +242,8 @@ pub fn render_month_strip<V: 'static>(
                 .when(is_today, |d| {
                     d.bg(th.link).font_weight(gpui::FontWeight::MEDIUM)
                 })
-                .when(!is_today, |d| d.hover(|s| s.bg(th.hover)))
+                // The strip sits on `shelf`: its hover is `nav_hover` (DESIGN.md §2.1).
+                .when(!is_today, |d| d.hover(|s| s.bg(th.nav_hover)))
                 .child(d.day().to_string())
                 .child(
                     div()

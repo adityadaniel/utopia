@@ -2214,13 +2214,15 @@ impl BlockEditor {
                 .py_1()
                 .rounded(px(crate::theme::RADIUS_CHIP))
                 .cursor_pointer()
-                .when(i == ac.selected, |d| d.bg(th.hover))
+                // The row the keyboard is on is `selected`; its second line is `ink_3`,
+                // because `muted` fails on that fill (DESIGN.md §2.1, §3.14).
+                .when(i == ac.selected, |d| d.bg(th.selected))
                 .child(div().text_color(th.ink).child(label))
                 .when_some(detail, |d, s| {
                     d.child(
                         div()
                             .text_size(px(crate::theme::CAPTION_SIZE))
-                            .text_color(th.muted)
+                            .text_color(if i == ac.selected { th.ink_3 } else { th.muted })
                             .child(s),
                     )
                 })

@@ -27,13 +27,13 @@ use crate::theme::{
     outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill,
     AVATAR_SIZE, AVATAR_TEXT, BLOCK_TEXT_LEFT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE, CARET_SLOT,
     COLLAPSED_RING, COMPACT_INDENT, CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP,
-    CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_GAP, DAY_HEADER_GAP,
-    DAY_HEADER_PAD_TOP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL,
+    CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_DIVIDER_BELOW, DAY_GAP,
+    DAY_HEADER_GAP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL,
     LABEL_MONO, MAX_VISUAL_DEPTH, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_REFS_GAP,
     PROPERTY_GAP_BELOW_TITLE, PROPERTY_HOVER_BLEED, PROPERTY_ICON, PROPERTY_KEY_WIDTH,
     PROPERTY_KEY_WIDTH_COMPACT, PROPERTY_PADDING_Y, PROPERTY_ROW_MIN_HEIGHT, ROW_GUTTER,
-    STATUS_DOT, STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET, TODO_CHECK_SIZE,
-    TODO_GAP, TODO_SIZE, UNLINKED_ROW_HEIGHT,
+    ROW_HOVER_BLEED, STATUS_DOT, STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET,
+    TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE, UNLINKED_ROW_HEIGHT,
 };
 
 /// Transclusions stop expanding at this depth (FR-4.5).
@@ -49,12 +49,11 @@ const JOURNAL_BATCH: usize = 10;
 /// The reference filter field's preferred width (LR-1); it no longer stretches the column.
 const REF_FILTER_WIDTH: f32 = 240.;
 /// The narrowest the field gets before the pane is too small to show the controls at all.
-const REF_FILTER_MIN_WIDTH: f32 = 90.;
-/// Height of the pinned day heading (DN-3). It is exactly the day header's own height —
-/// its top padding, the caption line, the date line, the gap below the title and the
-/// hairline — so the pinned copy replaces the real one without duplicating it.
-const STICKY_HEIGHT: f32 =
-    DAY_HEADER_PAD_TOP + DAY_CAPTION_LINE + DAY_TITLE.line + DAY_HEADER_GAP + 1.;
+const REF_FILTER_MIN_WIDTH: f32 = 80.;
+/// Height of the pinned day header (DN-3, DESIGN.md §3.5): one compact row, the height of
+/// an empty day row, plus its 1 px bottom edge. It is pinned only once the day's own title
+/// has scrolled under it, so the two never show at once.
+const STICKY_HEIGHT: f32 = EMPTY_DAY_HEIGHT + 1.;
 
 #[derive(Debug, Clone)]
 pub enum PageViewEvent {
@@ -147,6 +146,9 @@ enum Item {
         /// The feed day whose panel this is (`None` on a page view).
         date: Option<NaiveDate>,
         collapsed: bool,
+        /// A daily page's references are all "Scheduled for this day" (FR-1.12), said once
+        /// in the header (DESIGN.md §3.7).
+        scheduled: bool,
     },
     RefsControls,
     /// The panel's rounded bottom edge (the flat list draws the border item by item).
@@ -154,7 +156,6 @@ enum Item {
     GroupHeader {
         page: PageRow,
         count: usize,
-        scheduled: bool,
         /// The first group has no divider above it.
         first: bool,
     },
@@ -162,14 +163,17 @@ enum Item {
     /// children travel with it, so paint never reads the store (rule 3).
     Hit {
         hit: RefHit,
-        page_title: SharedString,
         /// The children shown inline, in outline order.
         children: Vec<(BlockId, String)>,
         /// Live children past the inline limit, behind the "+N more" chip.
         hidden: usize,
+        /// In the feed, the day the panel belongs to: its name is bold ink, not a link
+        /// (DESIGN.md §3.7). `None` uses the page view's own titles.
+        day_title: Option<SharedString>,
     },
     More {
         page: PageId,
+        title: SharedString,
         hidden: usize,
     },
     NoRefs,
@@ -180,6 +184,8 @@ enum Item {
     Mention(Mention),
     /// The unlinked section is open and there is nothing left to link (LR-5).
     NoMentions,
+    /// The open unlinked panel's rounded bottom edge.
+    UnlinkedEnd,
     /// A day's title in the Daily Notes feed (`page` is None for a blank day).
     DayHeader {
         date: NaiveDate,
@@ -227,6 +233,8 @@ struct DayHeading {
     title: SharedString,
     weekday: SharedString,
     today: bool,
+    /// The first day of the feed: no divider above it, the feed's top padding instead.
+    first: bool,
 }
 
 /// One calendar day of the feed while it is being built.
@@ -681,6 +689,9 @@ pub struct PageView {
     ref_children_cache_key: Option<(u64, usize)>,
     /// A reference control's menu is open (LR-1). Local view state, never persisted.
     controls_menu: Option<ControlMenu>,
+    /// The reference controls (filter field, date and sort menus, "Also mentions" chips)
+    /// are shown (DESIGN.md §3.7: only after Filter, or while a filter is in force).
+    controls_open: bool,
     open_embeds: HashSet<(BlockId, String)>,
     rename: Option<Entity<LineInput>>,
     filter: Entity<LineInput>,
@@ -919,6 +930,8 @@ impl PageView {
             cx.subscribe(&filter, |this, _, e: &LineInputEvent, cx| {
                 if let LineInputEvent::Changed(t) = e {
                     this.query.text = (!t.trim().is_empty()).then(|| t.clone());
+                    // Clearing the text keeps the controls open under the caret.
+                    this.controls_open |= this.query.text.is_some();
                     this.refs_key = None;
                     this.cycle
                         .invalidate(Invalidation::rows() | Invalidation::refs());
@@ -956,6 +969,7 @@ impl PageView {
             ref_children_cache: HashMap::new(),
             ref_children_cache_key: None,
             controls_menu: None,
+            controls_open: false,
             open_embeds: HashSet::new(),
             rename: None,
             filter,
@@ -1059,9 +1073,31 @@ impl PageView {
         }
     }
 
-    /// The pinned day heading's height (DN-3) for the day title in force.
+    /// The pinned day header's height (DN-3, DESIGN.md §3.5): the same in a pane.
     fn sticky_height(&self) -> f32 {
-        STICKY_HEIGHT - DAY_TITLE.line + self.day_title_role().line
+        STICKY_HEIGHT
+    }
+
+    /// How far below the top of a day's header item the bottom of its title sits: the
+    /// space above the header (the feed's top padding for the first day; the gap, the
+    /// divider and the space below it for the others), the caption line and the title.
+    fn day_title_bottom(&self, first: bool) -> f32 {
+        let above = if first {
+            self.pad_top(false)
+        } else {
+            DAY_GAP + 1. + DAY_DIVIDER_BELOW
+        };
+        above + DAY_CAPTION_LINE + self.day_title_role().line
+    }
+
+    /// The side margin of the references panel and the unlinked section: the column's
+    /// padding, or 16 px in a compact pane.
+    fn refs_pad(&self) -> f32 {
+        if self.compact {
+            crate::theme::SPACING[3]
+        } else {
+            CONTENT_PADDING_X
+        }
     }
 
     /// Air above the column: none in a pane, whose 44 px header is the air (§4.3).
@@ -1229,22 +1265,24 @@ impl PageView {
     }
 
     /// The day heading pinned to the top of the feed at the current scroll offset
-    /// (DN-3): the last heading at or above the first visible item, unless that heading
-    /// is itself exactly at the top. A binary search over the loaded days, so `render`
+    /// (DN-3): the last heading at or above the first visible item, once that heading's
+    /// own title has scrolled under the pinned row (DESIGN.md §3.5). A binary search over the loaded days, so `render`
     /// does no more work than the offset it already reads (rule 10).
     fn sticky_heading(&self) -> Option<&DayHeading> {
         self.journal()?;
         let top = self.list.logical_scroll_top();
-        let ix = self
+        let at = self
             .day_headings
             .partition_point(|h| h.ix <= top.item_ix)
             .checked_sub(1)?;
-        let heading = &self.day_headings[ix];
+        let heading = &self.day_headings[at];
         if top.item_ix >= heading.end {
             return None;
         }
-        let at_top = heading.ix == top.item_ix && top.offset_in_item <= px(0.5);
-        (!at_top).then_some(heading)
+        // §3.5: pinned only once the day's own title has passed under the pinned row.
+        let title_visible = heading.ix == top.item_ix
+            && top.offset_in_item < px(self.day_title_bottom(heading.first) - self.sticky_height());
+        (!title_visible).then_some(heading)
     }
 
     /// The date whose heading is stuck at the top of the feed, for scripts (DN-3).
@@ -1385,6 +1423,7 @@ impl PageView {
             return;
         };
         self.query = RefQuery::default();
+        self.controls_open = false;
         self.filter_titles.clear();
         self.unlinked = None;
         self.unlinked_open = false;
@@ -1908,7 +1947,7 @@ impl PageView {
         for r in rows {
             items.push(r);
         }
-        self.push_refs(&page, &mut items, cx);
+        self.push_refs(&mut items, cx);
         if zoom.is_none() {
             // Unlinked References (FR-3.9, LR-5, DESIGN.md §3.7): a collapsed row that is
             // searched only once it is expanded, so a closed row never runs the FTS scan.
@@ -1929,6 +1968,7 @@ impl PageView {
                     Some(_) => items.push(Item::NoMentions),
                     None => {}
                 }
+                items.push(Item::UnlinkedEnd);
             }
         }
         self.replace_items(items, cx);
@@ -2066,6 +2106,7 @@ impl PageView {
                     title: day.title.clone().into(),
                     weekday: weekday.clone(),
                     today: day.date == today_date,
+                    first: i == 0,
                 });
                 items.push(Item::DayHeader {
                     date: day.date,
@@ -2089,11 +2130,13 @@ impl PageView {
                             count: refs.shown(),
                             date: Some(day.date),
                             collapsed,
+                            scheduled: true,
                         });
                         // The collapsed header is the whole panel (rounded all round); a
                         // bottom edge under it would read as a shadow (§2.4).
                         if !collapsed {
-                            self.push_ref_groups(&page, refs, true, &mut items, cx);
+                            let day_title = headings[heading_ix].title.clone();
+                            self.push_ref_groups(refs, Some(day_title), &mut items, cx);
                             items.push(Item::RefsEnd);
                         }
                     }
@@ -2167,7 +2210,20 @@ impl PageView {
         }
     }
 
-    fn push_refs(&mut self, page: &PageId, items: &mut Vec<Item>, cx: &mut Context<Self>) {
+    /// A filter, a date range, a co-reference or a non-default sort is in force, so the
+    /// controls that show it must stay open (DESIGN.md §3.7).
+    fn filtering(&self) -> bool {
+        self.query.text.is_some()
+            || !self.query.also.is_empty()
+            || self.query.since.is_some()
+            || self.query.sort != RefSort::default()
+    }
+
+    fn controls_shown(&self) -> bool {
+        self.controls_open || self.filtering()
+    }
+
+    fn push_refs(&mut self, items: &mut Vec<Item>, cx: &mut Context<Self>) {
         let shown = self.refs.shown();
         let title = if self.zoom().is_some() {
             "Referenced by"
@@ -2179,8 +2235,9 @@ impl PageView {
             count: shown,
             date: None,
             collapsed: false,
+            scheduled: self.header.kind == PageKind::Daily && self.zoom().is_none(),
         });
-        if self.zoom().is_none() {
+        if self.zoom().is_none() && self.controls_shown() {
             items.push(Item::RefsControls);
         }
         if self.refs.groups.is_empty() {
@@ -2188,9 +2245,8 @@ impl PageView {
             items.push(Item::RefsEnd);
             return;
         }
-        let daily = self.header.kind == PageKind::Daily;
         let refs = std::mem::take(&mut self.refs);
-        self.push_ref_groups(page, &refs, daily, items, cx);
+        self.push_ref_groups(&refs, None, items, cx);
         self.refs = refs;
         items.push(Item::RefsEnd);
     }
@@ -2199,9 +2255,8 @@ impl PageView {
     /// with its first children inline (LR-4).
     fn push_ref_groups(
         &mut self,
-        page: &PageId,
         refs: &LinkedRefs,
-        daily: bool,
+        day_title: Option<SharedString>,
         items: &mut Vec<Item>,
         cx: &mut Context<Self>,
     ) {
@@ -2298,11 +2353,9 @@ impl PageView {
         }
         let mut first_group = true;
         for g in &refs.groups {
-            let scheduled = daily && g.page.id != *page;
             items.push(Item::GroupHeader {
                 page: g.page.clone(),
                 count: g.hits.len(),
-                scheduled,
                 first: std::mem::take(&mut first_group),
             });
             let limit = shown(g);
@@ -2311,14 +2364,15 @@ impl PageView {
                 let hidden = kids.total.saturating_sub(kids.shown.len());
                 items.push(Item::Hit {
                     hit: h.clone(),
-                    page_title: g.page.title.clone().into(),
                     children: kids.shown,
                     hidden,
+                    day_title: day_title.clone(),
                 });
             }
             if g.hits.len() > limit {
                 items.push(Item::More {
                     page: g.page.id.clone(),
+                    title: g.page.title.clone().into(),
                     hidden: g.hits.len() - limit,
                 });
             }
@@ -3575,7 +3629,7 @@ impl PageView {
                                 .ml_1()
                                 .px_1()
                                 .text_size(px(crate::theme::CAPTION_SIZE))
-                                .text_color(th.muted)
+                                .text_color(th.ink_3)
                                 .bg(th.line_soft)
                                 .rounded(px(crate::theme::RADIUS_CHIP))
                                 .child(format!("depth {}", r.depth)),
@@ -3732,7 +3786,7 @@ impl PageView {
     fn property_key_cell(
         &self,
         key: &str,
-        glyph: Icon,
+        glyph: Option<Icon>,
         key_w: f32,
         th: &crate::theme::Theme,
     ) -> Div {
@@ -3742,7 +3796,11 @@ impl PageView {
             .flex()
             .items_center()
             .gap_1()
-            .child(icon(glyph, PROPERTY_ICON, th.ink_3))
+            // A key without an icon keeps the slot, so every key starts on one edge.
+            .child(match glyph {
+                Some(glyph) => icon(glyph, PROPERTY_ICON, th.ink_3).into_any_element(),
+                None => div().size(px(PROPERTY_ICON)).flex_none().into_any_element(),
+            })
             .child(
                 div()
                     .min_w_0()
@@ -3776,9 +3834,9 @@ impl PageView {
             .flex()
             .items_center()
             .gap_2()
-            .hover(|d| d.bg(th.shelf))
+            .hover(|d| d.bg(th.hover))
             .cursor_pointer()
-            .child(self.property_key_cell(&p.key, Icon::DashedCircle, key_w, &th))
+            .child(self.property_key_cell(&p.key, property_icon(p.kind), key_w, &th))
             .child(
                 // A flex value cell lets the status pill size to its text instead of
                 // filling the column like a block-level child (gpui divs are blocks).
@@ -3957,7 +4015,7 @@ impl PageView {
             .flex()
             .items_center()
             .gap_2()
-            .child(self.property_key_cell("aliases", Icon::List, key_w, &th))
+            .child(self.property_key_cell("aliases", Some(Icon::List), key_w, &th))
             .child(value)
             .into_any_element()
     }
@@ -4501,16 +4559,28 @@ impl PageView {
     /// never moves the references (ALL-3).
     fn render_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
-        let sort_label = match self.query.sort {
-            RefSort::Title => "Title",
-            RefSort::Recency => "Recent",
-        };
+        let sort_label = sort_label(self.query.sort);
+        // DESIGN.md §3.7: the chips are a filter, not a summary of the groups below, so the
+        // row says what they do. A chip's number is the references it would keep.
         let mut chips = div()
             .debug_selector(|| "refs-chips".into())
             .flex()
             .flex_wrap()
             .gap_1()
-            .items_center();
+            .items_center()
+            .when(
+                !self.query.also.is_empty() || !self.suggestions.is_empty(),
+                |d| {
+                    d.child(
+                        div()
+                            .debug_selector(|| "refs-chips-label".into())
+                            .mr_1()
+                            .text_size(px(crate::theme::CAPTION_SIZE))
+                            .text_color(th.ink_3)
+                            .child("Also mentions"),
+                    )
+                },
+            );
         for (i, f) in self.query.also.iter().enumerate() {
             let id = f.clone();
             let title = self
@@ -4532,6 +4602,7 @@ impl PageView {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.query.also.retain(|p| *p != id);
                         this.refs_key = None;
+                        this.controls_open = true;
                         this.cycle
                             .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
@@ -4570,6 +4641,7 @@ impl PageView {
                         this.query.also.push(id.clone());
                         this.filter_titles.insert(id.clone(), t.clone());
                         this.refs_key = None;
+                        this.controls_open = true;
                         this.cycle
                             .invalidate(Invalidation::rows() | Invalidation::refs());
                         cx.notify();
@@ -4718,14 +4790,14 @@ impl PageView {
             ControlMenu::Sort => vec![
                 ControlChoice {
                     selector: "refs-sort-option-title",
-                    label: "Title",
+                    label: sort_label(RefSort::Title),
                     days: None,
                     sort: Some(RefSort::Title),
                     selected: self.query.sort == RefSort::Title,
                 },
                 ControlChoice {
                     selector: "refs-sort-option-recent",
-                    label: "Recent",
+                    label: sort_label(RefSort::Recency),
                     days: None,
                     sort: Some(RefSort::Recency),
                     selected: self.query.sort == RefSort::Recency,
@@ -4775,6 +4847,7 @@ impl PageView {
                     }
                     this.controls_menu = None;
                     this.refs_key = None;
+                    this.controls_open = true;
                     this.cycle
                         .invalidate(Invalidation::rows() | Invalidation::refs());
                     cx.notify();
@@ -4950,7 +5023,7 @@ impl PageView {
                                     .child(
                                         div()
                                             .text_size(px(crate::theme::CAPTION_SIZE))
-                                            .text_color(th.muted)
+                                            .text_color(th.ink_3)
                                             .child(detail),
                                     ),
                             )
@@ -5004,13 +5077,11 @@ impl PageView {
                 .px(px(CONTENT_PADDING_X))
                 .when(first, |d| d.pt(px(self.pad_top(false))))
                 .when(!first, |d| {
-                    // 40 px between days, then the 1 px divider, then the heading. Keeping
-                    // that gap in the margin means the pinned copy (STICKY_HEIGHT) is
-                    // exactly this header, so the two never double up.
+                    // DESIGN.md §2.3: 40 px above the 1 px divider, 24 px below it.
                     d.mt(px(DAY_GAP))
                         .border_t_1()
                         .border_color(th.line_soft)
-                        .pt(px(DAY_HEADER_PAD_TOP))
+                        .pt(px(DAY_DIVIDER_BELOW))
                 })
                 .pb(px(DAY_HEADER_GAP))
                 .child(
@@ -5093,18 +5164,15 @@ impl PageView {
                 let title_sel = format!("empty-title-{iso}");
                 let write_sel = format!("empty-write-{iso}");
                 let weekday_sel = format!("empty-weekday-{iso}");
-                div()
+                // The divider and its space sit above the first row, outside it, so every
+                // row of the group is the same 44 px with the same 4 px gap (§3.6). The row
+                // hover reaches ROW_HOVER_BLEED past the text, like every row hover (§2.1).
+                let row = div()
                     .id(gpui::ElementId::Name(format!("empty-day-{iso}").into()))
                     .debug_selector(move || row_sel.clone())
-                    .px(px(CONTENT_PADDING_X))
-                    .when(first, |d| {
-                        d.mt(px(DAY_GAP))
-                            .border_t_1()
-                            .border_color(th.line_soft)
-                            .pt(px(DAY_HEADER_PAD_TOP))
-                    })
-                    .when(!first, |d| d.mt(px(EMPTY_DAY_GAP)))
+                    .px(px(ROW_HOVER_BLEED))
                     .h(px(EMPTY_DAY_HEIGHT))
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -5129,16 +5197,14 @@ impl PageView {
                             .child(title),
                     )
                     .child(
-                        quiet_control(
+                        // §3.4: on the row's hover fill, Write's own hover is `selected`.
+                        crate::theme::quiet_control_in_row(
                             gpui::ElementId::Name(format!("empty-write-{iso}").into()),
                             "Write",
                             &th,
                         )
                         .debug_selector(move || write_sel.clone())
-                        .h(px(crate::theme::GHOST_TEXT_HEIGHT))
                         .ml_2()
-                        .flex()
-                        .items_center()
                         .on_click(cx.listener(
                             move |this, _, window, cx| {
                                 cx.stop_propagation();
@@ -5148,7 +5214,17 @@ impl PageView {
                     )
                     .on_click(
                         cx.listener(move |this, _, window, cx| this.start_day(date, window, cx)),
-                    )
+                    );
+                div()
+                    .px(px(CONTENT_PADDING_X - ROW_HOVER_BLEED))
+                    .when(first, |d| {
+                        d.mt(px(DAY_GAP))
+                            .border_t_1()
+                            .border_color(th.line_soft)
+                            .pt(px(DAY_DIVIDER_BELOW))
+                    })
+                    .when(!first, |d| d.pt(px(EMPTY_DAY_GAP)))
+                    .child(row)
                     .into_any_element()
             }
             Item::DayEmpty { date } => div()
@@ -5195,6 +5271,7 @@ impl PageView {
                 count,
                 date,
                 collapsed,
+                scheduled,
             } => {
                 let th = th.clone();
                 let pad = if self.compact {
@@ -5223,9 +5300,11 @@ impl PageView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(crate::theme::SMALL.size))
+                    // DESIGN.md §3.7: the panel's heading is 14/600 `ink`, so it is not
+                    // quieter than the group titles under it.
+                    .text_size(px(crate::theme::UI.size))
                     .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_color(th.ink_2);
+                    .text_color(th.ink);
                 match date {
                     Some(date) => {
                         let iso = utopia_core::date::iso(date);
@@ -5255,6 +5334,7 @@ impl PageView {
                                 crate::theme::count_chip(count, &th)
                                     .debug_selector(move || format!("refs-count-{count}")),
                             )
+                            .when(scheduled, |d| d.child(scheduled_label(&th)))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if !this.collapsed_ref_days.remove(&date) {
                                     this.collapsed_ref_days.insert(date);
@@ -5270,18 +5350,48 @@ impl PageView {
                                 crate::theme::count_chip(count, &th)
                                     .debug_selector(move || format!("refs-count-{count}")),
                             )
+                            .when(scheduled, |d| d.child(scheduled_label(&th)))
                             .child(div().flex_1())
-                            .child(
-                                outline_button("refs-filter", "Filter", &th)
-                                    .debug_selector(|| "refs-filter".into())
+                            .child({
+                                // Filter opens the controls and puts the caret in the field;
+                                // pressed again it closes them, unless a filter is in force
+                                // (then it only focuses the field, which shows the filter).
+                                let open = self.controls_shown();
+                                outline_button("refs-filter-button", "Filter", &th)
+                                    .debug_selector(move || {
+                                        format!(
+                                            "refs-filter-button-{}",
+                                            if open { "open" } else { "closed" }
+                                        )
+                                    })
+                                    .when(open, |d| d.bg(th.selected))
                                     .on_click(cx.listener(|this, _, window, cx| {
-                                        this.filter.update(cx, |f, _| f.focus(window));
-                                    })),
-                            );
+                                        if this.controls_shown() && !this.filtering() {
+                                            this.controls_open = false;
+                                            this.controls_menu = None;
+                                        } else {
+                                            this.controls_open = true;
+                                            this.filter.update(cx, |f, _| f.focus(window));
+                                        }
+                                        this.cycle.invalidate(Invalidation::rows());
+                                        cx.notify();
+                                    }))
+                            });
                     }
                 }
                 header.into_any_element()
             }
+            Item::UnlinkedEnd => div()
+                .debug_selector(|| "unlinked-end".into())
+                .mx(px(self.refs_pad()))
+                .h(px(crate::theme::SPACING[1]))
+                .bg(th.well)
+                .border_l_1()
+                .border_r_1()
+                .border_b_1()
+                .border_color(th.line)
+                .rounded_b(px(crate::theme::RADIUS_PANEL))
+                .into_any_element(),
             Item::RefsEnd => {
                 let pad = if self.compact {
                     crate::theme::SPACING[3]
@@ -5315,12 +5425,7 @@ impl PageView {
                     .child(self.render_controls(cx))
                     .into_any_element()
             }
-            Item::GroupHeader {
-                page,
-                count,
-                scheduled,
-                first,
-            } => {
+            Item::GroupHeader { page, count, first } => {
                 let id = page.id.clone();
                 let pad = if self.compact {
                     crate::theme::SPACING[3]
@@ -5338,12 +5443,19 @@ impl PageView {
                     .border_color(th.line)
                     .when(!first, |d| d.border_t_1())
                     .px(px(crate::theme::SPACING[4]))
-                    .pt(px(crate::theme::SPACING[3] + 2.))
-                    .pb(px(crate::theme::SPACING[1]))
+                    // DESIGN.md §3.7: a group title sits with its own blocks: 12 below the
+                    // divider (4 under the panel header) and nothing more above its first
+                    // reference, whose row adds 2.
+                    .pt(px(if first {
+                        crate::theme::SPACING[0]
+                    } else {
+                        crate::theme::SPACING[2]
+                    }))
                     .cursor_pointer()
                     .hover(|s| s.bg(th.hover))
-                    // The source page link is 14/500 `link` (DESIGN.md §3.7); the count chip
-                    // and the ref type label follow it.
+                    // The source page is 14/500 `ink` (DESIGN.md §3.7): blue stays for the
+                    // links inside the references, and the row's hover says it opens. Its
+                    // count chip follows only when there is more than one reference to count.
                     .child(
                         div()
                             .flex()
@@ -5352,19 +5464,16 @@ impl PageView {
                             .child(
                                 div()
                                     .debug_selector(|| format!("group-title-{ix}"))
-                                    .text_size(px(crate::theme::TAG.size))
+                                    .text_size(px(crate::theme::UI.size))
+                                    .line_height(px(crate::theme::UI.line))
                                     .font_weight(gpui::FontWeight::MEDIUM)
-                                    .text_color(th.link)
+                                    .text_color(th.ink)
                                     .child(page.title.clone()),
                             )
-                            .child(
-                                crate::theme::count_chip(count, &th)
-                                    .debug_selector(|| format!("group-count-{ix}-{count}")),
-                            )
-                            .when(scheduled, |d| {
+                            .when(count > 1, |d| {
                                 d.child(
-                                    ref_type_label("Scheduled for this day", &th)
-                                        .debug_selector(|| "ref-type-label".into()),
+                                    crate::theme::count_chip(count, &th)
+                                        .debug_selector(|| format!("group-count-{ix}-{count}")),
                                 )
                             }),
                     )
@@ -5376,9 +5485,9 @@ impl PageView {
             }
             Item::Hit {
                 hit,
-                page_title,
                 children,
                 hidden,
+                day_title,
             } => {
                 // The same row the right sidebar draws (RS-1), with the path above it (LR-3)
                 // and its first children inline (LR-4).
@@ -5399,38 +5508,59 @@ impl PageView {
                         ix,
                         crate::reference::RefRow {
                             hit: &hit,
-                            page_title: &page_title,
                             children: &children,
                             hidden,
                         },
                         &th,
                         &self.app.read(cx).store,
-                        &self.self_titles,
+                        &day_title
+                            .map(|t| vec![utopia_core::title::normalize_title(&t)])
+                            .unwrap_or_else(|| self.self_titles.clone()),
                         crate::theme::SPACING[4],
                         cx.entity(),
                     ))
                     .into_any_element()
             }
-            Item::More { page, hidden } => {
+            // DESIGN.md §3.7: the group's hidden references are a row of their own at the
+            // group's level, which names the group, not one more line of the last reference.
+            Item::More {
+                page,
+                title,
+                hidden,
+            } => {
                 let pad = if self.compact {
                     crate::theme::SPACING[3]
                 } else {
                     CONTENT_PADDING_X
                 };
                 div()
-                    .id(("more", ix))
                     .mx(px(pad))
                     .bg(th.well)
                     .border_l_1()
                     .border_r_1()
                     .border_color(th.line)
-                    .px(px(crate::theme::SPACING[4]))
-                    .text_size(px(crate::theme::CAPTION_SIZE))
-                    .text_color(th.link)
-                    .cursor_pointer()
-                    .child(format!("+{hidden} more"))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.set_expanded(page.clone(), cx)),
+                    .px(px(crate::theme::SPACING[4] - ROW_HOVER_BLEED))
+                    .pt(px(crate::theme::SPACING[0]))
+                    .pb(px(crate::theme::SPACING[1]))
+                    .child(
+                        div()
+                            .id(("more", ix))
+                            .debug_selector(move || format!("group-more-{hidden}"))
+                            .h(px(crate::theme::GHOST_TEXT_HEIGHT))
+                            .px(px(ROW_HOVER_BLEED))
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .rounded(px(crate::theme::RADIUS_CONTROL))
+                            .text_size(px(crate::theme::SMALL.size))
+                            .text_color(th.ink_3)
+                            .cursor_pointer()
+                            .hover(|s| s.bg(th.hover).text_color(th.ink))
+                            .child(icon(Icon::ChevronDown, crate::icons::ICON_SIZE, th.ink_3))
+                            .child(format!("Show {hidden} more from {title}"))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.set_expanded(page.clone(), cx)
+                            })),
                     )
                     .into_any_element()
             }
@@ -5453,26 +5583,29 @@ impl PageView {
                     .child("No linked references yet.")
                     .into_any_element()
             }
-            // DESIGN.md §3.7: a collapsed row at least 44 px tall with a top divider and a
-            // chevron-right. The mentions are searched when it is expanded, not before.
+            // DESIGN.md §3.7: the second half of "who mentions this page", so the same
+            // panel as Linked references: a 44 px well header with a chevron, the heading
+            // and its count, collapsed until opened. The mentions are searched when it is
+            // expanded, not before, so a closed panel has no count.
             Item::UnlinkedHeader { count, open } => div()
                 .id("unlinked-header")
                 .debug_selector(|| "unlinked-header".into())
-                .mt_4()
-                .mx(px(if self.compact {
-                    crate::theme::SPACING[3]
-                } else {
-                    CONTENT_PADDING_X
-                }))
+                .mt(px(crate::theme::SPACING[3]))
+                .mx(px(self.refs_pad()))
                 .h(px(UNLINKED_ROW_HEIGHT))
-                .px_2()
-                .border_t_1()
+                .px(px(crate::theme::SPACING[3]))
+                .bg(th.well)
+                .border_1()
                 .border_color(th.line)
+                .when(!open, |d| d.rounded(px(crate::theme::RADIUS_PANEL)))
+                .when(open, |d| {
+                    d.rounded_t(px(crate::theme::RADIUS_PANEL)).border_b_0()
+                })
                 .flex()
                 .items_center()
                 .gap_2()
-                .text_size(px(crate::theme::SMALL.size))
-                .text_color(th.ink_2)
+                .text_size(px(crate::theme::UI.size))
+                .text_color(th.ink)
                 .cursor_pointer()
                 .hover(|s| s.bg(th.hover))
                 .child(
@@ -5490,7 +5623,7 @@ impl PageView {
                 )
                 .child(
                     div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
                         .child("Unlinked references"),
                 )
                 .children(count.map(|c| {
@@ -5527,8 +5660,13 @@ impl PageView {
                 div()
                     .id(("mention", ix))
                     .debug_selector(|| format!("mention-{ix}"))
-                    .px_6()
-                    .py_0p5()
+                    .mx(px(self.refs_pad()))
+                    .bg(th.well)
+                    .border_l_1()
+                    .border_r_1()
+                    .border_color(th.line)
+                    .px(px(crate::theme::SPACING[4]))
+                    .py_1()
                     .flex()
                     .items_start()
                     .gap_2()
@@ -5582,13 +5720,38 @@ impl PageView {
             }
             Item::NoMentions => div()
                 .debug_selector(|| "unlinked-empty".into())
-                .px_6()
-                .py_0p5()
+                .mx(px(self.refs_pad()))
+                .bg(th.well)
+                .border_l_1()
+                .border_r_1()
+                .border_color(th.line)
+                .px(px(crate::theme::SPACING[4]))
+                .py_1()
                 .text_size(px(crate::theme::CAPTION_SIZE))
                 .text_color(th.muted)
                 .child("No unlinked mentions")
                 .into_any_element(),
         }
+    }
+}
+
+/// The icon before a property key (DESIGN.md §3.8): it says what kind of value follows, so
+/// only `status` has the dashed circle, a single page link (drawn with an avatar) has the
+/// person, and plain text has none.
+fn property_icon(kind: PropertyKind) -> Option<Icon> {
+    match kind {
+        PropertyKind::Status => Some(Icon::DashedCircle),
+        PropertyKind::Linked => Some(Icon::Person),
+        PropertyKind::Plain => None,
+    }
+}
+
+/// The sort menu's name for each order (DESIGN.md §3.7): what it does, not the field it
+/// reads. `Title` puts daily pages first, newest first, then other pages by title (FR-3.3).
+fn sort_label(sort: RefSort) -> &'static str {
+    match sort {
+        RefSort::Title => "Days, then A–Z",
+        RefSort::Recency => "Last edited",
     }
 }
 
@@ -6051,7 +6214,6 @@ impl Render for PageView {
         // DN-3: the day the column is inside stays at the top of the column while a long
         // day scrolls. Reading the offset and one heading is all `render` does for it.
         let sticky = self.sticky_heading().cloned();
-        let (day_role, sticky_h) = (self.day_title_role(), self.sticky_height());
         div()
             .size_full()
             .bg(th.paper)
@@ -6080,8 +6242,10 @@ impl Render for PageView {
                 .size_full(),
             )
             .when_some(sticky, |d, h| {
-                // Drawn after the list so it paints above the rows, and with no hitbox of
-                // its own, so a click at the top of the column still reaches the block.
+                // DESIGN.md §3.5: the pinned day header is a compact one-row copy of the day's
+                // header (the empty-day row's layout), drawn after the list so it paints above
+                // the rows, and with no hitbox of its own, so a click at the top of the column
+                // still reaches the block. Only its Today pill takes clicks.
                 d.child(
                     div()
                         .absolute()
@@ -6095,46 +6259,54 @@ impl Render for PageView {
                                 .debug_selector(|| "sticky-day".into())
                                 .w_full()
                                 .max_w(px(CONTENT_MAX_WIDTH))
-                                .h(px(sticky_h))
+                                .h(px(STICKY_HEIGHT))
                                 .px(px(CONTENT_PADDING_X))
-                                .pt(px(DAY_HEADER_PAD_TOP))
-                                .pb(px(DAY_HEADER_GAP))
+                                .flex()
+                                .items_center()
                                 .bg(th.paper)
                                 .border_b_1()
                                 .border_color(th.line)
                                 .child(
                                     div()
-                                        .h(px(DAY_CAPTION_LINE))
-                                        .flex()
-                                        .items_center()
-                                        .gap_1()
+                                        .flex_none()
+                                        .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
                                         .font_family(LABEL_MONO)
                                         .text_size(px(LABEL.size))
                                         .text_color(th.muted)
-                                        .child(h.weekday.clone())
-                                        .when(h.today, |d| {
-                                            d.child(
-                                                today_pill("Today", &th)
-                                                    .id("sticky-today-pill")
-                                                    .debug_selector(|| "sticky-today-pill".into())
-                                                    .cursor_pointer()
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.scroll_to_today(cx)
-                                                    })),
-                                            )
-                                        }),
+                                        .child(h.weekday.clone()),
                                 )
                                 .child(
-                                    div()
-                                        .text_size(px(day_role.size))
-                                        .line_height(px(day_role.line))
-                                        .font_weight(day_role.weight)
+                                    crate::theme::EMPTY_DAY_TITLE
+                                        .apply(div())
+                                        .debug_selector(|| "sticky-day-title".into())
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(th.ink)
                                         .child(h.title.clone()),
-                                ),
+                                )
+                                .when(h.today, |d| {
+                                    d.child(
+                                        today_pill("Today", &th)
+                                            .id("sticky-today-pill")
+                                            .debug_selector(|| "sticky-today-pill".into())
+                                            .ml_2()
+                                            .flex_none()
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.scroll_to_today(cx)
+                                            })),
+                                    )
+                                }),
                         ),
                 )
             })
     }
+}
+
+/// DESIGN.md §3.7: a daily page's references are all scheduled for it (FR-1.12), so the
+/// label is said once, in the panel header.
+fn scheduled_label(th: &crate::theme::Theme) -> impl IntoElement {
+    ref_type_label("Scheduled for this day", th).debug_selector(|| "ref-type-label".into())
 }
 
 /// DESIGN.md §3.5: the mono weekday label above a day's title, in upper case.
