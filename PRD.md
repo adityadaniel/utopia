@@ -1048,7 +1048,7 @@ GPUI is pre-1.0 (`gpui 0.2.2`, Apache-2.0, published Oct 2025) and has no rich i
 
 - One `BlockEditor` element implementing `EntityInputHandler` (IME, marked text) modeled on Zed's `editor` internals, but scoped to a single-line-ish block.
 - Custom shaping via `WindowTextSystem`; runs carry mark flags (bold/italic/code) and reference spans.
-- Grapheme-aware cursor/selection; `Cmd+A` selects block text; `Escape` blurs; `Up/Down` moves between blocks (keeping x-offset). A run of Up/Down keeps one column, the screen x where the run began, across lines and blocks of any depth; a short line on the way does not move the column, and any other caret move starts a new run.
+- Grapheme-aware cursor/selection; `Cmd+A` selects block text; `Escape` blurs; `Up/Down` moves between blocks (keeping x-offset). Each step aims at the caret's current screen x, across lines and blocks of any depth; no column is remembered between steps, so a short line on the way leaves the caret at its end.
 - Clipboard: our own serializer for subtree copy (Markdown), plus plain text.
 - **Spike required before M1** (see M0): IME (Japanese/Korean/Chinese), emoji ZWJ sequences, macOS dead keys, double-click word select, and `Cmd+←/→` line navigation.
 
