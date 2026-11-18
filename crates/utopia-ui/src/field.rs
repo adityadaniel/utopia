@@ -66,10 +66,6 @@ pub struct TextField {
     pub multiline: bool,
     pub selecting: bool,
     pub goal: Option<Goal>,
-    /// The column a run of Up/Down keeps (window x) and the offset the last of those moves
-    /// left the caret at. Any other move puts the caret somewhere else, which ends the run:
-    /// a short line between two long ones no longer pulls the caret to its end for good.
-    pub sticky: Option<(Pixels, usize)>,
     layout: Option<TextLayout>,
     layout_text: String,
     bounds: Option<Bounds<Pixels>>,
@@ -123,7 +119,6 @@ impl TextField {
         let c = t::floor_char_boundary(&self.text, caret);
         self.sel = c..c;
         self.reversed = false;
-        self.sticky = None;
     }
 
     pub fn cursor(&self) -> usize {
@@ -167,7 +162,6 @@ impl TextField {
         let c = start + new.len();
         self.sel = c..c;
         self.reversed = false;
-        self.sticky = None;
     }
 
     pub fn prev_boundary(&self) -> usize {
@@ -328,24 +322,15 @@ impl TextField {
         }
     }
 
-    /// The window x Up/Down aims for: the column of the run of vertical moves the caret
-    /// is in, else where the caret is now.
-    pub fn goal_x(&self) -> Option<Pixels> {
-        match self.sticky {
-            Some((x, ix)) if self.sel.is_empty() && ix == self.cursor() => Some(x),
-            _ => Some(self.point_for(self.cursor())?.x),
-        }
+    /// The window x of the caret: what Up/Down aims for. No column is remembered between
+    /// moves, so each step starts from where the caret is now.
+    pub fn caret_window_x(&self) -> Option<Pixels> {
+        Some(self.point_for(self.cursor())?.x)
     }
 
-    /// Move the caret as one step of a run of Up/Down moves aimed at window x `x`.
-    pub fn move_vertically_to(&mut self, ix: usize, x: Option<Pixels>) {
-        self.move_to(ix);
-        self.sticky = x.map(|x| (x, self.cursor()));
-    }
-
-    /// Caret index one visual line up/down, aimed at window x `x` (else the caret's own),
-    /// or `None` at the first/last line.
-    pub fn vertical(&self, up: bool, x: Option<Pixels>) -> Option<usize> {
+    /// Caret index one visual line up/down, under the caret's own x, or `None` at the
+    /// first/last line.
+    pub fn vertical(&self, up: bool) -> Option<usize> {
         let p = self.point_for(self.cursor())?;
         let lh = self.line_height();
         let first = self.point_for(0)?;
@@ -353,9 +338,8 @@ impl TextField {
         if (up && p.y <= first.y) || (!up && p.y >= last.y) {
             return None;
         }
-        let x = x.unwrap_or(p.x);
         let y = if up { p.y - lh / 2. } else { p.y + lh * 1.5 };
-        Some(self.nearest_index_at(point(x, y)))
+        Some(self.nearest_index_at(point(p.x, y)))
     }
 
     pub fn on_first_line(&self) -> bool {
@@ -392,11 +376,11 @@ impl TextField {
         }
         self.goal = None;
         let lh = self.line_height();
-        let (x, ix) = match goal {
-            Goal::FirstLine(x) => (x, self.nearest_index_at(point(x, b.top() + lh / 2.))),
-            Goal::LastLine(x) => (x, self.nearest_index_at(point(x, b.bottom() - lh / 2.))),
+        let ix = match goal {
+            Goal::FirstLine(x) => self.nearest_index_at(point(x, b.top() + lh / 2.)),
+            Goal::LastLine(x) => self.nearest_index_at(point(x, b.bottom() - lh / 2.)),
         };
-        self.move_vertically_to(ix, Some(x));
+        self.move_to(ix);
     }
 }
 
