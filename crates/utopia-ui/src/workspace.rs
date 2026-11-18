@@ -2687,7 +2687,8 @@ impl Workspace {
             .when(active, |d| {
                 d.bg(th.selected).font_weight(gpui::FontWeight::MEDIUM)
             })
-            .hover(|d| d.bg(th.nav_hover))
+            // An active row keeps `selected` under the pointer (DESIGN.md §3.2).
+            .when(!active, |d| d.hover(|d| d.bg(th.nav_hover)))
             .child(icon(
                 Icon::Page,
                 ICON_SIZE,
@@ -3041,7 +3042,8 @@ impl Workspace {
                             .py_0p5()
                             .rounded(px(RADIUS_CONTROL))
                             .cursor_pointer()
-                            .hover(|d| d.bg(th.hover))
+                            // The footer sits on `shelf`: its hover is `nav_hover` (§2.1).
+                            .hover(|d| d.bg(th.nav_hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.sync_open = !this.sync_open;
                                 cx.notify();
@@ -3395,15 +3397,8 @@ impl Workspace {
                                 .text_color(th.muted)
                                 .child(group.page.title.clone()),
                         )
-                        .child(
-                            div()
-                                .px_1()
-                                .rounded(px(crate::theme::RADIUS_CHIP))
-                                .bg(th.line_soft)
-                                .text_size(px(crate::theme::CAPTION_SIZE))
-                                .text_color(th.muted)
-                                .child(group.hits.len().to_string()),
-                        )
+                        // The count badge of DESIGN.md §3.4.
+                        .child(crate::theme::count_chip(group.hits.len(), &th))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -4160,7 +4155,8 @@ impl Workspace {
                             .font_family(crate::theme::LABEL_MONO)
                             .text_size(px(crate::theme::COUNT.size))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(th.muted)
+                            // `muted` fails on the `selected` fill (DESIGN.md §2.1, §3.9).
+                            .text_color(if on { th.ink_3 } else { th.muted })
                             .child(counts[i].to_string()),
                     )
                     .on_click(move |_, _, cx| tasks.update(cx, |t, cx| t.set_filter(f, cx))),
@@ -4430,7 +4426,7 @@ impl Render for Workspace {
                         .text_size(px(crate::theme::CAPTION_SIZE))
                         .text_color(th.muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(th.hover))
+                        .hover(|s| s.bg(th.nav_hover))
                         .child("»")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.toggle_left(&ToggleLeftSidebar, window, cx)

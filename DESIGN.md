@@ -1,15 +1,15 @@
 # Utopia Design Spec ("Quiet paper")
 
-Utopia is a desktop outliner built with GPUI. This file is the visual system and the main screens: the Daily Notes feed, a page view, the sidebar, the stacked panes that hold them (§4.3, §4.4) and the Tasks view (§4.5). Build to match what is written here. If something is not covered, pick the option that fits the principles in §1, then add the rule here.
+Utopia is a desktop outliner built with GPUI. This file is the visual system and every screen: the Daily Notes feed, a page view, the sidebar, the stacked panes that hold them (§4.3, §4.4), the Tasks view (§4.5), the right panel, the graph, the PDF viewer, Settings and the start screens (§4.6 to §4.10). Build to match what is written here. If something is not covered, pick the option that fits the principles in §1, then add the rule here.
 
-**Last checked against the app:** 2026-11-17. Every token below is a constant in `crates/utopia-ui/src/theme.rs` with the same name (`--line-soft` is `line_soft`). If the two disagree, one of them is a bug: fix the code or this file in the same change.
+**Last checked against the app:** 2026-11-18. Where the app does not yet match a rule, §6 lists it. Every token below is a constant in `crates/utopia-ui/src/theme.rs` with the same name (`--line-soft` is `line_soft`). If the two disagree, one of them is a bug: fix the code or this file in the same change.
 
-**How to read it.** §2 is the tokens, §3 the components, §4 the screens, §5 the keyboard and accessibility rules, §6 the open questions and §7 how the web terms below map to GPUI. Section numbers are cited from the code (`DESIGN.md §3.6`), so a new section goes at the end of its group and an old number never moves.
+**How to read it.** §2 is the tokens, §3 the components, §4 the screens, §5 the keyboard and accessibility rules, §6 the open questions and the list of places where the app does not match this file yet, and §7 how the web terms below map to GPUI. Section numbers are cited from the code (`DESIGN.md §3.6`), so a new section goes at the end of its group and an old number never moves.
 
 ## 1. Principles
 
 1. **Writing first.** Body text is 16px with generous line height. Chrome (sidebar, toolbars, pinned headers) never competes with the notes: it is smaller, quieter and shorter than the content it frames.
-2. **One loud color.** Blue means "this goes somewhere" (page links, date links). Nothing else uses it, except focus rings, the active nav icon, the today marker and checked checkboxes.
+2. **One loud color.** Blue means "this goes somewhere" (page links, date links). Nothing else uses it, except focus rings, the active nav icon, the today marker and a control that is on (a checked checkbox, a chosen radio, a switch).
 3. **Quiet structure.** Nesting is shown with thin thread lines and spacing, not boxes. Dividers are 1px warm gray.
 4. **One source of truth.** Anything shown on screen is the block data itself, drawn differently. Never show the same data twice (see Properties bar).
 5. **One piece, one look.** A row, a button or a hover looks the same on every screen. A real difference is a named variant in §3, never a local tweak.
@@ -56,9 +56,12 @@ Light and dark mode define the same names. The app follows the system appearance
 | `--scrim` | black 18 % | black 42 % | Behind a modal palette |
 | `--pdf-highlight` | yellow 35 % | same | PDF highlight overlay (does not follow the theme) |
 | `--pdf-selection` | blue 25 % | same | PDF text selection overlay |
+| `--pdf-paper` | `#FFFFFF` | same | The sheet under a PDF page (§4.8). A document's paper does not follow the theme |
 
 Rules:
-- **Contrast.** Every pair of text and background that a component draws must reach 4.5:1 in both themes. The test `every_text_pair_reaches_contrast` in `theme.rs` holds the list; a new component adds its pairs there. One known trap: `--muted` on `--selected` fails (4.34:1 light, 4.26:1 dark), so text on an active row or a selected segment uses `--ink-3` or `--ink`, never `--muted`. For the same reason a count on a sidebar row is always `--ink-3`.
+- **Contrast.** Every pair of text and background that a component draws must reach 4.5:1 in both themes. The test `every_text_pair_reaches_contrast` in `theme.rs` holds the list; a new component adds its pairs there. `--muted` is safe on `--paper`, `--shelf`, `--well`, `--hover`, `--nav-hover` and `--code-bg` only. It fails on `--selected` (4.34:1 light, 4.26:1 dark), on `--line-soft` (4.37:1 dark) and on `--banner-bg` (4.15:1 dark), so text on an active row, a selected segment, a chip or a banner uses `--ink-3` or `--ink`, never `--muted`. For the same reason a count on a sidebar row is always `--ink-3`.
+- **On a fill.** Text or a mark on a `--link` or `--ink` fill is `--paper` (today's cell, the check in a done checkbox, the workspace initial). Never write "white" or "black" in a rule or in the code: they do not follow the theme, and white on the dark `--link` is 2.5:1. The two tokens that are white or black on purpose are `--scrim` and `--pdf-paper`.
+- **Selected.** `--selected` is the one fill for "this is the chosen one": the active sidebar row, the selected segment, the row the keyboard is on in a menu or the palette (§3.14). Its text is `--ink`; a second text on it is `--ink-3`.
 - **Hover.** There are two hover fills: `--hover` on paper and well, `--nav-hover` on shelf. Nothing else is a hover fill. Hover is always quieter than `--selected`.
 - **Borders.** The three line tokens are close on purpose: each one has one role (structure, divider, control) and they are not shown side by side.
 - Page links and tags must look different in shape, not only color: links are plain blue text, tags are slate chips.
@@ -75,7 +78,9 @@ The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight 
 | Day title | `DAY_TITLE` | Sans | 30 / 38 | 600 |
 | Page title in a pane | `PANE_PAGE_TITLE` | Sans | 30 / 38 | 600 |
 | Day title in a pane | `PANE_DAY_TITLE` | Sans | 26 / 34 | 600 |
-| Section heading | `SECTION` | Sans | 20 / 28 | 600 |
+| Section heading, block heading 1 | `SECTION` | Sans | 20 / 28 | 600 |
+| Block heading 2 | `H2_SIZE` | Sans | 18 / 26 | 600 |
+| Block heading 3 | `H3_SIZE` | Sans | 17 / 24 | 600 |
 | Compact day title (empty day row, pinned day header) | `EMPTY_DAY_TITLE` | Sans | 17 / 26 | 600 |
 | Block text | `BODY` | Sans | 16 / 28 | 400 |
 | Reference block text | `REFERENCE` | Sans | 15 / 26 | 400 |
@@ -86,9 +91,11 @@ The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight 
 | Label | `LABEL` | Mono | 12 / 16 | 500, UPPERCASE |
 | Sidebar label, ref type label | `SIDEBAR_LABEL`, `REF_LABEL` | Mono | 11 / 16 | 500 |
 | Count, kbd | `COUNT` | Mono | 12 / 16 | 400 |
+| Code (block and copy-ready text) | `CODE_TEXT_SIZE` | Menlo | 13, on the block line | 400 |
 
 Rules:
-- Use a role, never a bare size. The 15, 17 and 26 sizes exist only for the roles that name them; don't reuse them for anything else.
+- Use a role, never a bare size. The 15, 17, 18 and 26 sizes exist only for the roles that name them; don't reuse them for anything else.
+- **Density.** Settings → Appearance → Density sets Block text: 16 / 28 (Comfortable) or 13.5 / 18 (Compact, with 4px between blocks). Every role in the table keeps its size in both.
 - GPUI 0.2 has no letter-spacing, so titles and labels have none (§7). macOS draws text antialiased by itself.
 
 ### 2.3 Spacing and dimensions
@@ -127,16 +134,18 @@ Inside a component, a padding may be off the scale when it centres content in a 
 | 3 | `RADIUS_LINK_RING` | Tint ring on a link open in the next pane |
 | 4 | `RADIUS_CHIP` | kbd, ref type label, checkboxes |
 | 5 | `RADIUS_TAG` | Tag chips |
-| 6 | `RADIUS_CONTROL` | Nav items, ghost buttons, every row hover |
-| 8 | `RADIUS_INPUT` | Inputs, search field, button groups, segmented controls |
-| 10 | `RADIUS_PANEL` | Panels (Linked references), the Tasks empty state |
+| 6 | `RADIUS_CONTROL` | Nav items, ghost buttons, every row hover, code blocks, file chips, image previews, menus, popovers and tooltips (§3.14) |
+| 8 | `RADIUS_INPUT` | Inputs, search field, button groups, segmented controls, the palette panel (§3.15) |
+| 10 | `RADIUS_PANEL` | Panels (Linked references), the Tasks empty state, cards in Settings (§4.9) |
 | 13 | `RADIUS_PILL` | **Round**: every pill and badge (status pill, count badge, Today pill, due label). Each is at most 26 tall, so 13 makes it fully round |
 
-No shadows anywhere. Use borders instead. The only exception is the inset focus ring on a property row being edited.
+No shadows anywhere. Use borders instead. The only exception is the inset focus ring on a property row being edited. A piece that floats above the page (menu, popover, tooltip, palette) separates with a fill and a 1px border, never a shadow (§3.14).
 
 ### 2.5 Icons
 
 16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. One set (Lucide). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks).
+
+Also in the set: close (×), more (⋯), check, grip, paperclip, file, image, clock, command, hash, lock, undo, plus the Settings tab icons. A text character is never an icon: "×", "▾", "✓", "⌘", "📎" and the like are drawn from the set, so they take the icon colour and size. (The arrow after an external link, §3.1, is text on purpose: it is part of the link.)
 
 An icon-only button has a tooltip with its name (GPUI has no accessible label, §7).
 
@@ -171,20 +180,37 @@ Each component lists its states. A state that is not listed does not change the 
 - Tag: inline chip, height 22, padding 0 7px, radius 5, `--tag-bg` fill, `--tag-ink` text, 14px. The fill reaches up to 7px into the space on each side of the tag. Two chips separated by one space share it: each fill reaches half way, leaving 2px of paper between them (a text run cannot be made wider, §7).
 - Ref type label (for example "Scheduled for this day"): height 20, padding 0 7px, radius 4, 1px `--line-strong` border, Mono 11px `--ink-3`, `--paper` fill.
 
-| State | Look |
+- Text caret: 2px wide, one line tall, `--link`; it blinks (§2.6). Selected text: `--selection` fill, the text keeps its color. An input-method composition has a 1px `--ink` underline. An empty block being edited shows the hint "Type, or [[ to link, # to tag, (( to reference" in `--muted`.
+- Drag: the bullet is the handle. The piece that follows the pointer is a floating surface (§3.14) with the first 60 characters of the block. The row the block will land after has a 2px `--link` line along its bottom edge.
+
+| State (row) | Look |
 |---|---|
-| Hover | Caret and drag handle show in the gutter |
-| Editing | Raw markup, caret; caret and drag handle show |
+| Hover | The caret shows in the gutter; the bullet becomes a grip (2 × 3 dots, 2px each, `--bullet`) |
+| Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link` and a tag is `--tag-ink` |
 | Selected (block selection) | `--selection` fill behind the row |
+
+| State (checkbox) | Look |
+|---|---|
+| Rest | 1px `--line-strong` border, no fill |
+| Done | `--link` border and fill, `--paper` check (§2.1 "On a fill") |
+| Hover | The pointer cursor only |
+
+| State (page link, date link) | Look |
+|---|---|
+| Rest | `--link`, no underline |
+| Hover | Underline, the pointer cursor |
+| Open in the next pane | `--link-tint` ring (§4.3) |
+| The page it sits on | Bold `--ink`, not a link (§3.7) |
+| No page yet | The same as Rest: following it creates the page. The right panel lists these under Unresolved (§4.6) |
 
 ### 3.2 Sidebar
 
 From top to bottom:
 
-1. **Workspace row:** 24px black square with the initial in white, the workspace name (15/600), a chevron-down for switching workspaces, and a collapse-sidebar icon button on the right.
+1. **Workspace row:** 24px `--ink` square with the initial in `--paper`, the workspace name (15/600), a chevron-down for switching workspaces, and a collapse-sidebar icon button on the right.
 2. **Search field:** a button that opens the command palette. Height 36, radius 8, `--paper` fill, `--line-strong` border, search icon, placeholder text "Search or jump to" in `--muted`, and `⌘K` kbd on the right.
 3. **Nav:** Daily Notes, Tasks (square-check icon, open to-do count on the right, §4.5). Each row is 34px tall, radius 6, 14px text.
-4. **Mini calendar:** month label (13/600) with prev/next buttons. A 7-column grid, weeks start on Sunday, weekday labels in Mono 11. Always 6 rows, so the sections below never move when the month changes. Day cells are 30px tall. Days of the next or previous month are `--muted`. Today: solid `--link` fill with white text. Days with notes: a 4px `--link` dot under the number. Clicking a day opens that daily note.
+4. **Mini calendar:** month label (13/600) with prev/next buttons. A 7-column grid, weeks start on Sunday, weekday labels in Mono 11. Always 6 rows, so the sections below never move when the month changes. Day cells are 30px tall. Days of the next or previous month are `--muted`. Today: solid `--link` fill with `--paper` text at 500. Days with notes: a 4px `--link` dot under the number (`--paper` on today). Clicking a day opens that daily note.
 5. **Pages:** Mono label "PAGES", then rows 32px tall with an icon (person icon for people pages, page icon for others), the name, and the reference count on the right. Pinned pages come first.
 6. **Tags:** Mono label "TAGS", then tag chips in a wrapping row. Shown only when a tag page exists. Tags are listed here, **not** in Pages.
 7. **Footer** (pinned to the bottom, 1px top border): an 8px status dot (`--disabled` when local only, `--success` in sync), the vault name in `--ink` 500, " · Local only", and a settings icon button.
@@ -197,14 +223,22 @@ There is no "Recent days" list: the feed already shows the days.
 |---|---|
 | Hover | `--nav-hover` fill |
 | Active | `--selected` fill, `--ink` text at 500, icon in `--link` |
+| Active and hover | The same as Active: an active row keeps `--selected` under the pointer, so hover never makes it look less chosen |
 | Focus (keyboard) | Focus ring (§5) |
+
+| State (calendar day cell) | Look |
+|---|---|
+| Rest | `--ink` number, Small 13, radius 6; a day of another month is `--muted` |
+| Has notes | A 4px `--link` dot under the number |
+| Hover | `--nav-hover` fill (the calendar sits on `--shelf`, §2.1) |
+| Today | `--link` fill, `--paper` number at 500, `--paper` dot; no hover change |
 
 ### 3.3 Top bar
 
 Back and forward icon buttons (forward is `--disabled` when there's nothing to go forward to), a title or breadcrumb, then actions on the right.
 
 - Daily Notes: title "Daily Notes", then a day navigation group (prev | Today | next) with a 1px `--line-strong` border, radius 8, 32px tall, then the view mode control (§3.9), then a toggle for the right panel.
-- Page view: the current page's title in `--ink` 500, then a more (⋯) menu that holds Delete page, the view mode control and the right panel toggle.
+- Page view: the current page's title in `--ink` 500, then the more (⋯) button, the view mode control and the right panel toggle. The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, Pin or Unpin, then a divider and Delete page as the danger item.
 - **Title or trail.** In Single mode the top bar shows only the current title. The pages before it are history, not a place the page sits in (pages have no hierarchy), so they are not drawn as a "›" trail. Back's tooltip names the page it goes to ("Back to Atlas Launch"). In Panes mode the top bar shows the trail of open panes (§4.3), because those panes are on screen side by side.
 
 1px `--line-soft` bottom border.
@@ -310,7 +344,7 @@ Editing:
 Used for the view mode (Panes | Single, §4.4) and the Tasks filter (Open | Done | All, §4.5).
 
 - Height 32, 1px `--line-strong` border, radius 8, segments separated by the same border.
-- Each segment: optional 16px icon, 14px label, optional count in Mono 12 `--muted`.
+- Each segment: optional 16px icon, 13px label, optional count in Mono 12: `--muted` at rest and `--ink-3` in the selected segment (`--muted` on `--selected` fails, §2.1).
 
 | State | Look |
 |---|---|
@@ -331,6 +365,181 @@ Used by the Tasks view (§4.5).
 | State | Look |
 |---|---|
 | Hover | `--hover` fill, radius 6, reaching 8px past the text on each side |
+
+### 3.11 Block kinds
+
+A kind changes what is in the row, not the row's grid: the caret slot and the bullet slot stay as §3.1 has them, and the kind keeps its look while the block is edited.
+
+| Kind | Look |
+|---|---|
+| Heading 1, 2, 3 | Block heading roles (§2.2): 20 / 28, 18 / 26, 17 / 24, weight 600, `--ink`. The bullet stays. No space is added above or below |
+| Quote | A 2px bar on the left, 8px before the text, text `--ink-3` italic. No fill. The bar is `--link` today (§6) |
+| Code | A card: `--code-bg` fill, 1px `--line` border, radius 6, padding 4 8, the Code role (Menlo 13). When the first line names a language, the name sits at the top right in Caption `--muted` |
+| Numbered | The number and a full stop ("3.") in the 24px bullet slot, centred, Block text size, `--muted`. It takes the place of the bullet and is the drag handle |
+| To-do | §3.1 |
+
+### 3.12 Inline marks and chips
+
+These are runs inside the block's text, never separate widgets, so they wrap with the line.
+
+| Mark | Look |
+|---|---|
+| Bold, italic | Weight 700; italic |
+| Strikethrough | A 1px line in the text's own color |
+| Highlight (`^^text^^`) | `--highlight-bg` fill, text keeps its color |
+| Inline code | `--code-bg` fill; the font and size do not change |
+| Attribute key (`key:: value` outside the properties bar) | "key: " in weight 700 `--muted` |
+| Attachment in the text (`[name](blob:…)`, `{{pdf: …}}`) | Paperclip icon and the name, `--muted`. The file itself is drawn under the block (§3.13) |
+| PDF highlight link (`{{highlight: …}}`) | "p. 12" as an underlined `--link`, no arrow: it opens inside the app |
+
+Chips. A chip is a run with a fill; all are `--line-soft` with `--ink-3` text unless the row says otherwise. `--muted` is never used on a chip (§2.1).
+
+| Chip | Text | Look |
+|---|---|---|
+| Block reference `((id))` | The first 40 characters of the block, then "›" | `--line-soft` fill, `--ink` text. A click opens the block under the row, and closes it again |
+| Block embed `{{embed: ((id))}}` | "⧉" and the first 40 characters | The block is always shown under the row (§3.13) |
+| Deleted block | "deleted block" | The id is kept, so the reference still says what happened to it |
+| Cyclic reference | "↻ cyclic reference" | |
+| Missing block | "Missing block ((id))" | `--danger` on `--danger-bg`, for a reference and for an embed |
+| Depth | "depth 13" | After the text of a block deeper than 12 levels, Caption size, radius 4, padding 0 4 |
+
+### 3.13 Content under a block
+
+Some marks draw more under their row. It starts at the row's text edge, one level in, so it lines up with the row's children.
+
+- **Embedded block, opened reference:** the block and its children as normal rows, with a `--well` fill and a 2px `--line-soft` bar on the left. At most 3 levels of embeds inside embeds, and 100 blocks.
+- **Notice line:** one line in Block text size, `--muted`, when the content cannot be shown: "↻ cyclic reference", "Missing block ((id))", "deleted block", "Query failed: …", "Query syntax: …".
+- **Query (`{{query: …}}`):** a header line in Caption `--muted`, "Query {expression} · 4 results" (or "50 of 212"; a query shows at most 50). Then one row for each hit: the page title in `--link` in a 160px column, then the block text; 2px above and below, 8px between the columns. No hits is the header alone with "0 results".
+- **Image:** at most 480 × 320, scaled to fit, radius 6, no border, 4px above and below. A click opens it in the system viewer.
+- **File chip** (any other file, and an image that has not arrived): `--line-soft` fill, radius 6, padding 2 8, 8px gaps: the icon (image, file or paperclip), the name in Block text `--ink`, then the size in Caption `--ink-3`. A PDF opens in the viewer (§4.8); other files open in the system.
+
+| State | Look |
+|---|---|
+| Hover on a query hit | `--hover` fill, radius 6 |
+| Hover on a file chip | `--hover` fill; only when the file is on this device |
+| File not here yet | The same chip with "waiting for sync" in place of the size; no hover, no pointer |
+
+### 3.14 Floating surfaces (menus, popovers, tooltips)
+
+Everything that floats above the page has one look, so it reads as one layer.
+
+- **Surface:** `--well` fill, 1px `--line` border, radius 6, padding 4. No shadow (§2.4). It is drawn above the page (§7 "Drawing order") and takes the clicks that land on it.
+- **Place:** 6px from the edge of the piece that opened it (`MENU_OFFSET`), and kept inside the window.
+- **Close:** a click on an item, a click outside, Escape, or a second click on the trigger. All four, on every menu.
+- Only the palette has a scrim (§3.15).
+
+**Menu item:** the quiet control of §3.4, full width: 28 tall, padding 0 8, radius 6, 13px `--ink-3`. Items have a 2px gap.
+
+| State (menu item) | Look |
+|---|---|
+| Hover | `--hover` fill, `--ink` text |
+| Keyboard row | `--selected` fill, `--ink` text; a second line on it is `--ink-3` |
+| Current choice (a menu that picks one) | A check icon in `--link` at the right edge |
+| Danger ("Delete page") | `--danger` text; hover is a `--danger-bg` fill |
+| Divider | 1px `--line`, 4px above and below |
+
+The menus:
+
+- **Page menu** (⋯ in the top bar, §3.3; "···" in a compact pane): 190 wide (`PAGE_MENU_WIDTH`), under the trigger's right edge.
+- **Reference date and sort menus** (§3.7) and the **search age menu** (§3.15): 160 wide (`REFS_MENU_WIDTH`).
+- **Autocomplete** (`[[`, `((`, `#`) **and the slash menu** (`/`): one menu, 340 wide, 4px under the line the caret is on.
+  - Row: padding 4 8, radius 4. The label is Block text `--ink`; a second line in Caption `--muted` gives "alias: Trellis" for a page found by its alias, or the page title for a block.
+  - Rows: up to 8 pages, then a relative date ("tomorrow") when the text is one, then `Create "x"` with `⌘↵` (not for `#`). Up to 8 blocks for `((`. A slash row starts with "/ ".
+  - Nothing to show draws nothing, and the menu then takes no keys.
+  - Keys: ↑ and ↓ move and wrap, Enter or Tab accepts, ⌘Enter creates the page. The first Escape closes the menu; the second leaves the block.
+- **Sync popover:** §3.17. **Graph hover card:** §4.7.
+
+**Tooltip:** the same surface, padding 4 8, Caption 12 `--ink`, at most 240 wide (`TOOLTIP_MAX_WIDTH`). Every icon-only button has one (§2.5).
+
+**Drag preview** (§3.1): the same surface, padding 4 8, Block text `--ink`.
+
+### 3.15 Palette
+
+One panel does five jobs; the title line says which: "Quick jump" (⌘K, or the sidebar search field), "Search" (⇧⌘F), "Quick capture → today" (⇧⌘Space), "Redirect link to…" and "Extract block to page".
+
+- **Scrim:** `--scrim` over the whole window. A click on it closes the palette.
+- **Panel:** centred, 90px from the top of the window. 520 wide, 860 in Search. At most 440 tall, less in a short window. `--well` fill, 1px `--line` border, radius 8, padding 8, 4px between its parts.
+- **Title line:** Caption `--muted`.
+- **Input:** the text field of §3.16, in Block text size.
+- **Scope bar** (Quick jump and Search; not while typing a `>` command): choice chips All, Journal, Pages, To-dos (§3.16), and the age menu "Any time" at the right (§3.14).
+- **Result row:** padding 4 8, 8px gaps, radius 4: a 14px icon slot (page, day, tag, command, plus), the label in `--ink` with the typed letters in 600, then a detail at the right in Caption `--muted`: "Page", "Day", "Tag", "Alias", "Today", "Yesterday", or a command's keys.
+- **Create row:** plus icon and `Create "x"` in `--link`, always last, under a 1px `--line` divider. Only where a new page makes sense (Quick jump, scope All or Pages).
+- **Empty input:** Quick jump lists Today, Yesterday and the 8 most recent pages. The other jobs list nothing.
+- **No result:** one line, "No results", Caption `--muted`.
+- **Footer:** 1px `--line` above it, Caption `--muted`, the keys for this job ("↑↓ move · ↩ open · ⌘↩ open beside · esc").
+- **Quick capture and Extract:** the title, the input and the footer only. Enter saves; an empty input does nothing.
+
+Search adds:
+
+- **Groups:** one for each page that has hits: a header (clock icon for a day, page icon for a page; the title in `--ink`; the count badge of §3.4), then its block rows under the title, two lines at most each.
+- **A hit in the text:** `--highlight-bg` fill (§2.1).
+- **Preview** of the row the keyboard is on, at the right: 40 % of the panel (240 to 340), a 1px `--line` on its left. The path in Caption `--muted`; a state chip that names the block's kind or "Done" (`--line-soft` fill, radius 6; `--ink-3` for a plain block or a done to-do, `--link` for the other kinds); "Edited Nov 18, 2026" in Caption `--muted`; the block in `--ink`, six lines at most; then its children.
+
+| State (row) | Look |
+|---|---|
+| Hover | `--hover` fill |
+| Keyboard row | `--selected` fill; the detail becomes `--ink-3`. It stays `--selected` under the pointer |
+| A command that cannot run now | `--muted` label, no hover, no pointer; Enter does nothing |
+
+Keys: ↑ and ↓ move and wrap, Enter opens, ⌘Enter (or a ⌘-click or Shift-click) opens beside, Escape closes.
+
+### 3.16 Form controls
+
+Used by Settings (§4.9), the palette (§3.15), the reference filter (§3.7) and the start screens (§4.10). There is no filled "primary" button in Utopia: an action is a quiet control or an outline button (§3.4), and the order on the row says which comes first.
+
+**Text field.** One frame everywhere: `--paper` fill, 1px `--line-strong` border, radius 8, 36 tall, padding 0 12, UI text (the palette uses Block text). A label, when there is one, sits above it in Small `--ink-3`, 4px away; a note sits below in Caption `--muted`. A secret (token, passphrase) shows one mark for each character, never the text.
+
+| State (text field) | Look |
+|---|---|
+| Placeholder | `--muted` |
+| Focus | 1px `--link` border; caret and selection as §3.1 |
+| Error | 1px `--danger` border, and the reason below in Caption `--danger` |
+| Disabled | `--well` fill, `--muted` text, no caret |
+
+**Choosing one of a few.** Three pieces, by what the options need:
+
+| Piece | Use | Rest | Hover | Chosen |
+|---|---|---|---|---|
+| Segmented control (§3.9) | 2 to 4 short labels that fit on one line (view mode, Tasks filter, sync mode, access level, children shown) | §3.9 | §3.9 | §3.9 |
+| Radio row | Options that need a sample or a line of help (font, density, indent). A row of a Settings card | A 14px round mark, 1px `--line-strong`; label; help in Caption `--muted` | `--hover` fill | Mark has a `--link` border and an 8px `--link` dot; the row has the `--selected` fill and its help is `--ink-3` |
+| Choice chip | A row of filters that wraps (palette scope, Help topics, graph mode) | Quiet control (§3.4) | `--hover` fill, `--ink` text | `--selected` fill, `--ink` text |
+
+**Switch** (one setting, on or off): a 34 × 20 round track with a 16px `--paper` knob, 2px in from the edge. Off: `--line-strong` track. On: `--link` track. The whole row is the target.
+
+**Key chip** (a shortcut in Settings): the kbd chip (radius 4, `--hover` fill, Mono 12 `--ink`).
+
+| State (key chip, Settings → Keybindings) | Look |
+|---|---|
+| Hover | 1px `--link` border |
+| Recording | 1px `--link` border, `--banner-bg` fill, the text "Press keys · Esc cancels" in `--link` |
+| Not a shortcut | The text typed, in `--warning`, and "Not a shortcut: …" below in Caption `--warning` |
+| Clash | "Also used by …" below in Caption `--warning`, the names underlined; the other row has a `--banner-bg` fill for 1.8 s |
+| Changed from the default | An undo icon button before the chip puts the default back |
+
+**Copy-ready text** (the Assistants setup entry): the Code role in `--ink-2`, no fill, 8px under its label row, which holds a quiet "Copy" control that reads "Copied" after a click.
+
+### 3.17 Sync status, banners and notices
+
+**Sidebar footer** (§3.2). The dot and the vault name are one button that opens the sync popover; an encrypted graph adds a lock icon in `--ink-3` with the tooltip "Encrypted at rest".
+
+| State | Dot | Text after the name |
+|---|---|---|
+| Local only (sync is off) | `--disabled` | "· Local only" in `--muted` |
+| Syncing, connecting | `--warning` | none |
+| In sync | `--success` | none |
+| A problem (offline, some pages not sent, a local error, sign-in needed, relay not supported, refused) | `--danger` | none |
+| Hover | `--nav-hover` fill behind the button, radius 6 | |
+
+**Sync popover:** a floating surface (§3.14), 232 wide (`SYNC_POPOVER_WIDTH`), padding 8, above the footer. Lines, top to bottom: "Sync" in `--ink` 500; the state in words ("Synced 2m ago", "Offline — 3 changes queued"), in `--warning` when it is a problem; the target ("Relay · https://…", "Folder · /…"); "Encrypted at rest." or "Not encrypted at rest."; and, when sync is off, "Set it up in Settings → Sync." in `--muted`. It has no controls: setup is in Settings.
+
+**Banner:** a `--banner-bg` strip across the top of the main area, above the top bar: one centred line in `--ink`, 4px above and below, no border and no close button.
+
+- New day: "It's a new day → open today". The whole strip is the button. It goes when the feed opens.
+- Merge: "Merged changes from the relay into 3 pages", for 5 seconds. Not a button.
+
+**Footer notice:** one line under the footer row. A result is `--ink` ("Exported 42 pages to …"); a failed action is `--danger`. A new one takes the place of the last.
+
+**Settings strip:** a full-width line at the bottom of the Settings window, 1px `--line` above it, padding 8 24, Caption size: a warning is `--warning` on `--banner-bg`; a status is `--muted` on `--well`.
 
 ## 4. Screens
 
@@ -390,6 +599,84 @@ Every to-do in the graph, grouped by the page it is written on (PRD §9.2.2). It
 - Rows: task rows (§3.10), the first one 4px below the group title.
 - Empty state: a 1px dashed `--line-strong` box, radius 10, padding 24px, 48px below the title, centered `--muted` text naming `/To-do` and ⌥↵.
 
+### 4.6 Right panel
+
+A second column at the right of the main area, for a page, a block or the references of the current page, next to what you are writing.
+
+- **Open and close:** the top bar toggle (tooltip "Toggle right sidebar", ⇧⌘\), a Shift-click on a link, "Toggle References" (⇧⌘B), or "Around {page}" from the graph. It starts closed.
+- **Column:** 380 wide by default, 240 to 640 (`right_sidebar_width` in `settings.json`), full height, `--well` fill, 1px `--line` on its left. A 4px strip on that edge resizes it: no fill at rest, `--link` on hover and while dragging (§6); the width is saved when the drag ends.
+- **Header:** one row with a close icon button at the right.
+- **Order, top to bottom:** the local graph (§4.7, 400 tall), the page cards, then the inspector.
+- **Page card** (the newest first): a header row with a fold chevron, the title in Caption 500 `--muted` and a close icon button; under it the page as a compact page view (22px indent step, 90px property keys). An open card takes the free height, at least 140; a folded card is its header. 1px `--line` between cards.
+- **Inspector** (for the page in focus): fills the panel when there are no cards, otherwise 260 tall. Choice chips (§3.16) pick References, Outline or Pinned.
+  - References: chips Incoming, Outgoing, Unresolved, each with its count. Incoming is the groups of §3.7 in the Reference role. Outgoing is one row for each linked page: Small `--ink`, with the count. Unresolved is one entry for each link whose page does not exist: the title in `--danger`, then quiet controls "Create page", "Redirect…", "Show as text".
+  - Outline: one row for each heading block, in its heading role, indented 10px for each level.
+  - Pinned: a quiet "Pin this page" or "Unpin this page", then the pinned pages, each with a close icon button.
+- **Empty lines:** "Shift-click a link to open it here." (no cards, inspector off), "No references yet.", "No unresolved references", "No headings in this page.", "No pinned pages yet.": Caption `--muted`, padding 4 8.
+
+| State | Look |
+|---|---|
+| Hover on a row or a card header | `--hover` fill, radius 6 |
+| Hover on a close button inside a row | `--selected` fill (§3.4) |
+| Toggle while the panel is open | `--selected` fill, the same as Filter while its controls are open (§3.7) |
+
+### 4.7 Graph view
+
+Pages as dots, links as lines. It takes the main area (⇧⌘G, or "Open in graph" in the page menu); Escape or opening a page gives the pane stack back. A smaller copy, "Around this page", sits at the top of the right panel (§4.6).
+
+- **Top bar** (§3.3): back button, the title "Graph" in `--ink` 500, then choice chips (§3.16) "All pages", "Around {page}" and "Journal pages".
+- **Canvas:** `--paper`.
+- **Node:** a circle, 6 to 18 across by how many links the page has. A page is `--bullet`, a daily page is `--tag-ink`. The page the graph is centred on has a 2px `--link` ring, 2px outside it.
+- **Label:** under the node, centred, Caption `--muted`. Shown for the node under the pointer, the centre page and its neighbours, and for as many of the rest as the zoom leaves room for.
+- **Link:** a `--line` stroke, 1, 2 or 3px by how many references it stands for, with an arrowhead at the target.
+- **Legend,** bottom left, 12px in: Caption `--muted`: a dot for "Pages", one for "Journal pages", a ring for "Current page", then "128 pages · 342 links".
+- **Zoom,** bottom right: quiet controls "−", "+" and "Fit". The range is 0.25 to 8.
+- **Empty:** "No links yet. Type [[ in a block to link pages." in `--muted`, centred.
+
+| State | Look |
+|---|---|
+| Hover on a node | The node, its links and their arrowheads turn `--link`; its label turns `--ink`; its neighbours stay; everything else drops to 25 % opacity. The pointer cursor |
+| Hover card | A floating surface (§3.14), 240 wide, padding 8, 12px right of and 14px under the pointer: the title in UI 500 `--ink`, then "12 links" and the page's first block in Caption `--muted` |
+| Click | Opens the page. Shift-click opens it in the right panel, ⌘-click as a pane |
+
+### 4.8 PDF viewer
+
+A PDF attached to a block opens in the main area (macOS). Escape or "Close" goes back.
+
+- **Ground:** `--well`.
+- **Header:** padding 8 16, 1px `--line` under it: the file name in `--ink` 600, then "12 pages · 3 highlights · drag over a page to highlight" in Caption `--muted`, and at the right the quiet controls "Open in Preview" (when the file is on this device) and "Close".
+- **Page:** 720 wide, as tall as the page's shape gives, centred, 8px above and below, `--pdf-paper` fill, 1px `--line` border. The crosshair cursor.
+- **Highlight:** `--pdf-highlight` rectangles, one for each line of the quoted text. The pointer cursor; a click opens the highlight's block in the right panel (§4.6).
+- **While selecting text:** `--pdf-selection` rectangles. **While dragging an area** (Option-drag): a 1px `--link` border with the `--pdf-highlight` fill.
+- **Cannot show:** one centred line in `--muted`: "This PDF has not synced to this device yet." or "This PDF cannot be shown here; use Open in Preview."
+
+### 4.9 Settings window
+
+A second window (⌘,), 1100 × 760, at least 900 × 520, titled "Settings". Pressing ⌘, again raises it; it never opens twice.
+
+- **Rail:** 220 wide, `--shelf`, 1px `--line` on its right, padding 16 12. The caption "Settings" in Caption 500 `--muted`, then one nav row (§3.2: icon, label, the same hover and active states) for each tab: Appearance, Keybindings, Shortcuts, Sync, Assistants, Help.
+- **Pane:** `--paper`. The tab's name in the Section heading role, 24px from the top and the sides. The content is one column, at most 720 wide, centred, with 16px between its parts. Only the content scrolls; the rail and the heading stay.
+- **Card:** a group of rows. A caption row (Caption 500 `--muted`, `--well` fill, padding 12 16 6), then the rows, 1px `--line` between them and around the card, radius 10. 16px between cards.
+- **Row:** padding 8 16 (in the Keybindings list, 11 16, and 7 16 in Compact). The label in Block text, a line of help under it in Caption `--muted`, and the control at the right. A row that can be clicked has the `--hover` fill on hover.
+- **Strips** at the bottom of the window: §3.17.
+
+The tabs:
+
+- **Appearance:** cards Font, Density and Indent (radio rows, §3.16; a font's sample line is set in that font; an indent's help is "45 px per level"), References ("Children shown", a segmented control 0 to 3), Pinned pages (how many, and a quiet "Clear"), Right sidebar (a quiet "Reset to 380 px").
+- **Keybindings:** a line of help ("Click a key, then press the new one.") with a quiet "Reset All" at the right; a filter text field ("name, description or key"); then one card for each category, one row for each action with its key chip (§3.16). "No match" is one line in Caption `--muted`.
+- **Shortcuts:** the same filter and cards, to read, not to change: the keys are Mono 12 `--muted` at the right of each row.
+- **Sync:** the mode (a segmented control: Off, Relay, Nearby Mac, Shared folder); the text fields the mode needs (address, token, passphrase, folder; the two secrets are masked, and a blank one keeps the saved value); then "Apply" (it reads "Working…" while it runs), "Test connection" and "Connect another device"; then one status line in `--muted`. A notice in `--warning` names the environment variables that override the saved settings; Apply is disabled while they do.
+- **Assistants:** the access level (a segmented control: Off, Read, Read and write), the switch that lets an assistant work while the app is closed (`when_closed`), one row for each client (Claude Code, Claude Desktop, Codex) with its copy-ready entry (§3.16), and whether the bridge runs, in Caption `--muted`.
+- **Help:** choice chips for the topics; then the topic's title (Section heading), a summary in `--muted`, its paragraphs in Block text, its shortcuts (key chip and a label in Caption `--muted`) and a screenshot: 640 wide, radius 6, 1px `--line`.
+
+### 4.10 Start screens
+
+What the window shows before a graph is open. The whole window is `--paper`, with no sidebar and no top bar, and one column 420 wide in the centre, 8px between its parts.
+
+- **New graph:** "Welcome to Utopia" (Section heading); a text field (§3.16) with the placeholder "Name your graph"; "Creates ~/Documents/Utopia/<name>.utopia" in Caption `--muted`. Enter creates it; there is no button. An empty name puts the field in its error state: "Please enter a name."
+- **Locked graph:** "This graph is locked" (Section heading); "Notes.utopia is encrypted at rest." in `--muted`; a masked text field with the placeholder "Passphrase"; a note in Caption `--muted` that a passphrase saved in the keychain unlocks it without asking. A wrong passphrase puts the field in its error state: "That passphrase does not open this graph."
+- **Cannot open:** one centred line in `--danger`: "This graph is already open in Utopia", or "Could not open {path}: {reason}".
+
 ## 5. Keyboard and accessibility
 
 **Focus.** Every interactive element (button, row that opens something, segment, link outside the editor) can take keyboard focus.
@@ -405,11 +692,44 @@ Other rules:
 - Reduce Motion is respected (§2.6).
 - Window min width: 960px. Below about 1100px, the sidebar can be collapsed with the toggle (⌘\). Content stays capped at 760px.
 
-## 6. Open questions
+## 6. Open questions and known gaps
+
+### 6.1 Decisions not made yet
 
 - Status colors beyond "in progress" (done, blocked, and so on) aren't defined yet. Add them as `--status-*` tokens and check each one's contrast before use.
-- The right panel (380px, `right_sidebar_width`) and the command palette (⌘K, quick jump) are built but have no section here yet. Write them up before the next change to either.
-- Focus (§5) is specified but not built: `FOCUS_RING` is defined and not drawn anywhere yet.
+- **Blue on things that are not links.** Principle 2 keeps `--link` for links and a short list of marks. Three built pieces use it outside that list: the bar of a quote block (§3.11), the resize strip of the right panel (§4.6) and the line that shows where a dragged block lands (§3.1). Either add them to the principle's list or give them a neutral token.
+- **The sync dot is color only.** Except for "Local only", the footer names no state in words (§3.17); the words are one click away in the popover. Decide if the footer needs a word for a problem.
+- **A link inside a highlight in dark mode** is 3.78:1 (`--link` on `--highlight-bg`). It is rare, so the token is unchanged; a darker dark `--highlight-bg` would fix it at the cost of a fainter highlight.
+- **The slash menu has no height limit.** It lists every command, template and plugin command with no scroll. Decide a maximum and how it scrolls.
+- **Inline code keeps the block's font.** Only the fill marks it (§3.12). Decide if it takes the Code role.
+
+### 6.2 Specified here, built differently
+
+The sections above say what each piece is. The app does not match these yet. Each line is a change to the code, not to this file; take the line out when the code matches.
+
+| Rule | What the code does today | Where |
+|---|---|---|
+| Focus ring (§5) | `FOCUS_RING` is defined and drawn nowhere; no text field has a focus, error or disabled look | everywhere |
+| Chosen = `--selected` fill, `--ink` text (§2.1) | Chosen is a `--line-soft` fill with `--link` text, or `--hover` with `--link` | Settings rail and radio rows, "Children shown", Help topics, access level, palette scope chips and age menu, graph chips, the right panel's inspector tabs |
+| Segmented control for 2 to 4 short options (§3.16) | Separate buttons with a `--link` border on the chosen one; number boxes | Settings → Sync mode, Assistants access level, "Children shown" |
+| One text field (§3.16) | Four frames: `--line` border and radius 6 (palette, Sync), `--well` fill and radius 8 (Settings filter), a `--link` border at rest (start screens) | `quick_jump.rs`, `settings.rs`, `sync_setup.rs`, `utopia-app/src/main.rs` |
+| Buttons are §3.4 | Sync has its own button: `--line-soft` fill, `--link` text, no hover. The right panel closes with a text "×" | `sync_setup.rs`, `workspace.rs` |
+| Icons, never text characters (§2.5) | "×", "▾ ▸", "‹ ›", "···", "»", "✓", "↺", "⌘", "#", "+", "◷ ▤", "☑ ☐ •", "📎 🖼 📄", "Aa ☰ ↻ ⇄ ?" | right panel, daily page calendar, compact page menu, collapsed sidebar, menus, Settings, palette, attachments |
+| Key chip is the kbd chip; shortcuts are Mono (§3.16) | A second chip (radius 6, `--line-soft`, Sans); keys as Sans text | Settings → Keybindings, Shortcuts, Help; palette command rows |
+| Code block fill is `--code-bg` (§3.11) | `--well` | `page_view.rs` |
+| A search hit is `--highlight-bg` (§3.15) | `--link` at 16 % | `quick_jump.rs` |
+| A missing embed is `--danger` on `--danger-bg` (§3.12) | `--line-soft` with quiet text | `rich.rs` |
+| Menu item is the quiet control; every menu closes four ways (§3.14) | The reference date and sort menus use 14px `--ink` items; they, the search age menu, the sync popover and the compact page menu do not close on Escape or on a click outside. The age menu is 170 wide | `page_view.rs`, `quick_jump.rs`, `workspace.rs` |
+| States in the tables of §3.1, §3.14, §3.15 | Not drawn: the underline on a hovered page link, the fill of a selected block, hover on an autocomplete row, the "No results" line | `rich.rs`, `page_view.rs`, `editor.rs`, `quick_jump.rs` |
+| Create row is `--link` (§3.14, §3.15) | `--ink` in autocomplete | `editor.rs` |
+| A notice that is not a link is `--warning` or `--muted` (§4.9) | `--link` text for the override notice, the saved-settings notice and the Assistants notice | `sync_setup.rs`, `assistants.rs` |
+| The graph has the top bar of §3.3; the PDF header is weight 600 (§4.7, §4.8) | Their own header rows, weight 700, no back button | `graph_view.rs`, `pdf_view.rs` |
+| A row hover is radius 6 (§2.4) | No radius on a query hit; radius 4 in the right panel | `page_view.rs`, `workspace.rs` |
+| The right panel toggle is `--selected` while open (§4.6) | The `--hover` fill, the same as its hover | `workspace.rs` |
+| Card radius 10 (§2.4, §4.9) | 8 | `settings.rs` |
+| One calendar look (§3.2) | The calendar on a daily page has 26 × 22 cells and marks today with a `--line-soft` fill and `--link` text | `calendar.rs` |
+| Use a role, never a bare size (§2.2) | These take the block size by naming none: the sync popover, the banners, the footer notice, the graph and PDF headers, the start screens. The Help title is weight 700 | `workspace.rs`, `graph_view.rs`, `pdf_view.rs`, `settings.rs`, `utopia-app/src/main.rs` |
+| A dimension is a `theme.rs` constant (§2) | Local numbers: the palette's 520, 860 and 90; autocomplete 340; image 480 × 320; PDF page 720; Settings 1100 × 760, 220 and 720; the start column 420; the switch, the radio mark | the files above |
 
 ## 7. Platform mapping (GPUI 0.2)
 
@@ -423,7 +743,7 @@ This spec was first written in web terms. GPUI does not have all of them. When a
 | `writing-mode: vertical-rl` | Not available. A spine sets one grapheme per line, upright |
 | `letter-spacing` | Not available. Leave it out |
 | `outline` / `:focus-visible` | Not available. Draw the focus ring as a border on a wrapper, only when focus came from the keyboard |
-| `accent-color` on a checkbox | Draw the checkbox: 16px, radius 4, `--line-strong` border, `--link` fill and a white check when done |
+| `accent-color` on a checkbox | Draw the checkbox: 16px, radius 4, `--line-strong` border, `--link` fill and a `--paper` check when done (§3.1) |
 | `aria-*`, landmarks, accessible labels | No accessibility tree. Use tooltips for icon-only buttons; keep the keyboard rules in §5 |
 | `text-overflow: ellipsis` | `.truncate()` on a single-line element; a run of styled text adds its own "…" |
 | A transition | Only the motion tokens in §2.6 |

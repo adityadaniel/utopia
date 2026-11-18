@@ -129,15 +129,11 @@ fn group_header(group: usize, g: &BlockGroup, th: &Theme) -> gpui::Stateful<gpui
                 .text_color(th.ink)
                 .child(g.title.clone()),
         )
+        // The count badge of DESIGN.md §3.4, the same one every other group count uses.
         .child(
             div()
                 .flex_none()
-                .px_2()
-                .rounded(px(crate::theme::RADIUS_CONTROL))
-                .bg(th.line_soft)
-                .text_size(px(CAPTION_SIZE))
-                .text_color(th.muted)
-                .child(format!("{}", g.hits.len())),
+                .child(crate::theme::count_chip(g.hits.len(), th)),
         )
 }
 
@@ -726,7 +722,8 @@ impl JumpPalette {
         let label = Self::state_label(p.kind, p.checked);
         let muted_state = p.kind == utopia_core::BlockKind::Bullet
             || (p.kind == utopia_core::BlockKind::Todo && p.checked);
-        let fg = if muted_state { th.muted } else { th.link };
+        // On `line_soft`, the quiet text is `ink_3` (DESIGN.md §2.1).
+        let fg = if muted_state { th.ink_3 } else { th.link };
         let mut state = div().flex().items_center().gap_2().child(
             div()
                 .debug_selector(|| "search-preview-state".into())
@@ -918,8 +915,10 @@ impl JumpPalette {
             .pl(px(46.))
             .rounded(px(crate::theme::RADIUS_CHIP))
             .cursor_pointer()
-            .hover(|d| d.bg(th.hover))
-            .when(i == self.selected, |d| d.bg(th.hover))
+            // The row the keyboard is on is `selected`, louder than hover, and it stays
+            // `selected` under the pointer (DESIGN.md §2.1).
+            .when(i != self.selected, |d| d.hover(|d| d.bg(th.hover)))
+            .when(i == self.selected, |d| d.bg(th.selected))
             .child(
                 div()
                     .debug_selector(move || format!("search-hit-text-{group}-{hit}"))
@@ -1040,8 +1039,8 @@ impl JumpPalette {
             .rounded(px(crate::theme::RADIUS_CHIP))
             .when(selectable, |d| d.cursor_pointer())
             .when(accent, |d| d.text_color(th.link))
-            .when(selectable, |d| d.hover(|d| d.bg(th.hover)))
-            .when(selected, |d| d.bg(th.line_soft))
+            .when(selectable && !selected, |d| d.hover(|d| d.bg(th.hover)))
+            .when(selected, |d| d.bg(th.selected))
             .child(row_icon(i, kind, &th))
             .child(
                 div()
@@ -1057,7 +1056,8 @@ impl JumpPalette {
                     .debug_selector(move || format!("qj-detail-{i}"))
                     .flex_none()
                     .text_size(px(CAPTION_SIZE))
-                    .text_color(th.muted)
+                    // `muted` fails on the `selected` fill (DESIGN.md §2.1).
+                    .text_color(if selected { th.ink_3 } else { th.muted })
                     .child(detail),
             )
             .on_mouse_down(
