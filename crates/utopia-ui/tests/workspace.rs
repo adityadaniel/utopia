@@ -3508,8 +3508,8 @@ fn unlinked_references_link_button(cx: &mut TestAppContext) {
     });
 }
 
-/// LR-3: the path above a reference is clickable part by part. The page part opens the
-/// referencing page; an ancestor part opens it with that ancestor focused.
+/// LR-3: the path above a reference is clickable part by part: an ancestor part opens the
+/// referencing page with that ancestor focused. The group header opens the page itself.
 #[gpui::test]
 fn reference_path_parts_open_their_target(cx: &mut TestAppContext) {
     use utopia_core::{BlockId, BlockKind, Command};
@@ -3558,13 +3558,20 @@ fn reference_path_parts_open_their_target(cx: &mut TestAppContext) {
     ws.update_in(cx, |w, window, cx| {
         w.open(target.clone(), None, None, false, window, cx)
     });
-    let page_part = path_part(cx, 0);
-    cx.simulate_click(page_part.center(), gpui::Modifiers::default());
+    // DESIGN.md §3.7: the path no longer repeats the page; its group header opens it.
+    cx.run_until_parked();
+    let group = (0..40)
+        .find_map(|ix| {
+            let sel: &'static str = Box::leak(format!("group-title-{ix}").into_boxed_str());
+            cx.debug_bounds(sel)
+        })
+        .expect("a group header names the page");
+    cx.simulate_click(group.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     assert_eq!(
         ws.update(cx, |w, cx| w.main_page(cx)),
         Some(atlas.clone()),
-        "the page part opens the page the reference lives on"
+        "the group header opens the page the reference lives on"
     );
 
     ws.update_in(cx, |w, window, cx| {

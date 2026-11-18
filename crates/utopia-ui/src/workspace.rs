@@ -163,6 +163,14 @@ impl Render for Tip {
     }
 }
 
+impl Workspace {
+    fn back_tip(
+        label: SharedString,
+    ) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
+        move |_, cx| cx.new(|_| Tip::new(label.clone())).into()
+    }
+}
+
 fn tip(text: &'static str) -> impl Fn(&mut Window, &mut gpui::App) -> gpui::AnyView + 'static {
     move |_, cx| cx.new(|_| Tip::new(text)).into()
 }
@@ -2679,7 +2687,8 @@ impl Workspace {
             .when(active, |d| {
                 d.bg(th.selected).font_weight(gpui::FontWeight::MEDIUM)
             })
-            .hover(|d| d.bg(th.nav_hover))
+            // An active row keeps `selected` under the pointer (DESIGN.md §3.2).
+            .when(!active, |d| d.hover(|d| d.bg(th.nav_hover)))
             .child(icon(
                 Icon::Page,
                 ICON_SIZE,
@@ -2721,7 +2730,8 @@ impl Workspace {
                     .flex_none()
                     .font_family(LABEL_MONO)
                     .text_size(px(COUNT.size))
-                    .text_color(th.muted)
+                    // §3.2: `ink_3`, not `muted`, which fails on an active row (§2.1).
+                    .text_color(th.ink_3)
                     .child(count.to_string()),
             )
             .on_mouse_down(
@@ -2877,7 +2887,7 @@ impl Workspace {
                     .font_family(crate::theme::LABEL_MONO)
                     .text_size(px(crate::theme::COUNT.size))
                     .font_weight(gpui::FontWeight::NORMAL)
-                    .text_color(th.muted)
+                    .text_color(th.ink_3)
                     .child(open_tasks.to_string()),
             )
             .on_click(cx.listener(|this, _, window, cx| this.go_tasks(&GoTasks, window, cx)));
@@ -3032,7 +3042,8 @@ impl Workspace {
                             .py_0p5()
                             .rounded(px(RADIUS_CONTROL))
                             .cursor_pointer()
-                            .hover(|d| d.bg(th.hover))
+                            // The footer sits on `shelf`: its hover is `nav_hover` (§2.1).
+                            .hover(|d| d.bg(th.nav_hover))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.sync_open = !this.sync_open;
                                 cx.notify();
@@ -3386,15 +3397,8 @@ impl Workspace {
                                 .text_color(th.muted)
                                 .child(group.page.title.clone()),
                         )
-                        .child(
-                            div()
-                                .px_1()
-                                .rounded(px(crate::theme::RADIUS_CHIP))
-                                .bg(th.line_soft)
-                                .text_size(px(crate::theme::CAPTION_SIZE))
-                                .text_color(th.muted)
-                                .child(group.hits.len().to_string()),
-                        )
+                        // The count badge of DESIGN.md §3.4.
+                        .child(crate::theme::count_chip(group.hits.len(), &th))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(move |this, e: &MouseDownEvent, window, cx| {
@@ -3415,7 +3419,7 @@ impl Workspace {
                             ix,
                             // The group header above names the page, and the sidebar is too
                             // narrow for LR-4's inline children.
-                            crate::reference::RefRow::alone(hit, &group.page.title),
+                            crate::reference::RefRow::alone(hit),
                             &th,
                             &self.app.read(cx).store,
                             &[],
@@ -3894,11 +3898,17 @@ impl Workspace {
             .into_any_element()
     }
 
-    /// The trail of open entries (§4.3): titles between chevron-right icons, the last in
-    /// `ink` 500 and the others `ink_3`. A title scrolls to its pane (Panes) or goes back
-    /// to it (Single, §4.4).
+    /// The trail of open panes (§4.3): titles between chevron-right icons, the last in
+    /// `ink` 500 and the others `ink_3`; a title scrolls to its pane. In Single mode the
+    /// earlier entries are history, not places the page sits in, so only the current
+    /// title shows and Back says where it goes (§4.4).
     fn trail(&self, th: &crate::theme::Theme, cx: &mut Context<Self>) -> AnyElement {
         let n = self.stack.len();
+        let from = if self.mode == ViewMode::Single {
+            n.saturating_sub(1)
+        } else {
+            0
+        };
         let mut trail = div()
             .debug_selector(|| "breadcrumb".into())
             .flex()
@@ -3907,8 +3917,8 @@ impl Workspace {
             .min_w_0()
             .overflow_hidden()
             .text_size(px(UI.size));
-        for i in 0..n {
-            if i > 0 {
+        for i in from..n {
+            if i > from {
                 trail = trail.child(div().flex_none().child(icon(
                     Icon::ChevronRight,
                     ICON_SIZE,
@@ -3916,7 +3926,7 @@ impl Workspace {
                 )));
             }
             let last = i + 1 == n;
-            let sel = if n == 1 {
+            let sel = if n - from == 1 {
                 "topbar-title".to_string()
             } else {
                 format!("trail-{i}")
@@ -4015,6 +4025,13 @@ impl Workspace {
             (main.is_journal(), main.page(), main.is_draft())
         };
         let can_back = self.stack.len() > 1;
+        // Single mode shows no trail (§4.4), so Back names the page it goes to.
+        let back_label: SharedString = match can_back.then(|| self.stack.len() - 2) {
+            Some(prev) if self.mode == ViewMode::Single => {
+                format!("Back to {}", self.entry_title(prev, cx)).into()
+            }
+            _ => "Back".into(),
+        };
         let mut bar = div()
             .debug_selector(|| "top-bar".into())
             .min_h(px(TOP_BAR_MIN_HEIGHT))
@@ -4037,7 +4054,7 @@ impl Workspace {
                     .items_center()
                     .justify_center()
                     .rounded(px(RADIUS_CONTROL))
-                    .tooltip(tip("Back"))
+                    .tooltip(Self::back_tip(back_label))
                     .child(icon(
                         Icon::ArrowLeft,
                         ICON_SIZE,
@@ -4138,7 +4155,8 @@ impl Workspace {
                             .font_family(crate::theme::LABEL_MONO)
                             .text_size(px(crate::theme::COUNT.size))
                             .font_weight(gpui::FontWeight::NORMAL)
-                            .text_color(th.muted)
+                            // `muted` fails on the `selected` fill (DESIGN.md §2.1, §3.9).
+                            .text_color(if on { th.ink_3 } else { th.muted })
                             .child(counts[i].to_string()),
                     )
                     .on_click(move |_, _, cx| tasks.update(cx, |t, cx| t.set_filter(f, cx))),
@@ -4408,7 +4426,7 @@ impl Render for Workspace {
                         .text_size(px(crate::theme::CAPTION_SIZE))
                         .text_color(th.muted)
                         .cursor_pointer()
-                        .hover(|s| s.bg(th.hover))
+                        .hover(|s| s.bg(th.nav_hover))
                         .child("»")
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.toggle_left(&ToggleLeftSidebar, window, cx)

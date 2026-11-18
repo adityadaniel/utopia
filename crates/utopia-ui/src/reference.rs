@@ -25,12 +25,9 @@ pub fn chip_state(store: &Store, uid: &str, row_block: &BlockId) -> ChipState {
     }
 }
 
-/// What a row shows besides the referencing block: the page it sits on, for the first part of
-/// its path (LR-3), and the children drawn under it (LR-4).
+/// What a row shows besides the referencing block: the children drawn under it (LR-4).
 pub struct RefRow<'a> {
     pub hit: &'a RefHit,
-    /// The referencing page's title (the group header's, LR-2).
-    pub page_title: &'a str,
     /// The first children of the referencing block and how many more there are (LR-4).
     pub children: &'a [(BlockId, String)],
     pub hidden: usize,
@@ -39,10 +36,9 @@ pub struct RefRow<'a> {
 impl<'a> RefRow<'a> {
     /// A row on its own, with no inline children: what the right sidebar's References tab
     /// shows (RS-1). The group above it already names the page.
-    pub fn alone(hit: &'a RefHit, page_title: &'a str) -> Self {
+    pub fn alone(hit: &'a RefHit) -> Self {
         Self {
             hit,
-            page_title,
             children: &[],
             hidden: 0,
         }
@@ -145,9 +141,10 @@ pub fn reference_row<H: RefRowHost + 'static>(
     let (page, block) = (hit.page.clone(), hit.block.clone());
     let bullet = || div().w(px(14.)).text_color(th.bullet).child("•");
 
-    // LR-3: the full path above the block, page first, each part clickable. A block that
-    // sits directly on its page has no ancestors, and the group header right above already
-    // names that page, so it gets no path line.
+    // LR-3 with DESIGN.md §3.7: the ancestors above the block, each clickable. The group
+    // header right above already names the page, so the path starts at the first ancestor
+    // (parts are numbered from 1; the page was part 0). A block that sits directly on its
+    // page gets no path line.
     let mut path = div()
         .debug_selector(|| format!("hit-path-{ix}"))
         .flex()
@@ -158,32 +155,8 @@ pub fn reference_row<H: RefRowHost + 'static>(
         .line_height(px(crate::theme::SMALL_TIGHT.line))
         .text_color(th.muted);
     if !hit.breadcrumb.is_empty() {
-        let target = page.clone();
-        let part_host = host.clone();
-        let page_title = row.page_title.to_string();
-        path = path.child(
-            div()
-                .id(("path-page", ix))
-                .debug_selector(|| format!("hit-path-part-{ix}-0"))
-                .cursor_pointer()
-                .hover(|s| s.text_color(th.link))
-                .child(page_title)
-                .on_mouse_down(MouseButton::Left, move |e, window, cx| {
-                    // The row under the path opens the block; the page part opens the page.
-                    cx.stop_propagation();
-                    part_host.update(cx, |this, cx| {
-                        this.open_reference_page(
-                            target.clone(),
-                            None,
-                            e.modifiers.shift,
-                            window,
-                            cx,
-                        )
-                    });
-                }),
-        );
         for (i, (ancestor, caption)) in hit.breadcrumb.iter().enumerate() {
-            let label: String = caption.chars().take(40).collect();
+            let label = path_label(caption);
             let label = if label.is_empty() {
                 "(empty)".to_string()
             } else {
@@ -192,7 +165,10 @@ pub fn reference_row<H: RefRowHost + 'static>(
             let target = page.clone();
             let ancestor = ancestor.clone();
             let part_host = host.clone();
-            path = path.child(div().child("›")).child(
+            if i > 0 {
+                path = path.child(div().child("›"));
+            }
+            path = path.child(
                 div()
                     .id(("path-part", ix * 100 + i))
                     .debug_selector(|| format!("hit-path-part-{ix}-{}", i + 1))
@@ -316,4 +292,39 @@ pub fn reference_row<H: RefRowHost + 'static>(
             });
         })
         .into_any_element()
+}
+
+/// The most characters one part of a reference path shows (DESIGN.md §3.7).
+const PATH_PART_CHARS: usize = 40;
+
+/// One part of a reference path: the caption, or, when it is longer than
+/// [`PATH_PART_CHARS`], its words up to that length and "…" (DESIGN.md §3.7: never cut in
+/// the middle of a word without one).
+fn path_label(caption: &str) -> String {
+    if caption.chars().count() <= PATH_PART_CHARS {
+        return caption.to_string();
+    }
+    let head: String = caption.chars().take(PATH_PART_CHARS).collect();
+    let cut = head
+        .trim_end()
+        .rfind(char::is_whitespace)
+        .unwrap_or(head.len());
+    format!("{}…", head[..cut].trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_label;
+
+    /// DESIGN.md §3.7: a long path part ends at a whole word with "…"; a short one is kept.
+    #[test]
+    fn a_long_path_part_ends_at_a_word_with_an_ellipsis() {
+        assert_eq!(path_label("Notes for tomorrow"), "Notes for tomorrow");
+        assert_eq!(
+            path_label("Sketched the outline of the beta announcement for the testers"),
+            "Sketched the outline of the beta…"
+        );
+        let word = "x".repeat(50);
+        assert_eq!(path_label(&word), format!("{}…", "x".repeat(40)));
+    }
 }
