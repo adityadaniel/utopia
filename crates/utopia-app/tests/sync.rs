@@ -475,3 +475,63 @@ fn headless_setup_refuses_to_save_while_the_environment_overrides_the_transport(
         "no settings were saved for a run whose transport the environment owns"
     );
 }
+
+/// §15.6: an environment-derived target goes through the same validation as a saved one, so
+/// a URL with credentials never reaches the transport, the report, the status output or the
+/// graph's `setup_destination` record.
+#[test]
+fn headless_sync_refuses_an_environment_url_with_credentials() {
+    let s = Scratch::new();
+    let a = s.graph("a");
+    s.seed(&a, "Alpha", "zebraenvurl");
+    assert!(s.setup(&a, &[]).status.success());
+
+    let secret = "password-secret-913";
+    let bad = format!("http://user:{secret}@127.0.0.1:9");
+    let destination = Store::open(&a)
+        .unwrap()
+        .sync_get("setup_destination")
+        .unwrap();
+    assert!(
+        destination.is_some(),
+        "setup recorded the valid destination first"
+    );
+    let out = s
+        .utopia()
+        .args(["sync", "--graph"])
+        .arg(&a)
+        .arg("--json")
+        .env("UTOPIA_SYNC_URL", &bad)
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "an environment target with credentials must not sync"
+    );
+    assert_no_secret(&out, &[secret]);
+    let store = Store::open(&a).unwrap();
+    assert_eq!(
+        store.sync_get("setup_destination").unwrap(),
+        destination,
+        "the invalid target replaced the graph's destination record"
+    );
+
+    let out = s
+        .utopia()
+        .args(["sync", "status", "--graph"])
+        .arg(&a)
+        .arg("--json")
+        .env("UTOPIA_SYNC_URL", &bad)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "status: {}", stderr(&out));
+    assert_no_secret(&out, &[secret]);
+    let status: Value = serde_json::from_str(stdout(&out).trim()).unwrap();
+    assert_eq!(status["mode"], "off", "{status}");
+    assert!(
+        status["notice"]
+            .as_str()
+            .is_some_and(|notice| notice.contains("credentials")),
+        "{status}"
+    );
+}

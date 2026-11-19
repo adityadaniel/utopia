@@ -619,6 +619,10 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
     let file = crate::paths::sync_config(config_dir, &graph);
     let (saved, notice) = Preferences::load(&file);
     let preferences = env.apply(&saved);
+    // §15.6: an environment override is a target too. Validate it exactly like a saved one
+    // before it can be printed, used for a transport, or written into the graph's
+    // destination record, so a URL with credentials never gets that far.
+    preferences.validate().map_err(anyhow::Error::msg)?;
     if preferences.mode == Mode::Off {
         let message = notice.unwrap_or_else(|| {
             format!(
@@ -752,7 +756,17 @@ fn status(options: &Options, config_dir: &Path) -> Result<i32> {
     let file = crate::paths::sync_config(config_dir, &graph);
     let (saved, notice) = Preferences::load(&file);
     let env = Environment::read(|key| std::env::var(key).ok());
+    let mut notice = notice;
     let preferences = env.apply(&saved);
+    // The same validation the run uses. An environment target that fails it is Off for this
+    // report, with a notice that names the rule and never echoes the URL (§15.6).
+    let preferences = match preferences.validate() {
+        Ok(()) => preferences,
+        Err(message) => {
+            notice = Some(format!("Sync is Off: {message}"));
+            Preferences::default()
+        }
+    };
     // Look, never keep: status must work while the app owns the graph (it reports that).
     let held = OwnerLock::try_acquire(&graph)
         .with_context(|| format!("checking the owner of {}", graph.display()))?;
