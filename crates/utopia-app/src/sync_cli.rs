@@ -101,24 +101,50 @@ pub fn run(args: &[String]) -> Result<i32> {
     let options = Options::parse(rest)?;
     let config = crate::paths::config_dir();
     match command {
-        "setup" => apply_command(&options, &config, true),
-        "config" => apply_command(&options, &config, false),
-        "status" => status(&options, &config),
-        _ => match one_shot(&options, &config) {
-            Ok(code) => Ok(code),
-            Err(error) => {
-                // --json promises one object on stdout even when the run could not start;
-                // the human text still goes to stderr.
-                if options.json {
-                    emit(&json!({
-                        "version": 1,
-                        "ok": false,
-                        "errors": [error.to_string()],
-                    }))?;
+        "setup" => {
+            options.ensure_only(
+                "setup",
+                &[
+                    "--graph",
+                    "--mode",
+                    "--url",
+                    "--folder",
+                    "--graph-id",
+                    "--token-stdin",
+                    "--passphrase-stdin",
+                ],
+            )?;
+            apply_command(&options, &config, true)
+        }
+        "config" => {
+            options.ensure_only(
+                "config",
+                &["--graph", "--mode", "--url", "--folder", "--off"],
+            )?;
+            apply_command(&options, &config, false)
+        }
+        "status" => {
+            options.ensure_only("status", &["--graph", "--json"])?;
+            status(&options, &config)
+        }
+        _ => {
+            options.ensure_only("sync", &["--graph", "--json"])?;
+            match one_shot(&options, &config) {
+                Ok(code) => Ok(code),
+                Err(error) => {
+                    // --json promises one object on stdout even when the run could not start;
+                    // the human text still goes to stderr.
+                    if options.json {
+                        emit(&json!({
+                            "version": 1,
+                            "ok": false,
+                            "errors": [error.to_string()],
+                        }))?;
+                    }
+                    Err(error)
                 }
-                Err(error)
             }
-        },
+        }
     }
 }
 
@@ -157,6 +183,58 @@ impl Options {
             i += 1;
         }
         Ok(options)
+    }
+
+    /// The flags this invocation supplied. `ensure_only` compares them with the ones a form
+    /// takes, so a flag cannot be parsed and then silently ignored.
+    fn given(&self) -> Vec<&'static str> {
+        let mut given = Vec::new();
+        if self.graph.is_some() {
+            given.push("--graph");
+        }
+        if self.json {
+            given.push("--json");
+        }
+        if self.mode.is_some() {
+            given.push("--mode");
+        }
+        if self.url.is_some() {
+            given.push("--url");
+        }
+        if self.folder.is_some() {
+            given.push("--folder");
+        }
+        if self.graph_id.is_some() {
+            given.push("--graph-id");
+        }
+        if self.token_stdin {
+            given.push("--token-stdin");
+        }
+        if self.passphrase_stdin {
+            given.push("--passphrase-stdin");
+        }
+        if self.off {
+            given.push("--off");
+        }
+        given
+    }
+
+    /// Refuse an option the selected form does not take. Runs before the graph is opened:
+    /// a malformed configuration command must not fall through to a one-shot sync.
+    fn ensure_only(&self, command: &str, allowed: &[&str]) -> Result<()> {
+        let unsupported: Vec<&str> = self
+            .given()
+            .into_iter()
+            .filter(|flag| !allowed.contains(flag))
+            .collect();
+        if unsupported.is_empty() {
+            return Ok(());
+        }
+        bail!(
+            "utopia sync {command} does not take {}. Use `utopia sync setup` or `utopia sync \
+             config` to change the saved settings.\n\n{USAGE}",
+            unsupported.join(", ")
+        );
     }
 
     /// `--graph` is necessary in every form (see [`USAGE`]).
@@ -421,20 +499,12 @@ fn lan_discovery() -> impl Fn(&str) -> Option<String> {
 /// app's order (destination first, settings last).
 fn apply_command(options: &Options, config_dir: &Path, setup: bool) -> Result<i32> {
     let graph = options.graph()?.to_path_buf();
-    if !setup {
-        if !graph.exists() {
-            bail!(
-                "no graph at {}; run `utopia sync setup --graph {} …` first.",
-                graph.display(),
-                graph.display()
-            );
-        }
-        if options.graph_id.is_some() || options.token_stdin || options.passphrase_stdin {
-            bail!(
-                "utopia sync config changes the saved transport only; use `utopia sync \
-                 setup` for a graph id or credentials.\n\n{USAGE}"
-            );
-        }
+    if !setup && !graph.exists() {
+        bail!(
+            "no graph at {}; run `utopia sync setup --graph {} …` first.",
+            graph.display(),
+            graph.display()
+        );
     }
     let env = Environment::read(|key| std::env::var(key).ok());
     let overrides = env.transport_names();

@@ -572,3 +572,62 @@ fn headless_sync_uploads_every_queued_attachment() {
         .count();
     assert_eq!(left, 0, "{left} attachment(s) were still queued");
 }
+
+/// A configuration flag is not a shortcut for the configuration command. The one-shot and
+/// `status` forms reject a flag they do not take before opening the graph, instead of
+/// silently ignoring it (and, for `--off`, syncing anyway).
+#[test]
+fn headless_sync_rejects_options_its_form_does_not_take() {
+    let s = Scratch::new();
+    let a = s.graph("a");
+    s.seed(&a, "Alpha", "zebraflags");
+    assert!(s.setup(&a, &[]).status.success());
+    let before = Store::open(&a).unwrap().outbox_count().unwrap();
+
+    let cases: Vec<(Vec<&str>, &str)> = vec![
+        (vec!["sync", "--off"], "--off"),
+        (vec!["sync", "--graph-id", "other"], "--graph-id"),
+        (vec!["sync", "--mode", "folder"], "--mode"),
+        (vec!["sync", "status", "--off"], "--off"),
+        (
+            vec!["sync", "status", "--json", "--mode", "relay"],
+            "--mode",
+        ),
+    ];
+    for (args, flag) in cases {
+        let out = s
+            .utopia()
+            .args(&args)
+            .args(["--graph"])
+            .arg(&a)
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "`utopia {} --graph … {flag}` must be refused",
+            args.join(" ")
+        );
+        assert!(
+            stderr(&out).contains(flag),
+            "the refusal names {flag}: {}",
+            stderr(&out)
+        );
+    }
+
+    let store = Store::open(&a).unwrap();
+    assert_eq!(
+        store.sync_get("synced_at").unwrap(),
+        None,
+        "a rejected command must not sync"
+    );
+    assert_eq!(
+        store.outbox_count().unwrap(),
+        before,
+        "a rejected command must not push"
+    );
+    assert_eq!(
+        store.sync_get("setup_graph").unwrap().as_deref(),
+        Some(GRAPH_ID),
+        "a rejected command must not change the graph id"
+    );
+}
