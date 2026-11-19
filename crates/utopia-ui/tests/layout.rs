@@ -4510,3 +4510,52 @@ fn mc_12_the_assistants_tab_is_one_centred_column(cx: &mut TestAppContext) {
         );
     }
 }
+
+/// DESIGN.md §3.16: the title bar is transparent, so the traffic lights draw over the
+/// window's top band. The sidebar's workspace row and the top bar share that band, and
+/// whatever is under the lights moves its first control 12 pt past them; full screen hides
+/// the lights, so the room goes too.
+#[gpui::test]
+fn traffic_lights_have_room_in_the_top_band(cx: &mut TestAppContext) {
+    use utopia_ui::theme::{TOP_BAR_MIN_HEIGHT, TRAFFIC_LIGHTS_WIDTH, TRAFFIC_LIGHT_X};
+    let lights_end = TRAFFIC_LIGHT_X + TRAFFIC_LIGHTS_WIDTH;
+    let cx = setup(cx);
+    cx.simulate_keystrokes("escape");
+
+    // Sidebar open: the lights sit in the workspace row, level with the top bar.
+    let row = bounds(cx, "workspace-row");
+    let bar = bounds(cx, "top-bar");
+    let room = bounds(cx, "traffic-lights-room");
+    let initial = bounds(cx, "workspace-initial");
+    assert!(
+        approx(row.origin.y, 0.) && approx(row.size.height, TOP_BAR_MIN_HEIGHT),
+        "the workspace row is the sidebar's part of the top band: {row:?}"
+    );
+    assert!(
+        approx(bar.origin.y, 0.) && approx(bar.size.height, TOP_BAR_MIN_HEIGHT),
+        "{bar:?}"
+    );
+    assert!(
+        approx(room.origin.x, TRAFFIC_LIGHT_X) && approx(room.size.width, TRAFFIC_LIGHTS_WIDTH),
+        "{room:?}"
+    );
+    assert!(
+        approx(initial.origin.x, lights_end + 8.),
+        "the workspace square starts after the lights: {initial:?}"
+    );
+
+    // Sidebar collapsed: the top bar's Back clears the lights by the same gap.
+    cx.simulate_keystrokes("cmd-\\");
+    let back = bounds(cx, "back");
+    assert!(approx(back.origin.x, lights_end + 8.), "{back:?}");
+
+    // Full screen: no lights, so Back is back at the top bar's own padding and the
+    // workspace square at the row's.
+    cx.update(|window, _| window.toggle_fullscreen());
+    cx.update(|window, _| window.refresh());
+    let back = bounds(cx, "back");
+    assert!(approx(back.origin.x, 32. + 20.), "{back:?}");
+    cx.simulate_keystrokes("cmd-\\");
+    let initial = bounds(cx, "workspace-initial");
+    assert!(approx(initial.origin.x, 20.), "{initial:?}");
+}

@@ -114,7 +114,8 @@ Inside a component, a padding may be off the scale when it centres content in a 
 | Piece | Size |
 |---|---|
 | Sidebar | 264 wide (min 240) |
-| Top bar | min 52 tall |
+| Top bar, and the window's top band (§3.18) | min 52 tall |
+| Traffic lights (close button's top left, room they take) | at 20, 19 / 64 wide |
 | Block line grid | 28 |
 | Caret slot / bullet slot | 20 / 24 |
 | Child indent (wide / narrow / compact pane) | 45 / 26 / 22 (31 margin + 13 padding + 1 thread line for wide) |
@@ -207,7 +208,7 @@ Each component lists its states. A state that is not listed does not change the 
 
 From top to bottom:
 
-1. **Workspace row:** 24px `--ink` square with the initial in `--paper`, the workspace name (15/600), a chevron-down for switching workspaces, and a collapse-sidebar icon button on the right.
+1. **Workspace row:** the sidebar's part of the window's top band (§3.18): 52 tall, level with the top bar, so the sidebar has no top padding above it. The traffic lights sit at its left end. Then the 24px `--ink` square with the initial in `--paper`, the workspace name (15/600), a chevron-down for switching workspaces, and a collapse-sidebar icon button on the right.
 2. **Search field:** a button that opens the command palette. Height 36, radius 8, `--paper` fill, `--line-strong` border, search icon, placeholder text "Search or jump to" in `--muted`, and `⌘K` kbd on the right.
 3. **Nav:** Daily Notes, Tasks (square-check icon, open to-do count on the right, §4.5). Each row is 34px tall, radius 6, 14px text.
 4. **Mini calendar:** month label (13/600) with prev/next buttons. A 7-column grid, weeks start on Sunday, weekday labels in Mono 11. Always 6 rows, so the sections below never move when the month changes. Day cells are 30px tall. Days of the next or previous month are `--muted`. Today: solid `--link` fill with `--paper` text at 500. Days with notes: a 4px `--link` dot under the number (`--paper` on today). Clicking a day opens that daily note.
@@ -532,7 +533,7 @@ Used by Settings (§4.9), the palette (§3.15), the reference filter (§3.7) and
 
 **Sync popover:** a floating surface (§3.14), 232 wide (`SYNC_POPOVER_WIDTH`), padding 8, above the footer. Lines, top to bottom: "Sync" in `--ink` 500; the state in words ("Synced 2m ago", "Offline — 3 changes queued"), in `--warning` when it is a problem; the target ("Relay · https://…", "Folder · /…"); "Encrypted at rest." or "Not encrypted at rest."; and, when sync is off, "Set it up in Settings → Sync." in `--muted`. It has no controls: setup is in Settings.
 
-**Banner:** a `--banner-bg` strip across the top of the main area, above the top bar: one centred line in `--ink`, 4px above and below, no border and no close button.
+**Banner:** a `--banner-bg` strip across the main area, under the top bar (never above it: the top band stays level with the traffic lights, §3.18): one centred line in `--ink`, 4px above and below, no border and no close button.
 
 - New day: "It's a new day → open today". The whole strip is the button. It goes when the feed opens.
 - Merge: "Merged changes from the relay into 3 pages", for 5 seconds. Not a button.
@@ -540,6 +541,24 @@ Used by Settings (§4.9), the palette (§3.15), the reference filter (§3.7) and
 **Footer notice:** one line under the footer row. A result is `--ink` ("Exported 42 pages to …"); a failed action is `--danger`. A new one takes the place of the last.
 
 **Settings strip:** a full-width line at the bottom of the Settings window, 1px `--line` above it, padding 8 24, Caption size: a warning is `--warning` on `--banner-bg`; a status is `--muted` on `--well`.
+
+### 3.18 Window frame (title bar)
+
+The system title bar is transparent: there is no separate strip with the window title. The traffic lights draw over the app's own **top band**, the 52px row that the top bar (§3.3) and the sidebar's workspace row (§3.2) share. The title is still set, so the Window menu and Mission Control name the window. The main window and Settings both work this way (`chrome::titlebar`).
+
+- **Where the lights are:** the close button's top left is at 20, 19 (`TRAFFIC_LIGHT_X`, `TRAFFIC_LIGHT_Y`), so the 14px buttons are centred on the band and start on the sidebar's content edge. They take 64 wide (`TRAFFIC_LIGHTS_WIDTH`: three buttons 23 apart, plus 4).
+- **Room for them:** whatever is under them starts its first control 12px after the zoom button, at x 92: the workspace square when the sidebar is open; Back (or the view's title in the graph and PDF views) when it is collapsed. The graph and PDF headers are then as tall as the top bar.
+- **Collapsed sidebar:** the rail's top 52px is the top bar carried to the window's edge (`--paper`, 1px `--line-soft` under it), so the lights never sit across the rail's border. "»" sits under it.
+- **Full screen:** macOS hides the lights, so the room goes: the workspace square and Back go back to their own padding.
+- **Settings:** the rail's top 52px is left for the lights; the "Settings" caption starts under it.
+- **Title bar actions:** the empty parts of the band (the lights' room, the workspace name, the space in the top bar after the title, the rail's top) take a double-click as a title bar does (zoom or minimise, as the user set it in System Settings). Buttons in the band keep their own clicks.
+
+| State | Look |
+|---|---|
+| Window focused | The system's coloured lights |
+| Window not focused | The system's grey lights; nothing of ours changes |
+| Dark theme | The lights on `--shelf` (sidebar) or `--paper` (top bar); no token changes |
+| A banner is showing (§3.17) | The banner is under the top bar, so the band does not move |
 
 ## 4. Screens
 

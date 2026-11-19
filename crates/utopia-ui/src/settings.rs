@@ -680,7 +680,7 @@ fn is_modifier_only(ks: &Keystroke) -> bool {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
         let density = appearance::density(cx);
         let font = appearance::ui_font(cx);
@@ -748,6 +748,11 @@ impl Render for SettingsView {
             .gap_0p5()
             .px_3()
             .py_4()
+            // DESIGN.md §3.16: the traffic lights sit on the rail's top row, so the
+            // caption starts below it.
+            .when(crate::chrome::lights_shown(window), |d| {
+                d.pt(px(crate::theme::TOP_BAR_MIN_HEIGHT))
+            })
             .border_r_1()
             .border_color(th.line)
             .bg(th.shelf)

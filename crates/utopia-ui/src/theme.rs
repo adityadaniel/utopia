@@ -208,6 +208,16 @@ pub const TOP_BAR_MIN_HEIGHT: f32 = 52.;
 pub const TOP_BAR_PADDING_Y: f32 = 8.;
 pub const TOP_BAR_PADDING_X: f32 = 20.;
 
+/// The title bar is transparent and the traffic lights sit on the app's own top row
+/// (DESIGN.md §3.16). The close button's left edge lines up with the sidebar's content
+/// (12 padding + 8 row padding); its top centres the 14 pt buttons on the 52 pt top band
+/// that the top bar and the sidebar's workspace row share.
+pub const TRAFFIC_LIGHT_X: f32 = 20.;
+pub const TRAFFIC_LIGHT_Y: f32 = 19.;
+/// The width the three buttons take on macOS 26 (14 pt each, 23 pt apart), plus 4 pt so
+/// the row's 8 pt gap after them reads as 12.
+pub const TRAFFIC_LIGHTS_WIDTH: f32 = 64.;
+
 /// Radius 4: kbd, ref-type label, small chips, checkboxes (§2.4).
 pub const RADIUS_CHIP: f32 = 4.;
 /// Radius 5: tag chips (§2.4).

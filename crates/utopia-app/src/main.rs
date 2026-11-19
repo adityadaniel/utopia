@@ -16,8 +16,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     div, prelude::*, px, size, App, Application, Bounds, Context, Entity, EntityInputHandler,
-    Global, Menu, MenuItem, Subscription, TitlebarOptions, Window, WindowBounds, WindowHandle,
-    WindowOptions,
+    Global, Menu, MenuItem, Subscription, Window, WindowBounds, WindowHandle, WindowOptions,
 };
 use utopia_store::{OwnerLock, Store};
 use utopia_ui::actions::*;
@@ -689,10 +688,7 @@ fn open_settings_now(tab: SettingsTab, cx: &mut App) {
     let bounds = Bounds::centered(None, size(px(1100.), px(760.)), cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some("Settings".into()),
-            ..Default::default()
-        }),
+        titlebar: Some(utopia_ui::chrome::titlebar("Settings")),
         window_min_size: Some(size(px(900.), px(520.))),
         ..Default::default()
     };
@@ -819,10 +815,7 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
         let bounds = Bounds::centered(None, size(px(1280.), px(820.)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("Utopia".into()),
-                ..Default::default()
-            }),
+            titlebar: Some(utopia_ui::chrome::titlebar("Utopia")),
             window_min_size: Some(size(px(960.), px(480.))),
             ..Default::default()
         };

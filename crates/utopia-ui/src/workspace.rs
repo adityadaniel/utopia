@@ -2756,7 +2756,7 @@ impl Workspace {
         }
     }
 
-    fn render_left(&mut self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_left(&mut self, lights: bool, cx: &mut Context<Self>) -> AnyElement {
         let th = theme(cx).clone();
         let today = self.today;
         let tasks_on = matches!(self.content, MainContent::Tasks(_));
@@ -2789,13 +2789,27 @@ impl Workspace {
         };
 
         // 1. Workspace row: the initial in an ink square, the name, and the collapse
-        // button. No workspace switcher: this app has one graph at a time.
+        // button. No workspace switcher: this app has one graph at a time. The traffic
+        // lights draw at its left end (§3.16), so a spacer keeps them clear; the row's
+        // empty parts act as a title bar.
         let workspace = div()
             .debug_selector(|| "workspace-row".into())
+            .h(px(TOP_BAR_MIN_HEIGHT))
+            .flex_none()
             .flex()
             .items_center()
             .gap_2()
             .px_2()
+            .when(lights, |d| {
+                d.child(
+                    div()
+                        .id("traffic-lights-room")
+                        .debug_selector(|| "traffic-lights-room".into())
+                        .on_click(|e, window, _| crate::chrome::on_titlebar_double_click(e, window))
+                        .w(px(crate::theme::TRAFFIC_LIGHTS_WIDTH))
+                        .flex_none(),
+                )
+            })
             .child(
                 div()
                     .debug_selector(|| "workspace-initial".into())
@@ -2813,7 +2827,9 @@ impl Workspace {
             )
             .child(
                 div()
+                    .id("workspace-name")
                     .debug_selector(|| "workspace-name".into())
+                    .on_click(|e, window, _| crate::chrome::on_titlebar_double_click(e, window))
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -2991,6 +3007,8 @@ impl Workspace {
             .border_r_1()
             .border_color(th.line)
             .p(px(crate::theme::SIDEBAR_PADDING))
+            // The workspace row is the sidebar's part of the window's top band (§3.16).
+            .pt_0()
             .child(workspace)
             .child(search)
             .child(nav)
@@ -4040,6 +4058,7 @@ impl Workspace {
             .items_center()
             .gap_2()
             .px(px(TOP_BAR_PADDING_X))
+            .pl(px(crate::chrome::leading_padding(TOP_BAR_PADDING_X, cx)))
             .py(px(TOP_BAR_PADDING_Y))
             .bg(th.paper)
             .border_b_1()
@@ -4067,7 +4086,13 @@ impl Workspace {
                     }),
             )
             .child(self.trail(&th, cx))
-            .child(div().flex_1());
+            .child(
+                div()
+                    .id("top-bar-drag")
+                    .flex_1()
+                    .h_full()
+                    .on_click(|e, window, _| crate::chrome::on_titlebar_double_click(e, window)),
+            );
         if journal {
             bar = bar.child(self.day_nav(cx));
         } else if page.is_some() && !draft {
@@ -4171,6 +4196,7 @@ impl Workspace {
             .items_center()
             .gap_2()
             .px(px(TOP_BAR_PADDING_X))
+            .pl(px(crate::chrome::leading_padding(TOP_BAR_PADDING_X, cx)))
             .py(px(TOP_BAR_PADDING_Y))
             .bg(th.paper)
             .border_b_1()
@@ -4183,6 +4209,8 @@ impl Workspace {
             )
             .child(
                 div()
+                    .id("top-bar-drag")
+                    .on_click(|e, window, _| crate::chrome::on_titlebar_double_click(e, window))
                     .flex_1()
                     .min_w_0()
                     .truncate()
@@ -4402,10 +4430,35 @@ impl Render for Workspace {
         self.refresh(cx);
         let th = theme(cx).clone();
         let density = crate::appearance::density(cx);
-        let left = if self.left_open {
-            self.render_left(cx)
+        // §3.16: with the sidebar collapsed, the traffic lights sit over the left end of
+        // whatever top bar the main column draws, so it moves its first control past them.
+        let lights = crate::chrome::lights_shown(window);
+        let inset = crate::chrome::LeadingInset(if self.left_open || !lights {
+            0.
         } else {
-            // Collapsed: a thin rail that brings the sidebar back (Cmd+\).
+            crate::chrome::lights_room(window) + crate::chrome::LIGHTS_GAP - LEFT_RAIL_WIDTH
+        });
+        if cx.try_global::<crate::chrome::LeadingInset>() != Some(&inset) {
+            cx.set_global(inset);
+        }
+        let left = if self.left_open {
+            self.render_left(lights, cx)
+        } else {
+            // Collapsed: a thin rail that brings the sidebar back (Cmd+\). While the
+            // traffic lights show, its top is the top bar carried to the window's edge, so
+            // the lights sit on one surface rather than across the rail's border (§3.16).
+            let expand = div()
+                .id("expand-left")
+                .px_1()
+                .rounded(px(crate::theme::RADIUS_CHIP))
+                .text_size(px(crate::theme::CAPTION_SIZE))
+                .text_color(th.muted)
+                .cursor_pointer()
+                .hover(|s| s.bg(th.nav_hover))
+                .child("»")
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.toggle_left(&ToggleLeftSidebar, window, cx)
+                }));
             div()
                 .debug_selector(|| "left-rail".into())
                 .w(px(LEFT_RAIL_WIDTH))
@@ -4413,28 +4466,45 @@ impl Render for Workspace {
                 .flex_none()
                 .flex()
                 .flex_col()
-                .items_center()
-                .pt_2()
-                .bg(th.shelf)
-                .border_r_1()
-                .border_color(th.line)
+                .when(lights, |d| {
+                    d.child(
+                        div()
+                            .id("left-rail-top")
+                            .h(px(TOP_BAR_MIN_HEIGHT))
+                            .flex_none()
+                            .bg(th.paper)
+                            .border_b_1()
+                            .border_color(th.line_soft)
+                            .on_click(|e, window, _| {
+                                crate::chrome::on_titlebar_double_click(e, window)
+                            }),
+                    )
+                })
                 .child(
                     div()
-                        .id("expand-left")
-                        .px_1()
-                        .rounded(px(crate::theme::RADIUS_CHIP))
-                        .text_size(px(crate::theme::CAPTION_SIZE))
-                        .text_color(th.muted)
-                        .cursor_pointer()
-                        .hover(|s| s.bg(th.nav_hover))
-                        .child("»")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.toggle_left(&ToggleLeftSidebar, window, cx)
-                        })),
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .pt_2()
+                        .bg(th.shelf)
+                        .border_r_1()
+                        .border_color(th.line)
+                        .child(expand),
                 )
                 .into_any_element()
         };
         let mut main_col = div().flex_1().min_w_0().h_full().flex().flex_col();
+        // The top bar comes first and the banners under it (DESIGN.md §3.17), so the top
+        // band stays level with the traffic lights (§3.18).
+        match &self.content {
+            MainContent::Page => main_col = main_col.child(self.render_top_bar(cx)),
+            MainContent::Tasks(tasks) => {
+                let tasks = tasks.clone();
+                main_col = main_col.child(self.render_tasks_top_bar(&tasks, cx));
+            }
+            MainContent::Graph(_) | MainContent::Pdf(_) => {}
+        }
         if self.new_day {
             main_col = main_col.child(
                 div()
@@ -4463,14 +4533,6 @@ impl Render for Workspace {
                         .child(text),
                 );
             }
-        }
-        match &self.content {
-            MainContent::Page => main_col = main_col.child(self.render_top_bar(cx)),
-            MainContent::Tasks(tasks) => {
-                let tasks = tasks.clone();
-                main_col = main_col.child(self.render_tasks_top_bar(&tasks, cx));
-            }
-            MainContent::Graph(_) | MainContent::Pdf(_) => {}
         }
         let stack = match self.mode {
             ViewMode::Panes => self.render_panes(window, cx),
