@@ -5,8 +5,8 @@
 use std::path::Path;
 
 use utopia_store::Destination;
+use utopia_sync::runner::{BoxTransport, SyncConfig, SyncTarget};
 use utopia_sync::setup::{Environment, Mode, Preferences};
-use utopia_ui::sync_runner::{BoxTransport, SyncConfig, SyncTarget};
 
 /// How a Nearby client finds its host (§12.7): mDNS on the local network.
 pub type Discover = dyn Fn(&str) -> Option<String> + Send + Sync;
@@ -109,7 +109,7 @@ pub fn resolve(
 /// Build the transport stack for a config: relay or folder, optionally encrypted
 /// (§12.7, §11.7). The app and the CLI both call this so the two carry the same stack.
 pub fn transport(cfg: &SyncConfig, client_id: &str) -> Result<BoxTransport, String> {
-    utopia_ui::sync_runner::build_transport(cfg, client_id)
+    utopia_sync::runner::build_transport(cfg, client_id)
         .map_err(|_| "Could not open the sync transport.".into())
 }
 
