@@ -435,6 +435,27 @@ fn headless_sync_stops_while_another_process_owns_the_graph() {
         before,
         "nothing was pushed behind the owner's back"
     );
+
+    // --json promises one object on stdout for this routine script outcome too.
+    let out = s
+        .utopia()
+        .args(["sync", "--graph"])
+        .arg(&a)
+        .arg("--json")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    let report: Value = serde_json::from_str(stdout(&out).trim())
+        .unwrap_or_else(|e| panic!("owned --json must print one object: {} ({e})", stdout(&out)));
+    assert_eq!(report["ok"], false, "{report}");
+    assert_eq!(report["owned"], true, "{report}");
+    assert!(
+        report["errors"]
+            .as_array()
+            .is_some_and(|errors| !errors.is_empty()),
+        "{report}"
+    );
+    assert_no_secret(&out, &[TOKEN, PASSPHRASE]);
     drop(held);
 
     let out = s.sync(&a);

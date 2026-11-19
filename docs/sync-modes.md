@@ -262,9 +262,10 @@ utopia sync --graph /path/Notes.utopia     # push what the agent wrote, pull wha
 
 `utopia sync` takes the graph's owner lock for the run (MC-4). If the app or `serve-api`
 owns the graph, it exits with code 3 and says the owner already syncs it; it never writes
-behind the owner's back. `--json` prints one object on stdout (`pushed`, `pulled`,
-`pending`, `errors`, …) and no summary, which is the shape a script reads. Without it the
-summary goes to stderr. Exit codes: 0 synced, 1 failed (target, credential, wrong
+behind the owner's back. `--json` prints one object on stdout (`pushed`, `pulled`, `pending`,
+`attachments_pending`, `errors`, …) and no summary, which is the shape a script reads; an
+ownership refusal is one of those objects too (`owned: true, ok: false, errors`, exit 3).
+Without `--json` the summary goes to stderr. Exit codes: 0 synced, 1 failed (target, credential, wrong
 passphrase, or changes still queued), 2 Sync is Off for this graph, 3 another process owns
 it. `utopia sync status --graph … [--json]` reports the mode, target, graph id, whether
 secrets are stored, whether the environment overrides the settings, the last successful

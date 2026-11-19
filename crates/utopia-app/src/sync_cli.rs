@@ -479,11 +479,22 @@ fn setup_graph_id(requested: Option<&str>, store: &Store, graph: &Path) -> Resul
 
 /// Become the graph's owner, or answer with the exit code that says another process is
 /// (MC-4). A command that cannot own the graph has nothing to do here: its owner syncs it.
-fn owner_or_exit(graph: &Path) -> Result<std::result::Result<OwnerLock, i32>> {
+/// `json` additionally emits the refusal as the one object `--json` promises, because a
+/// launchd job or agent sees this outcome routinely.
+fn owner_or_exit(graph: &Path, json: bool) -> Result<std::result::Result<OwnerLock, i32>> {
     match crate::cli::take_owner(graph) {
         Ok(lock) => Ok(Ok(lock)),
         Err(e) if e.downcast_ref::<crate::cli::AlreadyOpen>().is_some() => {
-            eprintln!("{e}; the open process already syncs this graph.");
+            let message = format!("{e}; the open process already syncs this graph.");
+            eprintln!("{message}");
+            if json {
+                emit(&json!({
+                    "version": 1,
+                    "ok": false,
+                    "owned": true,
+                    "errors": [message],
+                }))?;
+            }
             Ok(Err(EXIT_OWNED))
         }
         Err(e) => Err(e),
@@ -526,7 +537,7 @@ fn apply_command(options: &Options, config_dir: &Path, setup: bool) -> Result<i3
     } else {
         Typed::default()
     };
-    let _owner = match owner_or_exit(&graph)? {
+    let _owner = match owner_or_exit(&graph, false)? {
         Ok(lock) => lock,
         Err(code) => return Ok(code),
     };
@@ -680,7 +691,7 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
             graph.display()
         );
     }
-    let _owner = match owner_or_exit(&graph)? {
+    let _owner = match owner_or_exit(&graph, options.json)? {
         Ok(lock) => lock,
         Err(code) => return Ok(code),
     };
