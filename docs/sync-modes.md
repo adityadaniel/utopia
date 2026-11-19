@@ -252,7 +252,7 @@ EOF
 - A graph that has used E2E refuses a different passphrase (no silent re-key), and a first
   passphrase needs a target that can be read.
 
-**The loop.** After setup an agent does:
+**One-shot.** After setup an agent can run one sync, then work, then run it again:
 
 ```bash
 utopia sync --graph /path/Notes.utopia     # one run: rounds until nothing is queued
@@ -273,23 +273,61 @@ sync, the queued changes and whether another process owns the graph (it never pr
 secret). `utopia sync config --graph … --off` turns sync off; `--mode …` changes the saved
 settings with the same validation as Settings.
 
-**A `launchd` interval job** (create it yourself; nothing installs it):
+**Continuous (the daemon).** `utopia sync --continuous --graph /path/Notes.utopia` is the
+headless equivalent of `ob sync --continuous`. It takes the owner lock for its whole life,
+opens the store once, and runs the same round every 5 s while there is activity and every
+60 s when idle (the app's cadence). A relay's WebSocket notice makes it sync immediately,
+and a local write through its API (an MCP `append_blocks`, a `utopia capture`) nudges the
+next round, so delivery does not wait for the poll. `utopia serve-api --graph … --sync` is
+an alias for the same command.
 
-```xml
-<!-- ~/Library/LaunchAgents/local.utopia.sync.plist -->
-<key>ProgramArguments</key>
-<array>
-  <string>/Applications/Utopia.app/Contents/MacOS/utopia</string>
-  <string>sync</string>
-  <string>--graph</string>
-  <string>/Users/me/Documents/Utopia/Notes.utopia</string>
-</array>
-<key>StartInterval</key><integer>300</integer>
-<key>RunAtLoad</key><true/>
+While it runs it also serves the graph's loopback automation API, at the level in the
+`mcp/<graph key>.json` access file (Settings → Assistants), and writes the usual
+`api/<graph key>.json` discovery file. `utopia mcp` therefore takes the Remote path and
+`utopia capture` forwards to the daemon instead of opening a second writer. A `capture`
+from another process while the daemon owns the graph lands in the graph and is pushed on
+the next round.
+
+Stop it with SIGTERM or SIGINT (or by `launchctl bootout` for the agent below). A round
+that already started finishes; the store is flushed, the owner lock released and the
+discovery file removed. Logs go to stderr and name the round's result and the next
+cadence, never the token or passphrase.
+
+**A `launchd` agent** (the command prints the plist; nothing installs it):
+
+```bash
+mkdir -p ~/Library/Logs/Utopia
+utopia sync launchd-plist --graph /Users/me/Documents/Utopia/Notes.utopia \
+  > ~/Library/LaunchAgents/local.utopia.sync.Notes.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.utopia.sync.Notes.plist
 ```
 
-Only one of the app and the job can own the graph; while the app is open the job exits 3
-and the app syncs. Secrets are already in the Keychain, so the job needs no environment.
+The label is `local.utopia.sync.<graph file name>`; `launchctl print gui/$(id -u)` lists it.
+The plist runs `sync --continuous` with the absolute binary and graph paths, sets
+`RunAtLoad` and `KeepAlive` (so `launchd` restarts it if it exits), and writes
+`~/Library/Logs/Utopia/sync-<graph>.out.log` and `.err.log`. To stop and remove it:
+
+```bash
+launchctl bootout gui/$(id -u)/local.utopia.sync.Notes
+rm ~/Library/LaunchAgents/local.utopia.sync.Notes.plist
+```
+
+Keep `~/Library/LaunchAgents` and the log directory under your own home directory; the
+generated plist takes them from `HOME`. Only one process can own the graph, so do not leave
+the agent loaded while the app is open for the same graph: the agent exits 3, and
+`KeepAlive` retries it until the app lets go. Stop the agent before you open the app if that
+matters to you.
+
+**Secrets and the session.** The agent runs in your `gui` session and reads the relay token
+and E2E passphrase from the macOS Keychain like the app does, but the login keychain must be
+unlocked, so the first round may fail while you are logged out or before you log in. A
+`launchd` agent cannot prompt: if the passphrase for an encrypted graph is missing there,
+give it `UTOPIA_SYNC_PASSPHRASE` (and `UTOPIA_SYNC_TOKEN`, or `UTOPIA_SYNC_URL` for the
+target) in the plist's `EnvironmentVariables`. That is a trade-off: environment variables
+are plaintext in the plist on disk, in `launchctl print`, and in the process environment,
+so anyone who can read your home directory or run `ps` as you can read the secret. Prefer
+the Keychain when the Mac logs in normally; use environment variables only for a machine
+that must sync before anyone logs in, and keep the plist readable by you alone.
 
 `UTOPIA_SYNC_URL`, `UTOPIA_SYNC_FOLDER`, `UTOPIA_LAN_SERVE` and `UTOPIA_SYNC_GRAPH`
 override the saved transport for a run (setup and config refuse to save while one is set),
@@ -304,7 +342,9 @@ being saved.
 - `crates/utopia-sync/src/{folder,http,e2e,lib}.rs`, `crates/utopia-sync/src/setup/`.
 - `crates/utopia-syncd/src/{main,lan}.rs`.
 - `crates/utopia-app/src/{sync_setup,sync_target,sync_cli,paths}.rs` (the window's setup,
-  the one transport builder, and the headless `utopia sync`), `crates/utopia-ui/src/{sync_setup,sync_runner}.rs`.
+  the one transport builder, and the headless `utopia sync`, including `--continuous` and
+  `launchd-plist`), `crates/utopia-ui/src/{sync_setup,sync_runner}.rs`, and
+  `crates/utopia-sync/src/runner.rs` (the UI-free round both runners use).
 - `docs/state-machines/`: `sync-engine-outbox-and-cursor.md`, `sync-runner-round.md`,
   `sync-compaction-snapshots.md`, `lan-relay-discovery.md`, `realtime-listener.md`,
   `ffi-mobile-sync.md`.
