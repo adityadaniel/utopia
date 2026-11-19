@@ -75,7 +75,13 @@ prompt); `serve-api <file> [addr]` runs the automation API without a window;
 (PRD §13.8): `--graph` is necessary (MC-13) and each tool call runs in the open app through
 `/v1/op`, or headless when the app is closed and the access file's `when_closed` is on;
 `mcp config <claude-code|claude-desktop|codex> [--graph <file>]` prints the setup entry for
-one of them; a `utopia://…` argument opens that link.
+one of them; `sync setup --graph <file> --mode relay|nearby|folder [--url …] [--folder …]
+[--graph-id …]` writes the same per-graph settings Settings → Sync uses, and `sync --graph
+<file> [--json]` runs one sync to completion (then exit 0; 2 = Sync is Off, 3 = another
+process owns the graph), `sync status` reports the saved settings and `sync config` changes
+them; the token and E2E passphrase come from stdin without echo or from
+`--token-stdin`/`--passphrase-stdin`, and only ever reach the Keychain (`docs/sync-modes.md`,
+"Headless sync"); a `utopia://…` argument opens that link.
 
 **One owner for each graph (MC-4).** A process that writes a graph first takes an exclusive
 `flock` on the `<graph>.owner` sidecar (`utopia_store::OwnerLock`, `.owner` appended to the

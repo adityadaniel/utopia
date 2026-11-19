@@ -219,6 +219,82 @@ folder: type a passphrase in Settings → Sync (§11.7, `crates/utopia-sync/src/
 Recommendation: turn it on for every mode where a different person or company keeps the
 data (a relay on a rented server, iCloud Drive, Dropbox).
 
+## Headless sync (no window)
+
+§12 sync can run without the app, for a Mac that never opens Utopia: an agent's copy of the
+graph, a laptop that only needs to receive changes, or a `launchd` job. The same engine,
+the same per-graph settings file and the same transport code run; nothing is a second
+implementation.
+
+**Setup, once.** `utopia sync setup` writes the file Settings → Sync writes
+(`<config>/sync/<graph key>.json`), freezes the graph id into the graph, and stores the
+relay token and E2E passphrase in the Keychain:
+
+```bash
+utopia sync setup --graph /path/Notes.utopia \
+  --mode relay --url https://relay.example \
+  --graph-id notes \
+  --token-stdin --passphrase-stdin <<'EOF'
+the-relay-token
+the-e2e-passphrase
+EOF
+```
+
+- `--mode relay|nearby|folder`; relay takes `--url`, folder takes `--folder`, nearby finds
+  the host with mDNS (discovery waits 5 s).
+- `--graph-id` is optional. A graph that already synced keeps its id; a different one is
+  refused, because the id names data (§12.5). Both devices must use the same id.
+- The token and passphrase are read from a terminal without echo when the flags are not
+  given, or as one line each with `--token-stdin` / `--passphrase-stdin` (token first when
+  both). They are never arguments, files or output; a blank passphrase means no E2E.
+- A graph that does not exist yet is created empty, so the first `utopia sync` pulls
+  everything, like "Connect another device" in the app.
+- A graph that has used E2E refuses a different passphrase (no silent re-key), and a first
+  passphrase needs a target that can be read.
+
+**The loop.** After setup an agent does:
+
+```bash
+utopia sync --graph /path/Notes.utopia     # one run: rounds until nothing is queued
+utopia mcp --graph /path/Notes.utopia      # read and write through the MCP tools
+utopia sync --graph /path/Notes.utopia     # push what the agent wrote, pull what others did
+```
+
+`utopia sync` takes the graph's owner lock for the run (MC-4). If the app or `serve-api`
+owns the graph, it exits with code 3 and says the owner already syncs it; it never writes
+behind the owner's back. `--json` prints one object on stdout (`pushed`, `pulled`,
+`pending`, `errors`, …) and no summary, which is the shape a script reads. Without it the
+summary goes to stderr. Exit codes: 0 synced, 1 failed (target, credential, wrong
+passphrase, or changes still queued), 2 Sync is Off for this graph, 3 another process owns
+it. `utopia sync status --graph … [--json]` reports the mode, target, graph id, whether
+secrets are stored, whether the environment overrides the settings, the last successful
+sync, the queued changes and whether another process owns the graph (it never prints a
+secret). `utopia sync config --graph … --off` turns sync off; `--mode …` changes the saved
+settings with the same validation as Settings.
+
+**A `launchd` interval job** (create it yourself; nothing installs it):
+
+```xml
+<!-- ~/Library/LaunchAgents/local.utopia.sync.plist -->
+<key>ProgramArguments</key>
+<array>
+  <string>/Applications/Utopia.app/Contents/MacOS/utopia</string>
+  <string>sync</string>
+  <string>--graph</string>
+  <string>/Users/me/Documents/Utopia/Notes.utopia</string>
+</array>
+<key>StartInterval</key><integer>300</integer>
+<key>RunAtLoad</key><true/>
+```
+
+Only one of the app and the job can own the graph; while the app is open the job exits 3
+and the app syncs. Secrets are already in the Keychain, so the job needs no environment.
+
+`UTOPIA_SYNC_URL`, `UTOPIA_SYNC_FOLDER`, `UTOPIA_LAN_SERVE` and `UTOPIA_SYNC_GRAPH`
+override the saved transport for a run (setup and config refuse to save while one is set),
+and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the Keychain credentials without
+being saved.
+
 ## Sources
 
 - `PRD.md` §11.7 (encryption), §12.1–12.8 (sync design), and the security section on the
@@ -226,8 +302,8 @@ data (a relay on a rented server, iCloud Drive, Dropbox).
 - `AGENTS.md`: the "Sync" section and "Known limits".
 - `crates/utopia-sync/src/{folder,http,e2e,lib}.rs`, `crates/utopia-sync/src/setup/`.
 - `crates/utopia-syncd/src/{main,lan}.rs`.
-- `crates/utopia-app/src/sync_setup.rs`, `crates/utopia-ui/src/sync_setup.rs`,
-  `crates/utopia-ui/src/sync_runner.rs`.
+- `crates/utopia-app/src/{sync_setup,sync_target,sync_cli,paths}.rs` (the window's setup,
+  the one transport builder, and the headless `utopia sync`), `crates/utopia-ui/src/{sync_setup,sync_runner}.rs`.
 - `docs/state-machines/`: `sync-engine-outbox-and-cursor.md`, `sync-runner-round.md`,
   `sync-compaction-snapshots.md`, `lan-relay-discovery.md`, `realtime-listener.md`,
   `ffi-mobile-sync.md`.

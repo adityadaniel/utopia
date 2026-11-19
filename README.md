@@ -87,6 +87,31 @@ graph given by `--graph <file>` or `UTOPIA_GRAPH`. Without either, it reopens th
 you used, or the only one in `~/Documents/Utopia`, and otherwise asks you to name a new one.
 Opening the installed app registers the `utopia://` URL scheme.
 
+## Headless commands
+
+The same binary runs without a window, which is how scripts and agents work on a graph:
+
+```bash
+utopia doctor Notes.utopia               # check the §10.4 invariants
+utopia export Notes.utopia out/          # Markdown, graph.json and graph.opml
+utopia import-roam Notes.utopia roam.json
+utopia capture "a line for today's note"  # goes to the open app when it owns the graph
+utopia mcp --graph Notes.utopia          # MCP server on stdio for Claude Code, Claude Desktop, Codex
+
+utopia sync setup --graph Notes.utopia --mode relay \
+  --url https://relay.example --graph-id notes --token-stdin --passphrase-stdin
+utopia sync --graph Notes.utopia         # one sync to completion
+utopia sync status --graph Notes.utopia  # mode, target, graph id, secrets present, queue
+utopia sync config --graph Notes.utopia --off
+```
+
+`utopia sync setup` writes the same per-graph settings file Settings → Sync writes and stores
+the token and E2E passphrase only in the Keychain; they are read from stdin (no echo on a
+terminal, or `--token-stdin` / `--passphrase-stdin` for scripts), never from arguments.
+`utopia sync` exits 0 synced, 1 failed, 2 when sync is Off for the graph, and 3 when another
+process owns the graph (the open app syncs it). [`docs/sync-modes.md`](docs/sync-modes.md)
+has the agent/`launchd` workflow, and `utopia sync --help` has every option.
+
 ## Keyboard essentials
 
 These are the defaults. Change any of them in Settings → Keybindings; Cmd+/ shows the full
