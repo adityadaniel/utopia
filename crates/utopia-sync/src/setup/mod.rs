@@ -239,6 +239,22 @@ impl Environment {
         }
         p
     }
+
+    /// The set variables that decide *where* a run publishes, in precedence order. The
+    /// credentials are not included: they never change the destination. Settings → Sync
+    /// will not save setup while one is set, because the saved file would disagree with
+    /// the run, and `utopia sync setup` follows the same rule.
+    pub fn transport_names(&self) -> Vec<&'static str> {
+        [
+            ("UTOPIA_LAN_SERVE", self.host.is_some()),
+            ("UTOPIA_SYNC_URL", self.url.is_some()),
+            ("UTOPIA_SYNC_FOLDER", self.folder.is_some()),
+            ("UTOPIA_SYNC_GRAPH", self.graph.is_some()),
+        ]
+        .into_iter()
+        .filter_map(|(name, set)| set.then_some(name))
+        .collect()
+    }
 }
 
 pub mod probe;

@@ -88,6 +88,9 @@ fn ac_12_7_environment_overrides_saved_transport_without_persisting_secrets() {
     assert!(!serde_json::to_string(&effective)
         .unwrap()
         .contains("env-secret"));
+    // The transport variables are the ones that stop setup from saving a file that the
+    // run would ignore; a credential does not change where the run publishes.
+    assert_eq!(env.transport_names(), vec!["UTOPIA_SYNC_URL"]);
 }
 
 #[test]

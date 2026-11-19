@@ -13,14 +13,16 @@ use utopia_sync::setup::{
 };
 use utopia_sync::Transport;
 use utopia_ui::{
-    sync_runner::{build_transport, BoxTransport, SyncConfig, SyncTarget},
+    sync_runner::{BoxTransport, SyncConfig, SyncTarget},
     sync_setup::{Request, SetupHandle, SyncSetup},
     workspace::Workspace,
 };
 
+use crate::sync_target;
+
 /// How this device finds a Mac hosting this graph (§12.7 Nearby): mDNS on the local
 /// network. Injected so the discovery retry can be driven in a test without multicast.
-type Discover = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+type Discover = Arc<sync_target::Discover>;
 
 /// How often a Nearby client looks for its host again (§12.7): the runner's slow cadence,
 /// because a host that is asleep now may wake at any point during the day.
@@ -90,12 +92,11 @@ impl Coordinator {
         // An environment variable owns this run, so its id is not the user's to edit here.
         let graph_editable = env.graph.is_none() && stored.is_none();
         let graph = env.graph.clone().or(stored).unwrap_or(default_graph);
-        let id = utopia_store::graph_key(graph_path);
         cx.set_global(utopia_ui::sync_runner::SyncFacts {
             graph: Some(graph.clone()),
             ..Default::default()
         });
-        let file = config.join("sync").join(format!("{id}.json"));
+        let file = crate::paths::sync_config(config, graph_path);
         let view = cx.new(|cx| SyncSetup::new(graph.clone(), graph_editable, cx));
         cx.set_global(SetupHandle(view.clone()));
         cx.new(|cx| {
@@ -208,32 +209,22 @@ impl Coordinator {
                 }
                 let (token, passphrase) = credentials(&request, &graph, &env, secrets.as_ref())?;
                 let key_check = utopia_sync::setup::verify_passphrase(passphrase.as_deref(), &graph, marker.as_deref())?;
-                let mut lan = None;
-                let target = match request.preferences.mode {
-                    Mode::Relay => SyncTarget::Relay { url: request.preferences.url.clone(), token },
-                    Mode::Folder => SyncTarget::Folder(request.preferences.folder.clone().ok_or("Choose a shared folder.")?),
-                    Mode::Nearby => {
-                        let url = if let Some(bind) = &request.preferences.host {
-                            if env.host.is_none() && token.as_ref().is_none_or(|s| s.is_empty()) { return Err("Hosting needs a relay token.".into()); }
-                            if let Some(parent) = relay_file.parent() { std::fs::create_dir_all(parent).map_err(|_| "Could not create the relay directory.")?; }
-                            let db = relay_file.with_extension("relay.db");
-                            let cfg = utopia_syncd::Config { tokens: token.clone().into_iter().collect(), ..Default::default() };
-                            // The old host holds the listen address until it is dropped.
-                            drop(old_lan);
-                            let relay = utopia_syncd::lan::serve_lan(&db, bind, &graph, cfg, true).map_err(|_| "Could not host the relay. Check the listen address and whether its port is in use.")?;
-                            let url = format!("http://127.0.0.1:{}", relay.addr.port());
-                            lan = Some(relay); url
-                        } else {
-                            // A host that is asleep is normal: the caller looks again on the
-                            // runner's slow cadence instead of leaving sync off all day.
-                            discover(&graph).ok_or("No Nearby Mac found for this graph. Enable hosting on the other Mac and leave both Macs awake.")?
-                        };
-                        SyncTarget::Relay { url, token }
-                    }
-                    Mode::Off => unreachable!("handled before credentials"),
+                // One builder for the window and the CLI (`sync_target`): the old host is
+                // released only once the replacement settings are usable.
+                let Some(target) = sync_target::resolve(
+                    &request.preferences,
+                    &env,
+                    &graph,
+                    sync_target::Credentials { token, passphrase },
+                    &relay_file,
+                    old_lan,
+                    discover.as_ref(),
+                )? else {
+                    return Ok((None, "Sync is Off.".into()));
                 };
-                let cfg = SyncConfig { target, graph: graph.clone(), passphrase };
-                let transport = build_transport(&cfg, &client).map_err(|_| "Could not open the sync transport.")?;
+                let lan = target.lan;
+                let cfg = target.config;
+                let transport = sync_target::transport(&cfg, &client)?;
                 let mut transport = utopia_sync::setup::verified_target::VerifiedTarget::new(transport);
                 // Learn relay identity before choosing a destination; an unavailable relay
                 // still starts the normal retry loop, preserving offline-first editing.
@@ -264,7 +255,8 @@ impl Coordinator {
                     save_secrets(secrets.as_ref(), &graph, &request.token, &request.passphrase)?;
                 }
                 let transport: BoxTransport = Box::new(transport);
-                let destination = destination(&cfg, transport.cursor_space(), connected.instance);
+                let destination =
+                    sync_target::destination(&cfg, transport.cursor_space(), connected.instance);
                 Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on.".into()))
             }).await;
             let update = this.update(cx, |this, cx| -> (Option<utopia_sync::realtime::Listener>, bool) {
@@ -371,25 +363,6 @@ impl Coordinator {
             }
         }));
     }
-}
-
-/// The destination this run publishes to (§12.7): the transport's stable address plus the
-/// relay store id, when the probe could read one. Sampling it *after* the probe is the
-/// point — before that, a relay is only its URL, and a launch without a network must not
-/// look like a different destination (`sync-engine-outbox-and-cursor.md`).
-fn destination(
-    cfg: &SyncConfig,
-    space: utopia_sync::CursorSpace,
-    instance: Option<String>,
-) -> Destination {
-    let origin = match &cfg.target {
-        // The cursor space of a relay is `relay:<store-or-url>#<graph>`; the origin is the
-        // same string spelled with the URL, which is what an offline launch knows.
-        SyncTarget::Relay { url, .. } => utopia_sync::http::destination_origin(url, &cfg.graph),
-        // A folder is identified by its root, and has no store id to learn.
-        SyncTarget::Folder(_) => space.transport,
-    };
-    Destination::new(origin, instance)
 }
 
 fn credentials(

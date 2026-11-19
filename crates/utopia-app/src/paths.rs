@@ -22,6 +22,16 @@ pub fn config_dir() -> PathBuf {
     }
 }
 
+/// The per-graph sync settings file Settings → Sync writes (§12):
+/// `<config>/sync/<graph key>.json`, where the key is the SHA-256 of the canonical graph
+/// path (`utopia_store::graph_key`). The headless `utopia sync` reads and writes this same
+/// file (§15.6: it never holds a secret).
+pub fn sync_config(config: &Path, graph: &Path) -> PathBuf {
+    config
+        .join("sync")
+        .join(format!("{}.json", utopia_store::graph_key(graph)))
+}
+
 /// Default folder for graphs created by onboarding: `~/Documents/Utopia`.
 pub fn graphs_dir() -> PathBuf {
     home().join("Documents/Utopia")
@@ -121,6 +131,20 @@ pub fn remember_graph(config: &Path, graph: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_sync_settings_file_is_named_by_the_graph_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        let graph = dir.path().join("Notes.utopia");
+        std::fs::write(&graph, b"").unwrap();
+        let file = sync_config(&config, &graph);
+        assert_eq!(file.parent().unwrap(), config.join("sync"));
+        assert_eq!(
+            file.file_name().unwrap().to_string_lossy(),
+            format!("{}.json", utopia_store::graph_key(&graph))
+        );
+    }
 
     #[test]
     fn graph_names_are_safe() {
