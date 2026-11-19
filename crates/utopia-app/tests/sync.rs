@@ -33,7 +33,12 @@ struct Scratch {
 
 impl Scratch {
     fn new() -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        // Inside `target/`, like every scratch process in this repository, and unique per
+        // test so two tests can run at once.
+        let dir = tempfile::Builder::new()
+            .prefix("utopia-headless-sync-")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .unwrap();
         let root = dir.path().to_path_buf();
         std::fs::create_dir_all(root.join("config")).unwrap();
         std::fs::create_dir_all(root.join("home")).unwrap();
