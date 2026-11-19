@@ -740,6 +740,24 @@ fn mc_14_discover_and_initialize_answer_without_a_store() {
     assert!(server.finish().status.success());
 }
 
+/// Encrypt a scratch graph that this test just closed. `set_encryption` needs the graph's
+/// lock exclusively and answers `Busy` while anyone holds it. Other tests in this binary
+/// spawn processes all the time, and a child holds a copy of every descriptor the parent had
+/// open (this store's lock included) from `fork` until its `exec` closes them. Under a busy
+/// `make check` that window is long enough to see. Wait it out instead of failing.
+fn encrypt_graph(graph: &Path, passphrase: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match utopia_store::set_encryption(graph, None, Some(passphrase)) {
+            Ok(()) => return,
+            Err(utopia_store::StoreError::Busy) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => panic!("encrypt the scratch graph: {e:?}"),
+        }
+    }
+}
+
 /// MC-5: the opener never prompts. An encrypted graph with no `UTOPIA_DB_PASSPHRASE` and no
 /// Keychain item fails with a text, and the process does not hang on a read of `stdin`.
 #[test]
@@ -749,7 +767,7 @@ fn mc_5_an_encrypted_graph_without_a_passphrase_is_a_text_not_a_prompt() {
     }
     let s = Scratch::new();
     s.access(Level::Read, true);
-    utopia_store::set_encryption(&s.graph, None, Some("secret")).unwrap();
+    encrypt_graph(&s.graph, "secret");
 
     let started = Instant::now();
     let mut server = s.mcp(&[]);
