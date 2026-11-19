@@ -497,11 +497,15 @@ impl Render for PdfView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
         let count = self.pages.len();
+        // DESIGN.md §3.16: as tall as the top bar and clear of the traffic lights, which
+        // sit on this row when the sidebar is collapsed.
         let header = div()
+            .min_h(px(crate::theme::TOP_BAR_MIN_HEIGHT))
             .flex()
             .items_center()
             .gap_3()
             .px_4()
+            .pl(px(crate::chrome::leading_padding(16., cx)))
             .py_2()
             .border_b_1()
             .border_color(th.line)

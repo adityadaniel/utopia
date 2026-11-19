@@ -9,7 +9,8 @@
 //! - `scroll <dy>` scrolls the wheel by `dy` pixels at the centre of the window (negative
 //!   moves the content up, i.e. scrolls down, as a trackpad does)
 //! - `click <x> <y>` clicks the left button at a point in the window's content, in points
-//!   from its top left (a Retina capture is twice that and includes the 28 pt title bar),
+//!   from its top left (a Retina capture is twice that; the title bar is transparent, so the
+//!   content starts at the window's top edge, DESIGN.md §3.18),
 //!   for controls with no shortcut
 //! - `hover <x> <y>` (or `move <x> <y>`) moves the pointer there without pressing, for
 //!   states that only show on hover (a block's drag handle, PG-4, or a graph node, GR-2)

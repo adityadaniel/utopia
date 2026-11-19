@@ -596,6 +596,10 @@ impl Render for GraphView {
                 .items_center()
                 .gap_2()
                 .px_4()
+                // DESIGN.md §3.16: as tall as the top bar and clear of the traffic lights,
+                // which sit on this row when the sidebar is collapsed.
+                .min_h(px(crate::theme::TOP_BAR_MIN_HEIGHT))
+                .pl(px(crate::chrome::leading_padding(16., cx)))
                 .py_2()
                 .border_b_1()
                 .border_color(th.line)
