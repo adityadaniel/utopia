@@ -535,3 +535,40 @@ fn headless_sync_refuses_an_environment_url_with_credentials() {
         "{status}"
     );
 }
+
+/// One-shot `sync` must drain the attachment queue too: `sync_once` moves at most
+/// `BLOBS_PER_ROUND` per pass, so a backlog needs more than its inner loop. Success means
+/// the queue is empty, not that the last pass happened to move pages.
+#[test]
+fn headless_sync_uploads_every_queued_attachment() {
+    let s = Scratch::new();
+    let a = s.graph("a");
+    s.seed(&a, "Alpha", "zebrablobs");
+    let mut hashes = Vec::new();
+    {
+        let mut store = Store::open(&a).unwrap();
+        for i in 0..120 {
+            let bytes = format!("attachment-{i}-{}", "x".repeat(32));
+            let attachment = store
+                .add_blob(&format!("file-{i}.txt"), bytes.as_bytes())
+                .unwrap();
+            hashes.push(attachment.hash);
+        }
+    }
+    assert!(s.setup(&a, &[]).status.success());
+    let (out, report) = s.sync_json(&a);
+    assert!(out.status.success(), "sync: {}", stderr(&out));
+    assert_eq!(report["ok"], true, "{report}");
+    assert_eq!(
+        report["blobs_up"], 120,
+        "every queued attachment was uploaded: {report}"
+    );
+    let store = Store::open(&a).unwrap();
+    let left = hashes
+        .iter()
+        .filter(|hash| {
+            store.attachment_state(hash).unwrap() != Some(utopia_store::BlobState::Uploaded)
+        })
+        .count();
+    assert_eq!(left, 0, "{left} attachment(s) were still queued");
+}

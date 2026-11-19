@@ -693,7 +693,11 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
                     errors.extend(report.failed.iter().map(failure_text));
                     break;
                 }
-                if report.is_quiet() && store.outbox_count()? == 0 {
+                // A round that moved attachments is not quiet even when it moved no pages:
+                // `sync_once` sends at most `BLOBS_PER_ROUND` per pass, so an attachment
+                // backlog needs more rounds before the queue is empty.
+                let moved = !report.is_quiet() || report.blobs_up > 0 || report.blobs_down > 0;
+                if !moved && store.outbox_count()? == 0 {
                     break;
                 }
             }
@@ -707,10 +711,19 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
     // half-written when the process stops.
     store.sync_index()?;
     let pending = store.outbox_count()?;
+    // Pages are not the whole queue: a destination switch (or an interrupted run) leaves
+    // attachments pending, and `outbox_count` does not see them (§12.7). One row is enough
+    // to know work remains; its bytes are not kept.
+    let attachments_pending = !store.blobs_to_upload(1)?.is_empty();
     if errors.is_empty() && pending > 0 {
         errors.push(format!(
             "{pending} change(s) are still queued after {MAX_ROUNDS} rounds."
         ));
+    }
+    if errors.is_empty() && attachments_pending {
+        errors.push(
+            "Attachment(s) are still queued for upload; run `utopia sync` again to finish.".into(),
+        );
     }
     drop(lan);
     let ok = errors.is_empty();
@@ -728,6 +741,7 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
             "snapshots": totals.snapshots,
             "blobs_up": totals.blobs_up,
             "blobs_down": totals.blobs_down,
+            "attachments_pending": attachments_pending,
             "pending": pending,
             "errors": errors,
         });
