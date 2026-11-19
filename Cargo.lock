@@ -7429,6 +7429,7 @@ dependencies = [
  "anyhow",
  "core-graphics 0.24.0",
  "gpui",
+ "libc",
  "objc",
  "png 0.17.16",
  "raw-window-handle",

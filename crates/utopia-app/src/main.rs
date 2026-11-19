@@ -893,6 +893,13 @@ fn main() -> anyhow::Result<()> {
             let Some(graph) = args.get(1) else {
                 anyhow::bail!("{}", cli::USAGE);
             };
+            // `--sync` is the alias of the primary `utopia sync --continuous`: the same
+            // long-running owner, with rounds as well as the API.
+            if args.iter().any(|a| a == "--sync") {
+                let code =
+                    sync_cli::continuous(graph.as_ref(), &paths::config_dir(), "127.0.0.1:0")?;
+                std::process::exit(code);
+            }
             let addr = args.get(2).map_or("127.0.0.1:0", String::as_str);
             cli::serve_api(graph.as_ref(), addr, &paths::config_dir())
         }
