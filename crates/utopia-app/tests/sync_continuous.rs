@@ -660,3 +660,37 @@ fn api_calls_are_served_while_the_exchange_is_slow() {
     let (status, stderr) = daemon.stop();
     assert!(status.success(), "daemon exit: {status}\n{stderr}");
 }
+
+/// P2: `serve-api graph [addr] --sync` keeps the address it was given.
+#[test]
+fn serve_api_sync_uses_the_explicit_address() {
+    let s = Scratch::new();
+    let b = s.graph("b");
+    s.seed(&b, "Beta", "zebra-address");
+    s.setup(&b);
+    let port = {
+        let free = TcpListener::bind("127.0.0.1:0").unwrap();
+        free.local_addr().unwrap().port()
+    };
+    let addr = format!("127.0.0.1:{port}");
+    let child = s
+        .utopia()
+        .args(["serve-api"])
+        .arg(&b)
+        .arg(&addr)
+        .arg("--sync")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut daemon = Daemon { child: Some(child) };
+    daemon.wait_ready(&s.discovery(&b), &b);
+    let discovery = utopia_api::read_discovery(&s.discovery(&b)).unwrap();
+    assert_eq!(
+        discovery.url,
+        format!("http://{addr}"),
+        "the alias silently changed the requested address"
+    );
+    let (status, stderr) = daemon.stop();
+    assert!(status.success(), "daemon exit: {status}\n{stderr}");
+}
