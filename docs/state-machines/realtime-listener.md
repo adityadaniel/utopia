@@ -2,6 +2,13 @@
 
 ## Status
 
+The listener is held by the shared round, `utopia_sync::runner::SyncRunner`
+(`crates/utopia-sync/src/runner.rs`), not by GPUI: `utopia_sync::realtime::Listener` is
+started for a relay target, cancelled and joined when the runner is stopped or replaced, and
+its `nudge` wakes both the desktop loop and the headless `utopia sync --continuous` daemon.
+The UI adapter in `crates/utopia-ui/src/sync_runner.rs` only owns the GPUI loop task around
+that runner. References below to `sync_runner.rs` line numbers are historical.
+
 In-app setup replaces the desktop's detached blocking listener with
 `utopia_sync::realtime::Listener`, owned by `SyncRunner`. A oneshot cancellation signal
 races the entire async reconnect future, including connect/handshake, quiet socket reads

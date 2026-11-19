@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 gpui.workspace = true
+libc.workspace = true
 serde_json.workspace = true
 utopia-api.workspace = true
 utopia-core.workspace = true

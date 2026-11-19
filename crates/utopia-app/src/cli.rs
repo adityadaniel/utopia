@@ -15,7 +15,9 @@ usage:
   utopia import-roam <file.utopia> <roam.json>   import a Roam JSON export
   utopia capture <text…>                 append a line to today's note (bind to any OS shortcut);
                                          when Utopia has the graph open, the open app writes it
-  utopia serve-api <file.utopia> [addr]  run the local automation API without the app
+  utopia serve-api <file.utopia> [addr] [--sync]
+                                         run the local automation API without the app;
+                                         --sync is the alias of `utopia sync --continuous`
   utopia mcp --graph <file.utopia> [--read-only]
                                          MCP server on stdio for an AI client (§13.8); the
                                          graph is necessary, and --read-only lowers the
@@ -28,6 +30,12 @@ usage:
                                          an empty graph if it does not exist)
   utopia sync --graph <file.utopia> [--json]
                                          run one sync to completion and exit
+  utopia sync --continuous --graph <file.utopia>
+                                         keep syncing (and serving the automation API) until
+                                         SIGTERM/SIGINT; the headless daemon
+  utopia sync launchd-plist --graph <file.utopia>
+                                         print a LaunchAgent plist for --continuous
+                                         (nothing is installed)
   utopia sync status --graph <file.utopia> [--json]
                                          show the saved sync settings and state
   utopia sync config --graph <file.utopia> (--off | --mode relay|nearby|folder [--url …] [--folder …])

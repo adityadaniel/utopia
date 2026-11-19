@@ -21,13 +21,14 @@ use anyhow::{bail, Context, Result};
 use serde_json::json;
 use utopia_core::PageId;
 use utopia_store::{OwnerLock, Store};
+use utopia_sync::runner::{exchange_owned, BoxTransport, SyncRunner as SyncRound};
 use utopia_sync::setup::probe::{probe, Connection};
 use utopia_sync::setup::verified_target::{VerifiedTarget, UNREADABLE};
 use utopia_sync::setup::{
     may_freeze_key, save_secrets, verify_passphrase, Environment, Keychain, Mode, Preferences,
     Secrets, PASSPHRASE_SERVICE, TOKEN_SERVICE,
 };
-use utopia_sync::{FailureKind, SyncEngine, SyncError, SyncReport, Transport};
+use utopia_sync::{FailureKind, SyncEngine, SyncError, SyncReport, SyncStatus, Transport};
 
 use crate::sync_target::{self, Discover};
 
@@ -41,6 +42,12 @@ usage:
         `utopia sync` pulls everything.
   utopia sync --graph <file.utopia> [--json]
         run sync rounds until nothing is left to push or pull, then exit
+  utopia sync --continuous --graph <file.utopia>
+        keep syncing until SIGTERM/SIGINT: a round every 5 s while there is activity,
+        one a minute when idle, on relay notices, and shortly after a local write; also
+        serves the automation API so utopia mcp and utopia capture forward to this process
+  utopia sync launchd-plist --graph <file.utopia>
+        print a LaunchAgent plist for --continuous on stdout (nothing is installed)
   utopia sync status --graph <file.utopia> [--json]
         show the saved mode and target, the graph id, whether secrets are stored, whether
         the environment overrides the settings, the last successful sync, the queued
@@ -48,6 +55,11 @@ usage:
   utopia sync config --graph <file.utopia> (--off | --mode relay|nearby|folder [--url …] [--folder …])
         change the saved settings (same file, same validation); a blank secret keeps the
         stored one
+
+`serve-api --sync` is an alias for `sync --continuous`. The daemon takes the graph's owner
+lock for its whole life (MC-4), so a second utopia process forwards writes to it instead of
+opening the graph; stopping it releases the lock, flushes the store and removes its
+discovery file.
 
 --graph is necessary for every form: utopia sync never picks a graph by the app's start-up
 order, so a script cannot reach a graph its author did not name. The token and passphrase
@@ -92,6 +104,7 @@ pub fn run(args: &[String]) -> Result<i32> {
         Some("setup") => ("setup", &args[1..]),
         Some("status") => ("status", &args[1..]),
         Some("config") => ("config", &args[1..]),
+        Some("launchd-plist") => ("launchd-plist", &args[1..]),
         Some(other) if !other.starts_with('-') => bail!(
             "unknown utopia sync command {other:?}: use setup, status or config, or no \
              command to sync once.\n\n{USAGE}"
@@ -127,8 +140,16 @@ pub fn run(args: &[String]) -> Result<i32> {
             options.ensure_only("status", &["--graph", "--json"])?;
             status(&options, &config)
         }
+        "launchd-plist" => {
+            options.ensure_only("launchd-plist", &["--graph"])?;
+            launchd_plist(&options)
+        }
         _ => {
-            options.ensure_only("sync", &["--graph", "--json"])?;
+            options.ensure_only("sync", &["--graph", "--json", "--continuous"])?;
+            if options.continuous {
+                let graph = options.graph()?;
+                return continuous(graph, &config, "127.0.0.1:0");
+            }
             match one_shot(&options, &config) {
                 Ok(code) => Ok(code),
                 Err(error) => {
@@ -161,6 +182,7 @@ struct Options {
     token_stdin: bool,
     passphrase_stdin: bool,
     off: bool,
+    continuous: bool,
 }
 
 impl Options {
@@ -178,6 +200,7 @@ impl Options {
                 "--token-stdin" => options.token_stdin = true,
                 "--passphrase-stdin" => options.passphrase_stdin = true,
                 "--off" => options.off = true,
+                "--continuous" => options.continuous = true,
                 other => bail!("unknown option {other:?} for utopia sync.\n\n{USAGE}"),
             }
             i += 1;
@@ -215,6 +238,9 @@ impl Options {
         }
         if self.off {
             given.push("--off");
+        }
+        if self.continuous {
+            given.push("--continuous");
         }
         given
     }
@@ -681,6 +707,77 @@ fn save_and_apply(graph: &Path, config_dir: &Path, run: Save<'_>) -> Result<Stri
     ))
 }
 
+/// Everything a run needs after the saved settings named a transport: the frozen id, the
+/// transport guarded by the first-use check, the engine, and a hosted Nearby relay that the
+/// caller must keep alive for as long as it syncs.
+struct Prepared {
+    id: String,
+    target: sync_target::Target,
+    transport: VerifiedTarget<BoxTransport>,
+    engine: SyncEngine,
+}
+
+/// Resolve this run's target exactly as the app launches sync: credentials from the
+/// environment or the Keychain, the frozen graph id, the E2E marker, a target that was read
+/// before anything is pushed, and the destination record. One-shot `utopia sync` and the
+/// continuous daemon both come through here, so a difference between them cannot make one
+/// publish where the other would not.
+fn prepare_transport(
+    store: &mut Store,
+    graph: &Path,
+    config_dir: &Path,
+    env: &Environment,
+    preferences: &Preferences,
+) -> Result<Prepared> {
+    let file = crate::paths::sync_config(config_dir, graph);
+    let id = graph_id(store, graph, env)?;
+    let secrets = keychain();
+    let (token, passphrase) = credentials(env, &secrets, &id).map_err(anyhow::Error::msg)?;
+    let marker = store.sync_get("setup_e2e_check")?;
+    let key_check = verify_passphrase(passphrase.as_deref(), &id, marker.as_deref())
+        .map_err(anyhow::Error::msg)?;
+    let discover = lan_discovery();
+    let Some(target) = sync_target::resolve(
+        preferences,
+        env,
+        &id,
+        sync_target::Credentials { token, passphrase },
+        &file,
+        None,
+        &discover,
+    )
+    .map_err(anyhow::Error::msg)?
+    else {
+        bail!("Sync is Off: choose a transport with `utopia sync setup`.");
+    };
+    let sync_target::Target { config, lan } = target;
+    let engine = SyncEngine::new(store)?;
+    let mut transport = VerifiedTarget::new(
+        sync_target::transport(&config, engine.client_id()).map_err(anyhow::Error::msg)?,
+    );
+    let connected = probe(&mut transport);
+    if transport.unreadable {
+        bail!("{UNREADABLE}");
+    }
+    // A launch that reached the target freezes what now names synced data: the id and,
+    // once a payload proved the key, the E2E marker. Both are the app's launch rules.
+    store.sync_set("setup_graph", &id)?;
+    if marker.is_none() && config.passphrase.is_some() && may_freeze_key(&connected) {
+        if let Some(marker) = key_check {
+            store.sync_set("setup_e2e_check", &marker)?;
+        }
+    }
+    let destination =
+        sync_target::destination(&config, transport.cursor_space(), connected.instance);
+    store.prepare_sync_destination(&destination)?;
+    Ok(Prepared {
+        id,
+        target: sync_target::Target { config, lan },
+        transport,
+        engine,
+    })
+}
+
 /// `utopia sync`: one run to completion, then exit.
 fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
     let graph = options.graph()?.to_path_buf();
@@ -723,46 +820,13 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
         eprintln!("{message}");
         return Ok(EXIT_OFF);
     }
-    let id = graph_id(&store, &graph, &env)?;
-    let secrets = keychain();
-    let (token, passphrase) = credentials(&env, &secrets, &id).map_err(anyhow::Error::msg)?;
-    let marker = store.sync_get("setup_e2e_check")?;
-    let key_check = verify_passphrase(passphrase.as_deref(), &id, marker.as_deref())
-        .map_err(anyhow::Error::msg)?;
-    let discover = lan_discovery();
-    let Some(target) = sync_target::resolve(
-        &preferences,
-        &env,
-        &id,
-        sync_target::Credentials { token, passphrase },
-        &file,
-        None,
-        &discover,
-    )
-    .map_err(anyhow::Error::msg)?
-    else {
-        bail!("Sync is Off: choose a transport with `utopia sync setup`.");
-    };
-    let sync_target::Target { config, lan } = target;
-    let mut engine = SyncEngine::new(&store)?;
-    let mut transport = VerifiedTarget::new(
-        sync_target::transport(&config, engine.client_id()).map_err(anyhow::Error::msg)?,
-    );
-    let connected = probe(&mut transport);
-    if transport.unreadable {
-        bail!("{UNREADABLE}");
-    }
-    // A launch that reached the target freezes what now names synced data: the id and,
-    // once a payload proved the key, the E2E marker. Both are the app's launch rules.
-    store.sync_set("setup_graph", &id)?;
-    if marker.is_none() && config.passphrase.is_some() && may_freeze_key(&connected) {
-        if let Some(marker) = key_check {
-            store.sync_set("setup_e2e_check", &marker)?;
-        }
-    }
-    let destination =
-        sync_target::destination(&config, transport.cursor_space(), connected.instance);
-    store.prepare_sync_destination(&destination)?;
+    let Prepared {
+        id,
+        target,
+        mut transport,
+        mut engine,
+    } = prepare_transport(&mut store, &graph, config_dir, &env, &preferences)?;
+    let lan = target.lan;
 
     let mut totals = Totals::default();
     let mut errors: Vec<String> = Vec::new();
@@ -1016,6 +1080,414 @@ fn ago(at_ms: i64, now_ms: i64) -> String {
     } else {
         format!("{}d ago", seconds / 86_400)
     }
+}
+
+/// The daemon's stop flag, set by SIGTERM/SIGINT. A signal handler may only touch atomics;
+/// the loop notices it between steps and lets a round that already started finish.
+static STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+extern "C" fn request_stop(_: libc::c_int) {
+    STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn install_stop_handlers() {
+    STOP.store(false, std::sync::atomic::Ordering::SeqCst);
+    // SAFETY: `request_stop` only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(
+            libc::SIGTERM,
+            request_stop as *const () as libc::sighandler_t,
+        );
+        libc::signal(
+            libc::SIGINT,
+            request_stop as *const () as libc::sighandler_t,
+        );
+    }
+}
+
+/// The network half of a round, running on its own thread while the main loop keeps
+/// draining the API. The result is the exchange's answer and the transport coming home.
+struct InFlight {
+    result: std::sync::mpsc::Receiver<(Result<utopia_sync::Incoming, SyncError>, BoxTransport)>,
+}
+
+enum RoundStart {
+    InFlight(InFlight),
+    Finished(Result<SyncReport, SyncError>),
+}
+
+/// Prepare on the store-owning thread and send the network exchange to a worker. Only the
+/// exchange leaves the thread; apply stays here, so a round seen by SQLite is still one
+/// ordered transaction run by the owner.
+fn start_round(runner: &mut SyncRound, store: &mut Store) -> RoundStart {
+    let Some(transport) = runner.begin_round() else {
+        // Only one loop drives this runner; a second round cannot be started.
+        return RoundStart::Finished(Ok(SyncReport::default()));
+    };
+    match runner.engine.prepare(store) {
+        Ok(out) => {
+            runner.exchange();
+            let (answers, result) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("utopia-sync-exchange".into())
+                .spawn(move || {
+                    let _ = answers.send(exchange_owned(transport, out));
+                })
+                .expect("spawn the sync exchange worker");
+            RoundStart::InFlight(InFlight { result })
+        }
+        Err(error) => {
+            let report: Result<SyncReport, SyncError> = Err(error);
+            let status = SyncStatus::from_result(&report, store);
+            runner.round_failed(transport, status);
+            RoundStart::Finished(report)
+        }
+    }
+}
+
+/// Import an exchange's answer on the thread that owns the store, then put the transport
+/// home and set the next cadence.
+fn finish_round(
+    runner: &mut SyncRound,
+    store: &mut Store,
+    exchanged: (Result<utopia_sync::Incoming, SyncError>, BoxTransport),
+) -> Result<SyncReport, SyncError> {
+    let (result, transport) = exchanged;
+    runner.exchange_returned();
+    let report = match result {
+        Ok(incoming) => runner.engine.apply(store, incoming),
+        Err(error) => Err(error),
+    };
+    let status = SyncStatus::from_result(&report, store);
+    runner.end_round(transport, &report, status);
+    report
+}
+
+/// Run every queued API call; a write nudges the next round. This runs between every step
+/// of the daemon, including while an exchange is in flight, so an agent's call cannot wait
+/// out the network (the app's UI thread does the same).
+fn drain_api(
+    api: &utopia_api::ApiServer,
+    store: &mut Store,
+    nudge: &std::sync::atomic::AtomicBool,
+) {
+    while let Some(call) = api.try_recv() {
+        let changed = call.run(store);
+        if !changed.is_empty() {
+            nudge.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+/// Whether `error` is the one transient failure a daemon retries: a Nearby client whose
+/// host is asleep or off the network. A bad credential or a first E2E passphrase that
+/// cannot be proven is still fatal, as it is for the app.
+fn nearby_discovery_failure(preferences: &Preferences, error: &anyhow::Error) -> bool {
+    preferences.mode == Mode::Nearby
+        && preferences.host.is_none()
+        && error.to_string() == sync_target::NO_NEARBY_HOST
+}
+
+/// The discovery file names this process. It is removed on every exit, clean or fatal;
+/// nothing else can own the graph while the lock is held.
+struct DiscoveryGuard(PathBuf);
+
+impl Drop for DiscoveryGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// One line per finished round, on stderr and without secrets (§15.6). A refused or failed
+/// round still says what happened and what the next cadence is.
+fn log_round(round: u64, result: &Result<SyncReport, SyncError>, runner: &SyncRound) {
+    let next = runner.interval.as_secs();
+    match result {
+        Ok(report) if report.failed.is_empty() => {
+            if !report.is_quiet() || report.blobs_up > 0 || report.blobs_down > 0 {
+                eprintln!(
+                    "utopia: sync round {round}: pushed {}, pulled {}, snapshots {}, blobs {}/{}, next in {next}s",
+                    report.pushed,
+                    report.imported.len(),
+                    report.snapshots,
+                    report.blobs_up,
+                    report.blobs_down
+                );
+            } else {
+                eprintln!("utopia: sync round {round}: quiet, next in {next}s");
+            }
+        }
+        Ok(report) => {
+            eprintln!(
+                "utopia: sync round {round}: {} page(s) could not sync, next in {next}s",
+                report.failed.len()
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "utopia: sync round {round}: {}, next in {next}s",
+                error_text(error)
+            );
+        }
+    }
+}
+
+/// `utopia sync --continuous` (and the `utopia serve-api --sync` alias): keep this graph in
+/// sync, and serve the loopback API while doing it, until SIGTERM/SIGINT. It owns the graph
+/// for its whole life (MC-4), so `utopia mcp` (Remote) and `utopia capture` forward to it
+/// instead of opening a second writer.
+///
+/// The API starts before the transport is resolved, so an agent keeps working while a
+/// Nearby host is asleep; discovery is retried on the slow cadence. The network exchange of
+/// each round runs on a worker (`utopia-sync-exchange`), while prepare/apply and every API
+/// call stay on this thread with the store.
+pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
+    if !graph.exists() {
+        bail!(
+            "no graph at {}; run `utopia sync setup --graph {} …` first.",
+            graph.display(),
+            graph.display()
+        );
+    }
+    install_stop_handlers();
+    // Another process owning the graph is a routine answer (the app or a daemon already
+    // syncs it), so it gets the one-shot command's exit code instead of a generic failure.
+    let owner = match owner_or_exit(graph, false)? {
+        Ok(lock) => lock,
+        Err(code) => return Ok(code),
+    };
+    let mut store = crate::cli::open_store(graph)?;
+    let env = Environment::read(|key| std::env::var(key).ok());
+    let file = crate::paths::sync_config(config_dir, graph);
+    let (saved, notice) = Preferences::load(&file);
+    let preferences = env.apply(&saved);
+    preferences.validate().map_err(anyhow::Error::msg)?;
+    if preferences.mode == Mode::Off {
+        let message = notice.unwrap_or_else(|| {
+            format!(
+                "Sync is Off for {}; run `utopia sync setup --graph {} …` first.",
+                graph.display(),
+                graph.display()
+            )
+        });
+        eprintln!("{message}");
+        return Ok(EXIT_OFF);
+    }
+    let level = crate::api_launch::load_access(config_dir, graph).level;
+    let _discovery = DiscoveryGuard(utopia_api::discovery_file(config_dir, graph));
+    let api = crate::api_launch::serve(addr, level, config_dir, graph)?;
+    eprintln!("utopia: automation API on {}", api.url());
+    eprintln!("utopia: assistant access: {level:?}");
+
+    let nudge = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut runner: Option<SyncRound> = None;
+    let mut hosted: Option<utopia_syncd::lan::LanRelay> = None;
+    let mut inflight: Option<InFlight> = None;
+    let mut next_due = std::time::Instant::now();
+    let mut next_prepare = std::time::Instant::now();
+    let mut round = 0u64;
+    let mut fatal: Option<anyhow::Error> = None;
+
+    loop {
+        if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            drain_api(&api, &mut store, &nudge);
+        }
+        if let Some(current) = runner.as_mut() {
+            if let Some(waiting) = inflight.as_ref() {
+                match waiting.result.try_recv() {
+                    Ok(exchanged) => {
+                        inflight = None;
+                        let result = finish_round(current, &mut store, exchanged);
+                        round += 1;
+                        log_round(round, &result, current);
+                        next_due = std::time::Instant::now() + current.interval;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        inflight = None;
+                        fatal = Some(anyhow::anyhow!(
+                            "the sync exchange worker stopped without a result"
+                        ));
+                        break;
+                    }
+                }
+            } else if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+                let due = std::time::Instant::now() >= next_due;
+                let nudged =
+                    !current.is_refused() && nudge.swap(false, std::sync::atomic::Ordering::SeqCst);
+                if due || nudged {
+                    match start_round(current, &mut store) {
+                        RoundStart::InFlight(waiting) => inflight = Some(waiting),
+                        RoundStart::Finished(result) => {
+                            round += 1;
+                            log_round(round, &result, current);
+                            next_due = std::time::Instant::now() + current.interval;
+                        }
+                    }
+                }
+            }
+        } else if !STOP.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() >= next_prepare
+        {
+            match prepare_transport(&mut store, graph, config_dir, &env, &preferences) {
+                Ok(Prepared {
+                    id,
+                    target: sync_target::Target { config, lan: host },
+                    transport,
+                    engine,
+                }) => {
+                    let target_text = target_text(&preferences).unwrap_or_else(|| "unknown".into());
+                    let mut started = SyncRound::new(engine, Box::new(transport) as BoxTransport);
+                    started.nudge = nudge.clone();
+                    hosted = host;
+                    eprintln!(
+                        "utopia: continuous sync for {} (graph {id}, {target_text})",
+                        graph.display()
+                    );
+                    if let utopia_sync::runner::SyncTarget::Relay { url, token } = &config.target {
+                        started.realtime = Some(
+                            utopia_sync::realtime::Listener::start(
+                                url.clone(),
+                                config.graph.clone(),
+                                token.clone(),
+                                nudge.clone(),
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("starting the realtime listener: {error}")
+                            })?,
+                        );
+                        eprintln!("utopia: realtime listener started for {url}");
+                    } else {
+                        eprintln!("utopia: no realtime listener for a folder target; rounds poll");
+                    }
+                    runner = Some(started);
+                    next_due = std::time::Instant::now();
+                    eprintln!("utopia: continuous sync loop started");
+                }
+                Err(error) if nearby_discovery_failure(&preferences, &error) => {
+                    eprintln!(
+                        "utopia: Nearby host not found for {}; retrying discovery in {}s",
+                        graph.display(),
+                        utopia_sync::runner::SLOW.as_secs()
+                    );
+                    next_prepare = std::time::Instant::now() + utopia_sync::runner::SLOW;
+                }
+                Err(error) => {
+                    fatal = Some(error);
+                    break;
+                }
+            }
+        }
+        if STOP.load(std::sync::atomic::Ordering::SeqCst) && inflight.is_none() {
+            break;
+        }
+        let now = std::time::Instant::now();
+        let until = if runner.is_some() {
+            next_due.saturating_duration_since(now)
+        } else {
+            next_prepare.saturating_duration_since(now)
+        };
+        std::thread::sleep(
+            until
+                .min(Duration::from_millis(100))
+                .max(Duration::from_millis(5)),
+        );
+    }
+
+    // Stop the listener before the store: a notice that arrives during shutdown must not
+    // wake a round the loop will never run. An exchange already in flight finished above,
+    // so no round is left half-applied.
+    if let Some(runner) = runner.as_mut() {
+        if let Some(listener) = runner.realtime.take() {
+            listener.stop();
+        }
+    }
+    drop(inflight);
+    drop(runner);
+    drop(api);
+    // Finish the writer's buffered work before the store and the lock go away (MC-4).
+    store.sync_index()?;
+    store.flush()?;
+    drop(store);
+    drop(owner);
+    drop(hosted);
+    if let Some(error) = fatal {
+        return Err(error);
+    }
+    eprintln!("utopia: continuous sync stopped");
+    Ok(EXIT_OK)
+}
+
+/// The `launchd` plist for `utopia sync --continuous`: printed to stdout, never installed.
+/// `home` is the user whose LaunchAgent directory and log directory it names.
+pub fn launchd_plist_text(binary: &Path, graph: &Path, home: &Path) -> String {
+    let stem = graph
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("graph");
+    let label: String = stem
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let label = format!("local.utopia.sync.{label}");
+    let logs = home.join("Library/Logs/Utopia");
+    let out = logs.join(format!("sync-{stem}.out.log"));
+    let err = logs.join(format!("sync-{stem}.err.log"));
+    let xml = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&apos;")
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{label}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{binary}</string>
+    <string>sync</string>
+    <string>--continuous</string>
+    <string>--graph</string>
+    <string>{graph}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>StandardOutPath</key>
+  <string>{out}</string>
+  <key>StandardErrorPath</key>
+  <string>{err}</string>
+</dict>
+</plist>
+"#,
+        label = xml(&label),
+        binary = xml(&binary.display().to_string()),
+        graph = xml(&graph.display().to_string()),
+        out = xml(&out.display().to_string()),
+        err = xml(&err.display().to_string()),
+    )
+}
+
+fn launchd_plist(options: &Options) -> Result<i32> {
+    let graph = options.graph()?;
+    let graph = graph
+        .canonicalize()
+        .with_context(|| format!("resolving {}", graph.display()))?;
+    let binary = std::env::current_exe().context("finding the utopia binary")?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .context("HOME must name an absolute home directory")?;
+    print!("{}", launchd_plist_text(&binary, &graph, &home));
+    Ok(EXIT_OK)
 }
 
 #[cfg(test)]
@@ -1279,5 +1751,27 @@ mod tests {
             preferences_for(&off, &saved, true).is_err(),
             "setup names a transport; config --off is the way to turn sync off"
         );
+    }
+    /// `utopia sync launchd-plist` names absolute paths and the continuous command, and
+    /// points its logs at the documented directory. The process test checks it installs
+    /// nothing.
+    #[test]
+    fn launchd_plist_is_an_absolute_continuous_agent() {
+        let plist = launchd_plist_text(
+            Path::new("/Applications/Utopia.app/Contents/MacOS/utopia"),
+            Path::new("/Users/me/Documents/Utopia/Notes & Ideas.utopia"),
+            Path::new("/Users/me"),
+        );
+        for expected in [
+            "<string>/Applications/Utopia.app/Contents/MacOS/utopia</string>",
+            "<string>--continuous</string>",
+            "<string>/Users/me/Documents/Utopia/Notes &amp; Ideas.utopia</string>",
+            "<key>KeepAlive</key>",
+            "<key>RunAtLoad</key>",
+            "/Users/me/Library/Logs/Utopia/sync-Notes &amp; Ideas.out.log",
+        ] {
+            assert!(plist.contains(expected), "missing {expected:?}:\n{plist}");
+        }
+        assert!(plist.contains("local.utopia.sync.Notes---Ideas"), "{plist}");
     }
 }

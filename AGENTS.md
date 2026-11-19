@@ -70,7 +70,11 @@ the §10.4 invariants (exit 1 on problems); `export <file> <dir>` writes Markdow
 `capture <text…>` appends to today's note (when another process owns the graph and runs the
 API, it sends the text to that owner instead, see below); `encrypt` / `decrypt <file>` switch encryption at rest
 (`UTOPIA_DB_PASSPHRASE`, `UTOPIA_DB_NEW_PASSPHRASE`, keychain service `utopia-db`, or a
-prompt); `serve-api <file> [addr]` runs the automation API without a window;
+prompt); `serve-api <file> [addr] [--sync]` runs the automation API without a window;
+`sync --continuous --graph <file>` (alias: `serve-api <file> --sync`) is the headless
+daemon: it owns the graph, runs the app's sync rounds on notices and after local writes, and
+serves the API until SIGTERM/SIGINT; `sync launchd-plist --graph <file>` prints a
+`RunAtLoad`/`KeepAlive` LaunchAgent for it and installs nothing;
 `mcp --graph <file> [--read-only]` is the MCP server on stdio for an assistant client
 (PRD §13.8): `--graph` is necessary (MC-13) and each tool call runs in the open app through
 `/v1/op`, or headless when the app is closed and the access file's `when_closed` is on;
@@ -79,15 +83,17 @@ one of them; `sync setup --graph <file> --mode relay|nearby|folder [--url …] [
 [--graph-id …]` writes the same per-graph settings Settings → Sync uses, and `sync --graph
 <file> [--json]` runs one sync to completion (then exit 0; 2 = Sync is Off, 3 = another
 process owns the graph), `sync status` reports the saved settings and `sync config` changes
-them; the token and E2E passphrase come from stdin without echo or from
+them (the continuous daemon exits 2/3 the same way, and on a clean stop flushes the store,
+releases the lock and removes its discovery file); the token and E2E passphrase come from
+stdin without echo or from
 `--token-stdin`/`--passphrase-stdin`, and only ever reach the Keychain (`docs/sync-modes.md`,
 "Headless sync"); a `utopia://…` argument opens that link.
 
 **One owner for each graph (MC-4).** A process that writes a graph first takes an exclusive
 `flock` on the `<graph>.owner` sidecar (`utopia_store::OwnerLock`, `.owner` appended to the
 canonical path; the file stays on disk on purpose). The app (before `Store::open_with_key`,
-held as long as its store), `serve-api` (its whole life), `capture`, `import-roam` and
-`doctor --rebuild` take it, trying for 2 s; if it stays held they write nothing and stop with
+held as long as its store), `serve-api` and `sync --continuous` (their whole life), `capture`,
+`import-roam` and `doctor --rebuild` take it, trying for 2 s; if it stays held they write nothing and stop with
 "This graph is already open in Utopia" (the app shows it in the window). `capture` first
 sends the text to the owner (`POST /v1/capture` through the graph's discovery file, decision
 D10 A) and exits 0 when the owner wrote it; only when there is no discovery file, nothing
@@ -279,7 +285,7 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `crates/utopia-doc` | The CRDT boundary: the `PageDoc` trait and its Loro implementation (one shard per page) | `utopia-core`, `loro` |
 | `crates/utopia-store` | SQLite: schema/migrations, projections (`block`, `ref`, `block_fts`, `attr`), resolver, backlinks, rename/merge, trash, outbox, export, `doctor`, query evaluation, page graph, attachments (`<graph>.blobs/<sha256>`), PDF highlights, encryption at rest | `utopia-core`, `utopia-doc`, `rusqlite` |
 | `crates/utopia-proto` | Sync wire format v1 (§12.3), shared by client and relay | `serde` only |
-| `crates/utopia-sync` | Sync client: `Transport` trait, `SyncEngine` (prepare → `exchange` → apply), `HttpTransport`, `FolderTransport`, `e2e::Encrypted`, `realtime::listen`, in-memory reference relay | `utopia-core`, `utopia-doc`, `utopia-store`, `utopia-proto` |
+| `crates/utopia-sync` | Sync client: `Transport` trait, `SyncEngine` (prepare → `exchange` → apply), the UI-free `runner` round (one round at a time, backoff/reset, refusal policy, nudge) shared by the app and the headless daemon, `HttpTransport`, `FolderTransport`, `e2e::Encrypted`, `realtime::Listener`, in-memory reference relay | `utopia-core`, `utopia-doc`, `utopia-store`, `utopia-proto` |
 | `crates/utopia-syncd` | Relay server (axum, §12.8): per-page logs, dedupe, auth, quota, snapshots, WebSocket notices; `lan` = in-process relay + mDNS. **No CRDT dependency** | `utopia-proto`, `rusqlite` |
 | `crates/utopia-api` | Local automation API (loopback HTTP, bearer token) and `utopia://` link parsing; `handle(store, Op)` is the one implementation shared with plugins | `utopia-core`, `utopia-store`, `axum` |
 | `crates/utopia-mcp` | MCP server on stdio for assistant clients (PRD §13.8): the JSON-RPC wire for the two protocol eras, the tool catalog, the outline format with its id marker, the `Direct` headless backend, the `Remote` backend for the open app's API, the rule that picks one for each call, and the setup text for each client. No `gpui`, no async runtime | `utopia-api`, `utopia-store`, `utopia-core` |
@@ -502,8 +508,9 @@ Known limits (pick these up deliberately, don't paper over them):
   encrypted graph needs a passphrase the process can read
   (`UTOPIA_DB_PASSPHRASE` or the keychain) because `stdin` is the protocol channel and no
   prompt is possible. A cancel keeps back the answer but does not reverse a write the owner
-  already started. `serve-api` reads the access file once at start, so its `/v1/op` level
-  follows the file only on restart; the app re-levels its own server at once.
+  already started. `serve-api` and `sync --continuous` read the access file once at start, so
+  their `/v1/op` level follows the file only on restart; the app re-levels its own server at
+  once.
 - MCP: Claude Desktop has not been run against `utopia mcp` (its entry needs
   `claude_desktop_config.json` and a restart, so the owner adds it). Codex and Claude Code
   were, and their protocol eras are in `docs/mcp-design.md` §6. Codex's default

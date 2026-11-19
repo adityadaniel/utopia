@@ -5,11 +5,17 @@
 use std::path::Path;
 
 use utopia_store::Destination;
+use utopia_sync::runner::{BoxTransport, SyncConfig, SyncTarget};
 use utopia_sync::setup::{Environment, Mode, Preferences};
-use utopia_ui::sync_runner::{BoxTransport, SyncConfig, SyncTarget};
 
 /// How a Nearby client finds its host (§12.7): mDNS on the local network.
 pub type Discover = dyn Fn(&str) -> Option<String> + Send + Sync;
+
+/// The one failure a continuous run retries instead of exiting: a Nearby client whose host
+/// is asleep or off the network. It is a plain sentence because that is what the window
+/// shows; the daemon compares it to tell this apart from a bad configuration or credential.
+pub const NO_NEARBY_HOST: &str = "No Nearby Mac found for this graph. Enable hosting on the \
+                                 other Mac and leave both Macs awake.";
 
 /// A resolved target and, when this run hosts a Nearby relay, the relay.
 ///
@@ -88,10 +94,7 @@ pub fn resolve(
             None => {
                 // A host that is asleep is normal: the caller looks again on the runner's
                 // slow cadence instead of leaving sync off all day.
-                let url = discover(graph).ok_or(
-                    "No Nearby Mac found for this graph. Enable hosting on the other Mac and \
-                     leave both Macs awake.",
-                )?;
+                let url = discover(graph).ok_or(NO_NEARBY_HOST)?;
                 (SyncTarget::Relay { url, token }, None)
             }
         },
@@ -109,7 +112,7 @@ pub fn resolve(
 /// Build the transport stack for a config: relay or folder, optionally encrypted
 /// (§12.7, §11.7). The app and the CLI both call this so the two carry the same stack.
 pub fn transport(cfg: &SyncConfig, client_id: &str) -> Result<BoxTransport, String> {
-    utopia_ui::sync_runner::build_transport(cfg, client_id)
+    utopia_sync::runner::build_transport(cfg, client_id)
         .map_err(|_| "Could not open the sync transport.".into())
 }
 

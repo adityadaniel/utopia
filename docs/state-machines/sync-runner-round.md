@@ -2,6 +2,18 @@
 
 ## Status
 
+The round now lives in one UI-free place: `crates/utopia-sync/src/runner.rs`
+(`SyncRunner`, `SyncPhase`, `RefusalReason`, `begin_round`/`exchange`/`exchange_returned`/
+`end_round`, `next_interval`/`back_off`, the nudge and the refusal). The desktop's
+`crates/utopia-ui/src/sync_runner.rs` is an adapter that adds the GPUI loop task, the
+`SyncFacts` global, the sidebar dot and the status line; `utopia sync --continuous` drives
+the same `utopia_sync::runner::SyncRunner` from `crates/utopia-app/src/sync_cli.rs`, with a
+synchronous loop in place of the GPUI task. Both therefore share the one-round-at-a-time rule,
+the backoff and reset, the cursor-space-preserving `SyncEngine`, the realtime nudge, and the
+401/403 refusal policy; neither has a second copy. References below to
+`crates/utopia-ui/src/sync_runner.rs` name the adapter or the copy that lived there before
+the move, and describe the same transitions.
+
 In-app setup update (§12.7): `Coordinator` now prepares transports off the UI thread and
 installs them with `Workspace::start_prepared_sync`. Apply first calls `stop_sync`, which
 removes the runner and its owned poll task, clears target/facts and notifies the sidebar.
