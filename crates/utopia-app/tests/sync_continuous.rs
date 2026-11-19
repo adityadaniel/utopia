@@ -7,8 +7,11 @@
 //! writes a Keychain item: the relay token comes from `UTOPIA_SYNC_TOKEN`.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -90,18 +93,15 @@ impl Scratch {
     }
 
     fn setup(&self, graph: &Path) {
+        self.setup_at(graph, &self.url);
+    }
+
+    fn setup_at(&self, graph: &Path, url: &str) {
         let out = self
             .utopia()
             .args(["sync", "setup", "--graph"])
             .arg(graph)
-            .args([
-                "--mode",
-                "relay",
-                "--url",
-                self.url.as_str(),
-                "--graph-id",
-                GRAPH_ID,
-            ])
+            .args(["--mode", "relay", "--url", url, "--graph-id", GRAPH_ID])
             .output()
             .unwrap();
         assert!(
@@ -526,4 +526,137 @@ fn serve_api_sync_is_an_alias_and_a_second_daemon_exits_three() {
         1,
         "the alias is the same one-loop daemon: {stderr}"
     );
+}
+
+/// A relay that answers manifests at once except one chosen manifest request, which it
+/// holds open. Setup and the daemon's probe stay fast; the first round's exchange stalls.
+struct SlowRelay {
+    url: String,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SlowRelay {
+    /// `stalled` is the manifest request number (1 = setup's probe, 2 = the daemon's probe,
+    /// 3 = its first round) that sleeps for `hold`; `started` is signalled when it begins.
+    fn new(stalled: usize, hold: Duration, started: mpsc::Sender<()>) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut manifests = 0usize;
+            while !stopping.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((socket, _)) => {
+                        let mut request = [0u8; 4096];
+                        let mut read = Vec::new();
+                        let mut socket = socket;
+                        let _ = socket.set_read_timeout(Some(Duration::from_secs(5)));
+                        loop {
+                            match socket.read(&mut request) {
+                                Ok(0) => break,
+                                Ok(n) => {
+                                    read.extend_from_slice(&request[..n]);
+                                    if read.windows(4).any(|w| w == b"\r\n\r\n") {
+                                        break;
+                                    }
+                                }
+                                Err(_) => break,
+                            }
+                        }
+                        let head = String::from_utf8_lossy(&read);
+                        if head.contains("/manifest") {
+                            manifests += 1;
+                            let number = manifests;
+                            let started = started.clone();
+                            std::thread::spawn(move || {
+                                if number == stalled {
+                                    let _ = started.send(());
+                                    std::thread::sleep(hold);
+                                }
+                                let body = format!(
+                                    r#"{{"rev":0,"protocol_version":{},"pages":[]}}"#,
+                                    utopia_sync::PROTOCOL_VERSION
+                                );
+                                let response = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                                    body.len(),
+                                    body
+                                );
+                                let _ = socket.write_all(response.as_bytes());
+                            });
+                        } else {
+                            // The realtime listener's socket: no event stream here, so it
+                            // reconnects at its own cadence without affecting the count.
+                            let _ = socket.write_all(
+                                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                                  Connection: close\r\n\r\n",
+                            );
+                        }
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+        Self {
+            url,
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for SlowRelay {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// P1: the round's network exchange must not stop the only loop that drains the API. A
+/// capture sent while the exchange is stalled runs at once; before the exchange moved to a
+/// worker it sat in the queue until the relay answered (and would 504 after 30 s).
+#[test]
+fn api_calls_are_served_while_the_exchange_is_slow() {
+    let s = Scratch::new();
+    let b = s.graph("b");
+    s.seed(&b, "Beta", "zebra-starved");
+    let (started, exchange_started) = mpsc::channel();
+    let relay = SlowRelay::new(3, Duration::from_secs(8), started);
+    s.setup_at(&b, &relay.url);
+    s.access(&b, Level::Write);
+    let daemon = s.daemon(&b);
+    exchange_started
+        .recv_timeout(Duration::from_secs(15))
+        .expect("the daemon reached the stalled exchange");
+
+    let discovery = utopia_api::read_discovery(&s.discovery(&b)).unwrap();
+    let (answered, answer) = mpsc::channel();
+    std::thread::spawn(move || {
+        let op = utopia_api::Op::Capture {
+            text: "zebra-starved-served".into(),
+        };
+        let _ = answered.send(utopia_api::Client::new(discovery).op(&op));
+    });
+    match answer.recv_timeout(Duration::from_secs(4)) {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => panic!("the capture failed during the exchange: {error}"),
+        Err(_) => panic!("the capture did not run while the exchange was stalled"),
+    }
+    assert_eq!(
+        hits(&b, "zebra-starved-served"),
+        1,
+        "the owner wrote the capture while the exchange was in flight"
+    );
+
+    let (status, stderr) = daemon.stop();
+    assert!(status.success(), "daemon exit: {status}\n{stderr}");
 }

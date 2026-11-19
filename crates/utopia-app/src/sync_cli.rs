@@ -1105,32 +1105,76 @@ fn install_stop_handlers() {
     }
 }
 
-/// One round through the shared state machine: prepare, exchange, apply, and the cadence
-/// the next wake-up uses. The transport leaves the runner for the exchange and is always
-/// handed back, so the one-round-at-a-time rule has a single owner.
-fn run_round(runner: &mut SyncRound, store: &mut Store) -> Result<SyncReport, SyncError> {
+/// The network half of a round, running on its own thread while the main loop keeps
+/// draining the API. The result is the exchange's answer and the transport coming home.
+struct InFlight {
+    result: std::sync::mpsc::Receiver<(Result<utopia_sync::Incoming, SyncError>, BoxTransport)>,
+}
+
+enum RoundStart {
+    InFlight(InFlight),
+    Finished(Result<SyncReport, SyncError>),
+}
+
+/// Prepare on the store-owning thread and send the network exchange to a worker. Only the
+/// exchange leaves the thread; apply stays here, so a round seen by SQLite is still one
+/// ordered transaction run by the owner.
+fn start_round(runner: &mut SyncRound, store: &mut Store) -> RoundStart {
     let Some(transport) = runner.begin_round() else {
         // Only one loop drives this runner; a second round cannot be started.
-        return Ok(SyncReport::default());
+        return RoundStart::Finished(Ok(SyncReport::default()));
     };
     match runner.engine.prepare(store) {
         Ok(out) => {
             runner.exchange();
-            let (result, transport) = exchange_owned(transport, out);
-            runner.exchange_returned();
-            let report = match result {
-                Ok(incoming) => runner.engine.apply(store, incoming),
-                Err(error) => Err(error),
-            };
-            let status = SyncStatus::from_result(&report, store);
-            runner.end_round(transport, &report, status);
-            report
+            let (answers, result) = std::sync::mpsc::channel();
+            std::thread::Builder::new()
+                .name("utopia-sync-exchange".into())
+                .spawn(move || {
+                    let _ = answers.send(exchange_owned(transport, out));
+                })
+                .expect("spawn the sync exchange worker");
+            RoundStart::InFlight(InFlight { result })
         }
         Err(error) => {
             let report: Result<SyncReport, SyncError> = Err(error);
             let status = SyncStatus::from_result(&report, store);
             runner.round_failed(transport, status);
-            report
+            RoundStart::Finished(report)
+        }
+    }
+}
+
+/// Import an exchange's answer on the thread that owns the store, then put the transport
+/// home and set the next cadence.
+fn finish_round(
+    runner: &mut SyncRound,
+    store: &mut Store,
+    exchanged: (Result<utopia_sync::Incoming, SyncError>, BoxTransport),
+) -> Result<SyncReport, SyncError> {
+    let (result, transport) = exchanged;
+    runner.exchange_returned();
+    let report = match result {
+        Ok(incoming) => runner.engine.apply(store, incoming),
+        Err(error) => Err(error),
+    };
+    let status = SyncStatus::from_result(&report, store);
+    runner.end_round(transport, &report, status);
+    report
+}
+
+/// Run every queued API call; a write nudges the next round. This runs between every step
+/// of the daemon, including while an exchange is in flight, so an agent's call cannot wait
+/// out the network (the app's UI thread does the same).
+fn drain_api(
+    api: &utopia_api::ApiServer,
+    store: &mut Store,
+    nudge: &std::sync::atomic::AtomicBool,
+) {
+    while let Some(call) = api.try_recv() {
+        let changed = call.run(store);
+        if !changed.is_empty() {
+            nudge.store(true, std::sync::atomic::Ordering::SeqCst);
         }
     }
 }
@@ -1173,6 +1217,9 @@ fn log_round(round: u64, result: &Result<SyncReport, SyncError>, runner: &SyncRo
 /// sync, and serve the loopback API while doing it, until SIGTERM/SIGINT. It owns the graph
 /// for its whole life (MC-4), so `utopia mcp` (Remote) and `utopia capture` forward to it
 /// instead of opening a second writer.
+///
+/// The network exchange of each round runs on a worker (`utopia-sync-exchange`), while
+/// prepare/apply and every API call stay on this thread with the store.
 pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     if !graph.exists() {
         bail!(
@@ -1230,7 +1277,7 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
                 url.clone(),
                 config.graph.clone(),
                 token.clone(),
-                nudge,
+                nudge.clone(),
             )
             .map_err(|error| anyhow::anyhow!("starting the realtime listener: {error}"))?,
         );
@@ -1238,40 +1285,65 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     } else {
         eprintln!("utopia: no realtime listener for a folder target; rounds poll");
     }
+    let mut inflight: Option<InFlight> = None;
     let mut next_due = std::time::Instant::now();
     let mut round = 0u64;
-    while !STOP.load(std::sync::atomic::Ordering::SeqCst) {
-        while let Some(call) = api.try_recv() {
-            let changed = call.run(&mut store);
-            if !changed.is_empty() {
-                // A local write (an agent's append, a capture) is on the outbox: push it on
-                // the next turn of the loop, not on whatever poll is due later.
-                runner
-                    .nudge
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut fatal: Option<anyhow::Error> = None;
+    loop {
+        if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            drain_api(&api, &mut store, &nudge);
+        }
+        if let Some(waiting) = inflight.as_ref() {
+            match waiting.result.try_recv() {
+                Ok(exchanged) => {
+                    inflight = None;
+                    let result = finish_round(&mut runner, &mut store, exchanged);
+                    round += 1;
+                    log_round(round, &result, &runner);
+                    next_due = std::time::Instant::now() + runner.interval;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    inflight = None;
+                    fatal = Some(anyhow::anyhow!(
+                        "the sync exchange worker stopped without a result"
+                    ));
+                    break;
+                }
+            }
+        } else if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+            let due = std::time::Instant::now() >= next_due;
+            let nudged =
+                !runner.is_refused() && nudge.swap(false, std::sync::atomic::Ordering::SeqCst);
+            if due || nudged {
+                match start_round(&mut runner, &mut store) {
+                    RoundStart::InFlight(waiting) => inflight = Some(waiting),
+                    RoundStart::Finished(result) => {
+                        round += 1;
+                        log_round(round, &result, &runner);
+                        next_due = std::time::Instant::now() + runner.interval;
+                    }
+                }
             }
         }
-        let due = std::time::Instant::now() >= next_due;
-        let nudged = !runner.is_refused()
-            && runner
-                .nudge
-                .swap(false, std::sync::atomic::Ordering::SeqCst);
-        if due || nudged {
-            round += 1;
-            let result = run_round(&mut runner, &mut store);
-            log_round(round, &result, &runner);
-            next_due = std::time::Instant::now() + runner.interval;
+        if STOP.load(std::sync::atomic::Ordering::SeqCst) && inflight.is_none() {
+            break;
         }
-        let wait = next_due
-            .saturating_duration_since(std::time::Instant::now())
-            .min(Duration::from_millis(100));
-        std::thread::sleep(wait.max(Duration::from_millis(5)));
+        let until = next_due.saturating_duration_since(std::time::Instant::now());
+        std::thread::sleep(
+            until
+                .min(Duration::from_millis(100))
+                .max(Duration::from_millis(5)),
+        );
     }
+
     // Stop the listener before the store: a notice that arrives during shutdown must not
-    // wake a round the loop will never run.
+    // wake a round the loop will never run. An exchange already in flight finished above,
+    // so no round is left half-applied.
     if let Some(listener) = runner.realtime.take() {
         listener.stop();
     }
+    drop(inflight);
     drop(runner);
     drop(api);
     // The discovery file named this process. Nothing else can own the graph while the lock
@@ -1282,6 +1354,9 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     store.flush()?;
     drop(store);
     drop(owner);
+    if let Some(error) = fatal {
+        return Err(error);
+    }
     eprintln!("utopia: continuous sync stopped");
     Ok(EXIT_OK)
 }
