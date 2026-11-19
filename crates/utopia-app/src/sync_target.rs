@@ -11,6 +11,12 @@ use utopia_sync::setup::{Environment, Mode, Preferences};
 /// How a Nearby client finds its host (§12.7): mDNS on the local network.
 pub type Discover = dyn Fn(&str) -> Option<String> + Send + Sync;
 
+/// The one failure a continuous run retries instead of exiting: a Nearby client whose host
+/// is asleep or off the network. It is a plain sentence because that is what the window
+/// shows; the daemon compares it to tell this apart from a bad configuration or credential.
+pub const NO_NEARBY_HOST: &str = "No Nearby Mac found for this graph. Enable hosting on the \
+                                 other Mac and leave both Macs awake.";
+
 /// A resolved target and, when this run hosts a Nearby relay, the relay.
 ///
 /// The relay stops when it is dropped, so the caller keeps it for as long as it syncs.
@@ -88,10 +94,7 @@ pub fn resolve(
             None => {
                 // A host that is asleep is normal: the caller looks again on the runner's
                 // slow cadence instead of leaving sync off all day.
-                let url = discover(graph).ok_or(
-                    "No Nearby Mac found for this graph. Enable hosting on the other Mac and \
-                     leave both Macs awake.",
-                )?;
+                let url = discover(graph).ok_or(NO_NEARBY_HOST)?;
                 (SyncTarget::Relay { url, token }, None)
             }
         },

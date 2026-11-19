@@ -694,3 +694,37 @@ fn serve_api_sync_uses_the_explicit_address() {
     let (status, stderr) = daemon.stop();
     assert!(status.success(), "daemon exit: {status}\n{stderr}");
 }
+
+/// P3: a Nearby client with no host awake keeps the daemon (and its API) up instead of
+/// exiting, and retries discovery on the slow cadence.
+#[test]
+fn continuous_retries_nearby_discovery_instead_of_exiting() {
+    let s = Scratch::new();
+    let b = s.graph("b");
+    s.seed(&b, "Beta", "zebra-nearby");
+    Preferences {
+        version: 1,
+        mode: Mode::Nearby,
+        url: String::new(),
+        folder: None,
+        host: None,
+    }
+    .save(&s.settings_file(&b))
+    .unwrap();
+
+    // Before the fix there is no discovery file: the daemon exits during the failed
+    // discovery, so `wait_ready` sees the child die. Afterwards it serves first and keeps
+    // retrying; the first mDNS search takes up to 5 s, so wait past it.
+    let daemon = s.daemon(&b);
+    std::thread::sleep(Duration::from_secs(6));
+    assert!(
+        s.discovery(&b).is_file(),
+        "the daemon must keep serving while it retries Nearby discovery"
+    );
+    let (status, stderr) = daemon.stop();
+    assert!(status.success(), "daemon exit: {status}\n{stderr}");
+    assert!(
+        stderr.contains("Nearby") && stderr.contains("retrying"),
+        "the daemon logs the retry instead of dying: {stderr}"
+    );
+}

@@ -1179,6 +1179,25 @@ fn drain_api(
     }
 }
 
+/// Whether `error` is the one transient failure a daemon retries: a Nearby client whose
+/// host is asleep or off the network. A bad credential or a first E2E passphrase that
+/// cannot be proven is still fatal, as it is for the app.
+fn nearby_discovery_failure(preferences: &Preferences, error: &anyhow::Error) -> bool {
+    preferences.mode == Mode::Nearby
+        && preferences.host.is_none()
+        && error.to_string() == sync_target::NO_NEARBY_HOST
+}
+
+/// The discovery file names this process. It is removed on every exit, clean or fatal;
+/// nothing else can own the graph while the lock is held.
+struct DiscoveryGuard(PathBuf);
+
+impl Drop for DiscoveryGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 /// One line per finished round, on stderr and without secrets (§15.6). A refused or failed
 /// round still says what happened and what the next cadence is.
 fn log_round(round: u64, result: &Result<SyncReport, SyncError>, runner: &SyncRound) {
@@ -1218,8 +1237,10 @@ fn log_round(round: u64, result: &Result<SyncReport, SyncError>, runner: &SyncRo
 /// for its whole life (MC-4), so `utopia mcp` (Remote) and `utopia capture` forward to it
 /// instead of opening a second writer.
 ///
-/// The network exchange of each round runs on a worker (`utopia-sync-exchange`), while
-/// prepare/apply and every API call stay on this thread with the store.
+/// The API starts before the transport is resolved, so an agent keeps working while a
+/// Nearby host is asleep; discovery is retried on the slow cadence. The network exchange of
+/// each round runs on a worker (`utopia-sync-exchange`), while prepare/apply and every API
+/// call stay on this thread with the store.
 pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     if !graph.exists() {
         bail!(
@@ -1252,84 +1273,120 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
         eprintln!("{message}");
         return Ok(EXIT_OFF);
     }
-    let Prepared {
-        id,
-        target: sync_target::Target { config, lan: _lan },
-        transport,
-        engine,
-    } = prepare_transport(&mut store, graph, config_dir, &env, &preferences)?;
-    let target_text = target_text(&preferences).unwrap_or_else(|| "unknown".into());
     let level = crate::api_launch::load_access(config_dir, graph).level;
+    let _discovery = DiscoveryGuard(utopia_api::discovery_file(config_dir, graph));
     let api = crate::api_launch::serve(addr, level, config_dir, graph)?;
-    let discovery = utopia_api::discovery_file(config_dir, graph);
-    let nudge = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut runner = SyncRound::new(engine, Box::new(transport) as BoxTransport);
-    runner.nudge = nudge.clone();
-    eprintln!(
-        "utopia: continuous sync for {} (graph {id}, {target_text}); assistant access: {level:?}",
-        graph.display()
-    );
     eprintln!("utopia: automation API on {}", api.url());
-    eprintln!("utopia: continuous sync loop started");
-    if let utopia_sync::runner::SyncTarget::Relay { url, token } = &config.target {
-        runner.realtime = Some(
-            utopia_sync::realtime::Listener::start(
-                url.clone(),
-                config.graph.clone(),
-                token.clone(),
-                nudge.clone(),
-            )
-            .map_err(|error| anyhow::anyhow!("starting the realtime listener: {error}"))?,
-        );
-        eprintln!("utopia: realtime listener started for {url}");
-    } else {
-        eprintln!("utopia: no realtime listener for a folder target; rounds poll");
-    }
+    eprintln!("utopia: assistant access: {level:?}");
+
+    let nudge = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut runner: Option<SyncRound> = None;
+    let mut hosted: Option<utopia_syncd::lan::LanRelay> = None;
     let mut inflight: Option<InFlight> = None;
     let mut next_due = std::time::Instant::now();
+    let mut next_prepare = std::time::Instant::now();
     let mut round = 0u64;
     let mut fatal: Option<anyhow::Error> = None;
+
     loop {
         if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
             drain_api(&api, &mut store, &nudge);
         }
-        if let Some(waiting) = inflight.as_ref() {
-            match waiting.result.try_recv() {
-                Ok(exchanged) => {
-                    inflight = None;
-                    let result = finish_round(&mut runner, &mut store, exchanged);
-                    round += 1;
-                    log_round(round, &result, &runner);
-                    next_due = std::time::Instant::now() + runner.interval;
+        if let Some(current) = runner.as_mut() {
+            if let Some(waiting) = inflight.as_ref() {
+                match waiting.result.try_recv() {
+                    Ok(exchanged) => {
+                        inflight = None;
+                        let result = finish_round(current, &mut store, exchanged);
+                        round += 1;
+                        log_round(round, &result, current);
+                        next_due = std::time::Instant::now() + current.interval;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        inflight = None;
+                        fatal = Some(anyhow::anyhow!(
+                            "the sync exchange worker stopped without a result"
+                        ));
+                        break;
+                    }
                 }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    inflight = None;
-                    fatal = Some(anyhow::anyhow!(
-                        "the sync exchange worker stopped without a result"
-                    ));
-                    break;
+            } else if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
+                let due = std::time::Instant::now() >= next_due;
+                let nudged =
+                    !current.is_refused() && nudge.swap(false, std::sync::atomic::Ordering::SeqCst);
+                if due || nudged {
+                    match start_round(current, &mut store) {
+                        RoundStart::InFlight(waiting) => inflight = Some(waiting),
+                        RoundStart::Finished(result) => {
+                            round += 1;
+                            log_round(round, &result, current);
+                            next_due = std::time::Instant::now() + current.interval;
+                        }
+                    }
                 }
             }
-        } else if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
-            let due = std::time::Instant::now() >= next_due;
-            let nudged =
-                !runner.is_refused() && nudge.swap(false, std::sync::atomic::Ordering::SeqCst);
-            if due || nudged {
-                match start_round(&mut runner, &mut store) {
-                    RoundStart::InFlight(waiting) => inflight = Some(waiting),
-                    RoundStart::Finished(result) => {
-                        round += 1;
-                        log_round(round, &result, &runner);
-                        next_due = std::time::Instant::now() + runner.interval;
+        } else if !STOP.load(std::sync::atomic::Ordering::SeqCst)
+            && std::time::Instant::now() >= next_prepare
+        {
+            match prepare_transport(&mut store, graph, config_dir, &env, &preferences) {
+                Ok(Prepared {
+                    id,
+                    target: sync_target::Target { config, lan: host },
+                    transport,
+                    engine,
+                }) => {
+                    let target_text = target_text(&preferences).unwrap_or_else(|| "unknown".into());
+                    let mut started = SyncRound::new(engine, Box::new(transport) as BoxTransport);
+                    started.nudge = nudge.clone();
+                    hosted = host;
+                    eprintln!(
+                        "utopia: continuous sync for {} (graph {id}, {target_text})",
+                        graph.display()
+                    );
+                    if let utopia_sync::runner::SyncTarget::Relay { url, token } = &config.target {
+                        started.realtime = Some(
+                            utopia_sync::realtime::Listener::start(
+                                url.clone(),
+                                config.graph.clone(),
+                                token.clone(),
+                                nudge.clone(),
+                            )
+                            .map_err(|error| {
+                                anyhow::anyhow!("starting the realtime listener: {error}")
+                            })?,
+                        );
+                        eprintln!("utopia: realtime listener started for {url}");
+                    } else {
+                        eprintln!("utopia: no realtime listener for a folder target; rounds poll");
                     }
+                    runner = Some(started);
+                    next_due = std::time::Instant::now();
+                    eprintln!("utopia: continuous sync loop started");
+                }
+                Err(error) if nearby_discovery_failure(&preferences, &error) => {
+                    eprintln!(
+                        "utopia: Nearby host not found for {}; retrying discovery in {}s",
+                        graph.display(),
+                        utopia_sync::runner::SLOW.as_secs()
+                    );
+                    next_prepare = std::time::Instant::now() + utopia_sync::runner::SLOW;
+                }
+                Err(error) => {
+                    fatal = Some(error);
+                    break;
                 }
             }
         }
         if STOP.load(std::sync::atomic::Ordering::SeqCst) && inflight.is_none() {
             break;
         }
-        let until = next_due.saturating_duration_since(std::time::Instant::now());
+        let now = std::time::Instant::now();
+        let until = if runner.is_some() {
+            next_due.saturating_duration_since(now)
+        } else {
+            next_prepare.saturating_duration_since(now)
+        };
         std::thread::sleep(
             until
                 .min(Duration::from_millis(100))
@@ -1340,20 +1397,20 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     // Stop the listener before the store: a notice that arrives during shutdown must not
     // wake a round the loop will never run. An exchange already in flight finished above,
     // so no round is left half-applied.
-    if let Some(listener) = runner.realtime.take() {
-        listener.stop();
+    if let Some(runner) = runner.as_mut() {
+        if let Some(listener) = runner.realtime.take() {
+            listener.stop();
+        }
     }
     drop(inflight);
     drop(runner);
     drop(api);
-    // The discovery file named this process. Nothing else can own the graph while the lock
-    // is held, so removing it leaves a client with no stale address to try.
-    let _ = std::fs::remove_file(&discovery);
     // Finish the writer's buffered work before the store and the lock go away (MC-4).
     store.sync_index()?;
     store.flush()?;
     drop(store);
     drop(owner);
+    drop(hosted);
     if let Some(error) = fatal {
         return Err(error);
     }
