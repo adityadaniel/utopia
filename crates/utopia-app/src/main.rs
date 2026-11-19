@@ -8,7 +8,9 @@ mod hotkey;
 mod mcp;
 mod paths;
 mod shot;
+mod sync_cli;
 mod sync_setup;
+mod sync_target;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -895,6 +897,7 @@ fn main() -> anyhow::Result<()> {
             cli::serve_api(graph.as_ref(), addr, &paths::config_dir())
         }
         Some("mcp") => mcp::run(&args[1..]),
+        Some("sync") => std::process::exit(sync_cli::run(&args[1..])?),
         Some(url) if url.starts_with("utopia://") => {
             PENDING_URLS
                 .lock()

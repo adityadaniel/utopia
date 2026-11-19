@@ -22,6 +22,16 @@ usage:
                                          assistant access level for that client
   utopia mcp config <claude-code|claude-desktop|codex> [--graph <file.utopia>]
                                          print the setup entry for that AI client
+  utopia sync setup --graph <file.utopia> --mode relay|nearby|folder [--url <relay-url>]
+                    [--folder <path>] [--graph-id <id>] [--token-stdin] [--passphrase-stdin]
+                                         one-time headless sync setup for this graph (creates
+                                         an empty graph if it does not exist)
+  utopia sync --graph <file.utopia> [--json]
+                                         run one sync to completion and exit
+  utopia sync status --graph <file.utopia> [--json]
+                                         show the saved sync settings and state
+  utopia sync config --graph <file.utopia> (--off | --mode relay|nearby|folder [--url …] [--folder …])
+                                         change the saved sync settings
   utopia encrypt <file.utopia>          encrypt the graph at rest (or change its passphrase)
   utopia decrypt <file.utopia>          remove encryption at rest
   utopia utopia://page/<title>          open a utopia:// link (page, journal, block, search, capture)
@@ -38,11 +48,31 @@ SHA-256 of the canonical graph path). POST /v1/op runs one op at the access leve
 routes do not follow it.
 
 sync (optional): set UTOPIA_SYNC_URL=<relay origin>, and optionally UTOPIA_SYNC_GRAPH=<id>
-and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\").";
+and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\"). Without a
+window, `utopia sync setup` writes the same per-graph settings Settings → Sync uses, and
+`utopia sync` runs one sync. The token and E2E passphrase come from stdin (no echo on a
+terminal, or --token-stdin / --passphrase-stdin) and are stored only in the macOS keychain
+(services \"utopia-sync\" and \"utopia-sync-passphrase\"); they are never arguments, files or
+output. `utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E passphrase or
+queued changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app
+or serve-api already syncs it). `utopia sync --help` has the details.";
 
 /// What a process that cannot become the graph's owner says (MC-4), in the window and on
 /// stderr.
 pub const ALREADY_OPEN: &str = "This graph is already open in Utopia";
+
+/// The owner-lock refusal as a value, so a command can give it its own exit code instead
+/// of matching on the message (`utopia sync` does).
+#[derive(Debug)]
+pub struct AlreadyOpen {
+    pub graph: std::path::PathBuf,
+}
+impl std::fmt::Display for AlreadyOpen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{ALREADY_OPEN}: {}", self.graph.display())
+    }
+}
+impl std::error::Error for AlreadyOpen {}
 
 /// How long the app and the write commands try for the owner lock (docs/mcp-design.md
 /// §2.2): a headless call holds it for a short time.
@@ -54,7 +84,9 @@ pub fn take_owner(graph: &Path) -> Result<OwnerLock> {
         .with_context(|| format!("locking {}", graph.display()))?
     {
         Some(lock) => Ok(lock),
-        None => bail!("{ALREADY_OPEN}: {}", graph.display()),
+        None => Err(anyhow::Error::new(AlreadyOpen {
+            graph: graph.to_path_buf(),
+        })),
     }
 }
 
@@ -78,8 +110,10 @@ pub fn open_owned(graph: &Path) -> Result<Owned> {
     })
 }
 
-/// Read a passphrase from the terminal without echoing it.
-fn prompt_secret(prompt: &str) -> Result<String> {
+/// Read a passphrase from the terminal without echoing it. The caller decides when to
+/// prompt (a terminal) and what the prompt says; `utopia sync setup` uses it for its
+/// token and passphrase too.
+pub(crate) fn prompt_secret(prompt: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
