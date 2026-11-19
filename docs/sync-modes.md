@@ -278,8 +278,15 @@ headless equivalent of `ob sync --continuous`. It takes the owner lock for its w
 opens the store once, and runs the same round every 5 s while there is activity and every
 60 s when idle (the app's cadence). A relay's WebSocket notice makes it sync immediately,
 and a local write through its API (an MCP `append_blocks`, a `utopia capture`) nudges the
-next round, so delivery does not wait for the poll. `utopia serve-api --graph … --sync` is
-an alias for the same command.
+next round, so delivery does not wait for the poll.
+`utopia serve-api --graph … [addr] --sync` is an alias for the same command, and keeps the
+address it is given.
+
+The network exchange of each round runs on a worker while prepare and apply stay on the
+thread that owns the store. The daemon keeps draining the API during the exchange, so an
+agent's call or a capture is not stuck behind a slow upload. If a Nearby client cannot find
+its host, the daemon still starts its API and retries discovery on the slow cadence instead
+of exiting; the queued work goes out when the host wakes.
 
 While it runs it also serves the graph's loopback automation API, at the level in the
 `mcp/<graph key>.json` access file (Settings → Assistants), and writes the usual
