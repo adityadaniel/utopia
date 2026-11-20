@@ -132,6 +132,7 @@ Inside a component, a padding may be off the scale when it centres content in a 
 
 | Value | `theme.rs` | Use |
 |---|---|---|
+| 2 | `RADIUS_PANEL_JOIN` | The Unlinked references panel's top corners, where it meets the Linked panel's 2px bottom corners (§3.7) |
 | 3 | `RADIUS_LINK_RING` | Tint ring on a link open in the next pane |
 | 4 | `RADIUS_CHIP` | kbd, ref type label, checkboxes |
 | 5 | `RADIUS_TAG` | Tag chips |
@@ -303,7 +304,7 @@ Spacing in this panel says what belongs together: a group title is close to its 
 - Referenced blocks render with the Reference block text style. Children keep their thread line. The current page's name inside a reference is shown as **bold `--ink` text, not a link** (linking to the page you're already on is pointless). Inside a day of the feed, the current page is that day: a link to the day is bold `--ink` too, in any date form that resolves to it.
 - A path above a nested reference names its parent blocks, in Caption `--muted`; each part is a link. It does not start with the page: the group title right above already names it. A part longer than 40 characters is cut at the last whole word and ends with "…"; it is never cut in the middle of a word without one. The path wraps when it is wider than the panel.
 - **More references than the group shows** (more than 3): a row of its own at the group's level, after the last reference: a chevron-down and "Show 2 more from Atlas Launch" in 13px `--ink-3`, 28px tall, radius 6, `--hover` fill and `--ink` text on hover. It names the group, so it does not read as a child of the last reference.
-- **Unlinked references** is the other half of "who mentions this page", so it is the same kind of panel, 16px below the linked one: the same well, border and radius, a 44px header with a chevron, the heading "Unlinked references" in UI 14/600 `--ink`, and its count badge once it has been searched. It starts collapsed (rounded on all four corners) and is searched only when it is opened, so a closed panel has no count. Open, its rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) sit inside the panel with 16px side padding, and "Link all" sits on the header's right edge.
+- **Unlinked references** is the other half of "who mentions this page", so it is the same kind of panel, 8px below the linked one: the same well and border. Its top corners are 2px, like the Linked panel's bottom ones, and its bottom corners are 10px (`RADIUS_PANEL_JOIN`, `RADIUS_PANEL`), so the two panels read as one stack. It has a 44px header with a chevron, the heading "Unlinked references" in UI 14/600 `--ink`, and its count badge once it has been searched. It starts collapsed and is searched only when it is opened, so a closed panel has no count. Open, its rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) sit inside the panel with 16px side padding, and "Link all" sits on the header's right edge.
 
 | State | Look |
 |---|---|
@@ -568,7 +569,7 @@ Sidebar plus main area. The main area has the top bar and the content column. Da
 
 ### 4.2 Page view
 
-Sidebar (the page is highlighted in Pages) plus main area: top bar with the page's title (§3.3), page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then the Unlinked references panel 16px below that (§3.7).
+Sidebar (the page is highlighted in Pages) plus main area: top bar with the page's title (§3.3), page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then the Unlinked references panel 8px below that (§3.7).
 
 ### 4.3 Stacked panes (navigation model)
 

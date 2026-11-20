@@ -228,6 +228,10 @@ pub const RADIUS_CONTROL: f32 = 6.;
 pub const RADIUS_INPUT: f32 = 8.;
 /// Radius 10: panels such as Linked references (§2.4).
 pub const RADIUS_PANEL: f32 = 10.;
+/// Radius 2: where the Unlinked references panel meets the Linked one above it (§3.7).
+/// The Linked panel closes with a 4 px strip, which gpui can round by at most 2 px, so the
+/// Unlinked panel's top corners match that and the two read as one stack.
+pub const RADIUS_PANEL_JOIN: f32 = 2.;
 /// Radius 13: the status pill and count badges, fully round (§2.4).
 pub const RADIUS_PILL: f32 = 13.;
 
