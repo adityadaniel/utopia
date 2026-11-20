@@ -13,6 +13,20 @@ ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 - When its branch is merged, delete the worktree (`git worktree remove <path>`, its
   `target/` folder too) and the local branch.
 
+## Papercuts
+
+When you hit friction during work — a dead-end tool call, a broken link, a
+misleading doc, a footgun config, a missing helper — file it before moving on:
+
+```shell
+papercuts add "<what you hit and what would have prevented it>" --tag <area>
+```
+
+Don't stop working; file it and push through. Severity: minor (default) for
+annoyances, major for time sinks, blocker for hard walls. Run `papercuts schema`
+once if you need the full contract. Attach `--cmd`, `--exit`, or `--stderr-file`
+when filing tool failures; never feed raw environment dumps.
+
 ## Visual system
 
 **`DESIGN.md` is the visual spec ("Quiet paper").** Read it before changing anything on
