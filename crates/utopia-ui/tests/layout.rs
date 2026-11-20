@@ -1572,6 +1572,31 @@ fn unlinked_mention_wraps_and_keeps_link_in_view(cx: &mut TestAppContext) {
     assert_wraps_within(row, left, right);
 }
 
+/// DESIGN.md §3.7: the Unlinked panel sits 8 px under the Linked one, so the two read
+/// as one stack; open, its end strip is tall enough (20 px) for a real 10 px radius.
+#[gpui::test]
+fn unlinked_panel_sits_8_px_under_linked(cx: &mut TestAppContext) {
+    let (cx, ws, target) = setup_refs(cx, false);
+    ws.update_in(cx, |w, window, cx| {
+        w.open(target, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let end = bounds(cx, "refs-end");
+    let header = bounds(cx, "unlinked-header");
+    assert!(
+        approx(header.origin.y - (end.origin.y + end.size.height), 8.),
+        "8 px between the panels: {end:?} {header:?}"
+    );
+    assert!(
+        approx(header.size.width, f32::from(end.size.width)),
+        "{end:?} {header:?}"
+    );
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let close = bounds(cx, "unlinked-end");
+    assert!(approx(close.size.height, 20.), "{close:?}");
+}
+
 /// DESIGN.md §2.2 and §3.7: an unlinked mention is a referenced block too — Reference block
 /// text, 15/26 — and it is drawn by the rich renderer, so a link in the mentioning block is
 /// a link rather than raw `[[markup]]`.
