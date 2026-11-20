@@ -404,7 +404,7 @@ Implemented:
   them (their meaning changes daily, §10.3.1) and a real page with that title wins. The left
   sidebar collapses (Cmd+\) and its month grid is behind a "Calendar" toggle (local state).
 - **v1.1 / P1 (§4.2, §4.1 v1.1 column):** full-text search UI (Cmd+Shift+F), block types
-  (to-do, H1–H3, quote, code, numbered; Alt+Enter cycles to-dos), slash menu, unlinked references
+  (to-do, H1–H3, quote, code (syntax-coloured from its first line's language, bat's grammars through syntect, `utopia_ui::syntax`), numbered; Alt+Enter cycles to-dos), slash menu, unlinked references
   + one-click Link, co-reference and date filters, attributes + page metadata header, aliases UI,
   journal and page templates (`templates/<name>` pages), extract block to page, drag across
   pages, block embeds (`{{embed: ((uid))}}`), quick capture (in-app and system-wide hotkey,

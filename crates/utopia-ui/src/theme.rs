@@ -425,6 +425,13 @@ pub struct Theme {
     // ---- DESIGN.md §2.1, status, selection and overlay roles -----------------------------
     /// The text selection fill behind a highlighted range.
     pub selection: Hsla,
+    /// Code block syntax roles (§3.11, `crate::syntax`): keywords, strings, numbers, and
+    /// function and type names. Comments use `muted`. Each reaches 4.5:1 on `well` and
+    /// `code_bg`.
+    pub syntax_keyword: Hsla,
+    pub syntax_string: Hsla,
+    pub syntax_number: Hsla,
+    pub syntax_name: Hsla,
     /// A code block's card fill.
     pub code_bg: Hsla,
     /// The sync banner's fill.
@@ -474,6 +481,10 @@ impl Theme {
 
             selection: rgb(0xb7d2fb).into(),
             code_bg: rgb(0xf0f0ee).into(),
+            syntax_keyword: rgb(0x8a3a8f).into(),
+            syntax_string: rgb(0x2f6b2f).into(),
+            syntax_number: rgb(0xa04a12).into(),
+            syntax_name: rgb(0x2a5ea8).into(),
             banner_bg: rgb(0xeaf2ff).into(),
             highlight_bg: rgb(0xfff1a8).into(),
             danger_bg: rgb(0xfbe4e4).into(),
@@ -516,6 +527,10 @@ impl Theme {
 
             selection: rgb(0x264f8f).into(),
             code_bg: rgb(0x22221f).into(),
+            syntax_keyword: rgb(0xd4a6e0).into(),
+            syntax_string: rgb(0x9ccc8e).into(),
+            syntax_number: rgb(0xe5ac7a).into(),
+            syntax_name: rgb(0x8db6ee).into(),
             banner_bg: rgb(0x222e42).into(),
             highlight_bg: rgb(0x4e461f).into(),
             danger_bg: rgb(0x4a2222).into(),
@@ -941,6 +956,10 @@ mod tests {
             ("tag_bg", l.tag_bg, d.tag_bg),
             ("tag_ink", l.tag_ink, d.tag_ink),
             ("status_progress", l.status_progress, d.status_progress),
+            ("syntax_keyword", l.syntax_keyword, d.syntax_keyword),
+            ("syntax_string", l.syntax_string, d.syntax_string),
+            ("syntax_number", l.syntax_number, d.syntax_number),
+            ("syntax_name", l.syntax_name, d.syntax_name),
         ];
         for (name, light, dark) in spec {
             assert_ne!(light, dark, "a dark theme has its own value for {name}");
@@ -955,6 +974,10 @@ mod tests {
         let th = Theme::light();
         let table = [
             ("paper", th.paper, 0xffffff),
+            ("syntax_keyword", th.syntax_keyword, 0x8a3a8f),
+            ("syntax_string", th.syntax_string, 0x2f6b2f),
+            ("syntax_number", th.syntax_number, 0xa04a12),
+            ("syntax_name", th.syntax_name, 0x2a5ea8),
             ("shelf", th.shelf, 0xf6f6f4),
             ("well", th.well, 0xfafaf8),
             ("hover", th.hover, 0xf1f1ee),
@@ -1009,6 +1032,22 @@ mod tests {
                 ("link_hover", th.link_hover),
             ] {
                 for (bg_name, bg) in surfaces {
+                    let ratio = contrast(fg, bg);
+                    assert!(
+                        ratio >= 4.5,
+                        "{palette}: {fg_name} on {bg_name} is {ratio:.2}:1, below 4.5:1"
+                    );
+                }
+            }
+            // §3.11: code block syntax roles on both fills a code block can have.
+            for (fg_name, fg) in [
+                ("syntax_keyword", th.syntax_keyword),
+                ("syntax_string", th.syntax_string),
+                ("syntax_number", th.syntax_number),
+                ("syntax_name", th.syntax_name),
+                ("muted", th.muted),
+            ] {
+                for (bg_name, bg) in [("well", th.well), ("code_bg", th.code_bg)] {
                     let ratio = contrast(fg, bg);
                     assert!(
                         ratio >= 4.5,

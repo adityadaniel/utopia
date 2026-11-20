@@ -2289,7 +2289,25 @@ impl Render for BlockEditor {
                 hint.to_string(),
             )
         } else {
-            let mut hl = source_highlights(&text, &th);
+            // DESIGN.md §3.11: a code block's raw text is code, coloured in the language its
+            // first line names; markup in it is not a reference. The page is loaded while
+            // one of its blocks is edited, so this reads memory, not disk (rule 10).
+            let code = self.target().cloned().is_some_and(|t| {
+                self.app.update(cx, |app, _| {
+                    app.store
+                        .page_state(&t.page)
+                        .ok()
+                        .and_then(|st| st.block(&t.block).map(|b| b.kind))
+                }) == Some(BlockKind::Code)
+            });
+            let mut hl = if code {
+                crate::page_view::code_language(&text)
+                    .map_or_else(Vec::new, |(lang, body, skip)| {
+                        crate::syntax::highlights(&lang, body, skip, &th)
+                    })
+            } else {
+                source_highlights(&text, &th)
+            };
             if self.target().is_some_and(|t| t.property) {
                 if let Some((key, _)) = utopia_core::inline::attribute(&text) {
                     hl.push((
