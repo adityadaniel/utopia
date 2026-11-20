@@ -39,7 +39,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use utopia_core::PageId;
 
-use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
+use crate::fonts::{
+    register_geist, register_ibm_plex_mono, register_ibm_plex_sans, GEIST_SANS, IBM_PLEX_SANS,
+};
 pub use crate::pane_stack::ViewMode;
 use crate::theme::{BODY_SIZE, CHILD_INDENT, NARROW_INDENT};
 
@@ -50,8 +52,8 @@ pub const DEFAULT_REF_CHILDREN: usize = 2;
 /// The largest "Children shown in references" the Appearance tab offers.
 pub const REF_CHILDREN_MAX: usize = 3;
 
-/// The font the UI and notes are set in. Code blocks stay in Menlo either way, and mono
-/// labels always use the bundled IBM Plex Mono (DESIGN.md §2.2).
+/// The font the UI and notes are set in, with the mono font that pairs with it for labels
+/// and code (`theme::label_mono`, `theme::code_mono`, DESIGN.md §2.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UiFont {
     /// The platform's UI font (SF Pro on macOS). The default (DESIGN.md §2.2).
@@ -59,16 +61,19 @@ pub enum UiFont {
     System,
     /// IBM Plex Sans, bundled with the app (`crate::fonts`), for readers who prefer it.
     IbmPlexSans,
+    /// Geist, with Geist Mono for labels and code: Vercel's pair, bundled (`crate::fonts`).
+    Geist,
 }
 
 impl UiFont {
-    pub const ALL: &'static [UiFont] = &[UiFont::System, UiFont::IbmPlexSans];
+    pub const ALL: &'static [UiFont] = &[UiFont::System, UiFont::IbmPlexSans, UiFont::Geist];
 
     /// How `settings.json` spells it.
     pub fn key(self) -> &'static str {
         match self {
             UiFont::System => "system",
             UiFont::IbmPlexSans => "ibm-plex-sans",
+            UiFont::Geist => "geist",
         }
     }
 
@@ -80,6 +85,7 @@ impl UiFont {
         match self {
             UiFont::System => "System",
             UiFont::IbmPlexSans => "IBM Plex Sans",
+            UiFont::Geist => "Geist",
         }
     }
 
@@ -88,6 +94,7 @@ impl UiFont {
         match self {
             UiFont::System => ".SystemUIFont",
             UiFont::IbmPlexSans => IBM_PLEX_SANS,
+            UiFont::Geist => GEIST_SANS,
         }
     }
 
@@ -99,7 +106,7 @@ impl UiFont {
     pub fn features(self) -> FontFeatures {
         match self {
             UiFont::System => FontFeatures(Arc::new(vec![("cv06".into(), 1), ("cv07".into(), 1)])),
-            UiFont::IbmPlexSans => FontFeatures::default(),
+            UiFont::IbmPlexSans | UiFont::Geist => FontFeatures::default(),
         }
     }
 }
@@ -521,6 +528,7 @@ pub struct Appearance {
     config_dir: PathBuf,
     plex_registered: bool,
     mono_registered: bool,
+    geist_registered: bool,
 }
 
 impl Global for Appearance {}
@@ -532,12 +540,13 @@ pub fn install(cx: &mut App, config_dir: &Path) -> Vec<String> {
         eprintln!("utopia: {w}");
     }
     let font = prefs.font;
-    crate::theme::set_system_mono_pair(font == UiFont::System);
+    crate::theme::set_mono_pair(font);
     cx.set_global(Appearance {
         prefs,
         config_dir: config_dir.to_path_buf(),
         plex_registered: false,
         mono_registered: false,
+        geist_registered: false,
     });
     apply(cx, font);
     warnings
@@ -694,13 +703,15 @@ pub fn set_ref_children(cx: &mut App, count: usize, config_dir: &Path) -> std::i
 /// IBM Plex Mono is registered whatever the UI font is: labels, counts and shortcuts use
 /// it by DESIGN.md §2.2, not by preference.
 pub fn load_font(cx: &mut App, font: UiFont) {
-    let (mono, sans) = {
+    let (mono, sans, geist) = {
         let a = cx.default_global::<Appearance>();
         let mono = !a.mono_registered;
         let sans = font == UiFont::IbmPlexSans && !a.plex_registered;
+        let geist = font == UiFont::Geist && !a.geist_registered;
         a.mono_registered |= mono;
         a.plex_registered |= sans;
-        (mono, sans)
+        a.geist_registered |= geist;
+        (mono, sans, geist)
     };
     if mono {
         register_ibm_plex_mono(cx);
@@ -708,11 +719,14 @@ pub fn load_font(cx: &mut App, font: UiFont) {
     if sans {
         register_ibm_plex_sans(cx);
     }
+    if geist {
+        register_geist(cx);
+    }
 }
 
 fn apply(cx: &mut App, font: UiFont) {
     load_font(cx, font);
-    crate::theme::set_system_mono_pair(font == UiFont::System);
+    crate::theme::set_mono_pair(font);
     cx.default_global::<Appearance>().prefs.font = font;
     // Views only re-render when notified; every window reads the font at its root.
     cx.refresh_windows();

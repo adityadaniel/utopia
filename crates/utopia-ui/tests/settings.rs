@@ -1233,6 +1233,41 @@ mod appearance {
         (main, settings.into(), target, w)
     }
 
+    /// DESIGN.md §2.2: Geist is a pair. Picking it sets Geist at every window's root,
+    /// Geist Mono for labels and code, and saves `"font": "geist"`.
+    #[gpui::test]
+    fn choosing_geist_sets_the_pair_and_is_saved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (main, settings) = open_both(cx, dir.path());
+        let mut s = VisualTestContext::from_window(settings, cx);
+        s.run_until_parked();
+        let option = s
+            .debug_bounds("settings-font-geist")
+            .expect("the Geist choice is shown");
+        s.simulate_click(option.center(), Modifiers::default());
+        s.run_until_parked();
+
+        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::Geist);
+        assert!(s.debug_bounds("settings-ui-font-geist").is_some());
+        let mut w = VisualTestContext::from_window(main, cx);
+        w.run_until_parked();
+        assert!(w.debug_bounds("ui-font-geist").is_some());
+        assert_eq!(
+            (
+                utopia_ui::theme::label_mono(),
+                utopia_ui::theme::code_mono()
+            ),
+            ("Geist Mono", "Geist Mono")
+        );
+        assert_eq!(settings_json(dir.path()).unwrap()["font"], "geist");
+
+        // Back to the default, so the process-wide mono pair is left as other tests expect.
+        let option = s.debug_bounds("settings-font-system").unwrap();
+        s.simulate_click(option.center(), Modifiers::default());
+        s.run_until_parked();
+        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::System);
+    }
+
     /// Settings → Appearance: DESIGN.md §2.2 makes the system font the default; picking
     /// IBM Plex Sans applies it to every open window at once and writes it to
     /// `settings.json` (not `keymap.json`), versioned, and System can be picked back.

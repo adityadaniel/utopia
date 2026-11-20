@@ -35,8 +35,8 @@ screen. Every colour, type role, spacing and radius is a named token in
 shadows (§2.4). The dark theme defines the same token names with contrast-checked values and
 follows the system appearance. **The system font is the default UI and body font, and Normal the
 default density; the mono font (labels, counts, code) pairs with it: SF Mono with System, IBM Plex
-Mono and Menlo with Plex** (`theme::label_mono()` / `code_mono()`; the Appearance setting offers System
-and IBM Plex Sans, and Tight, Normal and Relaxed: 16 px text on 22, 24 or 26 px lines). Geometry
+Mono and Menlo with Plex, Geist Mono with Geist** (`theme::label_mono()` / `code_mono()`; the Appearance setting offers System,
+IBM Plex Sans and Geist, and Tight, Normal and Relaxed: 16 px text on 22, 24 or 26 px lines). Geometry
 is pinned by `crates/utopia-ui/tests/layout.rs`; the visual result is checked by the
 `UTOPIA_SHOT_SCRIPT` screenshots described under "Verifying a change". `UTOPIA_APPEARANCE=light|dark`
 pins the theme when both schemes are needed from a machine set to one.
@@ -76,7 +76,7 @@ dir), the only `*.utopia` in `~/Documents/Utopia`; otherwise onboarding asks for
 `UTOPIA_CONFIG_DIR` overrides the config dir (`keymap.json`, `settings.json`, `last_graph`); point
 both env vars at a scratch folder when trying the app so you never touch the user's real graph.
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
-`{"version": 1, "font": "system" | "ibm-plex-sans", "density": "tight" | "normal" | "relaxed",
+`{"version": 1, "font": "system" | "ibm-plex-sans" | "geist", "density": "tight" | "normal" | "relaxed",
 "indent": "wide" | "narrow", "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
 "right_sidebar_width": 380.0, "view_mode": "single" | "panes"}` (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
@@ -420,8 +420,8 @@ Implemented:
 - **Settings and keybindings (§9.1):** a Settings window (Cmd+,) with six tabs —
   **Keybindings**, where every action can be rebound by pressing the keys and the change
   applies at once; **Shortcuts**, the cheat sheet of everything bound; **Appearance**, the font
-  (System, or IBM Plex Sans bundled under the OFL in `crates/utopia-ui/assets/fonts`; code stays
-  Menlo), applied to every window at once and kept in `settings.json`; **Sync**, per-graph
+  (System with SF Mono, or IBM Plex Sans or Geist with its mono, both bundled under the OFL in
+  `crates/utopia-ui/assets/fonts`), applied to every window at once and kept in `settings.json`; **Sync**, per-graph
   transport setup, Keychain credentials, connection testing and device pairing; **Assistants**,
   the graph's MCP access level (Off, Read, Read and write), the `when_closed` switch, the setup
   entry to copy into Claude Code, Claude Desktop or Codex, and whether the bridge runs — a
