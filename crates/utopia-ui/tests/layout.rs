@@ -2410,6 +2410,51 @@ fn mini_calendar_opens_days_and_marks_notes(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §3.2: the sidebar's Recent list stops at ten pages, and a page that opens
+/// moves to its top. The rest are one Quick jump away.
+#[gpui::test]
+fn the_sidebar_lists_the_ten_most_recent_pages(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(today()));
+    let ids: Vec<_> = (1..=12)
+        .map(|i| store.create_page(&format!("Page {i:02}")).unwrap())
+        .collect();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| w.open_launch_page(window, cx));
+    cx.run_until_parked();
+
+    assert_eq!(cx.update(|_, cx| ws.read(cx).recent_titles()).len(), 10);
+    assert!(
+        cx.debug_bounds("page-row-9").is_some(),
+        "ten rows are drawn"
+    );
+    assert!(
+        cx.debug_bounds("page-row-10").is_none(),
+        "an eleventh is not"
+    );
+
+    for (open, want) in [
+        (&ids[11], vec!["Page 12"]),
+        (&ids[2], vec!["Page 03", "Page 12"]),
+        (&ids[11], vec!["Page 12", "Page 03"]),
+    ] {
+        ws.update_in(cx, |w, window, cx| {
+            w.open(open.clone(), None, None, false, window, cx)
+        });
+        cx.run_until_parked();
+        let titles = cx.update(|_, cx| ws.read(cx).recent_titles());
+        assert_eq!(titles[..want.len()], want[..], "{titles:?}");
+        assert_eq!(titles.len(), 10);
+    }
+}
+
 /// DESIGN.md §3.2 fixes the sidebar's page rows at 32 px; the density setting tightens
 /// blocks, not this chrome. The file uses the older "compact" key, which reads as Tight.
 #[gpui::test]
