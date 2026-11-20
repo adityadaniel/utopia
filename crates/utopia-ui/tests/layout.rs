@@ -2208,9 +2208,7 @@ fn pinned_pages_sit_above_pages_and_are_local(cx: &mut TestAppContext) {
         })
     });
     cx.run_until_parked();
-    let menu = bounds(cx, "page-menu");
-    cx.simulate_click(menu.center(), gpui::Modifiers::default());
-    let pin = bounds(cx, "page-menu-pin");
+    let pin = bounds(cx, "page-pin-off");
     cx.simulate_click(pin.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 
@@ -2485,18 +2483,58 @@ fn sidebar_rows_keep_the_spec_height_in_tight(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §3.3: the pin is a button on the top bar beside ⋯, not a menu item. One click
+/// pins, the button shows it is on, a second click unpins, and the ⋯ menu has no pin row.
+#[gpui::test]
+fn the_top_bar_pin_button_toggles_the_pin(cx: &mut TestAppContext) {
+    let cx = setup_page(cx);
+    cx.simulate_input("note");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let off = bounds(cx, "page-pin-off");
+    let menu = bounds(cx, "page-menu");
+    assert!(
+        approx(off.size.width, 32.) && off.origin.x < menu.origin.x,
+        "a 32 px button just before ⋯: {off:?} {menu:?}"
+    );
+    assert!(
+        approx(off.center().y, f32::from(menu.center().y)),
+        "{off:?} {menu:?}"
+    );
+
+    cx.simulate_click(off.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| utopia_ui::appearance::pinned(cx).len()),
+        1
+    );
+    let on = bounds(cx, "page-pin-on");
+    cx.simulate_click(on.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.update(|_, cx| utopia_ui::appearance::pinned(cx).is_empty()));
+
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("page-menu-graph").is_some(),
+        "the menu opened"
+    );
+    assert!(
+        cx.debug_bounds("page-menu-pin").is_none(),
+        "the menu no longer holds the pin"
+    );
+}
+
 /// SB-3: a written daily note is a page too (§5.5), so it can be pinned. Pins resolve
 /// against every live page, not only the ordinary Pages list (which excludes daily pages).
 #[gpui::test]
 fn pinned_daily_pages_show_above_pages(cx: &mut TestAppContext) {
     let cx = setup_page(cx);
-    // The page menu is only offered on a live page (a draft day has none).
+    // The pin is only offered on a live page (a draft day has none).
     cx.simulate_input("note");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let menu = bounds(cx, "page-menu");
-    cx.simulate_click(menu.center(), gpui::Modifiers::default());
-    let pin = bounds(cx, "page-menu-pin");
+    let pin = bounds(cx, "page-pin-off");
     cx.simulate_click(pin.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     let header = bounds(cx, "pinned-header");
