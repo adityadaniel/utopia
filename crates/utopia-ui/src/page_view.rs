@@ -5381,10 +5381,12 @@ impl PageView {
                 }
                 header.into_any_element()
             }
+            // Twice the panel radius tall: gpui rounds a corner by at most half the
+            // element's height, and the open panel's bottom keeps the full 10 px (§3.7).
             Item::UnlinkedEnd => div()
                 .debug_selector(|| "unlinked-end".into())
                 .mx(px(self.refs_pad()))
-                .h(px(crate::theme::SPACING[1]))
+                .h(px(2. * crate::theme::RADIUS_PANEL))
                 .bg(th.well)
                 .border_l_1()
                 .border_r_1()
@@ -5586,21 +5588,22 @@ impl PageView {
             // DESIGN.md §3.7: the second half of "who mentions this page", so the same
             // panel as Linked references: a 44 px well header with a chevron, the heading
             // and its count, collapsed until opened. The mentions are searched when it is
-            // expanded, not before, so a closed panel has no count.
+            // expanded, not before, so a closed panel has no count. It sits 8 px under the
+            // Linked panel with small top corners and round bottom ones, so the two read
+            // as one stack.
             Item::UnlinkedHeader { count, open } => div()
                 .id("unlinked-header")
                 .debug_selector(|| "unlinked-header".into())
-                .mt(px(crate::theme::SPACING[3]))
+                .mt(px(crate::theme::SPACING[1]))
                 .mx(px(self.refs_pad()))
                 .h(px(UNLINKED_ROW_HEIGHT))
                 .px(px(crate::theme::SPACING[3]))
                 .bg(th.well)
                 .border_1()
                 .border_color(th.line)
-                .when(!open, |d| d.rounded(px(crate::theme::RADIUS_PANEL)))
-                .when(open, |d| {
-                    d.rounded_t(px(crate::theme::RADIUS_PANEL)).border_b_0()
-                })
+                .rounded_t(px(crate::theme::RADIUS_PANEL_JOIN))
+                .when(!open, |d| d.rounded_b(px(crate::theme::RADIUS_PANEL)))
+                .when(open, |d| d.border_b_0())
                 .flex()
                 .items_center()
                 .gap_2()

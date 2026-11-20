@@ -1572,6 +1572,31 @@ fn unlinked_mention_wraps_and_keeps_link_in_view(cx: &mut TestAppContext) {
     assert_wraps_within(row, left, right);
 }
 
+/// DESIGN.md §3.7: the Unlinked panel sits 8 px under the Linked one, so the two read
+/// as one stack; open, its end strip is tall enough (20 px) for a real 10 px radius.
+#[gpui::test]
+fn unlinked_panel_sits_8_px_under_linked(cx: &mut TestAppContext) {
+    let (cx, ws, target) = setup_refs(cx, false);
+    ws.update_in(cx, |w, window, cx| {
+        w.open(target, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let end = bounds(cx, "refs-end");
+    let header = bounds(cx, "unlinked-header");
+    assert!(
+        approx(header.origin.y - (end.origin.y + end.size.height), 8.),
+        "8 px between the panels: {end:?} {header:?}"
+    );
+    assert!(
+        approx(header.size.width, f32::from(end.size.width)),
+        "{end:?} {header:?}"
+    );
+    cx.simulate_click(header.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    let close = bounds(cx, "unlinked-end");
+    assert!(approx(close.size.height, 20.), "{close:?}");
+}
+
 /// DESIGN.md §2.2 and §3.7: an unlinked mention is a referenced block too — Reference block
 /// text, 15/26 — and it is drawn by the rich renderer, so a link in the mentioning block is
 /// a link rather than raw `[[markup]]`.
@@ -2208,9 +2233,7 @@ fn pinned_pages_sit_above_pages_and_are_local(cx: &mut TestAppContext) {
         })
     });
     cx.run_until_parked();
-    let menu = bounds(cx, "page-menu");
-    cx.simulate_click(menu.center(), gpui::Modifiers::default());
-    let pin = bounds(cx, "page-menu-pin");
+    let pin = bounds(cx, "page-pin-off");
     cx.simulate_click(pin.center(), gpui::Modifiers::default());
     cx.run_until_parked();
 
@@ -2410,6 +2433,51 @@ fn mini_calendar_opens_days_and_marks_notes(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §3.2: the sidebar's Recent list stops at ten pages, and a page that opens
+/// moves to its top. The rest are one Quick jump away.
+#[gpui::test]
+fn the_sidebar_lists_the_ten_most_recent_pages(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let mut store = Store::open_in_memory().unwrap();
+    store.set_today(Some(today()));
+    let ids: Vec<_> = (1..=12)
+        .map(|i| store.create_page(&format!("Page {i:02}")).unwrap())
+        .collect();
+    store.sync_index().unwrap();
+    let app = cx.new(|_| AppState::new(store));
+    let (ws, cx) = cx.add_window_view(|window, cx| Workspace::new(app, window, cx));
+    cx.simulate_resize(size(px(W), px(H)));
+    ws.update_in(cx, |w, window, cx| w.open_launch_page(window, cx));
+    cx.run_until_parked();
+
+    assert_eq!(cx.update(|_, cx| ws.read(cx).recent_titles()).len(), 10);
+    assert!(
+        cx.debug_bounds("page-row-9").is_some(),
+        "ten rows are drawn"
+    );
+    assert!(
+        cx.debug_bounds("page-row-10").is_none(),
+        "an eleventh is not"
+    );
+
+    for (open, want) in [
+        (&ids[11], vec!["Page 12"]),
+        (&ids[2], vec!["Page 03", "Page 12"]),
+        (&ids[11], vec!["Page 12", "Page 03"]),
+    ] {
+        ws.update_in(cx, |w, window, cx| {
+            w.open(open.clone(), None, None, false, window, cx)
+        });
+        cx.run_until_parked();
+        let titles = cx.update(|_, cx| ws.read(cx).recent_titles());
+        assert_eq!(titles[..want.len()], want[..], "{titles:?}");
+        assert_eq!(titles.len(), 10);
+    }
+}
+
 /// DESIGN.md §3.2 fixes the sidebar's page rows at 32 px; the density setting tightens
 /// blocks, not this chrome. The file uses the older "compact" key, which reads as Tight.
 #[gpui::test]
@@ -2440,18 +2508,58 @@ fn sidebar_rows_keep_the_spec_height_in_tight(cx: &mut TestAppContext) {
     );
 }
 
+/// DESIGN.md §3.3: the pin is a button on the top bar beside ⋯, not a menu item. One click
+/// pins, the button shows it is on, a second click unpins, and the ⋯ menu has no pin row.
+#[gpui::test]
+fn the_top_bar_pin_button_toggles_the_pin(cx: &mut TestAppContext) {
+    let cx = setup_page(cx);
+    cx.simulate_input("note");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    let off = bounds(cx, "page-pin-off");
+    let menu = bounds(cx, "page-menu");
+    assert!(
+        approx(off.size.width, 32.) && off.origin.x < menu.origin.x,
+        "a 32 px button just before ⋯: {off:?} {menu:?}"
+    );
+    assert!(
+        approx(off.center().y, f32::from(menu.center().y)),
+        "{off:?} {menu:?}"
+    );
+
+    cx.simulate_click(off.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| utopia_ui::appearance::pinned(cx).len()),
+        1
+    );
+    let on = bounds(cx, "page-pin-on");
+    cx.simulate_click(on.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(cx.update(|_, cx| utopia_ui::appearance::pinned(cx).is_empty()));
+
+    cx.simulate_click(menu.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(
+        cx.debug_bounds("page-menu-graph").is_some(),
+        "the menu opened"
+    );
+    assert!(
+        cx.debug_bounds("page-menu-pin").is_none(),
+        "the menu no longer holds the pin"
+    );
+}
+
 /// SB-3: a written daily note is a page too (§5.5), so it can be pinned. Pins resolve
 /// against every live page, not only the ordinary Pages list (which excludes daily pages).
 #[gpui::test]
 fn pinned_daily_pages_show_above_pages(cx: &mut TestAppContext) {
     let cx = setup_page(cx);
-    // The page menu is only offered on a live page (a draft day has none).
+    // The pin is only offered on a live page (a draft day has none).
     cx.simulate_input("note");
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
-    let menu = bounds(cx, "page-menu");
-    cx.simulate_click(menu.center(), gpui::Modifiers::default());
-    let pin = bounds(cx, "page-menu-pin");
+    let pin = bounds(cx, "page-pin-off");
     cx.simulate_click(pin.center(), gpui::Modifiers::default());
     cx.run_until_parked();
     let header = bounds(cx, "pinned-header");

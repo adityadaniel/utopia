@@ -42,6 +42,8 @@ pub enum Icon {
     Columns,
     /// The Tasks nav row (§3.2, §4.5): Lucide's square-check.
     SquareCheck,
+    /// The top bar's pin toggle (§3.3): Lucide's pin.
+    Pin,
 }
 
 impl Icon {
@@ -67,6 +69,7 @@ impl Icon {
         Icon::Close,
         Icon::Columns,
         Icon::SquareCheck,
+        Icon::Pin,
     ];
 
     /// The file name under `assets/icons`.
@@ -93,6 +96,7 @@ impl Icon {
             Icon::Close => "x",
             Icon::Columns => "columns",
             Icon::SquareCheck => "square-check",
+            Icon::Pin => "pin",
         }
     }
 
@@ -124,6 +128,7 @@ impl Icon {
             Icon::Close => icon!("x"),
             Icon::Columns => icon!("columns"),
             Icon::SquareCheck => icon!("square-check"),
+            Icon::Pin => icon!("pin"),
         }
     }
 

@@ -132,6 +132,7 @@ Inside a component, a padding may be off the scale when it centres content in a 
 
 | Value | `theme.rs` | Use |
 |---|---|---|
+| 2 | `RADIUS_PANEL_JOIN` | The Unlinked references panel's top corners, where it meets the Linked panel's 2px bottom corners (§3.7) |
 | 3 | `RADIUS_LINK_RING` | Tint ring on a link open in the next pane |
 | 4 | `RADIUS_CHIP` | kbd, ref type label, checkboxes |
 | 5 | `RADIUS_TAG` | Tag chips |
@@ -144,7 +145,7 @@ No shadows anywhere. Use borders instead. The only exception is the inset focus 
 
 ### 2.5 Icons
 
-16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. One set (Lucide). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks).
+16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. One set (Lucide). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks), pin (the top bar's pin toggle).
 
 Also in the set: close (×), more (⋯), check, grip, paperclip, file, image, clock, command, hash, lock, undo, plus the Settings tab icons. A text character is never an icon: "×", "▾", "✓", "⌘", "📎" and the like are drawn from the set, so they take the icon colour and size. (The arrow after an external link, §3.1, is text on purpose: it is part of the link.)
 
@@ -187,7 +188,7 @@ Each component lists its states. A state that is not listed does not change the 
 | State (row) | Look |
 |---|---|
 | Hover | The caret shows in the gutter; the bullet becomes a grip (2 × 3 dots, 2px each, `--bullet`) |
-| Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link` and a tag is `--tag-ink` |
+| Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link`, a tag is `--tag-ink`, and a Markdown link's `[text]` is `--link` with its `(url)` in `--muted` |
 | Selected (block selection) | `--selection` fill behind the row |
 
 | State (checkbox) | Look |
@@ -212,7 +213,7 @@ From top to bottom:
 2. **Search field:** a button that opens the command palette. Height 36, radius 8, `--paper` fill, `--line-strong` border, search icon, placeholder text "Search or jump to" in `--muted`, and `⌘K` kbd on the right.
 3. **Nav:** Daily Notes, Tasks (square-check icon, open to-do count on the right, §4.5). Each row is 34px tall, radius 6, 14px text.
 4. **Mini calendar:** month label (13/600) with prev/next buttons. A 7-column grid, weeks start on Sunday, weekday labels in Mono 11. Always 6 rows, so the sections below never move when the month changes. Day cells are 30px tall. Days of the next or previous month are `--muted`. Today: solid `--link` fill with `--paper` text at 500. Days with notes: a 4px `--link` dot under the number (`--paper` on today). Clicking a day opens that daily note.
-5. **Pages:** Mono label "PAGES", then rows 32px tall with an icon (person icon for people pages, page icon for others), the name, and the reference count on the right. Pinned pages come first.
+5. **Recent:** Mono label "RECENT", then up to 10 page rows, 32px tall, with an icon (person icon for people pages, page icon for others), the name, and the reference count on the right. The pages opened last on this Mac come first (local state, never synced), then the pages edited last, so a new device still shows what was worked on. Every other page is one ⌘K away. Pinned pages have their own "PINNED" group above it.
 6. **Tags:** Mono label "TAGS", then tag chips in a wrapping row. Shown only when a tag page exists. Tags are listed here, **not** in Pages.
 7. **Footer** (pinned to the bottom, 1px top border): an 8px status dot (`--disabled` when local only, `--success` in sync), the vault name in `--ink` 500, " · Local only", and a settings icon button.
 
@@ -239,7 +240,7 @@ There is no "Recent days" list: the feed already shows the days.
 Back and forward icon buttons (forward is `--disabled` when there's nothing to go forward to), a title or breadcrumb, then actions on the right.
 
 - Daily Notes: title "Daily Notes", then a day navigation group (prev | Today | next) with a 1px `--line-strong` border, radius 8, 32px tall, then the view mode control (§3.9), then a toggle for the right panel.
-- Page view: the current page's title in `--ink` 500, then the more (⋯) button, the view mode control and the right panel toggle. The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, Pin or Unpin, then a divider and Delete page as the danger item.
+- Page view: the current page's title in `--ink` 500, then the pin button, the more (⋯) button, the view mode control and the right panel toggle. The pin button is a ghost icon button (pin icon) that pins the page to the sidebar's Pinned group in one click; when the page is pinned it has the selected look of a choice chip (§3.16: `--line-soft` fill, `--link` icon) and no hover fill, and its tooltip says "Unpin from sidebar" (otherwise "Pin to sidebar"). The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, then a divider and Delete page as the danger item. A page card's ⋯ menu in the right panel (§4.6) keeps Pin to sidebar, because a card has no room for a second button.
 - **Title or trail.** In Single mode the top bar shows only the current title. The pages before it are history, not a place the page sits in (pages have no hierarchy), so they are not drawn as a "›" trail. Back's tooltip names the page it goes to ("Back to Atlas Launch"). In Panes mode the top bar shows the trail of open panes (§4.3), because those panes are on screen side by side.
 
 1px `--line-soft` bottom border.
@@ -303,7 +304,7 @@ Spacing in this panel says what belongs together: a group title is close to its 
 - Referenced blocks render with the Reference block text style. Children keep their thread line. The current page's name inside a reference is shown as **bold `--ink` text, not a link** (linking to the page you're already on is pointless). Inside a day of the feed, the current page is that day: a link to the day is bold `--ink` too, in any date form that resolves to it.
 - A path above a nested reference names its parent blocks, in Caption `--muted`; each part is a link. It does not start with the page: the group title right above already names it. A part longer than 40 characters is cut at the last whole word and ends with "…"; it is never cut in the middle of a word without one. The path wraps when it is wider than the panel.
 - **More references than the group shows** (more than 3): a row of its own at the group's level, after the last reference: a chevron-down and "Show 2 more from Atlas Launch" in 13px `--ink-3`, 28px tall, radius 6, `--hover` fill and `--ink` text on hover. It names the group, so it does not read as a child of the last reference.
-- **Unlinked references** is the other half of "who mentions this page", so it is the same kind of panel, 16px below the linked one: the same well, border and radius, a 44px header with a chevron, the heading "Unlinked references" in UI 14/600 `--ink`, and its count badge once it has been searched. It starts collapsed (rounded on all four corners) and is searched only when it is opened, so a closed panel has no count. Open, its rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) sit inside the panel with 16px side padding, and "Link all" sits on the header's right edge.
+- **Unlinked references** is the other half of "who mentions this page", so it is the same kind of panel, 8px below the linked one: the same well and border. Its top corners are 2px, like the Linked panel's bottom ones, and its bottom corners are 10px (`RADIUS_PANEL_JOIN`, `RADIUS_PANEL`), so the two panels read as one stack. It has a 44px header with a chevron, the heading "Unlinked references" in UI 14/600 `--ink`, and its count badge once it has been searched. It starts collapsed and is searched only when it is opened, so a closed panel has no count. Open, its rows (source page link in Caption `--link`, the mention with its `--highlight-bg` fill, a small "Link" button: Caption `--link`, 1px `--line` border, radius 4) sit inside the panel with 16px side padding, and "Link all" sits on the header's right edge.
 
 | State | Look |
 |---|---|
@@ -568,7 +569,7 @@ Sidebar plus main area. The main area has the top bar and the content column. Da
 
 ### 4.2 Page view
 
-Sidebar (the page is highlighted in Pages) plus main area: top bar with the page's title (§3.3), page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then the Unlinked references panel 16px below that (§3.7).
+Sidebar (the page is highlighted in Pages) plus main area: top bar with the page's title (§3.3), page title (Page title style), properties bar, body blocks (placeholder "Click to start writing" in `--muted` with a `--line-strong` bullet when the body is empty), then the Linked references panel 48px below, then the Unlinked references panel 8px below that (§3.7).
 
 ### 4.3 Stacked panes (navigation model)
 
