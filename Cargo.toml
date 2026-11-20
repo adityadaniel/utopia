@@ -46,6 +46,10 @@ ureq = "2.12"
 zstd = "0.13"
 unicode-normalization = "0.1"
 unicode-segmentation = "1.12"
+# Code block highlighting: syntect's parser with bat's syntax set (two-face, ~200
+# languages), both on the pure-Rust regex engine (no Oniguruma C build).
+syntect = { version = "5.2", default-features = false, features = ["parsing", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 uuid = { version = "1.10", features = ["v5"] }
 
 [profile.dev.package."*"]

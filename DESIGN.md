@@ -52,6 +52,10 @@ Light and dark mode define the same names. The app follows the system appearance
 | `--selection` | `#B7D2FB` | `#264F8F` | Selected text |
 | `--highlight-bg` | `#FFF1A8` | `#4E461F` | A search hit, an unlinked mention |
 | `--code-bg` | `#F0F0EE` | `#22221F` | Inline code and code block fill |
+| `--syntax-keyword` | `#8A3A8F` | `#D4A6E0` | Code block keywords, storage words, `true`/`null` (§3.11) |
+| `--syntax-string` | `#2F6B2F` | `#9CCC8E` | Code block strings and escapes |
+| `--syntax-number` | `#A04A12` | `#E5AC7A` | Code block numbers |
+| `--syntax-name` | `#2A5EA8` | `#8DB6EE` | Code block function, type and class names |
 | `--banner-bg` | `#EAF2FF` | `#222E42` | The sync banner |
 | `--scrim` | black 18 % | black 42 % | Behind a modal palette |
 | `--pdf-highlight` | yellow 35 % | same | PDF highlight overlay (does not follow the theme) |
@@ -376,7 +380,7 @@ A kind changes what is in the row, not the row's grid: the caret slot and the bu
 |---|---|
 | Heading 1, 2, 3 | Block heading roles (§2.2): 20 / 28, 18 / 26, 17 / 24, weight 600, `--ink`. The bullet stays. No space is added above or below |
 | Quote | A 2px bar on the left, 8px before the text, text `--ink-3` italic. No fill. The bar is `--link` today (§6) |
-| Code | A card: `--code-bg` fill, 1px `--line` border, radius 6, padding 4 8, the Code role (Menlo 13). When the first line names a language, the name sits at the top right in Caption `--muted` |
+| Code | A card: `--code-bg` fill, 1px `--line` border, radius 6, padding 4 8, the Code role (Menlo 13). When the first line names a language, the name sits at the top right in Caption `--muted`, and the code is coloured in that language at rest and while edited: keywords `--syntax-keyword`, strings `--syntax-string`, numbers `--syntax-number`, function and type names `--syntax-name`, comments `--muted`, everything else `--ink` (bat's grammars, about 200 languages). The code is drawn as written: markup in it (`**`, `[[ ]]`) is not rendered |
 | Numbered | The number and a full stop ("3.") in the 24px bullet slot, centred, Block text size, `--muted`. It takes the place of the bullet and is the drag handle |
 | To-do | §3.1 |
 

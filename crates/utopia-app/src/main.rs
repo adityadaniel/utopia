@@ -794,6 +794,8 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
     application.run(move |cx: &mut App| {
         cx.set_global(Theme::light());
         utopia_ui::appearance::install(cx, &config);
+        // Code block grammars load on a worker thread, before any block is drawn (§3.11).
+        utopia_ui::syntax::warm_up();
         install_keymap(cx, keymap.as_deref());
         cx.set_menus(menus());
         cx.on_action(|_: &Quit, cx| quit_app(cx));

@@ -3269,10 +3269,63 @@ impl PageView {
                 None => rich::render(text, &th, &mut chip),
             }
         };
+        self.rich_element(
+            rendered,
+            text.len(),
+            row_block,
+            row,
+            min_h,
+            prefix,
+            named,
+            cx,
+        )
+    }
+
+    /// A code block's body (DESIGN.md §3.11): drawn as written, coloured in `lang` when the
+    /// block names one, with the same click-to-edit as any row.
+    #[allow(clippy::too_many_arguments)]
+    fn render_code(
+        &self,
+        text: &str,
+        lang: Option<&str>,
+        row_block: &BlockId,
+        row: Option<RowItem>,
+        min_h: f32,
+        prefix: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = theme(cx).clone();
+        let highlights = lang.map_or_else(Vec::new, |l| crate::syntax::highlights(l, text, 0, &th));
+        let rendered = rich::render_verbatim(text, highlights);
+        self.rich_element(
+            rendered,
+            text.len(),
+            row_block,
+            row,
+            min_h,
+            prefix,
+            true,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn rich_element(
+        &self,
+        rendered: rich::Rendered,
+        source_len: usize,
+        row_block: &BlockId,
+        row: Option<RowItem>,
+        min_h: f32,
+        prefix: usize,
+        named: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let th = theme(cx).clone();
         let styled =
             StyledText::new(rendered.text.clone()).with_highlights(rendered.highlights.clone());
         let layout = styled.layout().clone();
-        let end = prefix + text.len();
+        let end = prefix + source_len;
         let row2 = row.clone();
         let links = rendered.links.iter().map(|(r, _)| r.clone()).collect();
         let chips = rendered.chips.clone();
@@ -3384,6 +3437,9 @@ impl PageView {
         let row = r.clone();
         let content: AnyElement = if editing {
             self.editor.clone().into_any_element()
+        } else if r.kind == BlockKind::Code {
+            let lang = code.as_ref().map(|(l, _, _)| l.as_str());
+            self.render_code(shown, lang, &r.block, Some(row.clone()), line, prefix, cx)
         } else {
             self.render_rich(shown, &r.block, Some(row.clone()), line, prefix, cx)
         };
@@ -6048,7 +6104,7 @@ const CODE_LANGUAGES: &[&str] = &[
 
 /// `(language, the rest of the block, bytes skipped)` when a code block's first line names
 /// its language (PG-5). The block keeps its text; this only decides what is drawn.
-fn code_language(text: &str) -> Option<(String, &str, usize)> {
+pub(crate) fn code_language(text: &str) -> Option<(String, &str, usize)> {
     let (first, rest) = text.split_once('\n')?;
     let word = first.trim();
     if word.is_empty()

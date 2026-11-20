@@ -355,6 +355,24 @@ impl Builder<'_> {
 }
 
 /// Render a block body for display.
+/// `src` drawn as written, with `highlights` (source ranges) and no markup: a code block's
+/// body (DESIGN.md §3.11). Shown and source bytes are one for one, so a click lands where
+/// it was made.
+pub fn render_verbatim(src: &str, highlights: Vec<(Range<usize>, HighlightStyle)>) -> Rendered {
+    Rendered {
+        text: SharedString::from(src.to_string()),
+        highlights,
+        links: Vec::new(),
+        chips: Vec::new(),
+        spans: vec![Span {
+            shown: 0..src.len(),
+            source: 0..src.len(),
+            exact: true,
+        }],
+        source_len: src.len(),
+    }
+}
+
 pub fn render(src: &str, theme: &Theme, chip: &mut dyn FnMut(&str) -> ChipState) -> Rendered {
     render_self(src, theme, chip, &[])
 }
