@@ -1421,6 +1421,283 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// A built app, a seeded mock graph and an empty config dir under `target/<name>`, ready
+/// for a `UTOPIA_SHOT_SCRIPT` run (help and README screenshots).
+struct ShotApp {
+    root: PathBuf,
+    scratch: PathBuf,
+    config: PathBuf,
+    graph: PathBuf,
+    bin: PathBuf,
+}
+
+/// Build the app, seed `target/<name>/Demo.utopia` with [`seed_help_graph`] and place the
+/// binary under a bundle-shaped path. The config dir is empty, so the app shows its
+/// defaults (font, density, keys).
+fn shot_app(name: &str) -> Result<ShotApp> {
+    use std::process::Command as Proc;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .canonicalize()?;
+    anyhow::ensure!(
+        Proc::new(env!("CARGO"))
+            .current_dir(&root)
+            .args(["build", "-p", "utopia-app"])
+            .status()?
+            .success(),
+        "cargo build failed"
+    );
+    let scratch = root.join("target").join(name);
+    if scratch.exists() {
+        std::fs::remove_dir_all(&scratch)?;
+    }
+    let config = scratch.join("config");
+    std::fs::create_dir_all(&config)?;
+    let graph = scratch.join("Demo.utopia");
+    seed_help_graph(&graph)?;
+    // Settings → Assistants names the binary that runs, so it must not show `target/debug`.
+    // A copy under a bundle shape reads like the install the owner has.
+    let bundle = scratch.join("Utopia.app/Contents/MacOS");
+    std::fs::create_dir_all(&bundle)?;
+    let bin = bundle.join("utopia");
+    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_absolute() { p } else { root.join(p) })
+        .unwrap_or_else(|| root.join("target"));
+    let built = target.join("debug/utopia");
+    anyhow::ensure!(
+        std::fs::hard_link(&built, &bin).is_ok() || std::fs::copy(&built, &bin).is_ok(),
+        "could not place the app at {}",
+        bin.display()
+    );
+    Ok(ShotApp {
+        root,
+        scratch,
+        config,
+        graph,
+        bin,
+    })
+}
+
+/// Run the app once over `script` (steps joined by `; `), light theme.
+fn run_shot_script(app: &ShotApp, script: &str) -> Result<()> {
+    let status = std::process::Command::new(&app.bin)
+        .current_dir(&app.root)
+        .arg("--graph")
+        .arg(&app.graph)
+        .env("UTOPIA_CONFIG_DIR", &app.config)
+        .env("UTOPIA_APPEARANCE", "light")
+        .env("UTOPIA_SHOT_SCRIPT", script)
+        .status()?;
+    anyhow::ensure!(status.success(), "the app exited with {status}");
+    Ok(())
+}
+
+/// Shrink a capture so its longer side is `max` px, in place, and say by how much.
+fn downscale(p: &Path, max: u32) -> Result<()> {
+    anyhow::ensure!(p.exists(), "{} was not captured", p.display());
+    let before = std::fs::metadata(p)?.len();
+    anyhow::ensure!(
+        std::process::Command::new("sips")
+            .args(["-Z", &max.to_string(), "--setProperty", "format", "png"])
+            .arg(p)
+            .arg("--out")
+            .arg(p)
+            .status()?
+            .success(),
+        "sips failed on {}",
+        p.display()
+    );
+    println!(
+        "{}  {} KiB -> {} KiB",
+        p.file_name().unwrap_or_default().to_string_lossy(),
+        before / 1024,
+        std::fs::metadata(p)?.len() / 1024
+    );
+    Ok(())
+}
+
+/// Regenerate the README screenshots and demo GIF in `docs/images`.
+///
+/// The same mock graph and scenes as the Help screenshots, at 1400 px, plus Settings on its
+/// Keybindings tab. The GIF is a second run that types a `[[link]]` into today's note,
+/// opens the linked page and shows the new block under Linked References; each step is a
+/// `shot`, and ffmpeg turns the frames into a 960 px GIF.
+fn readme_shots() -> Result<()> {
+    let app = shot_app("readme-shots")?;
+    let out = app.root.join("docs/images");
+    std::fs::create_dir_all(&out)?;
+    let png = |name: &str| out.join(format!("{name}.png")).display().to_string();
+    let stills = [
+        // The first frame after a fresh build waits for the Metal shaders (~1 s).
+        "wait 1500".to_string(),
+        // The real pointer may rest over the window and paint a hover; park it on the
+        // empty top bar (a synthetic move, so it stays until the mouse really moves).
+        PARK_POINTER.to_string(),
+        "keys escape".to_string(),
+        "wait 400".to_string(),
+        format!("shot {}", png("daily-notes")),
+        "keys cmd-k".to_string(),
+        "wait 250".to_string(),
+        "type atlas".to_string(),
+        "wait 500".to_string(),
+        format!("shot {}", png("quick-jump")),
+        // "atlas" ranks the #atlas tag first; the outline shot is the project page.
+        "keys escape".to_string(),
+        "wait 300".to_string(),
+        "keys cmd-k".to_string(),
+        "wait 250".to_string(),
+        "type Atlas Launch".to_string(),
+        "wait 500".to_string(),
+        "keys enter".to_string(),
+        "wait 800".to_string(),
+        "keys escape".to_string(),
+        "wait 300".to_string(),
+        format!("shot {}", png("outline")),
+        "keys cmd-shift-f".to_string(),
+        "wait 250".to_string(),
+        "type migration".to_string(),
+        "wait 600".to_string(),
+        format!("shot {}", png("search")),
+        "keys escape".to_string(),
+        "wait 300".to_string(),
+        "keys cmd-k".to_string(),
+        "wait 250".to_string(),
+        "type Ana".to_string(),
+        "wait 500".to_string(),
+        "keys enter".to_string(),
+        "wait 900".to_string(),
+        "keys escape".to_string(),
+        "wait 300".to_string(),
+        format!("shot {}", png("backlinks")),
+        "keys cmd-shift-g".to_string(),
+        "wait 1200".to_string(),
+        format!("shot {}", png("graph")),
+        "keys cmd-,".to_string(),
+        "wait 1500".to_string(),
+        "target last".to_string(),
+        "wait 700".to_string(),
+        "hover 140 640".to_string(),
+        "wait 200".to_string(),
+        format!("shot {}", png("settings-keybindings")),
+    ]
+    .join("; ");
+    run_shot_script(&app, &stills)?;
+    for name in [
+        "daily-notes",
+        "quick-jump",
+        "outline",
+        "search",
+        "backlinks",
+        "graph",
+        "settings-keybindings",
+    ] {
+        downscale(&out.join(format!("{name}.png")), 1400)?;
+    }
+
+    // The GIF, on a fresh graph so the typing lands in the same note every run.
+    std::fs::remove_file(&app.graph)?;
+    for side in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(app.graph.with_extension(format!("utopia{side}")));
+    }
+    seed_help_graph(&app.graph)?;
+    let frames = app.scratch.join("frames");
+    std::fs::create_dir_all(&frames)?;
+    let mut gif = GifScript {
+        dir: frames.clone(),
+        steps: vec!["wait 1500".into(), PARK_POINTER.into()],
+        n: 0,
+    };
+    gif.keys(&["keys escape", "wait 300"]);
+    gif.frame(4);
+    open_today_new_block(&mut gif.steps);
+    gif.typed(&[
+        "Fi", "nis", "h", " the", " [[", "Re", "ad", "ing", "]]", " not", "es",
+    ]);
+    gif.keys(&["wait 400", "keys escape", "wait 400"]);
+    gif.frame(5);
+    gif.keys(&["keys cmd-k", "wait 250"]);
+    gif.typed(&["Re", "ad", "ing"]);
+    gif.keys(&["wait 300"]);
+    gif.frame(2);
+    gif.keys(&["keys enter", "wait 900", "keys escape", "wait 300"]);
+    gif.frame(8);
+    let steps = gif.steps;
+    run_shot_script(&app, &steps.join("; "))?;
+
+    let gif = out.join("demo.gif");
+    anyhow::ensure!(
+        std::process::Command::new("ffmpeg")
+            .args(["-y", "-loglevel", "error", "-framerate", "4", "-i"])
+            .arg(frames.join("f%03d.png"))
+            .args([
+                "-vf",
+                "scale=960:-1:flags=lanczos,split[a][b];[a]palettegen=stats_mode=diff[p];\
+                 [b][p]paletteuse=dither=bayer:bayer_scale=5",
+            ])
+            .arg(&gif)
+            .status()?
+            .success(),
+        "ffmpeg failed (is it installed?)"
+    );
+    println!("demo.gif  {} KiB", std::fs::metadata(&gif)?.len() / 1024);
+    println!("\nwrote {}", out.display());
+    Ok(())
+}
+
+/// The steps of the README GIF: each `frame` is a `shot` into `dir`, numbered in order.
+struct GifScript {
+    dir: PathBuf,
+    steps: Vec<String>,
+    n: usize,
+}
+
+impl GifScript {
+    fn keys(&mut self, steps: &[&str]) {
+        self.steps.extend(steps.iter().map(|s| s.to_string()));
+    }
+
+    /// `hold` frames of the same picture: the GIF has one frame rate, so a pause is
+    /// several copies.
+    fn frame(&mut self, hold: usize) {
+        for _ in 0..hold {
+            let f = self.dir.join(format!("f{:03}.png", self.n));
+            self.steps.push(format!("shot {}", f.display()));
+            self.n += 1;
+        }
+    }
+
+    /// Type each chunk and capture it at once, while the caret is steady after the key.
+    fn typed(&mut self, chunks: &[&str]) {
+        for c in chunks {
+            // `type` keeps everything after the one space that ends the verb, so a
+            // chunk's leading space is typed as it is.
+            self.steps.push(format!("type {c}"));
+            self.frame(1);
+        }
+    }
+}
+
+/// Where the shot scripts park the pointer: the empty middle of the main window's top bar.
+const PARK_POINTER: &str = "hover 760 28";
+
+/// The keys that put the caret in a new, empty block after the last of today's six
+/// blocks in the help graph (`seed_help_graph`), in the feed.
+fn open_today_new_block(steps: &mut Vec<String>) {
+    steps.extend(
+        [
+            "keys cmd-shift-d",
+            "wait 600",
+            "keys down down down down down",
+            "keys cmd-down",
+            "keys enter",
+            "wait 200",
+        ]
+        .map(String::from),
+    );
+}
+
 /// Regenerate the screenshots embedded in Settings → Help.
 ///
 /// Builds the app, seeds a mock graph, then drives the real window with
@@ -1430,52 +1707,16 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
 /// running binary, so the app is started from a bundle-shaped copy rather than
 /// `target/debug/utopia`.
 fn help_shots() -> Result<()> {
-    use std::process::Command as Proc;
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .canonicalize()?;
-    let cargo = env!("CARGO");
-    anyhow::ensure!(
-        Proc::new(cargo)
-            .current_dir(&root)
-            .args(["build", "-p", "utopia-app"])
-            .status()?
-            .success(),
-        "cargo build failed"
-    );
-
-    let scratch = root.join("target/help-shots");
-    if scratch.exists() {
-        std::fs::remove_dir_all(&scratch)?;
-    }
-    let config = scratch.join("config");
-    std::fs::create_dir_all(&config)?;
-    let graph = scratch.join("Demo.utopia");
-    seed_help_graph(&graph)?;
-
+    let ShotApp {
+        root,
+        scratch,
+        config,
+        graph,
+        bin,
+    } = shot_app("help-shots")?;
     let out = root.join("crates/utopia-ui/assets/help");
     std::fs::create_dir_all(&out)?;
     let png = |name: &str| out.join(format!("{name}.png")).display().to_string();
-    // The Settings → Assistants entries name the binary that runs, and this picture is
-    // embedded in every build, so it must not show `target/debug`. A copy under a bundle
-    // shape reads like the install the owner has.
-    let bundle = scratch.join("Utopia.app/Contents/MacOS");
-    std::fs::create_dir_all(&bundle)?;
-    let bin = bundle.join("utopia");
-    if bin.exists() {
-        std::fs::remove_file(&bin)?;
-    }
-    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(std::path::PathBuf::from)
-        .map(|p| if p.is_absolute() { p } else { root.join(p) })
-        .unwrap_or_else(|| root.join("target"));
-    let built = target.join("debug/utopia");
-    anyhow::ensure!(
-        std::fs::hard_link(&built, &bin).is_ok() || std::fs::copy(&built, &bin).is_ok(),
-        "could not place the app at {}",
-        bin.display()
-    );
     // One run, several captures: each `wait` gives the UI time to settle before `shot`.
     let script = [
         "wait 900".to_string(),
@@ -1523,14 +1764,16 @@ fn help_shots() -> Result<()> {
     ]
     .join("; ");
 
-    let status = Proc::new(&bin)
-        .current_dir(&root)
-        .arg("--graph")
-        .arg(&graph)
-        .env("UTOPIA_CONFIG_DIR", &config)
-        .env("UTOPIA_SHOT_SCRIPT", &script)
-        .status()?;
-    anyhow::ensure!(status.success(), "the app exited with {status}");
+    run_shot_script(
+        &ShotApp {
+            root: root.clone(),
+            scratch,
+            config,
+            graph,
+            bin,
+        },
+        &script,
+    )?;
 
     // Downscale so the binary does not carry full-resolution Retina captures.
     for name in [
@@ -1542,25 +1785,7 @@ fn help_shots() -> Result<()> {
         "graph",
         "assistants",
     ] {
-        let p = out.join(format!("{name}.png"));
-        anyhow::ensure!(p.exists(), "{} was not captured", p.display());
-        let before = std::fs::metadata(&p)?.len();
-        anyhow::ensure!(
-            Proc::new("sips")
-                .args(["-Z", "1200", "--setProperty", "format", "png"])
-                .arg(&p)
-                .arg("--out")
-                .arg(&p)
-                .status()?
-                .success(),
-            "sips failed on {}",
-            p.display()
-        );
-        println!(
-            "{name}.png  {} KiB -> {} KiB",
-            before / 1024,
-            std::fs::metadata(&p)?.len() / 1024
-        );
+        downscale(&out.join(format!("{name}.png")), 1200)?;
     }
     println!("\nwrote {}", out.display());
     Ok(())
@@ -1594,6 +1819,7 @@ fn main() -> Result<()> {
         Some("bundle") => bundle(args.iter().any(|a| a == "--debug")),
         Some("mobile") => mobile(args.iter().any(|a| a == "--ios")),
         Some("help-shots") => help_shots(),
+        Some("readme-shots") => readme_shots(),
         Some("seed-refs") => {
             seed_refs_graph(Path::new(args.get(1).context("graph path")?))?;
             println!("seeded {}", args[1]);
@@ -1610,7 +1836,7 @@ fn main() -> Result<()> {
         ),
         _ => {
             println!(
-                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
+                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- readme-shots       (regenerate docs/images for the README)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
             );
             Ok(())
         }

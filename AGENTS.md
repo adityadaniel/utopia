@@ -10,6 +10,8 @@ ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 - Editor: zed <path>.
 - Commits: Conventional Commits (feat|fix|refactor|build|ci|chore|docs|style|perf|test).
 - when working on a feature / fix, use new worktree
+- When its branch is merged, delete the worktree (`git worktree remove <path>`, its
+  `target/` folder too) and the local branch.
 
 ## Visual system
 
@@ -17,8 +19,9 @@ ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
 screen. Every colour, type role, spacing and radius is a named token in
 `crates/utopia-ui/src/theme.rs`; components use the tokens and never raw colours, sizes or
 shadows (§2.4). The dark theme defines the same token names with contrast-checked values and
-follows the system appearance. **IBM Plex Sans is the default UI and body font; IBM Plex Mono
-is the label/count font** (the Appearance setting still offers System and Plex Sans). Geometry
+follows the system appearance. **The system font is the default UI and body font, and Normal the
+default density; IBM Plex Mono is the label/count font** (the Appearance setting offers System
+and IBM Plex Sans, and Tight, Normal and Relaxed: 16 px text on 22, 24 or 26 px lines). Geometry
 is pinned by `crates/utopia-ui/tests/layout.rs`; the visual result is checked by the
 `UTOPIA_SHOT_SCRIPT` screenshots described under "Verifying a change". `UTOPIA_APPEARANCE=light|dark`
 pins the theme when both schemes are needed from a machine set to one.
@@ -58,7 +61,7 @@ dir), the only `*.utopia` in `~/Documents/Utopia`; otherwise onboarding asks for
 `UTOPIA_CONFIG_DIR` overrides the config dir (`keymap.json`, `settings.json`, `last_graph`); point
 both env vars at a scratch folder when trying the app so you never touch the user's real graph.
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
-`{"version": 1, "font": "system" | "ibm-plex-sans", "density": "comfortable" | "compact",
+`{"version": 1, "font": "system" | "ibm-plex-sans", "density": "tight" | "normal" | "relaxed",
 "indent": "wide" | "narrow", "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
 "right_sidebar_width": 380.0, "view_mode": "single" | "panes"}` (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
@@ -282,7 +285,7 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `crates/utopia-app` | Binary: window, keymap, actions, app assembly, CLI subcommands, startup probe, screenshot scripts, API/link inbox, unlock screen | everything above |
 | `crates/utopia-ffi` | Mobile core: UniFFI surface over the store and sync (§14) | `utopia-store`, `utopia-sync`, `uniffi` |
 | `mobile/ios` | SwiftUI shell (`UtopiaMobile`) and the Swift binding check | the generated bindings |
-| `xtask` | Dev tasks: `bench` (budgets), `profile-merge`, `bundle`, `mobile`, `help-shots` | anything |
+| `xtask` | Dev tasks: `bench` (budgets), `profile-merge`, `bundle`, `mobile`, `help-shots`, `readme-shots` | anything |
 
 Dependency direction is one-way: `app → ui → (plugin → api) → store → doc → core`;
 `app → mcp → api`; `ffi → sync → store`. If you find yourself importing upward, move the type
@@ -453,6 +456,9 @@ Known limits (pick these up deliberately, don't paper over them):
   the UI changes: rerun `cargo run -p xtask -- help-shots` and look at the PNGs. They are shown
   at a fixed 640 px width with the capture's own height ratio, because gpui only learns an
   image's aspect ratio a frame after layout.
+- The README's pictures (`docs/images`, the stills and `demo.gif`) go stale the same way:
+  `cargo run -p xtask -- readme-shots` captures them from the help graph with the default
+  settings (it needs ffmpeg, and an unlocked screen: a locked Mac captures black frames).
 - `open_settings` is deferred (`cx.defer`): gpui refuses to update a window from inside its own
   update, and global action handlers run during one, so Cmd+, pressed while Settings is focused
   would otherwise open a second Settings window instead of raising the first.
