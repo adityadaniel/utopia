@@ -98,6 +98,26 @@ impl UiFont {
         }
     }
 
+    /// The mono family for labels, counts, shortcuts and weekday labels that pairs with
+    /// this font (DESIGN.md §2.2): SF Mono, IBM Plex Mono or Geist Mono.
+    pub fn label_mono(self) -> &'static str {
+        match self {
+            UiFont::System => crate::theme::SF_MONO,
+            UiFont::IbmPlexSans => crate::fonts::IBM_PLEX_MONO,
+            UiFont::Geist => crate::fonts::GEIST_MONO,
+        }
+    }
+
+    /// The monospace family for code that pairs with this font: SF Mono, Menlo or Geist
+    /// Mono.
+    pub fn code_mono(self) -> &'static str {
+        match self {
+            UiFont::System => crate::theme::SF_MONO,
+            UiFont::IbmPlexSans => "Menlo",
+            UiFont::Geist => crate::fonts::GEIST_MONO,
+        }
+    }
+
     /// The OpenType features set with the family. System turns on SF Pro's tailed `l`
     /// (`cv06`) and one-storey `a` (`cv07`). They are `cv` tags, not the `ss06`/`ss07`
     /// sets, because those mean other things in Plex (Bulgarian forms); Menlo and the

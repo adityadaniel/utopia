@@ -767,27 +767,16 @@ fn mono_pair() -> crate::appearance::UiFont {
         .unwrap_or_default()
 }
 
-/// The monospace family for code: SF Mono with the system font, Menlo with Plex, Geist
-/// Mono with Geist.
+/// The monospace family for code that pairs with the UI font in force
+/// ([`crate::appearance::UiFont::code_mono`]).
 pub fn code_mono() -> &'static str {
-    use crate::appearance::UiFont;
-    match mono_pair() {
-        UiFont::System => SF_MONO,
-        UiFont::IbmPlexSans => "Menlo",
-        UiFont::Geist => crate::fonts::GEIST_MONO,
-    }
+    mono_pair().code_mono()
 }
 
-/// The mono family for labels, counts, shortcuts and weekday labels (§2.2): SF Mono with
-/// the system font, the bundled IBM Plex Mono with Plex Sans
-/// ([`crate::fonts::register_ibm_plex_mono`]), the bundled Geist Mono with Geist.
+/// The mono family for labels, counts, shortcuts and weekday labels that pairs with the
+/// UI font in force ([`crate::appearance::UiFont::label_mono`]).
 pub fn label_mono() -> &'static str {
-    use crate::appearance::UiFont;
-    match mono_pair() {
-        UiFont::System => SF_MONO,
-        UiFont::IbmPlexSans => crate::fonts::IBM_PLEX_MONO,
-        UiFont::Geist => crate::fonts::GEIST_MONO,
-    }
+    mono_pair().label_mono()
 }
 
 /// The small count that follows a name (LR-2, DESIGN.md §3.4): mono 12 in `ink_3` on a
@@ -881,14 +870,12 @@ mod tests {
     #[test]
     fn the_mono_families_follow_the_ui_font() {
         use crate::appearance::UiFont;
+        // The pure pairing, not the process-wide value: tests run in parallel and other
+        // tests install fonts too.
         let pairs: Vec<_> = UiFont::ALL
             .iter()
-            .map(|&f| {
-                set_mono_pair(f);
-                (label_mono(), code_mono())
-            })
+            .map(|f| (f.label_mono(), f.code_mono()))
             .collect();
-        set_mono_pair(UiFont::default());
         assert_eq!(
             pairs,
             [

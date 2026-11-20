@@ -1252,16 +1252,14 @@ mod appearance {
         let mut w = VisualTestContext::from_window(main, cx);
         w.run_until_parked();
         assert!(w.debug_bounds("ui-font-geist").is_some());
+        // The pairing itself; the process-wide value it feeds is shared with the other
+        // tests in this binary, which run in parallel.
         assert_eq!(
-            (
-                utopia_ui::theme::label_mono(),
-                utopia_ui::theme::code_mono()
-            ),
+            (UiFont::Geist.label_mono(), UiFont::Geist.code_mono()),
             ("Geist Mono", "Geist Mono")
         );
         assert_eq!(settings_json(dir.path()).unwrap()["font"], "geist");
 
-        // Back to the default, so the process-wide mono pair is left as other tests expect.
         let option = s.debug_bounds("settings-font-system").unwrap();
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
