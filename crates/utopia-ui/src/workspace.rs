@@ -101,9 +101,13 @@ struct SidePane {
 struct SidebarData {
     /// Every live page, daily ones included: pins resolve against this (§5.5).
     all: Vec<PageRow>,
-    /// The Pages list: `all` without daily pages and without tag pages (DESIGN.md §3.2:
-    /// tags live in their own section).
+    /// `all` without daily pages and without tag pages (DESIGN.md §3.2: tags live in
+    /// their own section), the last edited first.
     pages: Vec<PageRow>,
+    /// The Recent list the sidebar draws: up to [`SIDEBAR_RECENT`] of `pages`, the ones
+    /// opened last first, then the last edited (DESIGN.md §3.2). Kept here, not built in `render`
+    /// (rule 10): it changes on an index update or when a page opens.
+    shown: Vec<PageRow>,
     /// Pages that exist only because of a `#tag` (FR-2.15), drawn as chips under TAGS.
     tag_rows: Vec<PageRow>,
     days: HashSet<NaiveDate>,
@@ -131,6 +135,37 @@ const RECENT_KEY: &str = "recent_pages";
 /// How many ids are kept: Quick jump shows eight after today and yesterday, and pages
 /// deleted since the list was written are skipped, so a few spares are kept.
 const RECENT_KEEP: usize = 24;
+
+/// How many pages the sidebar's Recent list shows (DESIGN.md §3.2); Quick jump finds the rest.
+pub const SIDEBAR_RECENT: usize = 10;
+
+/// The sidebar's Recent list (DESIGN.md §3.2): the pages in `opened` (newest first) that are still
+/// in `pages`, then the rest of `pages` in its own order (the last edited first), up to
+/// `n`. So a new device, which has opened nothing, still shows the pages worked on last.
+fn recent_pages(pages: &[PageRow], opened: &[PageId], n: usize) -> Vec<PageRow> {
+    let by_id: HashMap<&PageId, &PageRow> = pages.iter().map(|p| (&p.id, p)).collect();
+    let mut out: Vec<PageRow> = Vec::with_capacity(n);
+    let mut taken: HashSet<&PageId> = HashSet::new();
+    for id in opened {
+        if out.len() == n {
+            return out;
+        }
+        if let Some(p) = by_id.get(id) {
+            if taken.insert(&p.id) {
+                out.push((*p).clone());
+            }
+        }
+    }
+    for p in pages {
+        if out.len() == n {
+            break;
+        }
+        if taken.insert(&p.id) {
+            out.push(p.clone());
+        }
+    }
+    out
+}
 
 /// The label an icon-only button can carry: gpui 0.2 has no accessibility tree, so a
 /// tooltip is the nearest thing to the accessible name DESIGN.md §2.5 asks for. A real view
@@ -306,11 +341,11 @@ pub struct Workspace {
     today: NaiveDate,
     new_day: bool,
     backup_dir: Option<PathBuf>,
-    /// The graph is encrypted at rest (SB-4): read once at startup, never in `render`.
+    /// The graph is encrypted at rest (DESIGN.md §3.2): read once at startup, never in `render`.
     encrypted: bool,
-    /// The sync target as a line without secrets (SB-4), e.g. "Relay · http://…".
+    /// The sync target as a line without secrets (DESIGN.md §3.2), e.g. "Relay · http://…".
     sync_target: Option<String>,
-    /// The footer's sync view is open (SB-4); it floats above the footer.
+    /// The footer's sync view is open (DESIGN.md §3.2); it floats above the footer.
     sync_open: bool,
     /// The dot state the last painted frame showed. Checked by tests to prove that a state
     /// change actually repainted (debug bounds linger after an element stops being drawn).
@@ -747,7 +782,7 @@ impl Workspace {
                 let alive = runner.alive();
                 let transport = runner.begin_round()?;
                 // The footer's dot says "syncing" from now until the exchange returns; ask
-                // for the frame now, or an idle window keeps last round's green (SB-4).
+                // for the frame now, or an idle window keeps last round's green (DESIGN.md §3.2).
                 cx.notify();
                 let out = app.update(cx, |app, _| runner.engine.prepare(&mut app.store));
                 match out {
@@ -1463,6 +1498,11 @@ impl Workspace {
         self.pinned.iter().map(|(_, title)| title.clone()).collect()
     }
 
+    /// The titles in the left sidebar's Recent list, top first (DESIGN.md §3.2).
+    pub fn recent_titles(&self) -> Vec<String> {
+        self.sidebar.shown.iter().map(|p| p.title.clone()).collect()
+    }
+
     /// Pages stacked in the right sidebar, top first.
     pub fn sidebar_pages(&self, cx: &gpui::App) -> Vec<PageId> {
         self.panes
@@ -1518,6 +1558,7 @@ impl Workspace {
         self.recent.retain(|p| p != page);
         self.recent.insert(0, page.clone());
         self.recent.truncate(RECENT_KEEP);
+        self.sidebar.shown = recent_pages(&self.sidebar.pages, &self.recent, SIDEBAR_RECENT);
         let joined = self
             .recent
             .iter()
@@ -2398,17 +2439,17 @@ impl Workspace {
         self.page_menu
     }
 
-    /// Whether the footer's sync view is open (SB-4).
+    /// Whether the footer's sync view is open (DESIGN.md §3.2).
     pub fn sync_view_open(&self) -> bool {
         self.sync_open
     }
 
-    /// The dot state from the runner right now (SB-4): off, synced, in flight or failed.
+    /// The dot state from the runner right now (DESIGN.md §3.2): off, synced, in flight or failed.
     pub fn sync_dot(&self) -> SyncDot {
         sync_dot(self.sync.as_ref())
     }
 
-    /// The dot state the last painted frame showed (SB-4), for tests that must tell a
+    /// The dot state the last painted frame showed (DESIGN.md §3.2), for tests that must tell a
     /// repaint from a stale one.
     pub fn rendered_sync_dot(&self) -> Option<SyncDot> {
         self.rendered_sync_dot
@@ -2495,11 +2536,14 @@ impl Workspace {
             let tags = self.app.read(cx).tag_pages.clone();
             let ref_counts = store.page_backlink_counts().unwrap_or_default();
             let open_tasks = store.open_task_count().unwrap_or_default();
-            let pages = all
+            let mut pages: Vec<PageRow> = all
                 .iter()
                 .filter(|p| !p.is_daily() && !tags.contains(&p.id))
                 .cloned()
                 .collect();
+            // Stable, so pages edited in the same commit keep their A–Z order.
+            pages.sort_by_key(|p| std::cmp::Reverse(p.updated_at));
+            let shown = recent_pages(&pages, &self.recent, SIDEBAR_RECENT);
             let tag_rows = all
                 .iter()
                 .filter(|p| tags.contains(&p.id))
@@ -2508,6 +2552,7 @@ impl Workspace {
             self.sidebar = SidebarData {
                 days: all.iter().filter_map(|p| p.daily_date).collect(),
                 pages,
+                shown,
                 tag_rows,
                 ref_counts,
                 open_tasks,
@@ -2768,7 +2813,7 @@ impl Workspace {
             .next()
             .map(|c| c.to_uppercase().to_string())
             .unwrap_or_else(|| "U".into());
-        let pages = self.sidebar.pages.clone();
+        let pages = self.sidebar.shown.clone();
         let tag_rows = self.sidebar.tag_rows.clone();
         // SB-3: pinned pages first, in pin order, above the ordinary list. A pin may point
         // at a daily page, which is not in `pages` but is in `all`.
@@ -2935,8 +2980,8 @@ impl Workspace {
                 scroll = scroll.child(self.sidebar_page_row(i, &page, true, cx));
             }
         }
-        // 5. Pages, without tag pages.
-        scroll = scroll.child(label("PAGES", "pages-header"));
+        // 5. Recent pages, without tag pages (DESIGN.md §3.2).
+        scroll = scroll.child(label("RECENT", "pages-header"));
         if pages.is_empty() {
             scroll = scroll.child(
                 div()
@@ -3021,7 +3066,7 @@ impl Workspace {
 
     /// The sidebar footer (DESIGN.md §3.2): an 8 px status dot (`disabled` while this graph
     /// is local only), the vault name in `ink` at 500, " · Local only" muted and the
-    /// settings button. The status area still opens the sync view above the footer (SB-4);
+    /// settings button. The status area still opens the sync view above the footer (DESIGN.md §3.2);
     /// the settings button is a separate target, so clicking it never toggles sync.
     fn render_footer(&mut self, cx: &mut Context<Self>) -> gpui::Div {
         let th = theme(cx).clone();
@@ -3148,7 +3193,7 @@ impl Workspace {
             .when_some(err, |d, e| d.child(div().text_color(th.danger).child(e)))
     }
 
-    /// The sync view the footer opens (SB-4): what sync is doing, where it goes and whether
+    /// The sync view the footer opens (DESIGN.md §3.2): what sync is doing, where it goes and whether
     /// this graph is encrypted at rest. Read-only; setup lives in Settings → Sync, and no
     /// secret is shown here (§15.6).
     fn sync_popover(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
@@ -4821,5 +4866,59 @@ fn flag(on: bool) -> &'static str {
         "1"
     } else {
         "0"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use utopia_core::PageKind;
+
+    fn row(id: &str, updated_at: i64) -> PageRow {
+        PageRow {
+            id: PageId(id.into()),
+            kind: PageKind::Page,
+            title: id.into(),
+            title_key: id.into(),
+            daily_date: None,
+            created_at: 0,
+            updated_at,
+            deleted_at: None,
+        }
+    }
+
+    fn ids(rows: &[PageRow]) -> Vec<&str> {
+        rows.iter().map(|p| p.id.as_str()).collect()
+    }
+
+    /// DESIGN.md §3.2: the opened pages lead, newest first; the last edited fill the rest;
+    /// no page shows twice and the list stops at `n`.
+    #[test]
+    fn recent_pages_lead_with_opened_then_edited() {
+        // `pages` arrives sorted by last edit, newest first.
+        let pages = [
+            row("e", 50),
+            row("d", 40),
+            row("c", 30),
+            row("b", 20),
+            row("a", 10),
+        ];
+        let opened = [
+            PageId("b".into()),
+            PageId("gone".into()),
+            PageId("d".into()),
+        ];
+        assert_eq!(ids(&recent_pages(&pages, &opened, 4)), ["b", "d", "e", "c"]);
+        assert_eq!(
+            ids(&recent_pages(&pages, &[], 3)),
+            ["e", "d", "c"],
+            "a new device"
+        );
+        assert_eq!(ids(&recent_pages(&pages, &opened, 1)), ["b"]);
+        assert_eq!(
+            recent_pages(&pages, &opened, 10).len(),
+            5,
+            "fewer pages than n"
+        );
     }
 }
