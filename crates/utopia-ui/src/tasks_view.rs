@@ -18,9 +18,9 @@ use crate::app_state::{AppState, IndexUpdated};
 use crate::icons::{icon, Icon};
 use crate::rich::{self, ChipState, LinkTarget};
 use crate::theme::{
-    count_chip, theme, Theme, CARET_SIZE, CONTENT_MAX_WIDTH, COUNT, LABEL_MONO, MONO, PAGE_TITLE,
-    RADIUS_CHIP, RADIUS_CONTROL, RADIUS_PANEL, REF_LABEL, REF_TYPE_PADDING_X, SECTION, SMALL,
-    TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
+    code_mono, count_chip, label_mono, theme, Theme, CARET_SIZE, CONTENT_MAX_WIDTH, COUNT,
+    PAGE_TITLE, RADIUS_CHIP, RADIUS_CONTROL, RADIUS_PANEL, REF_LABEL, REF_TYPE_PADDING_X, SECTION,
+    SMALL, TODO_CHECK_SIZE, TODO_GAP, TODO_SIZE,
 };
 
 /// Column padding (DESIGN.md §4.5): tighter than a page, so the list reads as one sheet.
@@ -299,7 +299,7 @@ impl TasksView {
                     .when_some(g.daily, |d, day| {
                         d.child(
                             div()
-                                .font_family(LABEL_MONO)
+                                .font_family(label_mono())
                                 .text_size(px(COUNT.size))
                                 .line_height(px(COUNT.line))
                                 .text_color(th.muted)
@@ -412,7 +412,7 @@ impl TasksView {
             .items_center()
             .justify_center()
             .cursor_pointer()
-            .font_family(MONO)
+            .font_family(code_mono())
             .text_size(px(TODO_CHECK_SIZE))
             .when(checked, |d| d.bg(th.link).text_color(th.paper).child("✓"))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(&cpage, &cblock, cx)));
@@ -494,7 +494,7 @@ impl TasksView {
                             .py(px(3.))
                             .rounded_full()
                             .bg(bg)
-                            .font_family(LABEL_MONO)
+                            .font_family(label_mono())
                             .text_size(px(REF_LABEL.size))
                             .line_height(px(REF_LABEL.size))
                             .font_weight(REF_LABEL.weight)

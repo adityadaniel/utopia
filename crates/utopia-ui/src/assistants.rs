@@ -348,7 +348,7 @@ impl Render for AssistantsSetup {
                         .debug_selector(move || entry_id.into())
                         .mt_2()
                         .w_full()
-                        .font_family(crate::theme::MONO)
+                        .font_family(crate::theme::code_mono())
                         .text_size(px(crate::theme::CODE_TEXT_SIZE))
                         .text_color(th.ink_2)
                         .child(entry),

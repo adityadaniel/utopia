@@ -68,7 +68,7 @@ Rules:
 
 ### 2.2 Typography
 
-Fonts: the **system font** (SF Pro on macOS; 400, 500, 600) for everything people read, by default. Settings → Appearance can switch that role to **IBM Plex Sans**. **IBM Plex Mono** (400, 500) for small labels, counts, shortcuts and weekday labels, in both cases. Both Plex fonts are bundled under `crates/utopia-ui/assets/fonts`; code blocks use Menlo.
+Fonts: the **system font** (SF Pro on macOS; 400, 500, 600) for everything people read, by default. Settings → Appearance can switch that role to **IBM Plex Sans**. The mono font pairs with it, for small labels, counts, shortcuts, weekday labels (400, 500) and code blocks: **SF Mono** with the system font (the system's monospaced UI font, `.AppleSystemUIFontMonospaced`, so nothing is bundled), and with IBM Plex Sans, **IBM Plex Mono** for the labels and Menlo for code. Both Plex fonts are bundled under `crates/utopia-ui/assets/fonts`.
 
 The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight travel together).
 

@@ -34,7 +34,8 @@ screen. Every colour, type role, spacing and radius is a named token in
 `crates/utopia-ui/src/theme.rs`; components use the tokens and never raw colours, sizes or
 shadows (§2.4). The dark theme defines the same token names with contrast-checked values and
 follows the system appearance. **The system font is the default UI and body font, and Normal the
-default density; IBM Plex Mono is the label/count font** (the Appearance setting offers System
+default density; the mono font (labels, counts, code) pairs with it: SF Mono with System, IBM Plex
+Mono and Menlo with Plex** (`theme::label_mono()` / `code_mono()`; the Appearance setting offers System
 and IBM Plex Sans, and Tight, Normal and Relaxed: 16 px text on 22, 24 or 26 px lines). Geometry
 is pinned by `crates/utopia-ui/tests/layout.rs`; the visual result is checked by the
 `UTOPIA_SHOT_SCRIPT` screenshots described under "Verifying a change". `UTOPIA_APPEARANCE=light|dark`

@@ -532,6 +532,7 @@ pub fn install(cx: &mut App, config_dir: &Path) -> Vec<String> {
         eprintln!("utopia: {w}");
     }
     let font = prefs.font;
+    crate::theme::set_system_mono_pair(font == UiFont::System);
     cx.set_global(Appearance {
         prefs,
         config_dir: config_dir.to_path_buf(),
@@ -711,6 +712,7 @@ pub fn load_font(cx: &mut App, font: UiFont) {
 
 fn apply(cx: &mut App, font: UiFont) {
     load_font(cx, font);
+    crate::theme::set_system_mono_pair(font == UiFont::System);
     cx.default_global::<Appearance>().prefs.font = font;
     // Views only re-render when notified; every window reads the font at its root.
     cx.refresh_windows();
