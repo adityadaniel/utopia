@@ -20,7 +20,7 @@ use gpui::{
     div, prelude::*, px, rgb, transparent_black, App, Div, ElementId, FontWeight, Global, Hsla,
     SharedString, Stateful, WindowAppearance,
 };
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::icons::{icon, Icon, ICON_SIZE};
 
@@ -749,35 +749,38 @@ pub fn nav_row(
 /// macOS (`/System/Library/Fonts/SFNSMono.ttf`), so nothing is bundled for it.
 pub const SF_MONO: &str = ".AppleSystemUIFontMonospaced";
 
-/// Whether the UI font in force is the system one (DESIGN.md §2.2). Process-wide, like the
-/// UI font itself: `appearance` sets it when the font is installed or changed, and the
-/// helpers that draw a label (`kbd`, `count_chip`…) only take the `Theme`, so the mono
+/// The UI font in force, as its index in `UiFont::ALL` (DESIGN.md §2.2). Process-wide,
+/// like the UI font itself: `appearance` sets it when the font is installed or changed, and
+/// the helpers that draw a label (`kbd`, `count_chip`…) only take the `Theme`, so the mono
 /// families are read here rather than from the `Appearance` global.
-static SYSTEM_PAIR: AtomicBool = AtomicBool::new(true);
+static MONO_PAIR: AtomicUsize = AtomicUsize::new(0);
 
-/// Pair the mono families with `system` (the System UI font) or not (IBM Plex Sans).
-pub(crate) fn set_system_mono_pair(system: bool) {
-    SYSTEM_PAIR.store(system, Ordering::Relaxed);
+/// Pair the mono families with `font`.
+pub(crate) fn set_mono_pair(font: crate::appearance::UiFont) {
+    let ix = crate::appearance::UiFont::ALL
+        .iter()
+        .position(|f| *f == font)
+        .unwrap_or(0);
+    MONO_PAIR.store(ix, Ordering::Relaxed);
 }
 
-/// The monospace family for code: SF Mono with the system font, Menlo with Plex.
+fn mono_pair() -> crate::appearance::UiFont {
+    crate::appearance::UiFont::ALL
+        .get(MONO_PAIR.load(Ordering::Relaxed))
+        .copied()
+        .unwrap_or_default()
+}
+
+/// The monospace family for code that pairs with the UI font in force
+/// ([`crate::appearance::UiFont::code_mono`]).
 pub fn code_mono() -> &'static str {
-    if SYSTEM_PAIR.load(Ordering::Relaxed) {
-        SF_MONO
-    } else {
-        "Menlo"
-    }
+    mono_pair().code_mono()
 }
 
-/// The mono family for labels, counts, shortcuts and weekday labels (§2.2): SF Mono with
-/// the system font, the bundled IBM Plex Mono with Plex Sans
-/// ([`crate::fonts::register_ibm_plex_mono`]).
+/// The mono family for labels, counts, shortcuts and weekday labels that pairs with the
+/// UI font in force ([`crate::appearance::UiFont::label_mono`]).
 pub fn label_mono() -> &'static str {
-    if SYSTEM_PAIR.load(Ordering::Relaxed) {
-        SF_MONO
-    } else {
-        crate::fonts::IBM_PLEX_MONO
-    }
+    mono_pair().label_mono()
 }
 
 /// The small count that follows a name (LR-2, DESIGN.md §3.4): mono 12 in `ink_3` on a
@@ -866,15 +869,25 @@ mod tests {
     use gpui::Rgba;
 
     /// DESIGN.md §2.2: the mono families pair with the UI font: SF Mono for labels and
-    /// code with the system font; Plex Mono labels and Menlo code with IBM Plex Sans.
+    /// code with the system font; Plex Mono labels and Menlo code with IBM Plex Sans; Geist
+    /// Mono for both with Geist.
     #[test]
     fn the_mono_families_follow_the_ui_font() {
-        set_system_mono_pair(false);
-        let plex = (label_mono(), code_mono());
-        set_system_mono_pair(true);
-        let system = (label_mono(), code_mono());
-        assert_eq!(plex, (crate::fonts::IBM_PLEX_MONO, "Menlo"));
-        assert_eq!(system, (SF_MONO, SF_MONO));
+        use crate::appearance::UiFont;
+        // The pure pairing, not the process-wide value: tests run in parallel and other
+        // tests install fonts too.
+        let pairs: Vec<_> = UiFont::ALL
+            .iter()
+            .map(|f| (f.label_mono(), f.code_mono()))
+            .collect();
+        assert_eq!(
+            pairs,
+            [
+                (SF_MONO, SF_MONO),
+                (crate::fonts::IBM_PLEX_MONO, "Menlo"),
+                (crate::fonts::GEIST_MONO, crate::fonts::GEIST_MONO),
+            ]
+        );
     }
 
     /// The verification shots need both schemes from a machine set to one: an environment
