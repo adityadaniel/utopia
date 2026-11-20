@@ -561,13 +561,13 @@ fn quick_jump_caps_its_height(cx: &mut TestAppContext) {
     );
 }
 
-/// ALL-5: Compact density does not break the palette — the rows still fit, in order.
+/// ALL-5: Tight density does not break the palette — the rows still fit, in order.
 #[gpui::test]
-fn quick_jump_works_at_compact_density(cx: &mut TestAppContext) {
+fn quick_jump_works_at_tight_density(cx: &mut TestAppContext) {
     let cx = setup(cx);
     let dir = tempfile::tempdir().unwrap();
     cx.update(|_window, cx| {
-        utopia_ui::appearance::set_density(cx, utopia_ui::appearance::Density::Compact, dir.path())
+        utopia_ui::appearance::set_density(cx, utopia_ui::appearance::Density::Tight, dir.path())
             .unwrap();
     });
     cx.simulate_keystrokes("escape cmd-k");
@@ -581,7 +581,7 @@ fn quick_jump_works_at_compact_density(cx: &mut TestAppContext) {
     let footer = bounds(cx, "jump-footer");
     assert!(
         footer.origin.y + footer.size.height <= palette.origin.y + palette.size.height + px(0.5),
-        "Compact keeps the footer inside: {footer:?} {palette:?}"
+        "Tight keeps the footer inside: {footer:?} {palette:?}"
     );
 }
 
@@ -782,7 +782,8 @@ fn empty_days_are_individual_list_items(cx: &mut TestAppContext) {
     ));
 }
 
-/// DESIGN.md §3.1: rows follow the 28 px line grid. The caret slot (20 px) sits in the
+/// DESIGN.md §3.1: rows follow the density's line grid (Normal: 24 px lines and 2 px
+/// between blocks). The caret slot (20 px) sits in the
 /// gutter, the bullet slot is 24 px, a 6 px bullet is centred in the first line, a
 /// top-level bullet's left edge lines up with the page title, and children step 45 px with
 /// a thread line under each ancestor's bullet.
@@ -802,10 +803,10 @@ fn block_rows_follow_the_line_grid_and_the_thread(cx: &mut TestAppContext) {
     let content2 = bounds(cx, "content-2");
     let content3 = bounds(cx, "content-3");
     assert!(
-        approx(row1.size.height, 28.),
-        "a one-line row is one 28 px line: {row1:?}"
+        approx(row1.size.height, 26.),
+        "a one-line row is one 24 px line and the 2 px gap: {row1:?}"
     );
-    assert!(approx(content1.size.height, 28.), "{content1:?}");
+    assert!(approx(content1.size.height, 24.), "{content1:?}");
     // The caret slot is 20 px and the bullet slot 24; the bullet sits 20 + 12 px in.
     let caret = bounds(cx, "caret-slot-1");
     let dot = bounds(cx, "dot-1");
@@ -1720,7 +1721,7 @@ fn the_right_sidebar_resizes_and_closes(cx: &mut TestAppContext) {
     assert!(approx(side.size.width, 440.), "{side:?}");
 }
 
-/// ALL-1: page title 28, H1 20, body 15 — measured as line boxes, since the heading used to
+/// ALL-1: page title 28, H1 20, body 16 — measured as line boxes, since the heading used to
 /// draw at 24 px (larger than H1 and close to the title).
 #[gpui::test]
 fn type_scale_caps_outline_headings_at_h1(cx: &mut TestAppContext) {
@@ -1740,11 +1741,11 @@ fn type_scale_caps_outline_headings_at_h1(cx: &mut TestAppContext) {
         title.size.height > h1.size.height,
         "the title outranks H1: {title:?} {h1:?}"
     );
-    // DESIGN.md §2.2: a section heading is 20 / 28 and body is 16 / 28, so the heading
-    // outranks the body by type size, not by line box: both rows are 28 px tall.
+    // DESIGN.md §2.2: a section heading is 20 / 28 at every density; the body's line box
+    // is the density's (24 at Normal), so the heading's is the taller one.
     assert!(
-        h1.size.height >= body.size.height && h1.size.height <= body.size.height + px(0.5),
-        "H1 and body share the 28 px line grid: {h1:?} {body:?}"
+        approx(h1.size.height, utopia_ui::theme::SECTION.line) && approx(body.size.height, 24.),
+        "H1 keeps its 28 px line, the body takes Normal's 24: {h1:?} {body:?}"
     );
     assert!(
         h1.size.height <= px(utopia_ui::theme::H1_SIZE + 8.),
@@ -1752,44 +1753,42 @@ fn type_scale_caps_outline_headings_at_h1(cx: &mut TestAppContext) {
     );
 }
 
-/// ALL-5: Compact shrinks the body and adds 4 px between blocks; both are measurable, and
-/// the setting applies to the open window without a restart.
+/// ALL-5: each density sets the body's line box and the gap between blocks (Normal 24 + 2,
+/// Tight 22 + 2, Relaxed 26 + 4), and a change applies to the open window without a restart.
 #[gpui::test]
-fn compact_density_is_tighter(cx: &mut TestAppContext) {
+fn each_density_sets_its_line_and_gap(cx: &mut TestAppContext) {
+    use utopia_ui::appearance::Density;
     let cx = setup(cx);
     cx.simulate_input("one");
     cx.simulate_keystrokes("enter");
     cx.simulate_input("two");
     cx.simulate_keystrokes("escape");
-    let body_before = bounds(cx, "content-1").size.height;
-    let row_before = bounds(cx, "row-1").size.height;
 
     let dir = tempfile::tempdir().unwrap();
-    cx.update(|_window, cx| {
-        utopia_ui::appearance::set_density(cx, utopia_ui::appearance::Density::Compact, dir.path())
-            .unwrap();
-    });
-    cx.run_until_parked();
-
-    assert!(
-        cx.debug_bounds("ui-density-compact").is_some(),
-        "the open window re-rendered at the new density"
-    );
-    let body_after = bounds(cx, "content-1").size.height;
-    let row_after = bounds(cx, "row-1").size.height;
-    assert!(
-        approx(body_after, 18.),
-        "Compact body is 13.5 px on an 18 px line: {body_after:?}"
-    );
-    assert!(
-        body_after < body_before && row_after < row_before,
-        "Compact is tighter: body {body_before:?} -> {body_after:?}, \
-         row {row_before:?} -> {row_after:?}"
-    );
-    assert!(
-        approx(row_after - body_after, 4.),
-        "4 px of block spacing: row {row_after:?}, body {body_after:?}"
-    );
+    for (density, selector, line, gap) in [
+        (Density::Normal, "ui-density-normal", 24., 2.),
+        (Density::Tight, "ui-density-tight", 22., 2.),
+        (Density::Relaxed, "ui-density-relaxed", 26., 4.),
+    ] {
+        cx.update(|_window, cx| {
+            utopia_ui::appearance::set_density(cx, density, dir.path()).unwrap();
+        });
+        cx.run_until_parked();
+        assert!(
+            cx.debug_bounds(selector).is_some(),
+            "the open window re-rendered at {density:?}"
+        );
+        let body = bounds(cx, "content-1").size.height;
+        let row = bounds(cx, "row-1").size.height;
+        assert!(
+            approx(body, line),
+            "{density:?}: a {line} px line: {body:?}"
+        );
+        assert!(
+            approx(row - body, gap),
+            "{density:?}: {gap} px between blocks: row {row:?}, body {body:?}"
+        );
+    }
 }
 
 /// A fresh page window for one menu state, so no debug bounds from the other state linger.
@@ -2412,9 +2411,9 @@ fn mini_calendar_opens_days_and_marks_notes(cx: &mut TestAppContext) {
 }
 
 /// DESIGN.md §3.2 fixes the sidebar's page rows at 32 px; the density setting tightens
-/// blocks, not this chrome.
+/// blocks, not this chrome. The file uses the older "compact" key, which reads as Tight.
 #[gpui::test]
-fn sidebar_rows_keep_the_spec_height_in_compact(cx: &mut TestAppContext) {
+fn sidebar_rows_keep_the_spec_height_in_tight(cx: &mut TestAppContext) {
     let cx = setup_seeded(cx, |s| {
         s.create_page("Alpha").unwrap();
     });
@@ -2431,8 +2430,8 @@ fn sidebar_rows_keep_the_spec_height_in_compact(cx: &mut TestAppContext) {
     });
     cx.run_until_parked();
     assert!(
-        cx.debug_bounds("ui-density-compact").is_some(),
-        "the workspace was drawn again in Compact"
+        cx.debug_bounds("ui-density-tight").is_some(),
+        "the workspace was drawn again in Tight"
     );
     let after = bounds_of(cx, "page-row-0".into());
     assert!(
@@ -2952,7 +2951,7 @@ fn a_lower_property_block_is_a_normal_bullet(cx: &mut TestAppContext) {
     // Both roots are bullets, the lower property included.
     bounds(cx, "content-1");
     let lower = bounds(cx, "content-2");
-    assert!(lower.size.height >= px(28.), "{lower:?}");
+    assert!(lower.size.height >= px(24.), "a whole body line: {lower:?}");
 }
 
 /// DESIGN.md §3.8 rule 4: no leading properties means only the "Add property" row (and the

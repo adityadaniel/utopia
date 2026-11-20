@@ -1233,42 +1233,50 @@ mod appearance {
         (main, settings.into(), target, w)
     }
 
-    /// Settings → Appearance: DESIGN.md §2.2 makes IBM Plex Sans the default; picking
-    /// System applies it to every open window at once and writes it to `settings.json`
-    /// (not `keymap.json`), versioned, and Plex Sans can be picked back.
+    /// Settings → Appearance: DESIGN.md §2.2 makes the system font the default; picking
+    /// IBM Plex Sans applies it to every open window at once and writes it to
+    /// `settings.json` (not `keymap.json`), versioned, and System can be picked back.
     #[gpui::test]
     fn choosing_a_font_applies_everywhere_and_is_saved(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (main, settings) = open_both(cx, dir.path());
-        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::IbmPlexSans);
+        assert_eq!(cx.update(|cx| appearance::ui_font(cx)), UiFont::System);
         assert!(settings_json(dir.path()).is_none(), "nothing saved yet");
         {
             let mut w = VisualTestContext::from_window(main, cx);
-            assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
+            assert!(w.debug_bounds("ui-font-system").is_some());
         }
 
         let mut s = VisualTestContext::from_window(settings, cx);
         s.run_until_parked();
-        assert!(s.debug_bounds("settings-ui-font-ibm-plex-sans").is_some());
+        assert!(s.debug_bounds("settings-ui-font-system").is_some());
         let option = s
-            .debug_bounds("settings-font-system")
-            .expect("the System choice is shown");
+            .debug_bounds("settings-font-ibm-plex-sans")
+            .expect("the IBM Plex Sans choice is shown");
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
 
-        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::System);
+        assert_eq!(
+            s.update(|_, cx| appearance::ui_font(cx)),
+            UiFont::IbmPlexSans
+        );
+        assert_eq!(
+            s.update(|_, cx| appearance::font_family(cx)),
+            "IBM Plex Sans",
+            "the family the bundled faces register under"
+        );
         // Both windows were drawn again with the new family at their root, unprompted.
-        assert!(s.debug_bounds("settings-ui-font-system").is_some());
+        assert!(s.debug_bounds("settings-ui-font-ibm-plex-sans").is_some());
         let mut w = VisualTestContext::from_window(main, cx);
         w.run_until_parked();
-        assert!(w.debug_bounds("ui-font-system").is_some());
+        assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
 
         assert_eq!(
             settings_json(dir.path()),
             Some(serde_json::json!({
                 "version": 1,
-                "font": "system",
-                "density": "comfortable",
+                "font": "ibm-plex-sans",
+                "density": "normal",
                 "indent": "wide",
                 "ref_children": 2,
                 "pinned": [],
@@ -1281,73 +1289,77 @@ mod appearance {
             "the font is not a keybinding"
         );
 
-        // And back: IBM Plex Sans is written down too, so the choice is explicit.
+        // And back: System is written down too, so the choice is explicit.
         let mut s = VisualTestContext::from_window(settings, cx);
-        let option = s.debug_bounds("settings-font-ibm-plex-sans").unwrap();
+        let option = s.debug_bounds("settings-font-system").unwrap();
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
-        assert_eq!(
-            s.update(|_, cx| appearance::ui_font(cx)),
-            UiFont::IbmPlexSans
-        );
-        assert_eq!(
-            s.update(|_, cx| appearance::font_family(cx)),
-            "IBM Plex Sans",
-            "the family the bundled faces register under"
-        );
+        assert_eq!(s.update(|_, cx| appearance::ui_font(cx)), UiFont::System);
         assert_eq!(
             settings_json(dir.path()).unwrap()["font"],
-            "ibm-plex-sans",
+            "system",
             "switching back is saved"
         );
     }
 
-    /// ALL-5: density is a local preference like the font. Picking Compact applies to every
-    /// open window and is written to settings.json; Comfortable can be picked back.
+    /// ALL-5: density is a local preference like the font. Normal is the default; picking
+    /// Tight or Relaxed applies to every open window and is written to settings.json;
+    /// Normal can be picked back.
     #[gpui::test]
     fn choosing_density_applies_everywhere_and_is_saved(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         let (main, settings) = open_both(cx, dir.path());
-        assert_eq!(
-            cx.update(|cx| appearance::density(cx)),
-            Density::Comfortable
-        );
+        assert_eq!(cx.update(|cx| appearance::density(cx)), Density::Normal);
         assert!(settings_json(dir.path()).is_none(), "nothing saved yet");
         {
             let mut w = VisualTestContext::from_window(main, cx);
-            assert!(w.debug_bounds("ui-density-comfortable").is_some());
+            assert!(w.debug_bounds("ui-density-normal").is_some());
         }
 
         let mut s = VisualTestContext::from_window(settings, cx);
         s.run_until_parked();
-        assert!(s.debug_bounds("settings-ui-density-comfortable").is_some());
-        let option = s
-            .debug_bounds("settings-density-compact")
-            .expect("the Compact choice is shown");
+        assert!(s.debug_bounds("settings-ui-density-normal").is_some());
+        for (key, option, root, main_root, want) in [
+            (
+                "relaxed",
+                "settings-density-relaxed",
+                "settings-ui-density-relaxed",
+                "ui-density-relaxed",
+                Density::Relaxed,
+            ),
+            (
+                "tight",
+                "settings-density-tight",
+                "settings-ui-density-tight",
+                "ui-density-tight",
+                Density::Tight,
+            ),
+        ] {
+            let option = s
+                .debug_bounds(option)
+                .unwrap_or_else(|| panic!("the {key} choice is shown"));
+            s.simulate_click(option.center(), Modifiers::default());
+            s.run_until_parked();
+
+            assert_eq!(s.update(|_, cx| appearance::density(cx)), want);
+            assert!(s.debug_bounds(root).is_some(), "{key}");
+            let mut w = VisualTestContext::from_window(main, cx);
+            w.run_until_parked();
+            assert!(
+                w.debug_bounds(main_root).is_some(),
+                "the main window was redrawn {key} without being asked"
+            );
+            let saved = settings_json(dir.path()).expect("settings.json written");
+            assert_eq!(saved["density"], key);
+            assert_eq!(saved["font"], "system", "the font is kept");
+        }
+
+        // And back: Normal is explicit in the file, like System.
+        let option = s.debug_bounds("settings-density-normal").unwrap();
         s.simulate_click(option.center(), Modifiers::default());
         s.run_until_parked();
-
-        assert_eq!(s.update(|_, cx| appearance::density(cx)), Density::Compact);
-        assert!(s.debug_bounds("settings-ui-density-compact").is_some());
-        let mut w = VisualTestContext::from_window(main, cx);
-        w.run_until_parked();
-        assert!(
-            w.debug_bounds("ui-density-compact").is_some(),
-            "the main window was redrawn compact without being asked"
-        );
-        let saved = settings_json(dir.path()).expect("settings.json written");
-        assert_eq!(saved["density"], "compact");
-        assert_eq!(saved["font"], "ibm-plex-sans", "the font is kept");
-
-        // And back: Comfortable is explicit in the file, like System.
-        let option = s.debug_bounds("settings-density-comfortable").unwrap();
-        s.simulate_click(option.center(), Modifiers::default());
-        s.run_until_parked();
-        assert_eq!(
-            s.update(|_, cx| appearance::density(cx)),
-            Density::Comfortable
-        );
-        assert_eq!(settings_json(dir.path()).unwrap()["density"], "comfortable");
+        assert_eq!(s.update(|_, cx| appearance::density(cx)), Density::Normal);
+        assert_eq!(settings_json(dir.path()).unwrap()["density"], "normal");
     }
 
     /// DESIGN.md §3.1: the indent step is a local preference like the density. Picking
@@ -1370,7 +1382,7 @@ mod appearance {
         assert_eq!(s.update(|_, cx| appearance::indent(cx)), Indent::Narrow);
         let saved = settings_json(dir.path()).expect("settings.json written");
         assert_eq!(saved["indent"], "narrow");
-        assert_eq!(saved["font"], "ibm-plex-sans", "the font is kept");
+        assert_eq!(saved["font"], "system", "the font is kept");
 
         let option = s.debug_bounds("settings-indent-wide").unwrap();
         s.simulate_click(option.center(), Modifiers::default());
@@ -1465,7 +1477,7 @@ mod appearance {
         assert_eq!(prefs.pinned, vec![page.clone()]);
         assert_eq!(
             prefs.density,
-            Density::Comfortable,
+            Density::Normal,
             "pinning does not disturb the other preferences"
         );
 
@@ -1566,8 +1578,8 @@ mod appearance {
         assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
     }
 
-    /// Rule 11: an unknown font in the file comes up as the default (IBM Plex Sans, §2.2),
-    /// says so, and the window opens.
+    /// Rule 11: an unknown font in the file comes up as the default (the system font,
+    /// §2.2), says so, and the window opens.
     #[gpui::test]
     fn an_unknown_font_falls_back_to_the_default(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1582,7 +1594,7 @@ mod appearance {
 
         let (main, settings) = open_both(cx, dir.path());
         let mut w = VisualTestContext::from_window(main, cx);
-        assert!(w.debug_bounds("ui-font-ibm-plex-sans").is_some());
+        assert!(w.debug_bounds("ui-font-system").is_some());
         let view = settings.downcast::<SettingsView>().unwrap();
         let warning = cx
             .read(|cx| view.read(cx).map(|v| v.warning().map(str::to_string)))

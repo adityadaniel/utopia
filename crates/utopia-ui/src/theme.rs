@@ -810,8 +810,8 @@ pub const H2_SIZE: f32 = 18.;
 pub const H3_SIZE: f32 = 17.;
 pub const BODY_SIZE: f32 = BODY.size;
 pub const CAPTION_SIZE: f32 = SMALL_TIGHT.size;
-/// Body text and leading at the default (Comfortable) density. `Density` in
-/// [`crate::appearance`] picks these or the compact pair.
+/// The Body role's text and leading. An outline row takes its line box from `Density` in
+/// [`crate::appearance`] instead (22, 24 or 26 px); this is the fallback before a layout.
 pub const TEXT_SIZE: f32 = BODY.size;
 pub const LINE_HEIGHT: f32 = BODY.line;
 /// The UI caps visual indentation; deeper blocks show a depth badge (§6.1).
