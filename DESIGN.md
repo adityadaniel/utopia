@@ -72,7 +72,7 @@ Rules:
 
 ### 2.2 Typography
 
-Fonts: the **system font** (SF Pro on macOS; 400, 500, 600) for everything people read, by default. Settings → Appearance can switch that role to **IBM Plex Sans**. The mono font pairs with it, for small labels, counts, shortcuts, weekday labels (400, 500) and code blocks: **SF Mono** with the system font (the system's monospaced UI font, `.AppleSystemUIFontMonospaced`, so nothing is bundled), and with IBM Plex Sans, **IBM Plex Mono** for the labels and Menlo for code. Both Plex fonts are bundled under `crates/utopia-ui/assets/fonts`.
+Fonts: the **system font** (SF Pro on macOS; 400, 500, 600) for everything people read, by default. Settings → Appearance can switch that role to **IBM Plex Sans** or **Geist**. The mono font pairs with it, for small labels, counts, shortcuts, weekday labels (400, 500) and code blocks: **SF Mono** with the system font (the system's monospaced UI font, `.AppleSystemUIFontMonospaced`, so nothing is bundled), with IBM Plex Sans, **IBM Plex Mono** for the labels and Menlo for code, and with Geist, **Geist Mono** for both (Vercel's pair). The Plex and Geist fonts are bundled under `crates/utopia-ui/assets/fonts`. Geist 1.3.1 has no italic faces, so italic text in Geist is drawn upright.
 
 The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight travel together).
 
