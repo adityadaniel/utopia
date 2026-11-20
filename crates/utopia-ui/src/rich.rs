@@ -771,29 +771,92 @@ fn link_boxes(
 }
 
 /// Syntax colouring for the focused block's source text: references are coloured, the
-/// characters themselves are untouched so caret offsets map 1:1.
+/// characters themselves are untouched so caret offsets map 1:1. A Markdown link
+/// `[text](url)` (or image `![alt](url)`) colours its `[text]` as a reference and its
+/// `(url)` in `--muted`, so a long address stays quiet (DESIGN.md §3.1).
 pub fn source_highlights(src: &str, theme: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
-    extract_refs(src)
+    let color = |c| HighlightStyle {
+        color: Some(c),
+        ..Default::default()
+    };
+    let mut out: Vec<_> = extract_refs(src)
         .into_iter()
         .map(|r| {
-            let color = match r.kind {
+            let c = match r.kind {
                 RefKind::Tag => theme.tag_ink,
                 _ => theme.link,
             };
-            (
-                r.range,
-                HighlightStyle {
-                    color: Some(color),
-                    ..Default::default()
-                },
-            )
+            (r.range, color(c))
         })
-        .collect()
+        .collect();
+    for (label, url) in markdown_link_parts(src, &parse(src)) {
+        out.push((label, color(theme.link)));
+        out.push((url, color(theme.muted)));
+    }
+    out.sort_by_key(|(r, _)| r.start);
+    out
+}
+
+/// The `[text]` and `(url)` source ranges of every Markdown link and image in `nodes`,
+/// inside emphasis too. Links that are not written as `[text](url)` (an attachment
+/// widget `{{pdf: …}}` parses as a link) are skipped.
+fn markdown_link_parts(src: &str, nodes: &[Inline]) -> Vec<(Range<usize>, Range<usize>)> {
+    let mut out = Vec::new();
+    for n in nodes {
+        match n {
+            Inline::Emph { children, .. } => out.extend(markdown_link_parts(src, children)),
+            Inline::Link { text, range, .. } => {
+                let start = if src[range.clone()].starts_with("![") {
+                    range.start + 1
+                } else {
+                    range.start
+                };
+                if !src[start..range.end].starts_with('[') {
+                    continue;
+                }
+                // `[` + text + `]`, then `(url)` to the end.
+                let mid = start + 1 + text.len() + 1;
+                out.push((range.start..mid, mid..range.end));
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// DESIGN.md §3.1: in the raw text being edited, a Markdown link's `[text]` is
+    /// `--link` like a reference and its `(url)` is `--muted`; a `#` in the URL is not a
+    /// tag. Ranges come back in order, so gpui can draw them.
+    #[test]
+    fn source_highlights_colour_markdown_links() {
+        let t = Theme::light();
+        let src = "Reading [Notes](https://x.y/inc/#a-b). For [[Utopia]], see ![p](blob:ab)";
+        let hl = source_highlights(src, &t);
+        let got: Vec<(&str, Hsla)> = hl
+            .iter()
+            .map(|(r, st)| (&src[r.clone()], st.color.unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("[Notes]", t.link),
+                ("(https://x.y/inc/#a-b)", t.muted),
+                ("[[Utopia]]", t.link),
+                ("![p]", t.link),
+                ("(blob:ab)", t.muted),
+            ]
+        );
+        let starts: Vec<_> = hl.iter().map(|(r, _)| r.start).collect();
+        assert!(starts.windows(2).all(|w| w[0] < w[1]), "{starts:?}");
+        assert!(
+            source_highlights("**[b](u)**", &t).len() == 2,
+            "a link inside emphasis is coloured too"
+        );
+    }
 
     #[test]
     fn renders_refs_as_links_without_brackets() {

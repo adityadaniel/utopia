@@ -187,7 +187,7 @@ Each component lists its states. A state that is not listed does not change the 
 | State (row) | Look |
 |---|---|
 | Hover | The caret shows in the gutter; the bullet becomes a grip (2 × 3 dots, 2px each, `--bullet`) |
-| Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link` and a tag is `--tag-ink` |
+| Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link`, a tag is `--tag-ink`, and a Markdown link's `[text]` is `--link` with its `(url)` in `--muted` |
 | Selected (block selection) | `--selection` fill behind the row |
 
 | State (checkbox) | Look |
