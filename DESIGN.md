@@ -144,7 +144,7 @@ No shadows anywhere. Use borders instead. The only exception is the inset focus 
 
 ### 2.5 Icons
 
-16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. One set (Lucide). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks).
+16px line icons, 2px stroke (1.75 for the 18px panel icons), round caps and joins, color `--ink-3`. One set (Lucide). Icons needed: search, calendar, page, person, sidebar-left, sidebar-right, arrow-left, arrow-right, chevron-down, chevron-right, chevron-left, plus, filter, star, settings, list (aliases), dashed-circle (status), square-check (Tasks), pin (the top bar's pin toggle).
 
 Also in the set: close (×), more (⋯), check, grip, paperclip, file, image, clock, command, hash, lock, undo, plus the Settings tab icons. A text character is never an icon: "×", "▾", "✓", "⌘", "📎" and the like are drawn from the set, so they take the icon colour and size. (The arrow after an external link, §3.1, is text on purpose: it is part of the link.)
 
@@ -239,7 +239,7 @@ There is no "Recent days" list: the feed already shows the days.
 Back and forward icon buttons (forward is `--disabled` when there's nothing to go forward to), a title or breadcrumb, then actions on the right.
 
 - Daily Notes: title "Daily Notes", then a day navigation group (prev | Today | next) with a 1px `--line-strong` border, radius 8, 32px tall, then the view mode control (§3.9), then a toggle for the right panel.
-- Page view: the current page's title in `--ink` 500, then the more (⋯) button, the view mode control and the right panel toggle. The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, Pin or Unpin, then a divider and Delete page as the danger item.
+- Page view: the current page's title in `--ink` 500, then the pin button, the more (⋯) button, the view mode control and the right panel toggle. The pin button is a ghost icon button (pin icon) that pins the page to the sidebar's Pinned group in one click; when the page is pinned it has the selected look of a choice chip (§3.16: `--line-soft` fill, `--link` icon) and no hover fill, and its tooltip says "Unpin from sidebar" (otherwise "Pin to sidebar"). The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, then a divider and Delete page as the danger item. A page card's ⋯ menu in the right panel (§4.6) keeps Pin to sidebar, because a card has no room for a second button.
 - **Title or trail.** In Single mode the top bar shows only the current title. The pages before it are history, not a place the page sits in (pages have no hierarchy), so they are not drawn as a "›" trail. Back's tooltip names the page it goes to ("Back to Atlas Launch"). In Panes mode the top bar shows the trail of open panes (§4.3), because those panes are on screen side by side.
 
 1px `--line-soft` bottom border.

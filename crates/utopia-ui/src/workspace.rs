@@ -4095,8 +4095,10 @@ impl Workspace {
             );
         if journal {
             bar = bar.child(self.day_nav(cx));
-        } else if page.is_some() && !draft {
-            bar = bar.child(self.page_menu_button(cx));
+        } else if let Some(p) = page.clone().filter(|_| !draft) {
+            bar = bar
+                .child(self.pin_button(p, cx))
+                .child(self.page_menu_button(cx));
         }
         bar = bar.child(self.mode_toggle(&th, cx));
         if self.mode == ViewMode::Panes {
@@ -4297,6 +4299,42 @@ impl Workspace {
             .into_any_element()
     }
 
+    /// The pin toggle beside ⋯ (DESIGN.md §3.3): pinning is a one-click choice, so it is a
+    /// button on the bar, not a menu item. On, it has the selected look of a choice chip
+    /// (§3.16: `--line-soft` fill, `--link` icon), and the hover fill stays off it so hover
+    /// never reads as selected. Local state in `settings.json` (SB-3, rule 9).
+    fn pin_button(&self, page: PageId, cx: &mut Context<Self>) -> AnyElement {
+        let th = theme(cx).clone();
+        let pinned = crate::appearance::is_pinned(cx, &page);
+        div()
+            .id("page-pin")
+            .debug_selector(move || format!("page-pin-{}", if pinned { "on" } else { "off" }))
+            .size(px(crate::theme::GHOST_BUTTON))
+            .flex_none()
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(RADIUS_CONTROL))
+            .cursor_pointer()
+            .when(pinned, |d| d.bg(th.line_soft))
+            .when(!pinned, |d| d.hover(|d| d.bg(th.hover)))
+            .tooltip(tip(if pinned {
+                "Unpin from sidebar"
+            } else {
+                "Pin to sidebar"
+            }))
+            .child(icon(
+                Icon::Pin,
+                ICON_SIZE,
+                if pinned { th.link } else { th.ink_3 },
+            ))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_pin(page.clone(), cx);
+                cx.notify();
+            }))
+            .into_any_element()
+    }
+
     /// The page view's ⋯ button and its menu (DESIGN.md §3.3): the page actions that exist,
     /// with Delete page last. It floats under the button, so opening it never moves the page.
     fn page_menu_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -4328,12 +4366,8 @@ impl Workspace {
 
     fn page_menu_popup(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let th = theme(cx).clone();
-        let page = self.current().read(cx).page();
         let kind = self.current().read(cx).page_kind();
         let has_aliases = self.current().read(cx).has_aliases();
-        let pinned = page
-            .as_ref()
-            .is_some_and(|p| crate::appearance::is_pinned(cx, p));
         let graph = quiet_control("page-menu-graph", "Open in graph", &th)
             .debug_selector(|| "page-menu-graph".into())
             .on_click(cx.listener(|this, _, _, cx| {
@@ -4370,24 +4404,6 @@ impl Workspace {
                     cx.notify();
                 }))
         });
-        let pin = page.clone().map(|p| {
-            let pin_page = p.clone();
-            quiet_control(
-                "page-menu-pin",
-                if pinned {
-                    "Unpin from sidebar"
-                } else {
-                    "Pin to sidebar"
-                },
-                &th,
-            )
-            .debug_selector(|| "page-menu-pin".into())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.page_menu = false;
-                this.toggle_pin(pin_page.clone(), cx);
-                cx.notify();
-            }))
-        });
         let delete = quiet_danger("page-menu-delete", "Delete page", &th)
             .debug_selector(|| "page-menu-delete".into())
             .on_click(cx.listener(|this, _, _, cx| {
@@ -4415,7 +4431,6 @@ impl Workspace {
             .child(export.w_full().justify_start())
             .children(rename.map(|r| r.w_full().justify_start()))
             .children(rewrite.map(|r| r.w_full().justify_start()))
-            .children(pin.map(|p| p.w_full().justify_start()))
             .child(div().h(px(1.)).my_1().bg(th.line))
             .child(delete.w_full().justify_start())
             .on_mouse_down_out(cx.listener(|this, _, _, cx| {
