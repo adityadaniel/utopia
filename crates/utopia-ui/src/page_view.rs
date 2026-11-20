@@ -24,12 +24,12 @@ use crate::line_input::{LineInput, LineInputEvent};
 use crate::pane_stack::Click;
 use crate::rich::{self, LinkTarget};
 use crate::theme::{
-    outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme, today_pill,
-    AVATAR_SIZE, AVATAR_TEXT, BLOCK_TEXT_LEFT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE, CARET_SLOT,
-    COLLAPSED_RING, COMPACT_INDENT, CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM, CONTENT_PADDING_TOP,
-    CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE, DAY_DIVIDER_BELOW, DAY_GAP,
-    DAY_HEADER_GAP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT, EMPTY_DAY_WEEKDAY_WIDTH, LABEL,
-    LABEL_MONO, MAX_VISUAL_DEPTH, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_REFS_GAP,
+    label_mono, outline_button, quiet_control, quiet_danger, quiet_menu, ref_type_label, theme,
+    today_pill, AVATAR_SIZE, AVATAR_TEXT, BLOCK_TEXT_LEFT, BULLET_SIZE, BULLET_SLOT, CARET_SIZE,
+    CARET_SLOT, COLLAPSED_RING, COMPACT_INDENT, CONTENT_MAX_WIDTH, CONTENT_PADDING_BOTTOM,
+    CONTENT_PADDING_TOP, CONTENT_PADDING_TOP_PAGE, CONTENT_PADDING_X, DAY_CAPTION_LINE,
+    DAY_DIVIDER_BELOW, DAY_GAP, DAY_HEADER_GAP, DAY_TITLE, EMPTY_DAY_GAP, EMPTY_DAY_HEIGHT,
+    EMPTY_DAY_WEEKDAY_WIDTH, LABEL, MAX_VISUAL_DEPTH, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_REFS_GAP,
     PROPERTY_GAP_BELOW_TITLE, PROPERTY_HOVER_BLEED, PROPERTY_ICON, PROPERTY_KEY_WIDTH,
     PROPERTY_KEY_WIDTH_COMPACT, PROPERTY_PADDING_Y, PROPERTY_ROW_MIN_HEIGHT, ROW_GUTTER,
     ROW_HOVER_BLEED, STATUS_DOT, STATUS_PILL_HEIGHT, STATUS_PILL_PADDING_X, THREAD_OFFSET,
@@ -3559,7 +3559,7 @@ impl PageView {
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
-                                .font_family(crate::theme::MONO)
+                                .font_family(crate::theme::code_mono())
                                 .text_size(px(TODO_CHECK_SIZE))
                                 .when(r.checked, |d| d.bg(th.link).text_color(th.paper).child("✓"))
                                 .on_click(
@@ -3600,7 +3600,7 @@ impl PageView {
                                     .rounded(px(crate::theme::RADIUS_CONTROL))
                                     .px_2()
                                     .py_1()
-                                    .font_family(crate::theme::MONO)
+                                    .font_family(crate::theme::code_mono())
                                     .text_size(px(crate::theme::CODE_TEXT_SIZE));
                                 match &code {
                                     Some((lang, _, _)) => card.child(
@@ -5094,7 +5094,7 @@ impl PageView {
                         .flex()
                         .items_center()
                         .gap_1()
-                        .font_family(LABEL_MONO)
+                        .font_family(label_mono())
                         .text_size(px(LABEL.size))
                         .text_color(th.muted)
                         .child(
@@ -5181,7 +5181,7 @@ impl PageView {
                         div()
                             .debug_selector(move || weekday_sel.clone())
                             .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
-                            .font_family(LABEL_MONO)
+                            .font_family(label_mono())
                             .text_size(px(LABEL.size))
                             .text_color(th.muted)
                             .child(weekday),
@@ -6270,7 +6270,7 @@ impl Render for PageView {
                                     div()
                                         .flex_none()
                                         .w(px(EMPTY_DAY_WEEKDAY_WIDTH))
-                                        .font_family(LABEL_MONO)
+                                        .font_family(label_mono())
                                         .text_size(px(LABEL.size))
                                         .text_color(th.muted)
                                         .child(h.weekday.clone()),

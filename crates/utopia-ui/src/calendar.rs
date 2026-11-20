@@ -8,7 +8,7 @@ use gpui::{div, prelude::*, px, Context, Div, MouseButton, MouseDownEvent, Windo
 
 use crate::icons::Icon;
 use crate::theme::{
-    ghost_icon, theme, CALENDAR_CELL_HEIGHT, CALENDAR_DOT, LABEL_MONO, SIDEBAR_LABEL,
+    ghost_icon, label_mono, theme, CALENDAR_CELL_HEIGHT, CALENDAR_DOT, SIDEBAR_LABEL,
 };
 
 /// The nearest thing to an accessible label for an icon-only button: gpui 0.2 has no
@@ -206,7 +206,7 @@ pub fn render_month_strip<V: 'static>(
                 .flex_1()
                 .flex()
                 .justify_center()
-                .font_family(LABEL_MONO)
+                .font_family(label_mono())
                 .text_size(px(SIDEBAR_LABEL.size))
                 .text_color(th.muted)
                 .child(*n)

@@ -31,8 +31,8 @@ use crate::sync_runner::{
 };
 use crate::tasks_view::{TaskFilter, TasksEvent, TasksView};
 use crate::theme::{
-    ghost_icon, ghost_text, kbd, nav_row, quiet_control, quiet_danger, theme, BUTTON_HEIGHT, COUNT,
-    FOOTER_DOT, LABEL_MONO, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
+    ghost_icon, ghost_text, kbd, label_mono, nav_row, quiet_control, quiet_danger, theme,
+    BUTTON_HEIGHT, COUNT, FOOTER_DOT, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
     RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT,
     TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI,
     VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
@@ -2728,7 +2728,7 @@ impl Workspace {
                 div()
                     .debug_selector(move || format!("{group}-count-{index}"))
                     .flex_none()
-                    .font_family(LABEL_MONO)
+                    .font_family(label_mono())
                     .text_size(px(COUNT.size))
                     // §3.2: `ink_3`, not `muted`, which fails on an active row (§2.1).
                     .text_color(th.ink_3)
@@ -2781,7 +2781,7 @@ impl Workspace {
                 .debug_selector(move || id.into())
                 .mt_3()
                 .px_2()
-                .font_family(LABEL_MONO)
+                .font_family(label_mono())
                 .text_size(px(SIDEBAR_LABEL.size))
                 .font_weight(SIDEBAR_LABEL.weight)
                 .text_color(th.muted)
@@ -2900,7 +2900,7 @@ impl Workspace {
                 div()
                     .debug_selector(|| "tasks-nav-count".into())
                     .flex_none()
-                    .font_family(crate::theme::LABEL_MONO)
+                    .font_family(crate::theme::label_mono())
                     .text_size(px(crate::theme::COUNT.size))
                     .font_weight(gpui::FontWeight::NORMAL)
                     .text_color(th.ink_3)
@@ -4177,7 +4177,7 @@ impl Workspace {
                     .child(f.label())
                     .child(
                         div()
-                            .font_family(crate::theme::LABEL_MONO)
+                            .font_family(crate::theme::label_mono())
                             .text_size(px(crate::theme::COUNT.size))
                             .font_weight(gpui::FontWeight::NORMAL)
                             // `muted` fails on the `selected` fill (DESIGN.md §2.1, §3.9).

@@ -20,6 +20,7 @@ use gpui::{
     div, prelude::*, px, rgb, transparent_black, App, Div, ElementId, FontWeight, Global, Hsla,
     SharedString, Stateful, WindowAppearance,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::icons::{icon, Icon, ICON_SIZE};
 
@@ -698,7 +699,7 @@ pub fn kbd(label: impl Into<SharedString>, th: &Theme) -> Div {
         .px(px(KBD_PADDING_X))
         .rounded(px(RADIUS_CHIP))
         .bg(th.hover)
-        .font_family(LABEL_MONO)
+        .font_family(label_mono())
         .text_size(px(COUNT.size))
         .text_color(th.ink_3)
         .child(label.into())
@@ -740,19 +741,47 @@ pub fn nav_row(
         .child(div().flex_1().min_w_0().truncate().child(label.into()))
 }
 
-/// The one monospace family for code: Menlo, whatever the notes are set in.
-pub const MONO: &str = "Menlo";
+/// SF Mono, by the name CoreText gives the system's monospaced UI font. It ships with
+/// macOS (`/System/Library/Fonts/SFNSMono.ttf`), so nothing is bundled for it.
+pub const SF_MONO: &str = ".AppleSystemUIFontMonospaced";
 
-/// The mono family for labels, counts, shortcuts and weekday labels (§2.2): the bundled
-/// IBM Plex Mono, registered by [`crate::fonts::register_ibm_plex_mono`].
-pub const LABEL_MONO: &str = crate::fonts::IBM_PLEX_MONO;
+/// Whether the UI font in force is the system one (DESIGN.md §2.2). Process-wide, like the
+/// UI font itself: `appearance` sets it when the font is installed or changed, and the
+/// helpers that draw a label (`kbd`, `count_chip`…) only take the `Theme`, so the mono
+/// families are read here rather than from the `Appearance` global.
+static SYSTEM_PAIR: AtomicBool = AtomicBool::new(true);
+
+/// Pair the mono families with `system` (the System UI font) or not (IBM Plex Sans).
+pub(crate) fn set_system_mono_pair(system: bool) {
+    SYSTEM_PAIR.store(system, Ordering::Relaxed);
+}
+
+/// The monospace family for code: SF Mono with the system font, Menlo with Plex.
+pub fn code_mono() -> &'static str {
+    if SYSTEM_PAIR.load(Ordering::Relaxed) {
+        SF_MONO
+    } else {
+        "Menlo"
+    }
+}
+
+/// The mono family for labels, counts, shortcuts and weekday labels (§2.2): SF Mono with
+/// the system font, the bundled IBM Plex Mono with Plex Sans
+/// ([`crate::fonts::register_ibm_plex_mono`]).
+pub fn label_mono() -> &'static str {
+    if SYSTEM_PAIR.load(Ordering::Relaxed) {
+        SF_MONO
+    } else {
+        crate::fonts::IBM_PLEX_MONO
+    }
+}
 
 /// The small count that follows a name (LR-2, DESIGN.md §3.4): mono 12 in `ink_3` on a
 /// `line_soft` badge, fully round.
 pub fn count_chip(count: usize, th: &Theme) -> Div {
     div()
         .flex_none()
-        .font_family(LABEL_MONO)
+        .font_family(label_mono())
         .text_size(px(COUNT.size))
         .text_color(th.ink_3)
         .bg(th.line_soft)
@@ -773,7 +802,7 @@ pub fn today_pill(label: impl Into<SharedString>, th: &Theme) -> Div {
         .px(px(REF_TYPE_PADDING_X))
         .rounded_full()
         .bg(th.link_tint)
-        .font_family(LABEL_MONO)
+        .font_family(label_mono())
         .text_size(px(PILL.size))
         .font_weight(PILL.weight)
         .text_color(th.link)
@@ -792,7 +821,7 @@ pub fn ref_type_label(label: impl Into<SharedString>, th: &Theme) -> Div {
         .border_1()
         .border_color(th.line_strong)
         .bg(th.paper)
-        .font_family(LABEL_MONO)
+        .font_family(label_mono())
         .text_size(px(REF_LABEL.size))
         .text_color(th.ink_3)
         .child(label.into())
@@ -831,6 +860,18 @@ pub fn heading_metrics(level: u8) -> (f32, f32) {
 mod tests {
     use super::*;
     use gpui::Rgba;
+
+    /// DESIGN.md §2.2: the mono families pair with the UI font: SF Mono for labels and
+    /// code with the system font; Plex Mono labels and Menlo code with IBM Plex Sans.
+    #[test]
+    fn the_mono_families_follow_the_ui_font() {
+        set_system_mono_pair(false);
+        let plex = (label_mono(), code_mono());
+        set_system_mono_pair(true);
+        let system = (label_mono(), code_mono());
+        assert_eq!(plex, (crate::fonts::IBM_PLEX_MONO, "Menlo"));
+        assert_eq!(system, (SF_MONO, SF_MONO));
+    }
 
     /// The verification shots need both schemes from a machine set to one: an environment
     /// pin decides the theme, and without it the window still follows the system.
