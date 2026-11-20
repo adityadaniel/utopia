@@ -10,7 +10,7 @@
 //! {
 //!   "version": 1,
 //!   "font": "ibm-plex-sans",
-//!   "density": "comfortable",
+//!   "density": "normal",
 //!   "indent": "wide",
 //!   "ref_children": 2,
 //!   "pinned": [],
@@ -19,8 +19,9 @@
 //! }
 //! ```
 //!
-//! `font` is `"ibm-plex-sans"` (the default) or `"system"`; `density` is
-//! `"comfortable"` (the default) or `"compact"` (ALL-5); `indent` is `"wide"` (the
+//! `font` is `"system"` (the default) or `"ibm-plex-sans"`; `density` is
+//! `"tight"`, `"normal"` (the default) or `"relaxed"` (ALL-5; the older `"compact"` and
+//! `"comfortable"` still read, as tight and normal); `indent` is `"wide"` (the
 //! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `ref_children` is how many
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
@@ -40,7 +41,7 @@ use utopia_core::PageId;
 
 use crate::fonts::{register_ibm_plex_mono, register_ibm_plex_sans, IBM_PLEX_SANS};
 pub use crate::pane_stack::ViewMode;
-use crate::theme::{BODY_SIZE, CHILD_INDENT, LINE_HEIGHT, NARROW_INDENT};
+use crate::theme::{BODY_SIZE, CHILD_INDENT, NARROW_INDENT};
 
 pub const FILE: &str = "settings.json";
 pub const VERSION: u64 = 1;
@@ -53,11 +54,10 @@ pub const REF_CHILDREN_MAX: usize = 3;
 /// labels always use the bundled IBM Plex Mono (DESIGN.md §2.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UiFont {
-    /// The platform's UI font (SF Pro on macOS), kept as an option for readers who
-    /// prefer it; not the default.
-    System,
-    /// IBM Plex Sans, bundled with the app (`crate::fonts`). The default (DESIGN.md §2.2).
+    /// The platform's UI font (SF Pro on macOS). The default (DESIGN.md §2.2).
     #[default]
+    System,
+    /// IBM Plex Sans, bundled with the app (`crate::fonts`), for readers who prefer it.
     IbmPlexSans,
 }
 
@@ -118,56 +118,67 @@ pub trait UiFontExt: Styled + Sized {
 
 impl<E: Styled> UiFontExt for E {}
 
-/// How tightly blocks are set (ALL-5). Local to the machine, like the font.
+/// How tightly blocks are set (ALL-5). Local to the machine, like the font. The three
+/// options change only the spacing: the body stays at 16 px in each (DESIGN.md §2.2).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Density {
-    /// The body at 15 px on 24 px lines, as before the setting existed.
+    /// 22 px lines (1.375) and 2 px between blocks: the most blocks on the screen.
+    Tight,
+    /// 24 px lines (1.5) and 2 px between blocks. The default.
     #[default]
-    Comfortable,
-    /// 13.5 px body, 18 px lines and 4 px between blocks.
-    Compact,
+    Normal,
+    /// 26 px lines (1.625) and 4 px between blocks: the most open.
+    Relaxed,
 }
 
 impl Density {
-    pub const ALL: &'static [Density] = &[Density::Comfortable, Density::Compact];
+    pub const ALL: &'static [Density] = &[Density::Tight, Density::Normal, Density::Relaxed];
 
     pub fn key(self) -> &'static str {
         match self {
-            Density::Comfortable => "comfortable",
-            Density::Compact => "compact",
+            Density::Tight => "tight",
+            Density::Normal => "normal",
+            Density::Relaxed => "relaxed",
         }
     }
 
+    /// Also reads the two keys written before the three options existed. `"comfortable"`
+    /// was the default, and saving any other preference wrote it too, so it is no choice
+    /// and becomes the new default; `"compact"` was chosen, so it stays the tight one.
     pub fn from_key(key: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|d| d.key() == key)
+        match key {
+            "comfortable" => Some(Density::Normal),
+            "compact" => Some(Density::Tight),
+            _ => Self::ALL.iter().copied().find(|d| d.key() == key),
+        }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Density::Comfortable => "Comfortable",
-            Density::Compact => "Compact",
+            Density::Tight => "Tight",
+            Density::Normal => "Normal",
+            Density::Relaxed => "Relaxed",
         }
     }
 
     pub fn text_size(self) -> f32 {
-        match self {
-            Density::Comfortable => BODY_SIZE,
-            Density::Compact => 13.5,
-        }
+        BODY_SIZE
     }
 
     pub fn line_height(self) -> f32 {
         match self {
-            Density::Comfortable => LINE_HEIGHT,
-            Density::Compact => 18.,
+            Density::Tight => 22.,
+            Density::Normal => 24.,
+            Density::Relaxed => 26.,
         }
     }
 
-    /// Space between two blocks. Rows take half of it above and half below.
+    /// Space between two blocks. Rows take half of it above and half below. It is more
+    /// than the space between the lines of one block, so a wrapped block reads as one.
     pub fn block_spacing(self) -> f32 {
         match self {
-            Density::Comfortable => 0.,
-            Density::Compact => 4.,
+            Density::Tight | Density::Normal => 2.,
+            Density::Relaxed => 4.,
         }
     }
 }
@@ -306,12 +317,16 @@ impl Prefs {
         let density = match rest.remove("density") {
             None => Density::default(),
             Some(Value::String(s)) => Density::from_key(&s).unwrap_or_else(|| {
-                warnings.push(format!("{FILE}: unknown density {s:?}; using Comfortable"));
+                warnings.push(format!(
+                    "{FILE}: unknown density {s:?}; using {}",
+                    Density::default().label()
+                ));
                 Density::default()
             }),
             Some(v) => {
                 warnings.push(format!(
-                    "{FILE}: density should be a string, not {v}; using Comfortable"
+                    "{FILE}: density should be a string, not {v}; using {}",
+                    Density::default().label()
                 ));
                 Density::default()
             }
@@ -539,7 +554,7 @@ pub fn font_family(cx: &App) -> SharedString {
     ui_font(cx).family().into()
 }
 
-/// The density in force. Comfortable when nothing was installed (tests, early startup).
+/// The density in force. The default (Normal) when nothing was installed (tests, early startup).
 pub fn density(cx: &App) -> Density {
     cx.try_global::<Appearance>()
         .map_or(Density::default(), |a| a.prefs.density)
@@ -719,7 +734,7 @@ mod tests {
     fn round_trip() {
         let p = Prefs {
             font: UiFont::IbmPlexSans,
-            density: Density::Compact,
+            density: Density::Relaxed,
             indent: Indent::Narrow,
             ref_children: 0,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
@@ -734,7 +749,7 @@ mod tests {
             serde_json::json!({
                 "version": 1,
                 "font": "ibm-plex-sans",
-                "density": "compact",
+                "density": "relaxed",
                 "indent": "narrow",
                 "ref_children": 0,
                 "pinned": ["page-a", "page-b"],
@@ -831,7 +846,8 @@ mod tests {
     #[test]
     fn missing_keys_are_defaults_without_complaint() {
         assert_eq!(Prefs::from_json("{}"), (Prefs::default(), vec![]));
-        assert_eq!(Prefs::default().density, Density::Comfortable);
+        assert_eq!(Prefs::default().density, Density::Normal);
+        assert_eq!(Prefs::default().font, UiFont::System);
         assert_eq!(
             Prefs::default().ref_children,
             DEFAULT_REF_CHILDREN,
@@ -884,13 +900,47 @@ mod tests {
         );
     }
 
-    /// An unknown density is the comfortable one, said out loud, never a panic (rule 11).
+    /// An unknown density is the default (normal) one, said out loud, never a panic
+    /// (rule 11).
     #[test]
-    fn an_unknown_density_falls_back_to_comfortable() {
+    fn an_unknown_density_falls_back_to_the_default() {
         let (p, warnings) = Prefs::from_json(r#"{"version": 1, "density": "tiny"}"#);
-        assert_eq!(p.density, Density::Comfortable);
+        assert_eq!(p.density, Density::Normal);
         assert_eq!(warnings.len(), 1, "{warnings:?}");
         assert!(warnings[0].contains("tiny"), "{warnings:?}");
+        assert!(warnings[0].contains("Normal"), "{warnings:?}");
+    }
+
+    /// A file from before the three options keeps working with no warning: the old
+    /// default becomes the new default, and the old tight choice stays tight.
+    #[test]
+    fn the_older_density_keys_still_read() {
+        for (key, want) in [
+            ("comfortable", Density::Normal),
+            ("compact", Density::Tight),
+            ("tight", Density::Tight),
+            ("normal", Density::Normal),
+            ("relaxed", Density::Relaxed),
+        ] {
+            let (p, warnings) =
+                Prefs::from_json(&format!(r#"{{"version": 1, "density": "{key}"}}"#));
+            assert_eq!(p.density, want, "{key}");
+            assert!(warnings.is_empty(), "{key}: {warnings:?}");
+        }
+    }
+
+    /// Each option is 16 px text; a block's lines sit closer than two blocks do.
+    #[test]
+    fn the_densities_step_in_spacing_only() {
+        let pitch = |d: Density| d.line_height() + d.block_spacing();
+        assert_eq!(
+            Density::ALL.iter().map(|&d| pitch(d)).collect::<Vec<_>>(),
+            [24., 26., 30.]
+        );
+        for &d in Density::ALL {
+            assert_eq!(d.text_size(), BODY_SIZE, "{d:?}");
+            assert!(d.block_spacing() > 0., "{d:?}");
+        }
     }
 
     /// DESIGN.md §3.1: the indent step is Wide (45 px) unless the file says Narrow; a value
@@ -938,7 +988,7 @@ mod tests {
             warnings.is_empty(),
             "the removed key is kept silently: {warnings:?}"
         );
-        assert_eq!(p.density, Density::Compact);
+        assert_eq!(p.density, Density::Tight);
 
         // Saving after another change keeps the key and the rest of the file.
         let p = Prefs {
@@ -950,7 +1000,10 @@ mod tests {
             serde_json::from_str(&std::fs::read_to_string(dir.path().join(FILE)).unwrap()).unwrap();
         assert_eq!(v["attribute-blocks"], "blocks", "the unknown key survives");
         assert_eq!(v["font"], "ibm-plex-sans");
-        assert_eq!(v["density"], "compact");
+        assert_eq!(
+            v["density"], "tight",
+            "the old key is saved under its new name"
+        );
         assert_eq!(v["ref_children"], 2);
     }
 

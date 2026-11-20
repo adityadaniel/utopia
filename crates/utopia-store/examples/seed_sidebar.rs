@@ -162,7 +162,7 @@ fn main() {
     s.sync_index().unwrap();
 
     let prefs = format!(
-        "{{\n  \"version\": 1,\n  \"font\": \"system\",\n  \"density\": \"comfortable\",\n  \"pinned\": [\"{}\", \"{}\"]\n}}\n",
+        "{{\n  \"version\": 1,\n  \"font\": \"system\",\n  \"density\": \"normal\",\n  \"pinned\": [\"{}\", \"{}\"]\n}}\n",
         atlas.as_str(),
         reading.as_str()
     );

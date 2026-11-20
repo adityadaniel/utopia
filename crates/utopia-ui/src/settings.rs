@@ -2,7 +2,7 @@
 //! side as System Settings has it (ST-5):
 //!
 //! - **Appearance** — the font notes and the interface are set in (System or the bundled
-//!   IBM Plex Sans), how densely blocks are set (Comfortable or Compact) and how far
+//!   IBM Plex Sans), how densely blocks are set (Tight, Normal or Relaxed) and how far
 //!   children indent (Wide, 45 px, or Narrow, 26 px). Applies to every window at once;
 //!   kept in `settings.json` ([`crate::appearance`]), not in `keymap.json`.
 //! - **Keybindings** — every action in [`crate::actions::CATALOG`] with the keys in force,
@@ -718,7 +718,7 @@ impl Render for SettingsView {
                     .items_center()
                     .gap_2()
                     .px_2()
-                    .py(px(if density == Density::Compact { 5. } else { 8. }))
+                    .py(px(if density == Density::Tight { 5. } else { 8. }))
                     .rounded(px(crate::theme::RADIUS_CONTROL))
                     .cursor_pointer()
                     .text_size(px(crate::theme::CONTROL_SIZE))
@@ -920,7 +920,7 @@ fn card_row<E: Styled + gpui::prelude::FluentBuilder>(
     density: Density,
 ) -> E {
     row.px_4()
-        .py(px(if density == Density::Compact { 7. } else { 11. }))
+        .py(px(if density == Density::Tight { 7. } else { 11. }))
         .when(i > 0, |d| d.border_t_1().border_color(th.line))
 }
 
@@ -938,7 +938,7 @@ fn key_card_row<E: Styled + gpui::prelude::FluentBuilder>(
         .mx_auto()
         .flex_shrink_0()
         .px_4()
-        .py(px(if density == Density::Compact { 7. } else { 11. }))
+        .py(px(if density == Density::Tight { 7. } else { 11. }))
         .border_l_1()
         .border_r_1()
         .border_t_1()

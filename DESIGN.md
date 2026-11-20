@@ -68,7 +68,7 @@ Rules:
 
 ### 2.2 Typography
 
-Fonts: **IBM Plex Sans** (400, 500, 600) for everything people read. **IBM Plex Mono** (400, 500) for small labels, counts, shortcuts and weekday labels. Both are bundled under `crates/utopia-ui/assets/fonts`; code blocks use Menlo. Settings → Appearance can switch the Sans role to the system font.
+Fonts: the **system font** (SF Pro on macOS; 400, 500, 600) for everything people read, by default. Settings → Appearance can switch that role to **IBM Plex Sans**. **IBM Plex Mono** (400, 500) for small labels, counts, shortcuts and weekday labels, in both cases. Both Plex fonts are bundled under `crates/utopia-ui/assets/fonts`; code blocks use Menlo.
 
 The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight travel together).
 
@@ -95,14 +95,14 @@ The ramp. Each role is a `TypeRole` in `theme.rs` (size, line height and weight 
 
 Rules:
 - Use a role, never a bare size. The 15, 17, 18 and 26 sizes exist only for the roles that name them; don't reuse them for anything else.
-- **Density.** Settings → Appearance → Density sets Block text: 16 / 28 (Comfortable) or 13.5 / 18 (Compact, with 4px between blocks). Every role in the table keeps its size in both.
+- **Density.** Settings → Appearance → Density sets the line box of Block text and the space between blocks; the text stays 16px. **Tight** 22 + 2 (1.375), **Normal** 24 + 2 (1.5, the default), **Relaxed** 26 + 4 (1.625). The gap between blocks is what tells a new block from the next line of a long one, so no option has 0. Every other role in the table keeps its size and line height in all three: a heading keeps its own line box. (Chosen 2026-11-20 over 16 / 28 with no gap, where two blocks sat as far apart as two lines of one block, and 13.5 / 18, which was too small to read.) A settings file that says `compact` reads as Tight and one that says `comfortable` as Normal.
 - GPUI 0.2 has no letter-spacing, so titles and labels have none (§7). macOS draws text antialiased by itself.
 
 ### 2.3 Spacing and dimensions
 
 **Spacing** (gaps and padding): 4px base. Allowed values: 4, 8, 12, 16, 20, 24, 32, 40, 48, 56, 64, 72, 96.
 
-Inside a component, a padding may be off the scale when it centres content in a fixed height or on the 28px line grid. These are the only ones: tag chip and Today pill 0 7, count badge 1 8, reference group header 14 top, property bar 6, checkbox gap 10, bullet-to-text 15. A new one is listed here with its reason.
+Inside a component, a padding may be off the scale when it centres content in a fixed height or on the block line grid. These are the only ones: tag chip and Today pill 0 7, count badge 1 8, reference group header 14 top, property bar 6, checkbox gap 10, bullet-to-text 15. A new one is listed here with its reason.
 
 - Content column: max width **760px**, centered, padding 48px top (56 on a page view), 40px sides, 96px bottom.
 - Between days: 40px above the 1px `--line-soft` divider and **24px below it**, on every kind of day section (open day, empty-day group). The first day has no divider.
@@ -116,7 +116,7 @@ Inside a component, a padding may be off the scale when it centres content in a 
 | Sidebar | 264 wide (min 240) |
 | Top bar, and the window's top band (§3.18) | min 52 tall |
 | Traffic lights (close button's top left, room they take) | at 20, 19 / 64 wide |
-| Block line grid | 28 |
+| Block line grid (Tight / Normal / Relaxed) | 22 + 2 / 24 + 2 / 26 + 4 (line + gap between blocks) |
 | Caret slot / bullet slot | 20 / 24 |
 | Child indent (wide / narrow / compact pane) | 45 / 26 / 22 (31 margin + 13 padding + 1 thread line for wide) |
 | Empty day row, pinned day header row | 44 tall |
@@ -168,7 +168,7 @@ Each component lists its states. A state that is not listed does not change the 
 
 ### 3.1 Block (outliner row)
 
-- The row height follows a **28px line grid**. Bullets, carets and checkboxes are vertically centered within the first 28px line.
+- The row height follows the **density's line grid** (§2.2; Normal: 24px lines and 2px between blocks, 1px above and 1px below the row). Bullets, carets and checkboxes are vertically centered within the first line.
 - Layout from left: caret slot (20px, sits in the left gutter outside the text column) → bullet slot (24px) → content. A top-level bullet's left edge sits on the page title's left edge; the text starts 15px further in (the rest of the bullet slot).
 - Bullet: 6px circle, `--bullet`.
 - Collapsed block: the bullet gets a 12px `--line-strong` ring around a 6px `--ink-3` dot, and the caret points right.
@@ -358,7 +358,7 @@ Used for the view mode (Panes | Single, §4.4) and the Tasks filter (Open | Done
 
 Used by the Tasks view (§4.5).
 
-- Task row: the §3.1 to-do (16px checkbox, 10px gap, Block text on the 28px grid). A done task is `--muted` with a strikethrough.
+- Task row: the §3.1 to-do (16px checkbox, 10px gap, Block text on the density's line grid). A done task is `--muted` with a strikethrough.
 - Context line (the parent is a plain block): Caption-size 13/20 `--muted` under the task text, aligned with it, 4px tighter to the task above.
 - Nested to-do: indented under its parent's checkbox with the §3.1 thread line.
 - Due label: after the text on the right, Mono 11 UPPERCASE, round, padding 4px 7px. **Overdue** is `--danger` on `--danger-bg`; **Today** is `--link` on `--link-tint`. The date itself stays in the text as a date link.
@@ -676,7 +676,7 @@ A second window (⌘,), 1100 × 760, at least 900 × 520, titled "Settings". Pre
 - **Rail:** 220 wide, `--shelf`, 1px `--line` on its right, padding 16 12. The caption "Settings" in Caption 500 `--muted`, then one nav row (§3.2: icon, label, the same hover and active states) for each tab: Appearance, Keybindings, Shortcuts, Sync, Assistants, Help.
 - **Pane:** `--paper`. The tab's name in the Section heading role, 24px from the top and the sides. The content is one column, at most 720 wide, centred, with 16px between its parts. Only the content scrolls; the rail and the heading stay.
 - **Card:** a group of rows. A caption row (Caption 500 `--muted`, `--well` fill, padding 12 16 6), then the rows, 1px `--line` between them and around the card, radius 10. 16px between cards.
-- **Row:** padding 8 16 (in the Keybindings list, 11 16, and 7 16 in Compact). The label in Block text, a line of help under it in Caption `--muted`, and the control at the right. A row that can be clicked has the `--hover` fill on hover.
+- **Row:** padding 8 16 (in the Keybindings list, 11 16, and 7 16 in Tight). The label in Block text, a line of help under it in Caption `--muted`, and the control at the right. A row that can be clicked has the `--hover` fill on hover.
 - **Strips** at the bottom of the window: §3.17.
 
 The tabs:

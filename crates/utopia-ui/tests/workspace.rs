@@ -8211,7 +8211,13 @@ fn a_bare_url_opens_from_a_block_at_rest(cx: &mut TestAppContext) {
     let sel: &'static str = Box::leak(format!("text-{}", block.0).into_boxed_str());
     let text = cx.debug_bounds(sel).expect("the block shows as text");
     assert_eq!(cx.opened_url(), None);
-    cx.simulate_click(text.center(), Modifiers::default());
+    // On the URL's first characters: the text box spans the column, so its centre can be
+    // past the end of a short line (Compact, 13.5 px), where a click edits instead.
+    let on_url = gpui::point(
+        text.origin.x + gpui::px(24.),
+        text.origin.y + text.size.height / 2.,
+    );
+    cx.simulate_click(on_url, Modifiers::default());
     cx.run_until_parked();
     assert_eq!(cx.opened_url().as_deref(), Some(url));
 }
