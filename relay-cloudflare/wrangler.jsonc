@@ -24,12 +24,15 @@
       "preview_bucket_name": "utopia-relay-blobs"
     }
   ],
+  // RELAY_TOKENS (accepted bearer tokens, comma-separated) is deliberately not a var: it is
+  // a secret (`wrangler secret put RELAY_TOKENS`), and a var of the same name would be
+  // deployed in plain text next to it. Locally it comes from `.dev.vars` (copy
+  // `.dev.vars.example`) or `--var RELAY_TOKENS:<token>`; the tests set it in
+  // vitest.config.ts. Unset means every request is 401 unless ALLOW_ANONYMOUS is "1"
+  // (unlike utopia-syncd, an empty token list does not silently disable auth).
   "vars": {
-    // Accepted bearer tokens, comma-separated. Empty means every request is 401 unless
-    // ALLOW_ANONYMOUS is "1" (unlike utopia-syncd, an empty token list does not silently
-    // disable auth). Set the real value with `wrangler secret put RELAY_TOKENS`.
-    "RELAY_TOKENS": "",
-    // Per-graph storage limit: 1 GiB, matching utopia-syncd's default (PRD §12.8).
+    // Per-graph storage limit: 1 GiB, matching utopia-syncd's default (PRD §12.8). Not a
+    // secret: change it here, or for one run with `--var QUOTA_BYTES:<bytes>`.
     "QUOTA_BYTES": "1073741824"
   }
 }

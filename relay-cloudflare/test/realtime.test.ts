@@ -100,6 +100,68 @@ describe("realtime notices", () => {
     expect((await graph.pushOutcome([update("c:1", "after close")])).accepted).toBe(1);
   });
 
+  it("the close handler never throws, whatever code the socket closed with", async () => {
+    // 1005 (a close frame with no code) and 1006 (the TCP connection dropped, which is how
+    // the Rust client's `realtime::Listener` stops) are reserved: they arrive at
+    // `webSocketClose` but `WebSocket.close` refuses to send them. 1015 is the same.
+    const graph = new Graph();
+    const codes = [1000, 1001, 1005, 1006, 1011, 1015, 3000, 4999, 0, 999, 5000];
+    const failures = await graph.inDo(async (instance, state) => {
+      const failed: string[] = [];
+      for (const code of codes) {
+        for (const reason of ["", "x".repeat(200)]) {
+          const pair = new WebSocketPair();
+          const server = pair[1];
+          state.acceptWebSocket(server);
+          try {
+            await instance.webSocketClose(server, code, reason, false);
+          } catch (e) {
+            failed.push(`${code}/${reason.length}: ${String(e)}`);
+          }
+          // A second call on the same, now closed, socket is harmless too.
+          try {
+            await instance.webSocketClose(server, code, reason, true);
+          } catch (e) {
+            failed.push(`${code}/${reason.length} again: ${String(e)}`);
+          }
+        }
+      }
+      return failed;
+    });
+    expect(failures).toEqual([]);
+  });
+
+  it("a client that closes without a code is let go, and the graph keeps working", async () => {
+    // End to end: `close()` with no code sends a close frame without one, which reaches
+    // the object as 1005. The runtime only logs what the handler throws, so the handler is
+    // wrapped on this object's instance to see the code it got and anything it threw.
+    const graph = new Graph();
+    const seen: { code: number; error: string | null }[] = [];
+    await graph.inDo((instance) => {
+      const original = instance.webSocketClose.bind(instance);
+      instance.webSocketClose = async (ws, code, reason, wasClean) => {
+        try {
+          await original(ws, code, reason, wasClean);
+          seen.push({ code, error: null });
+        } catch (e) {
+          seen.push({ code, error: String(e) });
+        }
+      };
+    });
+    const socket = await connect(graph);
+    const stays = await connect(graph);
+    socket.close();
+    for (let i = 0; i < 80 && seen.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    expect(seen).toEqual([{ code: 1005, error: null }]);
+    expect(await graph.inDo((_instance, state) => state.getWebSockets().length)).toBe(1);
+    const notice = nextMessage(stays);
+    expect((await graph.pushOutcome([update("c:1", "after a bare close")])).accepted).toBe(1);
+    expect(JSON.parse(await notice)).toEqual({ page_id: PID, head_seq: 1 });
+    stays.close(1000, "done");
+  });
+
   it("ignores messages the client sends", async () => {
     const graph = new Graph();
     const socket = await connect(graph);

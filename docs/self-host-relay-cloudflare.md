@@ -24,6 +24,9 @@ Utopia (Mac)  ──HTTPS/WebSocket──▶  Worker (routing, auth, validation,
 
 - **One Worker** (`src/index.ts`, logic in `src/relay.ts`) routes, authenticates, validates
   ids and hashes, enforces the 64 MiB body limit and decodes zstd before a graph is touched.
+  The bearer token stops at the Worker: it is not passed to the Durable Object or stored.
+  Attachment uploads are streamed through to R2, never held whole in memory (a Worker
+  isolate has 128 MB).
 - **One SQLite-backed Durable Object per graph** (`src/graph.ts`, class `GraphObject`,
   `idFromName(gid)`): the per-page append-only update log, the snapshot per page, the graph
   revision, the relay's instance id, and an index of the attachments. This is
@@ -84,7 +87,7 @@ TOML) are named identically.
       "preview_bucket_name": "utopia-relay-blobs"
     }
   ],
-  "vars": { "RELAY_TOKENS": "", "QUOTA_BYTES": "1073741824" }
+  "vars": { "QUOTA_BYTES": "1073741824" }
 }
 ```
 
@@ -94,10 +97,13 @@ TOML) are named identically.
   your account; adding a class or changing its storage backend is a new tag, not an edit.
 - **R2 binding.** `bucket_name` is the bucket you create below. `preview_bucket_name` is
   only for `wrangler dev --remote`; `--local` simulates the bucket on disk.
-- **`RELAY_TOKENS`** in `vars` is a placeholder for local development. A deploy sets the
-  real value as a secret.
-- **`QUOTA_BYTES`** is optional and defaults to 1 GiB per graph, the same as
-  `utopia-syncd`'s default. It counts the update log plus snapshots plus attachment sizes.
+- **`RELAY_TOKENS` is not in `vars`, on purpose.** It is a secret (below), and a var of the
+  same name would be deployed in plain text next to it. Local development reads it from
+  `relay-cloudflare/.dev.vars` (gitignored; copy `.dev.vars.example`) or from
+  `--var RELAY_TOKENS:<token>`; the tests set it in `vitest.config.ts`.
+- **`QUOTA_BYTES`** is an ordinary var, not a secret, and defaults to 1 GiB per graph, the
+  same as `utopia-syncd`'s default. It counts the update log plus snapshots plus attachment
+  sizes.
 
 ### Create the R2 bucket
 
@@ -132,10 +138,11 @@ npx wrangler secret put RELAY_TOKENS       # paste it at the prompt (or pipe it 
 `<new>,<old>` until every device has the new one. The secret's value is never printed by
 wrangler and never reaches the graph.
 
-The `vars.RELAY_TOKENS: ""` in `wrangler.jsonc` is a local-development placeholder with the
-same name as the secret. The secret wins at runtime (wrangler warns about the shadowing on
-deploy); if your wrangler version refuses the deploy instead, delete that `vars` entry and
-keep the value only as a secret.
+Set it **before the first deploy**: until the secret exists, the deployed relay answers
+401 to everything (an unset `RELAY_TOKENS` refuses everyone, see below). `wrangler.jsonc`
+has no `RELAY_TOKENS` var to shadow it, so the secret is the only value a deployment sees.
+For `wrangler dev`, put a throwaway token in `relay-cloudflare/.dev.vars` instead
+(`cp .dev.vars.example .dev.vars`); that file is gitignored and is never deployed.
 
 Deliberate difference from `utopia-syncd`: an **empty token list means refuse everyone**,
 not "auth off". A relay whose secret failed to load must not silently accept the internet.
@@ -144,10 +151,14 @@ knob and must never be in a deploy.
 
 ### Optional: the quota
 
-```bash
-npx wrangler secret put QUOTA_BYTES        # e.g. 2147483648 for 2 GiB per graph
+`QUOTA_BYTES` is not a secret. Change it in `wrangler.jsonc` and deploy again:
+
+```jsonc
+"vars": { "QUOTA_BYTES": "2147483648" }   // 2 GiB per graph
 ```
 
+Do not also set it with `wrangler secret put`: a secret and a var of one name conflict
+(depending on the wrangler version, a deploy warns about the shadowing or refuses).
 A per-graph limit: a push or attachment over it is refused with 413 and the client keeps
 its outbox (`quota_rejects_and_keeps_the_outbox`). Dedupe runs before the quota, so a batch
 whose response was lost is never refused for its own bytes (§12.6). A missing, empty or
@@ -157,15 +168,17 @@ unparseable value is the 1 GiB default, never a zero-byte quota.
 
 ```bash
 cd relay-cloudflare
-npm test                                   # vitest, real workerd, ~2 s
-npm run dev -- --var RELAY_TOKENS:dev-token --persist-to .wrangler/state
+npm test                                   # vitest, real workerd, a few seconds
+cp .dev.vars.example .dev.vars             # RELAY_TOKENS=dev-token, gitignored
+npm run dev -- --persist-to .wrangler/state
 curl -H 'Authorization: Bearer dev-token' http://127.0.0.1:8787/v1/graphs/g1/manifest
 ```
 
-Wrangler keeps the local relay's storage in `relay-cloudflare/.wrangler/state` (SQLite
-files for each Durable Object, R2 objects, the local trace store). `RM_STATE=1` on the
-first script below starts from an empty one. The request-count script writes its own state
-under `target/`.
+Instead of `.dev.vars`, `--var RELAY_TOKENS:dev-token` on the `npm run dev` line works too
+(the scripts below do that). Wrangler keeps the local relay's storage in `relay-cloudflare/.wrangler/state` (SQLite
+files for each Durable Object, R2 objects, the local trace store). The scripts below write
+their own state under `target/` instead: the first gives every run a fresh directory
+(`UTOPIA_RELAY_STATE_DIR` names another), so two runs never share one.
 
 `npm test` covers the protocol, quota, blobs, realtime and the chunked large-payload path;
 `npm run typecheck` proves the types. Neither needs an account or the network.
@@ -173,17 +186,27 @@ under `target/`.
 Three scripts in `scripts/` run **the real Utopia client** against the Worker this way:
 
 ```bash
-relay-cloudflare/scripts/test-against-rust-client.sh   # the Rust sync client, 12 scenarios
+relay-cloudflare/scripts/test-against-rust-client.sh   # the relay contract + differential test
 relay-cloudflare/scripts/e2e-two-instances.sh          # two daemons, E2E on, MCP edits
 relay-cloudflare/scripts/measure-requests.sh           # Worker requests/min, idle vs active
 ```
 
 `test-against-rust-client.sh` starts `wrangler dev --local` on a free port, sets
 `RELAY_TOKENS=test-token`, waits for `/healthz`, then runs
-`cargo test -p utopia-syncd --test cloudflare` twice: the client scenarios with a 1 GiB
-quota, then the two quota scenarios with `QUOTA_BYTES=4096` on a second wrangler instance.
-It always stops wrangler. Without `UTOPIA_RELAY_URL` the Rust tests print a skip and pass,
-so `make check` needs no Node.
+`cargo test -p utopia-syncd --test cloudflare --test differential` twice: the client
+scenarios and the differential script with a 1 GiB quota, then the quota scenarios with
+`QUOTA_BYTES=4096` on a second wrangler instance. It always stops wrangler. It sets
+`UTOPIA_RELAY_REQUIRED=1`, so a missing or unreachable Worker fails rather than skips;
+without `UTOPIA_RELAY_URL` (and that switch) the Rust tests print a skip and pass, so
+`make check` needs no Node. `make relay-check` runs `tsc`, `npm test` and this script in
+one go, and `.github/workflows/relay.yml` runs the same steps in CI on every pull request
+that touches a relay, the wire format or the sync client.
+
+The scenarios are the relay contract (`crates/utopia-syncd/tests/contract/mod.rs`), which
+`tests/http.rs` also runs against `utopia-syncd` on every `cargo test`, so both relays meet
+the same list. `tests/differential.rs` sends one script of raw requests to both and
+compares the answers; the differences it finds are recorded there and in
+`relay-cloudflare/README.md`.
 
 What those tests prove, against the Worker rather than against the Rust relay:
 
@@ -194,7 +217,7 @@ What those tests prove, against the Worker rather than against the Rust relay:
 | `auth_is_enforced` | 401 on a wrong token, `NeedsAuth`, the outbox kept; the right token syncs |
 | `ac_12_3_a_change_id_repeated_in_one_batch_is_a_duplicate` | one id twice in one batch: accepted once, stored once |
 | `ac_12_6_a_replayed_batch_is_a_duplicate_even_at_the_quota` | dedupe before quota (small-quota run) |
-| `ac_12_6_a_lost_ack_is_replayed_not_rejected` | a lost response is re-pushed; the relay stored the batch once |
+| `ac_12_6_a_lost_ack_is_replayed_not_rejected_by_quota` | a lost response is re-pushed under a quota with room for one copy; the relay stored and charged the batch once (small-quota run) |
 | `quota_rejects_and_keeps_the_outbox` | 413 and the outbox survives (small-quota run) |
 | `snapshots_compact_the_log_and_bootstrap_new_devices` | the log truncates (`tail_bytes`), a new device bootstraps the latest text |
 | `e2e_encrypted_sync_relay_sees_only_ciphertext` | a wrong passphrase fails; a canary string is on the devices and in none of wrangler's state files |
@@ -214,10 +237,25 @@ CLI/MCP upload path, so upload and download are covered by
 
 ## Deploy
 
+The checklist, in order, the first time:
+
+1. `npx wrangler r2 bucket create utopia-relay-blobs` ([above](#create-the-r2-bucket)).
+2. `npx wrangler secret put RELAY_TOKENS` with a token from `openssl rand -hex 32`
+   ([above](#set-the-relay-token)). It is a secret only; `wrangler.jsonc` has no var of
+   that name.
+3. Optionally, change `vars.QUOTA_BYTES` in `wrangler.jsonc` ([above](#optional-the-quota)).
+   It is a var, not a secret.
+4. Make sure `ALLOW_ANONYMOUS` is set nowhere a deploy reads it (`wrangler.jsonc`, a
+   secret). It belongs only in a local `.dev.vars`, and `.dev.vars` is never deployed.
+5. Deploy:
+
 ```bash
 cd relay-cloudflare
 npx wrangler deploy
 ```
+
+6. Check it: `curl https://utopia-relay.<your-subdomain>.workers.dev/healthz` answers `ok`,
+   and a manifest request without the token answers 401.
 
 The first deploy applies the `v1` migration. The output prints the Worker's URL, usually
 `https://utopia-relay.<your-subdomain>.workers.dev`. A custom domain works too (Routes →
@@ -258,8 +296,15 @@ Protocol-visible differences: none. These are behavioural, and each is a deliber
    afterwards, so a client can always compact.
 6. **No hash check on blobs** (matching the Rust relay): blobs may be ciphertext, and the
    client verifies after decrypting.
-7. **Identity is the token**, and tokens are per relay, not per graph.
-8. **No attachment garbage collection.** Removing a page or block does not delete its R2
+7. **The token is neither forwarded nor stored.** `utopia-syncd` writes the caller's token in
+   plain text to `graph.owner_id` (never read); this relay checks it in the Worker and
+   passes it nowhere: not to the Durable Object, not into storage. As there, tokens are per
+   relay, not per graph.
+8. **Attachment uploads stream** from the client through the Worker and the Durable Object
+   into R2 when the request has a `Content-Length` (the Rust client always sends one), so no
+   full copy of a 64 MiB attachment is held in memory; a chunked upload is held once in the
+   Worker. `utopia-syncd` reads each body into memory.
+9. **No attachment garbage collection.** Removing a page or block does not delete its R2
    object, and there is no admin endpoint to. `utopia-syncd` has no GC either. An R2 lifecycle
    rule is not a substitute — it is not reference-aware, so it would delete attachments that
    live blocks still use — and the only safe deletion today is a retired graph's prefix (see
@@ -376,8 +421,10 @@ Notes that matter more than the arithmetic:
 ## Verified where
 
 - `npm test` in `relay-cloudflare/`: the TypeScript suite in real workerd.
-- `scripts/test-against-rust-client.sh`: 12 client scenarios over HTTP and WebSocket, a
-  canary scan of wrangler's DO SQLite and R2 state, and a small-quota run.
+- `scripts/test-against-rust-client.sh` (`make relay-check`, and
+  `.github/workflows/relay.yml` in CI): the 12 contract scenarios over HTTP and WebSocket, a
+  canary scan of wrangler's DO SQLite and R2 state, a small-quota run, and the raw
+  differential script against `utopia-syncd`.
 - `scripts/e2e-two-instances.sh`: two daemons, E2E encryption, MCP edits, a realtime notice
   against a 60 s poll, and a plaintext scan of the relay's state.
 - Not verified here: a deployed Worker, a real R2 bucket, two separate Macs, and the

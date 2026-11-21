@@ -17,7 +17,7 @@
 
 import { decompress } from "fzstd";
 
-import { DEFAULT_QUOTA_BYTES, type Env } from "./graph";
+import { BLOB_SIZE_HEADER, DEFAULT_QUOTA_BYTES, type Env } from "./graph";
 import {
   BadRequest,
   parseJsonRequest,
@@ -49,22 +49,21 @@ export function acceptedTokens(env: Env): string[] {
     .filter((t) => t.length > 0);
 }
 
-export type Auth = { ok: true; owner: string } | { ok: false };
-
 /**
- * The caller's identity is its token, as in `utopia_syncd::Ctx::auth`. Anonymous callers
- * (`ALLOW_ANONYMOUS=1` with no tokens) are the owner `anonymous`.
+ * Whether the request may proceed: its bearer token is one of `RELAY_TOKENS`, or there are
+ * no tokens and `ALLOW_ANONYMOUS=1`.
+ *
+ * The token stops here. `utopia_syncd::Ctx::auth` returns it as the caller's identity and
+ * the Rust relay stores it in `graph.owner_id`; nothing ever reads that column, so this relay
+ * neither forwards the token to a Durable Object (an internal URL or header ends up in
+ * request traces) nor stores it.
  */
-export function authorize(env: Env, headers: Headers): Auth {
+export function authorize(env: Env, headers: Headers): boolean {
   const tokens = acceptedTokens(env);
+  if (tokens.length === 0) return env.ALLOW_ANONYMOUS === "1";
   const bearer = /^Bearer (.+)$/.exec(headers.get("authorization") ?? "");
-  if (tokens.length === 0) {
-    if (env.ALLOW_ANONYMOUS !== "1") return { ok: false };
-    return { ok: true, owner: "anonymous" };
-  }
-  if (bearer === null) return { ok: false };
-  const token = bearer[1] ?? "";
-  return tokens.includes(token) ? { ok: true, owner: token } : { ok: false };
+  if (bearer === null) return false;
+  return tokens.includes(bearer[1] ?? "");
 }
 
 /** 1–128 characters of `[A-Za-z0-9_-]`: safe in a URL and in an R2 key. */
@@ -80,6 +79,17 @@ export function validHash(hash: string): boolean {
 export function bodyTooLarge(contentLength: string | null): boolean {
   if (contentLength === null || !/^\d+$/.test(contentLength)) return false;
   return Number(contentLength) > MAX_BODY_BYTES;
+}
+
+/**
+ * The body's declared length, or `null` when it has none (a chunked body). A declared
+ * length over the limit is refused here, before a byte is read.
+ */
+function declaredLength(request: Request): number | null {
+  const raw = request.headers.get("content-length");
+  if (bodyTooLarge(raw)) throw new PayloadTooLarge();
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  return Number(raw);
 }
 
 type Route =
@@ -146,16 +156,13 @@ function invalid(what: string, value: string): string {
 }
 
 /**
- * Read a request body, refusing anything over the limit while it arrives: a declared
- * `Content-Length` over the limit is answered before a byte is buffered, and a body
- * without one (chunked) is stopped as soon as it passes the limit.
+ * The chunks of a body with no declared length, stopped as soon as they pass the limit.
+ * They are kept as they arrived, so the body is held once and never joined.
  */
-async function readBody(request: Request): Promise<Uint8Array> {
-  if (bodyTooLarge(request.headers.get("content-length"))) {
-    throw new PayloadTooLarge();
-  }
-  if (request.body === null) return new Uint8Array(0);
-  const reader = request.body.getReader();
+async function readChunks(
+  body: ReadableStream<Uint8Array>,
+): Promise<{ chunks: Uint8Array[]; total: number }> {
+  const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
   for (;;) {
@@ -168,6 +175,39 @@ async function readBody(request: Request): Promise<Uint8Array> {
     }
     chunks.push(value);
   }
+  return { chunks, total };
+}
+
+/**
+ * Read a JSON request body, refusing anything over the limit while it arrives: a declared
+ * `Content-Length` over the limit is answered before a byte is read, and a body without one
+ * (chunked) is stopped as soon as it passes the limit.
+ *
+ * A declared length is read straight into one buffer of that size, so the body is held
+ * once. A chunked body is held once as its chunks and copied into one buffer at the end
+ * (zstd and JSON need contiguous bytes) unless it arrived as a single chunk.
+ */
+async function readBody(request: Request): Promise<Uint8Array> {
+  const declared = declaredLength(request);
+  if (request.body === null) return new Uint8Array(0);
+  if (declared !== null) {
+    const body = new Uint8Array(declared);
+    const reader = request.body.getReader();
+    let offset = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (offset + value.length > declared) {
+        await reader.cancel();
+        throw new BadRequest("body is longer than its content-length");
+      }
+      body.set(value, offset);
+      offset += value.length;
+    }
+    return offset === declared ? body : body.subarray(0, offset);
+  }
+  const { chunks, total } = await readChunks(request.body);
+  if (chunks.length === 1 && chunks[0] !== undefined) return chunks[0];
   const body = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) {
@@ -175,6 +215,30 @@ async function readBody(request: Request): Promise<Uint8Array> {
     offset += chunk.length;
   }
   return body;
+}
+
+/**
+ * An attachment body for the Durable Object, and its size. With a declared length the
+ * request's own stream is handed on, so the Worker never holds the body: the bytes go from
+ * the client through the object into R2. A chunked body has no length to check the quota
+ * against, so it is read here (held once, as its chunks) and handed on as a stream of those
+ * chunks, each released once the object has taken it.
+ */
+async function blobBody(
+  request: Request,
+): Promise<{ body: ReadableStream<Uint8Array> | null; size: number }> {
+  const declared = declaredLength(request);
+  if (request.body === null) return { body: null, size: 0 };
+  if (declared !== null) return { body: request.body, size: declared };
+  const { chunks, total } = await readChunks(request.body);
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      const next = chunks.shift();
+      if (next === undefined) controller.close();
+      else controller.enqueue(next);
+    },
+  });
+  return { body, size: total };
 }
 
 /**
@@ -221,8 +285,7 @@ export async function handle(request: Request, env: Env): Promise<Response> {
   }
   if (route.kind === "healthz") return text(200, "ok");
 
-  const auth = authorize(env, request.headers);
-  if (!auth.ok) return text(401, "unauthorized");
+  if (!authorize(env, request.headers)) return text(401, "unauthorized");
   if (!validId(route.gid)) return text(400, invalid("id", route.gid));
 
   const stub = env.GRAPH.get(env.GRAPH.idFromName(route.gid));
@@ -241,11 +304,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
         if (!validId(route.pid)) return text(400, invalid("id", route.pid));
         if (request.method === "POST") {
           const body = decodeBody(request, await readBody(request));
-          const req = parseJsonRequest(body, parsePushRequest);
+          // Validated here, then forwarded as the bytes that were validated rather than
+          // serialised again (one string less in memory).
+          parseJsonRequest(body, parsePushRequest);
           return await stub.fetch(
-            `https://graph/push?pid=${encodeURIComponent(route.pid)}` +
-              `&owner=${encodeURIComponent(auth.owner)}&quota=${quota}`,
-            { method: "POST", body: JSON.stringify(req) },
+            `https://graph/push?pid=${encodeURIComponent(route.pid)}&quota=${quota}`,
+            { method: "POST", body },
           );
         }
         const since = sinceFrom(url);
@@ -256,10 +320,10 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       case "snapshot": {
         if (!validId(route.pid)) return text(400, invalid("id", route.pid));
         const body = decodeBody(request, await readBody(request));
-        const req = parseJsonRequest(body, parseSnapshotRequest);
+        parseJsonRequest(body, parseSnapshotRequest);
         return await stub.fetch(
           `https://graph/snapshot?pid=${encodeURIComponent(route.pid)}`,
-          { method: "POST", body: JSON.stringify(req) },
+          { method: "POST", body },
         );
       }
       case "events": {
@@ -275,12 +339,12 @@ export async function handle(request: Request, env: Env): Promise<Response> {
       case "blob": {
         if (!validHash(route.hash)) return text(400, invalid("blob hash", route.hash));
         if (request.method === "PUT") {
-          const body = await readBody(request);
-          return await stub.fetch(
-            `https://graph/blob?hash=${route.hash}&owner=${encodeURIComponent(auth.owner)}` +
-              `&quota=${quota}`,
-            { method: "PUT", body },
-          );
+          const { body, size } = await blobBody(request);
+          return await stub.fetch(`https://graph/blob?hash=${route.hash}&quota=${quota}`, {
+            method: "PUT",
+            body,
+            headers: { [BLOB_SIZE_HEADER]: String(size) },
+          });
         }
         return await stub.fetch(`https://graph/blob?hash=${route.hash}`);
       }

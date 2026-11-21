@@ -1,6 +1,6 @@
 // Quota (§12.6, §12.8): the relay refuses new bytes over the per-graph limit, and a
 // replayed batch is deduped before quota so a lost response cannot turn into a permanent
-// 413. The client-side half of `quota_rejects_and_keeps_outbox` (the outbox keeps the
+// 413. The client-side half of `quota_rejects_and_keeps_the_outbox` (the outbox keeps the
 // edits) belongs to `utopia-sync`; what is pinned here is the relay's side.
 
 import { describe, expect, it } from "vitest";
@@ -16,7 +16,7 @@ async function pushWithQuota(
   pid: string = PID,
 ): Promise<Response> {
   return graph.direct(
-    `/push?pid=${pid}&owner=tester&quota=${quota}`,
+    `/push?pid=${pid}&quota=${quota}`,
     { method: "POST", body: JSON.stringify({ updates }) },
   );
 }
@@ -27,7 +27,7 @@ async function putBlobWithQuota(
   bytes: Uint8Array,
   quota: number,
 ): Promise<Response> {
-  return graph.direct(`/blob?hash=${hash}&owner=tester&quota=${quota}`, {
+  return graph.direct(`/blob?hash=${hash}&quota=${quota}`, {
     method: "PUT",
     body: bytes,
   });
@@ -112,12 +112,12 @@ describe("quota", () => {
     // The Worker validates before forwarding, so this only pins the Durable Object's own
     // contract (used by these tests for quota overrides).
     const graph = new Graph();
-    const notJson = await graph.direct(`/push?pid=${PID}&owner=t&quota=1000`, {
+    const notJson = await graph.direct(`/push?pid=${PID}&quota=1000`, {
       method: "POST",
       body: "{",
     });
     expect(notJson.status).toBe(400);
-    const badBase64 = await graph.direct(`/push?pid=${PID}&owner=t&quota=1000`, {
+    const badBase64 = await graph.direct(`/push?pid=${PID}&quota=1000`, {
       method: "POST",
       body: JSON.stringify({
         updates: [{ id: "c:1", client_seq: 1, frontier: "", payload: "!!!" }],
@@ -132,10 +132,10 @@ describe("quota", () => {
     expect(await graph.logRows()).toEqual([]);
   });
 
-  it("quota_rejects_and_keeps_outbox (relay side)", async () => {
+  it("quota_rejects_and_keeps_the_outbox (relay side)", async () => {
     // The relay answers 413 and stores nothing; the client keeps the edits queued
-    // (`SyncError::Transport` with 413, `quota_rejects_and_keeps_outbox` in
-    // `crates/utopia-syncd/tests/http.rs`).
+    // (`SyncError::Transport` with 413, `quota_rejects_and_keeps_the_outbox` in
+    // `crates/utopia-syncd/tests/contract/mod.rs`).
     const graph = new Graph();
     const res = await pushWithQuota(graph, [update("big:1", "x".repeat(500))], 64);
     expect(res.status).toBe(413);

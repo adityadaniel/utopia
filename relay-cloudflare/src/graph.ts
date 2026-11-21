@@ -36,11 +36,19 @@ const CHUNK_BYTES = 512 * 1024;
 /** `utopia-syncd`'s default (1 GiB); the Worker passes `QUOTA_BYTES` per request. */
 export const DEFAULT_QUOTA_BYTES = 1 << 30;
 
+/**
+ * The internal header the Worker uses to tell the object an attachment's size, so the quota
+ * is checked before a byte of a streamed body is read (`GraphObject.putBlob`).
+ */
+export const BLOB_SIZE_HEADER = "x-utopia-blob-size";
+
 const SCHEMA = [
+  // The Rust relay's `graph` table also has `owner_id`, the caller's bearer token in plain
+  // text, which nothing reads. This relay never receives the token, so it has no such
+  // column (relay-cloudflare/README.md, "Differences").
   `CREATE TABLE IF NOT EXISTS graph (
      id INTEGER PRIMARY KEY CHECK (id = 1),
-     created_at INTEGER NOT NULL,
-     owner_id TEXT
+     created_at INTEGER NOT NULL
    )`,
   `CREATE TABLE IF NOT EXISTS page_log (
      page_id TEXT NOT NULL,
@@ -231,6 +239,79 @@ async function jsonBody<T>(request: Request): Promise<T> {
   }
 }
 
+/**
+ * An attachment's size as the Worker declared it (`BLOB_SIZE_HEADER`), or the body's own
+ * `Content-Length` on the direct interface; `null` when neither is there.
+ */
+function declaredBlobSize(headers: Headers): number | null {
+  const raw = headers.get(BLOB_SIZE_HEADER) ?? headers.get("content-length");
+  if (raw === null) return null;
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new BadRequest(`invalid attachment size ${JSON.stringify(raw)}`);
+  }
+  return Number(raw);
+}
+
+/** An attachment body: a stream of a declared size, bytes already read, or nothing. */
+type BlobBody = ReadableStream<Uint8Array> | Uint8Array | null;
+
+/**
+ * Read a body that will not be stored, without holding it: the client sent all of it before
+ * reading the answer (`ureq … send_bytes`), as the Rust relay reads every body in full.
+ */
+async function discard(body: BlobBody): Promise<void> {
+  if (body === null || body instanceof Uint8Array) return;
+  try {
+    await body.pipeTo(new WritableStream());
+  } catch {
+    // The client went away; nothing was going to be stored anyway.
+  }
+}
+
+/**
+ * Copy `body` into `writable`, one chunk at a time, refusing a body that is not exactly
+ * `size` bytes before the stream sees a byte too many (or closes a byte short). On any
+ * failure both ends are released, so nothing is left waiting and the R2 put fails.
+ */
+async function pump(
+  body: ReadableStream<Uint8Array>,
+  writable: WritableStream<Uint8Array>,
+  size: number,
+): Promise<void> {
+  const reader = body.getReader();
+  const writer = writable.getWriter();
+  let seen = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      seen += value.length;
+      if (seen > size) break;
+      await writer.write(value);
+    }
+    // A body that is not the size it declared is the client's error: axum answers a body
+    // it cannot read with 400 too.
+    if (seen !== size) {
+      throw new BadRequest(`attachment body is not the ${size} bytes it declared`);
+    }
+    await writer.close();
+  } catch (e) {
+    await writer.abort(e).catch(() => undefined);
+    await reader.cancel(e).catch(() => undefined);
+    throw e;
+  }
+}
+
+/** Close codes `WebSocket.close` may send: 1005, 1006 and 1015 are reserved (RFC 6455 §7.4). */
+function sendableCloseCode(code: number): boolean {
+  return (
+    code === 1000 ||
+    (code >= 1001 && code <= 1003) ||
+    (code >= 1007 && code <= 1011) ||
+    (code >= 3000 && code <= 4999)
+  );
+}
+
 function decodePayload(payload: string): Uint8Array {
   try {
     return b64decode(payload);
@@ -288,10 +369,9 @@ export class GraphObject extends DurableObject<Env> {
         }
         case "/push": {
           const pid = url.searchParams.get("pid") ?? "";
-          const owner = url.searchParams.get("owner") ?? "";
           const quota = quotaFrom(url.searchParams.get("quota"));
           const req = await jsonBody<PushRequest>(request);
-          const resp = this.push(pid, owner, req, quota);
+          const resp = this.push(pid, req, quota);
           // Announce only what was accepted; a duplicate batch changes nothing (§12.3).
           if (resp.accepted > 0) this.notify(pid, resp.head_seq);
           return json(resp);
@@ -311,12 +391,15 @@ export class GraphObject extends DurableObject<Env> {
           const hash = url.searchParams.get("hash") ?? "";
           if (request.method === "PUT") {
             const quota = quotaFrom(url.searchParams.get("quota"));
-            const owner = url.searchParams.get("owner") ?? "";
-            const bytes = new Uint8Array(await request.arrayBuffer());
-            // One upload at a time: see `putBlob`.
-            const created = await this.serializeUpload(() =>
-              this.putBlob(hash, owner, bytes, quota),
-            );
+            const size = declaredBlobSize(request.headers);
+            // One upload at a time: see `putBlob`. A body whose size nobody declared (only
+            // the direct interface can send one) is read inside the queue, so an upload
+            // waiting its turn holds nothing.
+            const created = await this.serializeUpload(async () => {
+              if (size !== null) return this.putBlob(hash, request.body, size, quota);
+              const bytes = new Uint8Array(await request.arrayBuffer());
+              return this.putBlob(hash, bytes, bytes.length, quota);
+            });
             return new Response(null, { status: created ? 201 : 200 });
           }
           const body = await this.getBlob(hash);
@@ -427,19 +510,10 @@ export class GraphObject extends DurableObject<Env> {
    * again would refuse it forever (§12.6). A change id repeated within the request is a
    * duplicate too — the first copy is stored, the second would break the UNIQUE index.
    */
-  private push(
-    pid: string,
-    owner: string,
-    req: PushRequest,
-    quota: number,
-  ): PushResponse {
+  private push(pid: string, req: PushRequest, quota: number): PushResponse {
     const sql = this.ctx.storage.sql;
     return this.ctx.storage.transactionSync(() => {
-      sql.exec(
-        "INSERT OR IGNORE INTO graph(id, created_at, owner_id) VALUES (1, ?, ?)",
-        nowMs(),
-        owner,
-      );
+      sql.exec("INSERT OR IGNORE INTO graph(id, created_at) VALUES (1, ?)", nowMs());
       let head = headOf(sql, pid);
       let accepted = 0;
       let duplicate = 0;
@@ -576,8 +650,21 @@ export class GraphObject extends DurableObject<Env> {
 
   // -- attachments -----------------------------------------------------------------
 
+  /**
+   * The graph id, which names this object (`idFromName(gid)`) and its R2 prefix. There is
+   * no fallback: an object without a name (one made by `newUniqueId`, or a runtime that
+   * stopped passing the name) would otherwise share one prefix with every other such
+   * object, and write-once would then answer one graph's upload with another's bytes.
+   */
   private get graphKey(): string {
-    return this.ctx.id.name ?? "graph";
+    const name = this.ctx.id.name;
+    if (name === undefined || name === "") {
+      throw new Error(
+        "this graph object has no name: it must be reached through idFromName(gid), " +
+          "which names its attachments' R2 prefix",
+      );
+    }
+    return name;
   }
 
   private blobKey(hash: string): string {
@@ -587,7 +674,7 @@ export class GraphObject extends DurableObject<Env> {
   /**
    * Write-once: an existing hash is kept as stored and answered 200. The bytes are not
    * checked against the hash — they may be ciphertext, and the client verifies after
-   * decrypting (`tampered_blob_is_rejected` in `crates/utopia-syncd/tests/http.rs`).
+   * decrypting (`tampered_blob_is_rejected` in `crates/utopia-syncd/tests/contract/mod.rs`).
    *
    * An index row whose object is gone is repaired instead: the bytes a re-upload carries are
    * put back, still answered 200 because nothing new is indexed. R2 can lose an object while
@@ -595,21 +682,28 @@ export class GraphObject extends DurableObject<Env> {
    * restore), and a relay that trusted the row would answer 404 forever while refusing the one
    * upload that could heal it.
    *
+   * The body streams into R2 and is never held here: the quota is checked against the
+   * declared `size` before a byte is read, and `writeObject` makes R2 refuse a body that is
+   * not exactly that size. A body that is not stored (a duplicate, a quota refusal) is read
+   * and dropped.
+   *
    * The whole check → put → index sequence runs under [`Self::serializeUpload`], because the
    * `await` on R2 leaves this object's input gate open: without it two requests for one hash
    * both saw no row and the loser's bytes overwrote R2 while its index insert was ignored,
    * and two uploads each fitted a quota neither fits with the other (§12.6, rule 12).
    *
-   * The upload bytes are reserved against the quota across that await
+   * The upload's size is reserved against the quota across that await
    * (`inFlightBlobBytes`), so a push that lands meanwhile cannot admit bytes the upload is
    * about to take.
    */
   private async putBlob(
     hash: string,
-    owner: string,
-    bytes: Uint8Array,
+    body: BlobBody,
+    size: number,
     quota: number,
   ): Promise<boolean> {
+    // First, so a nameless object fails before it reads or stores anything.
+    const key = this.blobKey(hash);
     const sql = this.ctx.storage.sql;
     const existing = sql
       .exec<{ present: number }>(
@@ -620,29 +714,31 @@ export class GraphObject extends DurableObject<Env> {
     if (existing.present !== 0) {
       // The index remembers these bytes; R2 should still hold them. If it does not, this is
       // the only chance to put them back, and `head` is one cheap call on a replay.
-      if ((await this.env.BLOBS.head(this.blobKey(hash))) !== null) return false;
-      await this.env.BLOBS.put(this.blobKey(hash), bytes);
+      if ((await this.env.BLOBS.head(key)) !== null) {
+        await discard(body);
+        return false;
+      }
+      await this.writeObject(key, body, size);
       return false;
     }
-    if (this.usedBytes() + bytes.length > quota) throw new QuotaExceeded();
-    sql.exec(
-      "INSERT OR IGNORE INTO graph(id, created_at, owner_id) VALUES (1, ?, ?)",
-      nowMs(),
-      owner,
-    );
-    // Bytes first, index second: an interrupted write leaves an unreferenced object, never
-    // an index row whose bytes are missing. The reservation keeps those bytes out of another
-    // request's quota headroom while they are only in flight.
-    this.inFlightBlobBytes += bytes.length;
+    if (this.usedBytes() + size > quota) {
+      await discard(body);
+      throw new QuotaExceeded();
+    }
+    sql.exec("INSERT OR IGNORE INTO graph(id, created_at) VALUES (1, ?)", nowMs());
+    // Bytes first, index second: an interrupted write leaves no index row whose bytes are
+    // missing. The reservation keeps those bytes out of another request's quota headroom
+    // while they are only in flight.
+    this.inFlightBlobBytes += size;
     try {
-      await this.env.BLOBS.put(this.blobKey(hash), bytes);
+      await this.writeObject(key, body, size);
     } finally {
-      this.inFlightBlobBytes -= bytes.length;
+      this.inFlightBlobBytes -= size;
     }
     const inserted = sql.exec(
       "INSERT OR IGNORE INTO blob(hash, size, received_at) VALUES (?, ?, ?)",
       hash,
-      bytes.length,
+      size,
       nowMs(),
     );
     // `rowsWritten` is SQLite's `changes()`: 0 when a concurrent writer indexed the same
@@ -651,7 +747,31 @@ export class GraphObject extends DurableObject<Env> {
     return inserted.rowsWritten > 0;
   }
 
+  /**
+   * Put `size` bytes into R2 under `key`. A stream goes through a `FixedLengthStream`: R2
+   * needs a stream of known length. `pump` stops a body that turns out shorter or longer
+   * than declared, which fails the put, so R2 stores nothing for it.
+   */
+  private async writeObject(key: string, body: BlobBody, size: number): Promise<void> {
+    if (body === null || body instanceof Uint8Array) {
+      const bytes = body ?? new Uint8Array(0);
+      if (bytes.length !== size) {
+        throw new BadRequest(`attachment body is not the ${size} bytes it declared`);
+      }
+      await this.env.BLOBS.put(key, bytes);
+      return;
+    }
+    const { readable, writable } = new FixedLengthStream(size);
+    const [put, pumped] = await Promise.allSettled([
+      this.env.BLOBS.put(key, readable),
+      pump(body, writable, size),
+    ]);
+    if (pumped.status === "rejected") throw pumped.reason;
+    if (put.status === "rejected") throw put.reason;
+  }
+
   private async getBlob(hash: string): Promise<ReadableStream | null> {
+    const key = this.blobKey(hash);
     const row = this.ctx.storage.sql
       .exec<{ present: number }>(
         "SELECT EXISTS(SELECT 1 FROM blob WHERE hash = ?) AS present",
@@ -659,7 +779,7 @@ export class GraphObject extends DurableObject<Env> {
       )
       .one();
     if (row.present === 0) return null;
-    const object = await this.env.BLOBS.get(this.blobKey(hash));
+    const object = await this.env.BLOBS.get(key);
     return object === null ? null : object.body;
   }
 
@@ -696,12 +816,25 @@ export class GraphObject extends DurableObject<Env> {
     // Incoming messages are ignored: notices only travel one way.
   }
 
+  /**
+   * Complete the closing handshake, and never throw. The client's code is echoed when it may
+   * be sent; 1005 (a close frame with no code), 1006 (the connection dropped, which is how
+   * the Rust client's listener stops) and 1015 are reserved and `close` refuses them, so
+   * those are answered with 1000. Echoing no reason keeps clear of the 123-byte limit. A
+   * socket that is already closed (the runtime may have answered the close frame itself)
+   * makes `close` throw, which is equally nothing to act on: no per-socket state is held.
+   */
   override async webSocketClose(
     socket: WebSocket,
     code: number,
-    reason: string,
+    _reason: string,
+    _wasClean: boolean,
   ): Promise<void> {
-    socket.close(code, reason);
+    try {
+      socket.close(sendableCloseCode(code) ? code : 1000);
+    } catch {
+      // Already closed, or closing: nothing left to answer.
+    }
   }
 
   override async webSocketError(): Promise<void> {

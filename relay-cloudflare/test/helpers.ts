@@ -8,7 +8,7 @@
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { zstdCompressSync } from "node:zlib";
 
-import type { GraphObject } from "../src/graph";
+import type { Env as RelayEnv, GraphObject } from "../src/graph";
 import {
   b64encode,
   type Manifest,
@@ -231,6 +231,58 @@ export function unb64(s: string): Uint8Array {
   const out = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
   return out;
+}
+
+/** One request the Worker sent to a graph's Durable Object (`recordingEnv`). */
+export interface ObjectCall {
+  url: string;
+  headers: [string, string][];
+  body: unknown;
+}
+
+/**
+ * The deployment's bindings with `GRAPH` wrapped so every request the Worker makes to a
+ * Durable Object is recorded before it is sent on unchanged. For calling `handle` directly:
+ * the internal URL and headers are otherwise invisible to a test.
+ */
+export function recordingEnv(vars: Partial<RelayEnv> = {}): {
+  relayEnv: RelayEnv;
+  calls: ObjectCall[];
+} {
+  const calls: ObjectCall[] = [];
+  const namespace = env.GRAPH;
+  const GRAPH = {
+    idFromName: (name: string) => namespace.idFromName(name),
+    get: (id: DurableObjectId) => {
+      const stub = namespace.get(id);
+      return {
+        fetch: (input: string, init: RequestInit = {}) => {
+          calls.push({
+            url: input,
+            headers: [...new Headers(init.headers).entries()],
+            body: init.body,
+          });
+          return stub.fetch(input, init);
+        },
+      };
+    },
+  } as unknown as RelayEnv["GRAPH"];
+  return { relayEnv: { ...env, ...vars, GRAPH }, calls };
+}
+
+/** A body of `chunks` chunks of `chunkBytes` each, sent without a Content-Length. */
+export function chunkedBody(chunks: number, chunkBytes: number, seed = 1): ReadableStream<Uint8Array> {
+  let sent = 0;
+  return new ReadableStream<Uint8Array>({
+    pull(controller) {
+      if (sent === chunks) {
+        controller.close();
+        return;
+      }
+      controller.enqueue(pseudoRandom(chunkBytes, seed + sent));
+      sent += 1;
+    },
+  });
 }
 
 export function sha256Hex(bytes: Uint8Array): Promise<string> {

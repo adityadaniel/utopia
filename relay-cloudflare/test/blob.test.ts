@@ -1,9 +1,9 @@
 // Attachments at the relay (PRD §12.8): opaque bytes, content-addressed, write-once,
 // stored in R2 and indexed in the graph's Durable Object for quota and lookups. The relay
 // never checks the hash against the body — blobs may be ciphertext, and the client verifies
-// after decrypting (`tampered_blob_is_rejected` in `crates/utopia-syncd/tests/http.rs`).
+// after decrypting (`tampered_blob_is_rejected` in `crates/utopia-syncd/tests/contract/mod.rs`).
 
-import { env } from "cloudflare:test";
+import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { Graph, bytesEqual, decode, encode, pseudoRandom, sha256Hex } from "./helpers";
@@ -60,7 +60,7 @@ describe("blobs", () => {
     const tooBig = pseudoRandom(20, 3);
     const hash = await sha256Hex(tooBig);
     const refused = await graph.direct(
-      `/blob?hash=${hash}&owner=tester&quota=10`,
+      `/blob?hash=${hash}&quota=10`,
       { method: "PUT", body: tooBig },
     );
     expect(refused.status).toBe(413);
@@ -74,7 +74,7 @@ describe("blobs", () => {
     const smallHash = await sha256Hex(small);
     expect(
       (
-        await graph.direct(`/blob?hash=${smallHash}&owner=tester&quota=10`, {
+        await graph.direct(`/blob?hash=${smallHash}&quota=10`, {
           method: "PUT",
           body: small,
         })
@@ -82,7 +82,7 @@ describe("blobs", () => {
     ).toBe(201);
     expect(
       (
-        await graph.direct(`/blob?hash=${smallHash}&owner=tester&quota=0`, {
+        await graph.direct(`/blob?hash=${smallHash}&quota=0`, {
           method: "PUT",
           body: small,
         })
@@ -94,7 +94,7 @@ describe("blobs", () => {
   it("does not verify the hash against the body", async () => {
     // Blobs may be ciphertext: the relay stores what it is given, and the client verifies
     // after decrypting (`tampered_blob_is_rejected` in
-    // `crates/utopia-syncd/tests/http.rs`). A relay that hashed the body would refuse
+    // `crates/utopia-syncd/tests/contract/mod.rs`). A relay that hashed the body would refuse
     // every encrypted attachment.
     const graph = new Graph();
     const claimed = await sha256Hex(encode("the real notes"));
@@ -178,6 +178,47 @@ describe("blobs", () => {
     expect(
       decode((await (await r2Object(graph.gid, hash))?.arrayBuffer()) ?? new ArrayBuffer(0)),
     ).toBe("a live attachment");
+  });
+
+  it("an object reached without a name refuses attachments instead of sharing a prefix", async () => {
+    // The R2 prefix is the object's name (`idFromName(gid)`). An object without one must
+    // fail loudly: a fallback name would put every such graph's attachments under one
+    // prefix, where write-once would hand one graph another's bytes.
+    const stub = env.GRAPH.get(env.GRAPH.newUniqueId());
+    const bytes = encode("an attachment");
+    const hash = await sha256Hex(bytes);
+    const put = await stub.fetch(`https://graph/blob?hash=${hash}&quota=1000`, {
+      method: "PUT",
+      body: bytes,
+    });
+    expect(put.status).toBe(500);
+    expect(await put.text()).toContain("idFromName");
+    const listed = await env.BLOBS.list({ prefix: "graphs/graph/" });
+    expect(listed.objects).toEqual([]);
+    const indexed = await runInDurableObject(stub, (_instance, state) =>
+      state.storage.sql.exec("SELECT hash FROM blob").toArray(),
+    );
+    expect(indexed).toEqual([]);
+    const get = await stub.fetch(`https://graph/blob?hash=${hash}`);
+    expect(get.status).toBe(500);
+    await get.text();
+
+    // A named object's prefix is its graph id.
+    const graph = new Graph();
+    expect(await graph.inDo((instance) => instance["blobKey"](hash))).toBe(
+      `graphs/${graph.gid}/blobs/${hash}`,
+    );
+  });
+
+  it("an empty attachment is stored and served like any other", async () => {
+    const graph = new Graph();
+    const empty = new Uint8Array(0);
+    const hash = await sha256Hex(empty);
+    expect((await graph.putBlob(hash, empty)).status).toBe(201);
+    const got = await graph.getBlob(hash);
+    expect(got.status).toBe(200);
+    expect((await got.arrayBuffer()).byteLength).toBe(0);
+    expect((await graph.putBlob(hash, empty)).status).toBe(200);
   });
 
   it("is deduped per graph, not across graphs", async () => {

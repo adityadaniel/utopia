@@ -27,19 +27,15 @@ function headers(init: Record<string, string> = {}): Headers {
 }
 
 describe("auth policy", () => {
-  it("accepts only a configured bearer token, and identifies the caller by it", () => {
+  it("accepts only a configured bearer token", () => {
+    // The answer is yes or no: the token is not an identity anything downstream receives
+    // (test/token.test.ts).
     const tokens = env({ RELAY_TOKENS: "alpha,beta" });
-    expect(authorize(tokens, headers({ authorization: "Bearer alpha" }))).toEqual({
-      ok: true,
-      owner: "alpha",
-    });
-    expect(authorize(tokens, headers({ authorization: "Bearer beta" }))).toEqual({
-      ok: true,
-      owner: "beta",
-    });
+    expect(authorize(tokens, headers({ authorization: "Bearer alpha" }))).toBe(true);
+    expect(authorize(tokens, headers({ authorization: "Bearer beta" }))).toBe(true);
     for (const header of [undefined, "", "alpha", "Bearer", "Bearer gamma", "bearer alpha"]) {
       const h = headers(header === undefined ? {} : { authorization: header });
-      expect(authorize(tokens, h)).toEqual({ ok: false });
+      expect(authorize(tokens, h)).toBe(false);
     }
     // Whitespace around a comma-separated list is not part of a token.
     expect(acceptedTokens(env({ RELAY_TOKENS: " alpha , beta ," }))).toEqual([
@@ -52,24 +48,20 @@ describe("auth policy", () => {
     // A deliberate difference from utopia-syncd, whose empty list disables auth: a hosted
     // relay that silently accepts everyone because a secret failed to load is worse than
     // one that refuses everyone until it is configured.
-    expect(authorize(env({ RELAY_TOKENS: "" }), headers())).toEqual({ ok: false });
-    expect(authorize(env({}), headers())).toEqual({ ok: false });
-    expect(
-      authorize(env({ RELAY_TOKENS: "", ALLOW_ANONYMOUS: "0" }), headers()),
-    ).toEqual({ ok: false });
-    expect(
-      authorize(env({ RELAY_TOKENS: "", ALLOW_ANONYMOUS: "1" }), headers()),
-    ).toEqual({ ok: true, owner: "anonymous" });
+    expect(authorize(env({ RELAY_TOKENS: "" }), headers())).toBe(false);
+    expect(authorize(env({}), headers())).toBe(false);
+    expect(authorize(env({ RELAY_TOKENS: "", ALLOW_ANONYMOUS: "0" }), headers())).toBe(false);
+    expect(authorize(env({ RELAY_TOKENS: "", ALLOW_ANONYMOUS: "1" }), headers())).toBe(true);
     // Configured tokens win over anonymous mode, even with no Authorization header.
     expect(
       authorize(
         env({ RELAY_TOKENS: "alpha", ALLOW_ANONYMOUS: "1" }),
         headers({ authorization: "Bearer alpha" }),
       ),
-    ).toEqual({ ok: true, owner: "alpha" });
-    expect(
-      authorize(env({ RELAY_TOKENS: "alpha", ALLOW_ANONYMOUS: "1" }), headers()),
-    ).toEqual({ ok: false });
+    ).toBe(true);
+    expect(authorize(env({ RELAY_TOKENS: "alpha", ALLOW_ANONYMOUS: "1" }), headers())).toBe(
+      false,
+    );
   });
 });
 
