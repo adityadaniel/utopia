@@ -1,0 +1,113 @@
+name: Relay parity
+
+# The two sync relays, crates/utopia-syncd (Rust) and relay-cloudflare (a Cloudflare
+# Worker), speak one protocol (PRD §12.3, §12.8). This workflow proves they still do: the
+# Worker's type check and its vitest suite in workerd, then the relay contract
+# (crates/utopia-syncd/tests/contract) and the raw differential test against the Worker
+# under `wrangler dev --local`. Nothing here logs in, deploys or touches a Cloudflare
+# account. `make relay-check` runs the same steps, in the same order, on a laptop.
+#
+# Unlike ci.yml this uses `paths`: it runs only when a relay, the wire format, the client
+# they serve, or this file changes. Markdown counts on purpose: the differential test reads
+# relay-cloudflare/README.md's list of deliberate differences. Keep the two lists the same.
+#
+# A path-filtered workflow that does not run reports nothing, not "skipped": if this job is
+# ever made a required check, a PR that touches none of these paths waits for it forever.
+# Make it required only together with a job that always reports, or leave it optional.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "relay-cloudflare/**"
+      - "crates/utopia-syncd/**"
+      - "crates/utopia-proto/**"
+      - "crates/utopia-sync/**"
+      - ".github/workflows/relay.yml"
+  pull_request:
+    paths:
+      - "relay-cloudflare/**"
+      - "crates/utopia-syncd/**"
+      - "crates/utopia-proto/**"
+      - "crates/utopia-sync/**"
+      - ".github/workflows/relay.yml"
+  workflow_dispatch:
+
+# A new push to a PR makes the previous run irrelevant; macOS minutes are expensive.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Loro and SQLCipher rlibs fill the disk fast when features change (see AGENTS.md).
+  CARGO_INCREMENTAL: 0
+  # Wrangler asks nothing and sends no telemetry.
+  CI: true
+  WRANGLER_SEND_METRICS: false
+
+jobs:
+  relay:
+    # macOS: utopia-syncd's tests drive the real sync client over utopia-store, which builds
+    # SQLCipher on macOS (encryption at rest) and has never been built or tested on Linux
+    # in this repository. A Linux runner would be cheaper once that is proven.
+    name: tsc, vitest, Rust contract and differential against wrangler
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Point at the installed Xcode
+        # The bundle is renamed by every Xcode release, so ask rather than hardcode.
+        run: echo "DEVELOPER_DIR=$(xcode-select -p)" >> "$GITHUB_ENV"
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # wrangler 4 needs Node >= 22.12 (its `engines`); 24 is what the relay is
+          # developed with.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: relay-cloudflare/package-lock.json
+
+      - name: npm ci
+        working-directory: relay-cloudflare
+        run: npm ci
+
+      # The TypeScript checks first: seconds, and failing early saves a Rust build.
+      - name: tsc --noEmit
+        working-directory: relay-cloudflare
+        run: npx --no-install tsc --noEmit
+
+      - name: npm test (vitest in workerd)
+        working-directory: relay-cloudflare
+        run: npm test
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Its own key: this job builds utopia-syncd's tests, not the app, and must not
+          # save a GPUI-less cache under ci.yml's key.
+          shared-key: macos-15-relay
+
+      # The constants test, the README classification and the in-process contract: what
+      # ci.yml runs too, here so a relay-only (or README-only) change runs them as well.
+      - name: cargo test -p utopia-syncd
+        run: cargo test -p utopia-syncd
+
+      # Starts wrangler dev --local twice (the default and a small quota) and runs
+      # tests/cloudflare.rs and tests/differential.rs with UTOPIA_RELAY_REQUIRED=1, so a
+      # Worker that is missing or unreachable fails the job instead of skipping.
+      - name: Contract and differential against the Worker
+        run: relay-cloudflare/scripts/test-against-rust-client.sh
+
+      - name: Upload the wrangler and cargo logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-check-logs
+          path: target/relay-check/logs/
+          if-no-files-found: ignore
+          retention-days: 14

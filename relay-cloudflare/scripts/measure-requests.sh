@@ -14,19 +14,12 @@ set -uo pipefail
 
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 repo=$(cd "$here/.." && pwd)
-source "$HOME/.cargo/env" 2>/dev/null || true
-if [ -z "${CARGO_TARGET_DIR:-}" ]; then
-  if [ -d "$HOME/Developer/utopia/target" ]; then
-    export CARGO_TARGET_DIR="$HOME/Developer/utopia/target"
-  else
-    export CARGO_TARGET_DIR="$repo/target"
-  fi
-fi
-export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
-export DEVELOPER_DIR="${DEVELOPER_DIR:-$(xcode-select -p 2>/dev/null)}"
-export WRANGLER_SEND_METRICS=false
+# shellcheck source=lib.sh
+source "$here/scripts/lib.sh"
 
-BIN="${UTOPIA_BIN:-$CARGO_TARGET_DIR/debug/utopia}"
+# The binary of `cargo build -p utopia-app`, wherever cargo puts it (CARGO_TARGET_DIR is
+# respected), unless UTOPIA_BIN names another. MEASURE_DIR moves this run's state elsewhere.
+BIN="${UTOPIA_BIN:-$(cargo_target_dir)/debug/utopia}"
 WORK="${MEASURE_DIR:-$repo/target/relay-request-counts}"
 CONFIG="$WORK/config"
 GRAPH="$WORK/Count.utopia"

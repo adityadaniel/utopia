@@ -70,6 +70,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+A change to either sync relay (`crates/utopia-syncd`, `relay-cloudflare/`), the wire format or the
+sync client also runs `make relay-check`: the Worker's `tsc` and vitest suite, `cargo test -p
+utopia-syncd`, then `relay-cloudflare/scripts/test-against-rust-client.sh`, which starts `wrangler dev
+--local` (never an account) and runs the relay contract (`crates/utopia-syncd/tests/contract`, the
+scenarios `tests/http.rs` also runs against `utopia-syncd`) and the raw differential test
+(`tests/differential.rs`, both relays' answers compared, every difference recorded in its
+`EXCEPTIONS`) with `UTOPIA_RELAY_REQUIRED=1`, so a missing Worker fails rather than skips. It needs
+Node (≥ 22.12) and `npm ci` in `relay-cloudflare/` once; `.github/workflows/relay.yml` runs it in
+CI when those paths change. Without `UTOPIA_RELAY_URL` the Worker tests print a skip, so `make
+check` needs no Node. A new relay scenario goes into `tests/contract/mod.rs`, which runs it against
+both relays.
+
 Run the app with `cargo run -p utopia-app` (binary name `utopia`). The graph is chosen in
 this order: `--graph <file>`, `UTOPIA_GRAPH`, the last graph opened (recorded in the config
 dir), the only `*.utopia` in `~/Documents/Utopia`; otherwise onboarding asks for a name (§9.3).
