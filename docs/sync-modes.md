@@ -44,11 +44,16 @@ mode.
 - **The poll cadence is the same.** A round runs each 5 s while there is activity, and
   goes back to one round each 60 s when the rounds are quiet
   (`crates/utopia-ui/src/sync_runner.rs`, `FAST` and `SLOW`).
-- **The WebSocket is optional.** Settings → Sync → **Live updates** chooses whether the
-  realtime socket stays open (**Always**, the default) or only **while you are using
-  Utopia**: it then opens when a window gets focus or you edit, and closes after two quiet
-  minutes, or when Utopia goes to the background
-  (`crates/utopia-ui/src/sync_runner.rs`, `LIVE_IDLE`). Windows of the app count together,
+- **The WebSocket is optional.** Settings → Sync → **Live updates** ("Show changes from
+  your other devices right away") chooses whether the realtime socket stays open
+  (**Always**, the default) or only **while you are using Utopia**: it then opens when a
+  window gets focus, you press a key in any Utopia window (moving the caret or scrolling
+  with the keyboard counts, not only editing) or you edit, and closes after two minutes
+  with none of those, or when Utopia goes to the background
+  (`crates/utopia-ui/src/sync_runner.rs`, `LIVE_IDLE`). Pointer input alone does not
+  count: gpui 0.2.2 has no app-wide hook for mouse events, so someone who only scrolls
+  with a trackpad for two minutes falls back to polling until the next key or focus
+  change. Windows of the app count together,
   so the socket follows the whole app: moving to Settings is not leaving, and leaving from
   Settings closes it. Polling is unchanged in both, so a closed socket only means a change
   on another device arrives at the next check rather than at once. The choice is

@@ -696,12 +696,26 @@ impl SettingsView {
     }
 
     /// Settings → Sync, below the setup pane: the machine's "Live updates" choice (§12.3).
-    /// It is not per graph — it decides how long this device keeps its WebSocket open — so
-    /// it shows whether or not a graph is open.
+    /// It is not per graph (it decides how long this device keeps its realtime socket
+    /// open), so it shows whether or not a graph is open.
+    ///
+    /// The text sits above the choices, not beside them. Beside them, the text column was
+    /// a `flex_1` item in a flex row, and the row's height was settled while that column's
+    /// width was still open: gpui's text measure answers an indefinite-width query with
+    /// whatever wrap it measured last (`gpui::elements::text`, `TextLayout::layout`), so
+    /// the row came out sized for fewer lines than the text then drew at its real width
+    /// and the text ran over the row's padding and borders. Stacked, every line of text is
+    /// laid out at the row's own definite width (`live_updates_text_keeps_its_padding` in
+    /// `tests/layout.rs`).
     fn render_live_updates(&self, cx: &mut Context<Self>) -> Div {
         let th = theme(cx).clone();
         let current = appearance::sync_realtime(cx);
-        let mut choices = div().flex().items_center().gap_2();
+        let mut choices = div()
+            .debug_selector(|| "settings-sync-realtime-choices".into())
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap_2();
         for &mode in RealtimeMode::ALL {
             let on = mode == current;
             let th = th.clone();
@@ -729,34 +743,37 @@ impl SettingsView {
         }
         div()
             .debug_selector(|| "settings-sync-realtime".into())
+            .w_full()
+            .max_w(px(CONTENT_WIDTH))
+            .mx_auto()
+            .flex_shrink_0()
             .flex()
             .flex_col()
-            .gap_0()
             .mt_2()
             .child(card_top(&th, "Live updates"))
             .child(appearance_row(
                 div()
+                    .debug_selector(|| "settings-sync-realtime-row".into())
                     .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_4()
+                    .flex_col()
+                    .gap_3()
                     .child(
                         div()
+                            .debug_selector(|| "settings-sync-realtime-text".into())
                             .flex()
                             .flex_col()
-                            .flex_1()
-                            .min_w_0()
                             .gap_1()
-                            .child(div().child("Realtime updates over WebSocket"))
                             .child(
                                 div()
+                                    .debug_selector(|| "settings-sync-realtime-title".into())
+                                    .child(LIVE_UPDATES_TITLE),
+                            )
+                            .child(
+                                div()
+                                    .debug_selector(|| "settings-sync-realtime-caption".into())
                                     .text_size(px(crate::theme::CAPTION_SIZE))
                                     .text_color(th.muted)
-                                    .child(
-                                        "Polling continues either way — a closed socket only \
-                                         makes a change on another device arrive at the next \
-                                         check instead of at once.",
-                                    ),
+                                    .child(LIVE_UPDATES_CAPTION),
                             ),
                     )
                     .child(choices),
@@ -765,6 +782,14 @@ impl SettingsView {
             ))
     }
 }
+
+/// Settings → Sync "Live updates" (§12.3), in the words of someone who has never heard of a
+/// socket: what each choice does for them, and that neither loses anything.
+pub const LIVE_UPDATES_TITLE: &str = "Show changes from your other devices right away";
+pub const LIVE_UPDATES_CAPTION: &str = "With \u{201c}Only while I'm using Utopia\u{201d}, \
+    this pauses after two minutes without typing in Utopia, or when you switch to another \
+    app. Nothing is lost either way: changes still arrive, within about a minute instead of \
+    right away.";
 
 /// gpui sends modifier presses through as keystrokes with no real key on some layouts.
 fn is_modifier_only(ks: &Keystroke) -> bool {

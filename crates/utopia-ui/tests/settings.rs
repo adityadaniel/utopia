@@ -513,6 +513,23 @@ fn the_sync_tab_offers_the_live_updates_choice(cx: &mut TestAppContext) {
         RealtimeMode::Always,
         "always is the default"
     );
+    // The card speaks to someone who has never heard of a socket: what the choice does
+    // for them, that nothing is lost, and no transport jargon.
+    let words = format!(
+        "{} {} {} {}",
+        utopia_ui::settings::LIVE_UPDATES_TITLE,
+        utopia_ui::settings::LIVE_UPDATES_CAPTION,
+        RealtimeMode::Always.label(),
+        RealtimeMode::WhileActive.label()
+    );
+    for jargon in ["WebSocket", "socket", "polling", "Polling", "\u{2014}"] {
+        assert!(!words.contains(jargon), "{jargon:?} in {words:?}");
+    }
+    assert!(
+        utopia_ui::settings::LIVE_UPDATES_CAPTION.contains(RealtimeMode::WhileActive.label()),
+        "the caption names the choice it explains"
+    );
+    assert!(utopia_ui::settings::LIVE_UPDATES_CAPTION.contains("Nothing is lost"));
     let while_active = cx
         .debug_bounds("settings-sync-realtime-while_active")
         .expect("the choice is a control");

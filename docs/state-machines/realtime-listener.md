@@ -7,9 +7,16 @@ The desktop keeps its listener in `utopia_ui::sync_runner::LiveUpdates`, held by
 (the real `utopia_sync::realtime::Listener`, or a stand-in in tests), opened when a relay
 target exists. How long it stays open is Settings → Sync **Live updates**
 (`crates/utopia-ui/src/appearance.rs`, `RealtimeMode`): `always` (the default) never closes
-it; `while_active` opens it on a window activation or a local edit and closes it on
-deactivation or after `LIVE_IDLE` with no activity (2 minutes, counted by a gpui timer, so
-a test clocks it with `advance_clock`). A socket that closes is joined on the background
+it; `while_active` opens it on a window activation, a keystroke in any window of the app
+or a local edit, and closes it on deactivation or after `LIVE_IDLE` with none of those
+(2 minutes). The keystrokes come from one app-wide `intercept_keystrokes` hook installed by
+the workspace: with `always` it is one load and a branch (`LiveWatch::Off`), with the socket
+open it records the time in `LiveClock`, and only with the socket closed does it call the
+workspace to reopen it, which it refuses while no window of the app has the keyboard. The
+countdown is one gpui timer that, on firing, compares `LiveClock` with `LIVE_IDLE` and either
+closes the socket or sleeps for what is left, so activity never spawns a task; the clock is
+the executor's, so a test drives it with `advance_clock`. Pointer input is not counted:
+gpui 0.2.2 has no app-level mouse hook, only per-frame element listeners. A socket that closes is joined on the background
 executor; there is never a second one. The headless daemon (`utopia sync --continuous`)
 still keeps `SyncRunner::realtime` in `crates/utopia-sync/src/runner.rs` and always
 listens, since it has no user activity to follow.
@@ -49,8 +56,13 @@ and `ac_12_3_stop_cancels_a_stalled_handshake`, plus, for the activity policy,
 `live_updates_follow_the_mode_and_keep_one_socket` and the workspace scripts
 `always_keeps_the_realtime_socket_open`, `while_active_closes_and_reopens_the_realtime_socket_with_focus`,
 `while_active_closes_the_realtime_socket_after_two_quiet_minutes`,
-`while_active_closes_the_socket_when_the_app_leaves_from_settings` and
-`while_active_reopens_the_socket_from_the_settings_window_alone`.
+`while_active_closes_the_socket_when_the_app_leaves_from_settings`,
+`while_active_reopens_the_socket_from_the_settings_window_alone`,
+`while_active_keystrokes_without_an_edit_keep_the_socket_open`,
+`while_active_a_keystroke_reopens_the_socket_after_the_quiet_minutes`,
+`while_active_keystrokes_in_settings_keep_the_socket_open`,
+`while_active_a_keystroke_with_no_window_active_does_not_reopen` and
+`always_ignores_keystrokes`.
 
 ## What it controls
 

@@ -355,9 +355,16 @@ pub struct Workspace {
     /// §12.3). One socket at most, and it lives here rather than in the round: whether a
     /// user is present is a property of the window, not of the sync state machine.
     live: crate::sync_runner::LiveUpdates,
-    /// The `while_active` countdown to closing that socket. Replacing it cancels the
-    /// previous one, so an edit restarts the two quiet minutes.
+    /// The `while_active` countdown to closing that socket: one task, which sleeps until
+    /// the quiet minutes could be up, reads [`Self::live_clock`], and either closes the
+    /// socket or sleeps for what is left. Activity never spawns or replaces it; a focus
+    /// change, a policy change or a reopened socket does.
     live_idle_task: Option<Task<()>>,
+    /// The last sign of life and what a keystroke means for the policy, shared with the
+    /// app-wide keystroke hook installed in [`Self::new`] (§12.3).
+    live_clock: std::rc::Rc<crate::sync_runner::LiveClock>,
+    /// How many countdowns were started, for tests: keystrokes must not add to it.
+    live_idle_arms: usize,
     focus: FocusHandle,
     subs: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
@@ -525,6 +532,28 @@ impl Workspace {
                 }
             }));
         }
+        // Settings → Sync "Live updates" (§12.3): a keystroke in any window of the app is
+        // the user being here, reading or navigating as much as editing. An interceptor,
+        // not `observe_keystrokes`: observers miss a key whose handler stopped propagation
+        // (the keybinding editor's capture, Escape closing a menu). With `always` the hook
+        // is one load and one branch; with the socket open it only records the time, and
+        // only a closed socket costs a call into this view.
+        let live_clock = std::rc::Rc::new(crate::sync_runner::LiveClock::default());
+        {
+            let clock = live_clock.clone();
+            let me = cx.entity().downgrade();
+            subs.push(
+                cx.intercept_keystrokes(move |_, _, cx| match clock.watch() {
+                    crate::sync_runner::LiveWatch::Off => {}
+                    crate::sync_runner::LiveWatch::Open => {
+                        clock.touch(cx.background_executor().now())
+                    }
+                    crate::sync_runner::LiveWatch::Closed => {
+                        me.update(cx, |this, cx| this.live_activity(cx)).ok();
+                    }
+                }),
+            );
+        }
         let mut me = Self {
             app,
             editor,
@@ -570,6 +599,8 @@ impl Workspace {
             sync: None,
             live: crate::sync_runner::LiveUpdates::new(crate::appearance::sync_realtime(cx)),
             live_idle_task: None,
+            live_clock,
+            live_idle_arms: 0,
             focus: cx.focus_handle(),
             subs,
             _tasks: Vec::new(),
@@ -785,21 +816,37 @@ impl Workspace {
         self.refresh_live(cx);
     }
 
-    /// The user edited: open the socket and restart the quiet minutes. Unlike a focus
-    /// change this does not mean the app is in the front, so a later switch to
-    /// `while_active` does not read it as one.
+    /// The user typed or edited: record the time and, if the quiet minutes had closed the
+    /// socket, open it again. Unlike a focus change this does not mean the app is in the
+    /// front, so a later switch to `while_active` does not read it as one.
     ///
-    /// An edit that arrives while no window has the keyboard does not count. The editor
-    /// commits its block as the window deactivates, and an agent writing through the owner
-    /// while the app is in the background is not the user being here; either would reopen
-    /// what losing focus just closed. Polling pushes such a write anyway.
+    /// With the socket open this only moves the clock: the running countdown reads it when
+    /// it fires, so a burst of keystrokes costs no task and no timer. Only reopening a
+    /// socket starts a countdown, and there is never more than one.
+    ///
+    /// Activity while no window has the keyboard does not count. The editor commits its
+    /// block as the window deactivates, and an agent writing through the owner while the
+    /// app is in the background is not the user being here; either would reopen what
+    /// losing focus just closed. Polling pushes such a write anyway.
     fn live_activity(&mut self, cx: &mut Context<Self>) {
+        if self.live.mode() != crate::sync_runner::RealtimeMode::WhileActive {
+            return;
+        }
         if cx.active_window().is_none() {
+            return;
+        }
+        self.live_clock.touch(cx.background_executor().now());
+        if self.live.is_open() {
             return;
         }
         self.live.activity();
         self.refresh_live(cx);
-        self.arm_live_idle(cx);
+        self.start_live_countdown(cx);
+    }
+
+    /// How many `while_active` countdowns were started (tests: a keystroke adds none).
+    pub fn live_idle_arms(&self) -> usize {
+        self.live_idle_arms
     }
 
     /// Settings → Sync changed the policy: apply it to the socket at once.
@@ -813,10 +860,19 @@ impl Workspace {
         self.arm_live_idle(cx);
     }
 
-    /// The two quiet minutes are up: close the socket and leave polling alone.
-    fn live_timeout(&mut self, cx: &mut Context<Self>) {
-        self.live.idle();
-        self.refresh_live(cx);
+    /// The countdown woke: how much longer to wait, or `None` once it is over — the
+    /// quiet minutes are up (the socket is closed here and polling runs alone) or there is
+    /// no `while_active` socket left to count for.
+    fn live_tick(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
+        if !self.live.counting_down() {
+            return None;
+        }
+        let left = self.live_clock.remaining(cx.background_executor().now());
+        if left.is_none() {
+            self.live.idle();
+            self.refresh_live(cx);
+        }
+        left
     }
 
     /// Open or close the socket to match the policy. A socket that closes is joined on the
@@ -825,6 +881,7 @@ impl Workspace {
     fn refresh_live(&mut self, cx: &mut Context<Self>) {
         let mut closed = Vec::new();
         self.live.reconcile(&mut closed);
+        self.live_clock.set_watch(self.live.watch());
         if closed.is_empty() {
             return;
         }
@@ -837,18 +894,31 @@ impl Workspace {
             .detach();
     }
 
-    /// (Re)start the `while_active` countdown. Replacing the task cancels the previous one,
-    /// which is what makes every edit buy another two minutes.
+    /// Restart the two quiet minutes from now: a window got the keyboard, the policy or
+    /// the target changed. Keystrokes and edits do not come here (`live_activity`).
     fn arm_live_idle(&mut self, cx: &mut Context<Self>) {
+        self.live_clock.touch(cx.background_executor().now());
+        self.start_live_countdown(cx);
+    }
+
+    /// Start the one `while_active` countdown, replacing (and so cancelling) any other.
+    /// It sleeps, asks [`Self::live_tick`] how much is left, and sleeps again for that, so
+    /// activity in between only has to move the clock.
+    fn start_live_countdown(&mut self, cx: &mut Context<Self>) {
         self.live_idle_task = None;
         if !self.live.counting_down() {
             return;
         }
+        self.live_idle_arms += 1;
         self.live_idle_task = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(crate::sync_runner::LIVE_IDLE)
-                .await;
-            this.update(cx, |this, cx| this.live_timeout(cx)).ok();
+            let mut wait = crate::sync_runner::LIVE_IDLE;
+            loop {
+                cx.background_executor().timer(wait).await;
+                match this.update(cx, |this, cx| this.live_tick(cx)) {
+                    Ok(Some(left)) => wait = left,
+                    _ => return,
+                }
+            }
         }));
     }
 

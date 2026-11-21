@@ -5,8 +5,9 @@
 //! long the realtime socket stays open. Store work (prepare/apply) runs on the UI thread in
 //! short steps; network exchange runs on a background thread.
 
+use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub use utopia_sync::runner::{
     back_off, build_transport, exchange_owned, next_interval, BoxTransport, RefusalReason,
@@ -18,10 +19,68 @@ pub use crate::appearance::RealtimeMode;
 use utopia_sync::realtime::Listener;
 use utopia_sync::SyncStatus;
 
-/// How long a `while_active` socket stays open after the last edit or focus change (§12.3):
-/// two quiet minutes, then the WebSocket closes and polling runs alone until the user is
-/// back. Nothing is lost — the next poll still pulls, it just is not cut short early.
+/// How long a `while_active` socket stays open after the user's last sign of life (§12.3):
+/// a keystroke in any window of the app, a local edit, or a window of the app getting the
+/// keyboard. Two quiet minutes, then the WebSocket closes and polling runs alone until the
+/// user is back. Nothing is lost: the next poll still pulls, it just is not cut short early.
 pub const LIVE_IDLE: Duration = Duration::from_secs(120);
+
+/// What the app's keystroke hook does with a key (§12.3), kept current by the workspace
+/// each time it reconciles the socket so the hook itself decides with one load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LiveWatch {
+    /// `always`, or no relay target: a keystroke is none of the policy's business. This is
+    /// the default and the whole cost a keystroke pays for the setting (§15.1).
+    #[default]
+    Off,
+    /// `while_active` with the socket open: a keystroke only moves [`LiveClock::touch`]; the
+    /// one countdown reads that time when it fires and re-arms itself for the rest.
+    Open,
+    /// `while_active` with the socket closed (quiet minutes passed, or the app is in the
+    /// background): a keystroke asks the workspace to reopen it, which it does only when a
+    /// window of the app has the keyboard.
+    Closed,
+}
+
+/// The time of the user's last sign of life, shared by the workspace and the app-wide
+/// keystroke hook (§12.3). UI thread only (`Cell`), and a keystroke never spawns a task or
+/// touches the socket through it: the countdown that closes a `while_active` socket is one
+/// timer, which on firing compares this time with [`LIVE_IDLE`] and either closes the
+/// socket or sleeps for what is left.
+#[derive(Debug, Default)]
+pub struct LiveClock {
+    watch: Cell<LiveWatch>,
+    last: Cell<Option<Instant>>,
+}
+
+impl LiveClock {
+    pub fn watch(&self) -> LiveWatch {
+        self.watch.get()
+    }
+
+    pub fn set_watch(&self, watch: LiveWatch) {
+        self.watch.set(watch);
+    }
+
+    /// The user did something at `now` (the executor's clock, so a test can drive it).
+    pub fn touch(&self, now: Instant) {
+        self.last.set(Some(now));
+    }
+
+    /// How long nothing has happened, as of `now`; forever when nothing ever did.
+    pub fn quiet(&self, now: Instant) -> Duration {
+        self.last
+            .get()
+            .map_or(Duration::MAX, |t| now.saturating_duration_since(t))
+    }
+
+    /// What is left of the quiet minutes as of `now`: `None` when they are up.
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        LIVE_IDLE
+            .checked_sub(self.quiet(now))
+            .filter(|d| !d.is_zero())
+    }
+}
 
 /// Where the realtime socket connects, kept while sync runs so the policy can reopen it.
 /// The token is the one sync already holds; it never reaches `settings.json` or a
@@ -116,9 +175,11 @@ fn presence_changed(cx: &mut gpui::App) {
 /// The "Live updates" policy for the realtime socket (§12.3, Settings → Sync).
 ///
 /// `Always` keeps the socket open for as long as sync runs: the behaviour every release had
-/// before the setting. `WhileActive` opens it when a window gets focus or the user edits,
-/// and closes it after [`LIVE_IDLE`] with no activity or when the whole app goes to the
-/// background. Polling is the same in both (5 s / 60 s), so a closed socket changes only
+/// before the setting. `WhileActive` opens it when a window gets focus, the user types in
+/// any window of the app, or edits, and closes it after [`LIVE_IDLE`] with none of those or
+/// when the whole app goes to the background. Pointer input alone (scrolling, clicking
+/// inside a window that already has the keyboard) does not count: gpui 0.2.2 has no
+/// app-level hook for mouse events, only per-frame element listeners. Polling is the same in both (5 s / 60 s), so a closed socket changes only
 /// how soon a remote change is noticed.
 ///
 /// One socket at most: the handle is an `Option`, a transition replaces it, and the socket
@@ -184,10 +245,9 @@ impl LiveUpdates {
         self.wanted = true;
     }
 
-    /// The user edited: a sign of life that reopens the socket and restarts the quiet
-    /// minutes. Unlike a focus change it does not say the app is in the front — only the
-    /// platform does — so the caller (`Workspace::live_activity`) decides whether an edit
-    /// counts.
+    /// The user typed or edited: a sign of life that reopens the socket. Unlike a focus
+    /// change it does not say the app is in the front (only the platform does), so the
+    /// caller (`Workspace::live_activity`) decides whether it counts.
     pub fn activity(&mut self) {
         self.wanted = true;
     }
@@ -208,6 +268,17 @@ impl LiveUpdates {
     /// Whether the caller should be running the idle countdown.
     pub fn counting_down(&self) -> bool {
         self.mode == RealtimeMode::WhileActive && self.socket.is_some()
+    }
+
+    /// What a keystroke means for this policy right now (see [`LiveWatch`]).
+    pub fn watch(&self) -> LiveWatch {
+        if self.mode != RealtimeMode::WhileActive || self.target.is_none() {
+            LiveWatch::Off
+        } else if self.socket.is_some() {
+            LiveWatch::Open
+        } else {
+            LiveWatch::Closed
+        }
     }
 
     /// Bring the socket in line with the decision. A socket that has to close is pushed

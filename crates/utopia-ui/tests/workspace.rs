@@ -2305,6 +2305,256 @@ fn while_active_closes_the_realtime_socket_after_two_quiet_minutes(cx: &mut Test
     assert_eq!(o - s, 1, "never two sockets at once");
 }
 
+/// A `while_active` workspace with a stand-in socket, its window holding the keyboard.
+struct WhileActive<'a> {
+    app: Entity<AppState>,
+    ws: Entity<Workspace>,
+    cx: &'a mut VisualTestContext,
+    opened: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    stopped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    dir: tempfile::TempDir,
+}
+
+fn while_active_workspace(cx: &mut TestAppContext) -> WhileActive<'_> {
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+    let (app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (opened, stopped, opener) = live_opener();
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    WhileActive {
+        app,
+        ws,
+        cx,
+        opened,
+        stopped,
+        dir,
+    }
+}
+
+/// §12.3, "Only while I'm using Utopia": reading and moving around is using the app. A
+/// keystroke that edits nothing (the caret moving) restarts the quiet minutes like an
+/// edit does, and a burst of them starts no new countdown: the one timer re-arms itself
+/// from the time of the last key.
+#[gpui::test]
+fn while_active_keystrokes_without_an_edit_keep_the_socket_open(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let WhileActive {
+        app,
+        ws,
+        cx,
+        opened,
+        stopped,
+        ..
+    } = while_active_workspace(cx);
+    cx.simulate_input("some words to move through");
+    cx.run_until_parked();
+    // Let the debounced text edit land (250 ms idle), so nothing after this is an edit.
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    let version = app.read_with(cx, |a, _| a.version);
+    let arms = ws.read_with(cx, |w, _| w.live_idle_arms());
+
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_secs(100));
+        cx.run_until_parked();
+        for _ in 0..20 {
+            cx.simulate_keystrokes("left");
+        }
+        cx.run_until_parked();
+        assert!(
+            ws.read_with(cx, |w, _| w.live_socket_open()),
+            "moving the caret is the user being here"
+        );
+    }
+    assert_eq!(
+        app.read_with(cx, |a, _| a.version),
+        version,
+        "the keys edited nothing: only the keystroke hook kept the socket"
+    );
+    assert_eq!(
+        ws.read_with(cx, |w, _| w.live_idle_arms()),
+        arms,
+        "sixty keystrokes started no countdown"
+    );
+
+    cx.executor().advance_clock(Duration::from_secs(119));
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "two minutes after the last key the socket closes"
+    );
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+}
+
+/// §12.3: once the quiet minutes have closed the socket, the next keystroke opens it again
+/// (no edit, no focus change), and a run of keys after that opens nothing more.
+#[gpui::test]
+fn while_active_a_keystroke_reopens_the_socket_after_the_quiet_minutes(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    let WhileActive {
+        app,
+        ws,
+        cx,
+        opened,
+        stopped,
+        ..
+    } = while_active_workspace(cx);
+    cx.simulate_input("words");
+    cx.run_until_parked();
+    cx.executor().advance_clock(Duration::from_secs(121));
+    cx.run_until_parked();
+    assert!(!ws.read_with(cx, |w, _| w.live_socket_open()));
+    let version = app.read_with(cx, |a, _| a.version);
+
+    cx.simulate_keystrokes("left");
+    cx.run_until_parked();
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "a key opens the socket back up"
+    );
+    let arms = ws.read_with(cx, |w, _| w.live_idle_arms());
+    for _ in 0..10 {
+        cx.simulate_keystrokes("right");
+    }
+    cx.run_until_parked();
+    assert_eq!(app.read_with(cx, |a, _| a.version), version, "no edit");
+    assert_eq!(ws.read_with(cx, |w, _| w.live_idle_arms()), arms);
+    let (o, s) = (
+        opened.load(Ordering::SeqCst),
+        stopped.load(Ordering::SeqCst),
+    );
+    assert_eq!((o, s), (2, 1));
+    assert_eq!(o - s, 1, "never two sockets at once");
+}
+
+/// §12.3: a keystroke in the Settings window is the user using Utopia too. With only
+/// Settings in front, keys there keep the workspace's socket past the quiet minutes.
+#[gpui::test]
+fn while_active_keystrokes_in_settings_keep_the_socket_open(cx: &mut TestAppContext) {
+    use std::time::Duration;
+    let WhileActive {
+        ws,
+        cx,
+        opened,
+        stopped,
+        dir,
+        ..
+    } = while_active_workspace(cx);
+    let mut settings = settings_window(cx, dir.path());
+    settings.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_secs(100));
+        cx.run_until_parked();
+        settings.simulate_keystrokes("down");
+        cx.run_until_parked();
+    }
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "keys in Settings count"
+    );
+    cx.executor().advance_clock(Duration::from_secs(121));
+    cx.run_until_parked();
+    assert!(!ws.read_with(cx, |w, _| w.live_socket_open()));
+    use std::sync::atomic::Ordering;
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+}
+
+/// §12.3: input while no window of the app has the keyboard is not the user being here.
+/// After the app goes to the background, a key that still reaches a window (the test
+/// platform delivers it; macOS would not) leaves the socket closed.
+#[gpui::test]
+fn while_active_a_keystroke_with_no_window_active_does_not_reopen(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    let WhileActive {
+        ws,
+        cx,
+        opened,
+        stopped,
+        ..
+    } = while_active_workspace(cx);
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(!ws.read_with(cx, |w, _| w.live_socket_open()));
+
+    cx.simulate_keystrokes("left");
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "neither a key nor an edit reopens it in the background"
+    );
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+}
+
+/// §12.3, §15.1: with `always`, keystrokes are none of the policy's business. The socket
+/// stays the one it was, and no countdown is ever started.
+#[gpui::test]
+fn always_ignores_keystrokes(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    let (_app, ws, cx) = setup(cx);
+    let (opened, stopped, opener) = live_opener();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    for _ in 0..10 {
+        cx.simulate_keystrokes("left");
+    }
+    cx.simulate_input("typed");
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    assert_eq!(ws.read_with(cx, |w, _| w.live_idle_arms()), 0);
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 0)
+    );
+}
+
 /// §12.3: correctness never depends on the socket. With the `while_active` socket closed,
 /// polling still rounds on its own cadence.
 #[gpui::test]

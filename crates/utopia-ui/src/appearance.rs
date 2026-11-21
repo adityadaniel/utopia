@@ -263,9 +263,9 @@ pub enum RealtimeMode {
     /// before this setting did).
     #[default]
     Always,
-    /// The socket opens when a window gets focus or the user edits, and closes after two
-    /// quiet minutes or when the app goes to the background. Polling is unchanged, so a
-    /// closed socket costs delivery latency, never correctness.
+    /// The socket opens when a window gets focus or the user types or edits, and closes
+    /// after two quiet minutes or when the app goes to the background. Polling is
+    /// unchanged, so a closed socket costs delivery latency, never correctness.
     WhileActive,
 }
 

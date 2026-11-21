@@ -4666,3 +4666,94 @@ fn traffic_lights_have_room_in_the_top_band(cx: &mut TestAppContext) {
     let initial = bounds(cx, "workspace-initial");
     assert!(approx(initial.origin.x, 20.), "{initial:?}");
 }
+
+/// Settings → Sync "Live updates" (§12.3): the row's text and choices sit inside the row with
+/// the 8 px padding every Settings card row has, at each density and with each font. The
+/// first version put the text beside the choices in a flex row whose height was settled
+/// before the text column's width was, so the row was sized for fewer lines than the text
+/// drew and the title ran into the card header while the caption touched the bottom border.
+/// A fresh window for each case, so no bounds linger from another (AGENTS.md).
+#[gpui::test]
+fn live_updates_text_keeps_its_padding(cx: &mut TestAppContext) {
+    use utopia_ui::appearance::{self, Density, UiFont};
+    const PAD: f32 = 8.;
+    const BORDER: f32 = 1.;
+    const INSET: f32 = 16.;
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    for &font in UiFont::ALL {
+        for (density, width) in Density::ALL.iter().flat_map(|&d| [(d, 900.), (d, 1100.)]) {
+            // The app's own Sync tab: the setup pane above the card, as in the window.
+            cx.update(|cx| {
+                appearance::set_font(cx, font, dir.path()).unwrap();
+                appearance::set_density(cx, density, dir.path()).unwrap();
+                let setup =
+                    cx.new(|cx| utopia_ui::sync_setup::SyncSetup::new("g".into(), true, cx));
+                cx.set_global(utopia_ui::sync_setup::SetupHandle(setup));
+            });
+            let path = dir.path().to_path_buf();
+            let (_view, cx) =
+                cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Sync, window, cx));
+            // The narrowest Settings window the app allows (the most wrapping), and the size
+            // it opens at.
+            cx.simulate_resize(size(px(width), px(760.)));
+            cx.run_until_parked();
+
+            let case = format!("{font:?}, {density:?}, {width} px");
+            let header = bounds(cx, "settings-card-Live updates");
+            let row = bounds(cx, "settings-sync-realtime-row");
+            let text = bounds(cx, "settings-sync-realtime-text");
+            let title = bounds(cx, "settings-sync-realtime-title");
+            let caption = bounds(cx, "settings-sync-realtime-caption");
+            let choices = bounds(cx, "settings-sync-realtime-choices");
+            let (top, bottom) = (f32::from(row.origin.y), f32::from(row.bottom()));
+            let (left, right) = (f32::from(row.origin.x), f32::from(row.right()));
+
+            assert!(
+                f32::from(header.bottom()) <= top + 0.5,
+                "{case}: the row starts below the card header: {header:?}, {row:?}"
+            );
+            assert!(
+                f32::from(text.origin.y) >= top + BORDER + PAD - 0.5,
+                "{case}: the title keeps the row's top padding: {text:?} in {row:?}"
+            );
+            assert!(
+                f32::from(title.origin.y) >= f32::from(text.origin.y) - 0.5
+                    && f32::from(caption.bottom()) <= f32::from(text.bottom()) + 0.5,
+                "{case}: the title and caption are inside their column: {title:?}, {caption:?}, {text:?}"
+            );
+            assert!(
+                f32::from(caption.size.height) > f32::from(title.size.height),
+                "{case}: at this width the caption wraps: {caption:?}"
+            );
+            for b in [text, choices] {
+                assert!(
+                    f32::from(b.bottom()) <= bottom - BORDER - PAD + 0.5,
+                    "{case}: the row's bottom padding is kept: {b:?} in {row:?}"
+                );
+            }
+            assert!(
+                f32::from(text.bottom()) <= f32::from(choices.origin.y) + 0.5,
+                "{case}: the choices come after the text: {text:?}, {choices:?}"
+            );
+            for b in [text, choices] {
+                assert!(
+                    f32::from(b.origin.x) >= left + BORDER + INSET - 0.5
+                        && f32::from(b.right()) <= right - BORDER - INSET + 0.5,
+                    "{case}: inside the row's side insets: {b:?} in {row:?}"
+                );
+            }
+            for mode in ["always", "while_active"] {
+                let choice = bounds_of(cx, format!("settings-sync-realtime-{mode}"));
+                assert!(
+                    f32::from(choice.right()) <= f32::from(choices.right()) + 0.5
+                        && f32::from(choice.bottom()) <= f32::from(choices.bottom()) + 0.5,
+                    "{case}: {mode} is inside the choices: {choice:?} in {choices:?}"
+                );
+            }
+        }
+    }
+}
