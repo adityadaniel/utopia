@@ -17,7 +17,7 @@ use utopia_core::{BlockId, PageId};
 use utopia_store::{OutgoingRef, PageRow, RefTarget};
 
 use crate::actions::*;
-use crate::app_state::{AppState, IndexUpdated};
+use crate::app_state::{AppState, Changed, IndexUpdated};
 use crate::appearance::UiFontExt;
 use crate::editor::{BlockEditor, EditorEvent};
 use crate::graph_view::{GraphEvent, GraphView};
@@ -351,6 +351,13 @@ pub struct Workspace {
     /// change actually repainted (debug bounds linger after an element stops being drawn).
     rendered_sync_dot: Option<SyncDot>,
     sync: Option<SyncRunner>,
+    /// The realtime socket and how long it may stay open (Settings → Sync "Live updates",
+    /// §12.3). One socket at most, and it lives here rather than in the round: whether a
+    /// user is present is a property of the window, not of the sync state machine.
+    live: crate::sync_runner::LiveUpdates,
+    /// The `while_active` countdown to closing that socket. Replacing it cancels the
+    /// previous one, so an edit restarts the two quiet minutes.
+    live_idle_task: Option<Task<()>>,
     focus: FocusHandle,
     subs: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
@@ -400,6 +407,10 @@ impl Focusable for Workspace {
 
 impl Workspace {
     pub fn new(app: Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        // The app's one realtime socket lives here, so any window of the app can report
+        // activation to it (§12.3). `weak_entity`: this view is not registered yet while its
+        // constructor runs, and a global may not hold a strong reference back to it.
+        cx.set_global(crate::sync_runner::LivePresence(cx.weak_entity()));
         let editor = cx.new(|cx| BlockEditor::new(app.clone(), cx));
         let main =
             cx.new(|cx| PageView::new(app.clone(), editor.clone(), false, false, window, cx));
@@ -437,7 +448,28 @@ impl Workspace {
                 },
             ),
             cx.observe(&app, |_, _, cx| cx.notify()),
+            // Settings → Sync "Live updates" (§12.3). A local write is the user being here:
+            // a sync import is not (`Changed::local`), or a busy peer would keep the socket
+            // open for an idle user forever.
+            cx.subscribe(&app, |this, _, e: &Changed, cx| {
+                if e.local {
+                    this.live_activity(cx);
+                }
+            }),
+            // A change to the policy applies at once, without a restart.
+            cx.observe_global::<crate::appearance::Appearance>(|this, cx| {
+                this.live_mode_changed(cx);
+            }),
         ];
+        // A window that gets or loses the keyboard means the user arrived or left — but the
+        // app has more than one window, and Settings having it is still the user being here
+        // (§12.3). Every window of the app reports to the one policy
+        // (`sync_runner::report_presence`), which reads the keyboard from a task once the
+        // platform has settled every window, so opening Settings is not mistaken for the
+        // user leaving the main window.
+        subs.push(cx.observe_window_activation(window, |_this, _window, cx| {
+            crate::sync_runner::report_presence(cx);
+        }));
         let flag = |key: &str, default: bool| {
             app.read(cx)
                 .store
@@ -536,6 +568,8 @@ impl Workspace {
             sync_open: false,
             rendered_sync_dot: None,
             sync: None,
+            live: crate::sync_runner::LiveUpdates::new(crate::appearance::sync_realtime(cx)),
+            live_idle_task: None,
             focus: cx.focus_handle(),
             subs,
             _tasks: Vec::new(),
@@ -610,7 +644,7 @@ impl Workspace {
         cfg: crate::sync_runner::SyncConfig,
         cx: &mut Context<Self>,
     ) -> bool {
-        drop(self.stop_sync(cx));
+        self.stop_sync(cx);
         // Say where sync goes without the token or passphrase (never shown, §15.6); the
         // sidebar names the target even when the transport below cannot be built.
         self.sync_target = Some(match &cfg.target {
@@ -627,15 +661,15 @@ impl Workspace {
                 let started = self.enable_sync_with(t, Some(nudge.clone()), cx);
                 if started {
                     if let crate::sync_runner::SyncTarget::Relay { url, token } = &cfg.target {
-                        if let Some(runner) = &mut self.sync {
-                            runner.realtime = utopia_sync::realtime::Listener::start(
-                                url.clone(),
-                                cfg.graph.clone(),
-                                token.clone(),
+                        self.set_live_target(
+                            Some(crate::sync_runner::LiveTarget {
+                                url: url.clone(),
+                                graph: cfg.graph.clone(),
+                                token: token.clone(),
                                 nudge,
-                            )
-                            .ok();
-                        }
+                            }),
+                            cx,
+                        );
                     }
                 }
                 started
@@ -650,19 +684,19 @@ impl Workspace {
         }
     }
 
-    /// Stop polling immediately; the returned listener is joined off the UI thread.
-    pub fn stop_sync(&mut self, cx: &mut Context<Self>) -> Option<utopia_sync::realtime::Listener> {
-        let listener = self
-            .sync
-            .take()
-            .and_then(|mut runner| runner.realtime.take());
+    /// Stop polling immediately. Any realtime socket is signalled here and joined on the
+    /// background executor: joining blocks, so it never runs on the UI thread.
+    pub fn stop_sync(&mut self, cx: &mut Context<Self>) {
+        self.live_idle_task = None;
+        self.live.set_target(None);
+        self.refresh_live(cx);
+        self.sync = None;
         self.sync_target = None;
         let mut facts = crate::sync_runner::facts(cx);
         facts.target = None;
         facts.encrypted = false;
         cx.set_global(facts);
         cx.notify();
-        listener
     }
 
     /// Install a transport prepared off the UI thread (key derivation and folder I/O).
@@ -672,21 +706,26 @@ impl Workspace {
         transport: BoxTransport,
         cx: &mut Context<Self>,
     ) -> bool {
-        drop(self.stop_sync(cx));
+        self.stop_sync(cx);
         let facts = crate::sync_runner::SyncFacts::from_config(cfg);
         self.sync_target = facts.target.clone();
         let started = self.enable_sync_with(transport, None, cx);
         if started {
-            if let (Some(runner), crate::sync_runner::SyncTarget::Relay { url, token }) =
-                (&mut self.sync, &cfg.target)
-            {
-                runner.realtime = utopia_sync::realtime::Listener::start(
-                    url.clone(),
-                    cfg.graph.clone(),
-                    token.clone(),
-                    runner.nudge.clone(),
-                )
-                .ok();
+            if let crate::sync_runner::SyncTarget::Relay { url, token } = &cfg.target {
+                let nudge = self
+                    .sync
+                    .as_ref()
+                    .map(|r| r.nudge.clone())
+                    .unwrap_or_default();
+                self.set_live_target(
+                    Some(crate::sync_runner::LiveTarget {
+                        url: url.clone(),
+                        graph: cfg.graph.clone(),
+                        token: token.clone(),
+                        nudge,
+                    }),
+                    cx,
+                );
             }
             if let Some(runner) = &self.sync {
                 runner
@@ -697,6 +736,120 @@ impl Workspace {
         }
         cx.notify();
         started
+    }
+
+    // ------------------------------------------------- live updates (§12.3)
+
+    /// Point the realtime socket at a relay, or take it away (`None`). Sync does this
+    /// itself for a relay target; it is public so a test can install a stand-in opener and
+    /// drive the activity policy without a relay.
+    pub fn set_live_target(
+        &mut self,
+        target: Option<crate::sync_runner::LiveTarget>,
+        cx: &mut Context<Self>,
+    ) {
+        self.live.set_target(target);
+        self.refresh_live(cx);
+        self.arm_live_idle(cx);
+    }
+
+    /// Replace the realtime opener. The app never does; a test installs a counter here so
+    /// "open" and "closed" are observable without a server.
+    pub fn set_live_opener(&mut self, opener: crate::sync_runner::LiveOpener) {
+        self.live.set_opener(opener);
+    }
+
+    /// Whether a realtime socket is open (there is never more than one).
+    pub fn live_socket_open(&self) -> bool {
+        self.live.is_open()
+    }
+
+    /// A window got focus: open the socket, and restart the quiet minutes that close it.
+    fn live_focused(&mut self, cx: &mut Context<Self>) {
+        self.live.focused();
+        self.refresh_live(cx);
+        self.arm_live_idle(cx);
+    }
+
+    /// Some window of this app gained or lost the keyboard (§12.3). Every window reports it
+    /// through [`crate::sync_runner::report_presence`], so the socket follows the app and
+    /// not just the window it is drawn in: the user opening Settings is here, and the app
+    /// going to the background from Settings is gone.
+    pub fn set_present(&mut self, present: bool, cx: &mut Context<Self>) {
+        if present {
+            self.live_focused(cx);
+            return;
+        }
+        self.live.deactivate();
+        self.live_idle_task = None;
+        self.refresh_live(cx);
+    }
+
+    /// The user edited: open the socket and restart the quiet minutes. Unlike a focus
+    /// change this does not mean the app is in the front, so a later switch to
+    /// `while_active` does not read it as one.
+    ///
+    /// An edit that arrives while no window has the keyboard does not count. The editor
+    /// commits its block as the window deactivates, and an agent writing through the owner
+    /// while the app is in the background is not the user being here; either would reopen
+    /// what losing focus just closed. Polling pushes such a write anyway.
+    fn live_activity(&mut self, cx: &mut Context<Self>) {
+        if cx.active_window().is_none() {
+            return;
+        }
+        self.live.activity();
+        self.refresh_live(cx);
+        self.arm_live_idle(cx);
+    }
+
+    /// Settings → Sync changed the policy: apply it to the socket at once.
+    fn live_mode_changed(&mut self, cx: &mut Context<Self>) {
+        let mode = crate::appearance::sync_realtime(cx);
+        if mode == self.live.mode() {
+            return;
+        }
+        self.live.set_mode(mode);
+        self.refresh_live(cx);
+        self.arm_live_idle(cx);
+    }
+
+    /// The two quiet minutes are up: close the socket and leave polling alone.
+    fn live_timeout(&mut self, cx: &mut Context<Self>) {
+        self.live.idle();
+        self.refresh_live(cx);
+    }
+
+    /// Open or close the socket to match the policy. A socket that closes is joined on the
+    /// background executor: `Listener::stop` waits for the thread, and no render or handler
+    /// may do that.
+    fn refresh_live(&mut self, cx: &mut Context<Self>) {
+        let mut closed = Vec::new();
+        self.live.reconcile(&mut closed);
+        if closed.is_empty() {
+            return;
+        }
+        cx.background_executor()
+            .spawn(async move {
+                for socket in closed {
+                    socket.stop();
+                }
+            })
+            .detach();
+    }
+
+    /// (Re)start the `while_active` countdown. Replacing the task cancels the previous one,
+    /// which is what makes every edit buy another two minutes.
+    fn arm_live_idle(&mut self, cx: &mut Context<Self>) {
+        self.live_idle_task = None;
+        if !self.live.counting_down() {
+            return;
+        }
+        self.live_idle_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(crate::sync_runner::LIVE_IDLE)
+                .await;
+            this.update(cx, |this, cx| this.live_timeout(cx)).ok();
+        }));
     }
 
     /// Start sync for `cfg` and publish what Settings → Sync should say (ST-5). The enabled
@@ -828,7 +981,7 @@ impl Workspace {
                         let r = runner.engine.apply(&mut app.store, inc);
                         if let Ok(rep) = &r {
                             if !rep.imported.is_empty() {
-                                app.changed(rep.imported.clone(), true, cx);
+                                app.imported(rep.imported.clone(), cx);
                             }
                         }
                         r

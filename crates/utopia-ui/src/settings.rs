@@ -18,7 +18,10 @@
 //!   and the pane says so. "Test connection" makes one manifest request off the UI thread;
 //!   "Connect another device" shows what the other instance needs, never a secret. The
 //!   pane itself is [`crate::sync_setup::SyncSetup`], installed by the app for the open
-//!   graph; without one (component tests) the tab shows the transport facts only.
+//!   graph; without one (component tests) the tab shows the transport facts only. Below it,
+//!   **Live updates** is the one machine-local choice of the tab (§12.3): keep the realtime
+//!   WebSocket open `always`, or only while you are using the app (`while_active`). It is
+//!   written to `settings.json`, never to the per-graph sync settings.
 //! - **Assistants** — assistant access over MCP for this graph (PRD §13.8 MC-12): Off, Read
 //!   or Read and write, the `when_closed` switch, the setup entry to copy into each AI
 //!   client, and the state of the bridge. A change applies with no restart: the app saves
@@ -41,7 +44,7 @@ use std::path::PathBuf;
 use crate::actions::{
     by_category, doc, pretty_keys, reinstall, ActionDoc, Category, Override, Overrides, CATALOG,
 };
-use crate::appearance::{self, Density, Indent, UiFont, UiFontExt};
+use crate::appearance::{self, Density, Indent, RealtimeMode, UiFont, UiFontExt};
 use crate::help::{shot_image, TOPICS};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::sync_runner;
@@ -285,6 +288,11 @@ impl SettingsView {
             if !window.is_window_active() {
                 this.capture_left_the_window(cx);
             }
+            // Settings is a window of this app, and with "Live updates" on
+            // `while_active` the realtime socket follows the app, not one window (§12.3):
+            // coming here is the user being present, and leaving the app from here is the
+            // user being gone.
+            crate::sync_runner::report_presence(cx);
         }));
         Self {
             config_dir,
@@ -668,6 +676,93 @@ impl SettingsView {
             Ok(()) => None,
         };
         cx.notify();
+    }
+
+    /// Settings → Sync: how long the realtime socket stays open (§12.3). The open windows
+    /// notice the changed preference and apply it at once; no restart and no re-sync.
+    pub fn choose_sync_realtime(&mut self, mode: RealtimeMode, cx: &mut Context<Self>) {
+        self.status = match appearance::set_sync_realtime(cx, mode, &self.config_dir) {
+            Err(e) => Some(
+                format!(
+                    "Live updates: {} applies now, but could not save {}: {e}",
+                    mode.label(),
+                    appearance::FILE
+                )
+                .into(),
+            ),
+            Ok(()) => None,
+        };
+        cx.notify();
+    }
+
+    /// Settings → Sync, below the setup pane: the machine's "Live updates" choice (§12.3).
+    /// It is not per graph — it decides how long this device keeps its WebSocket open — so
+    /// it shows whether or not a graph is open.
+    fn render_live_updates(&self, cx: &mut Context<Self>) -> Div {
+        let th = theme(cx).clone();
+        let current = appearance::sync_realtime(cx);
+        let mut choices = div().flex().items_center().gap_2();
+        for &mode in RealtimeMode::ALL {
+            let on = mode == current;
+            let th = th.clone();
+            choices = choices.child(
+                div()
+                    .id(SharedString::from(format!("sync-realtime-{}", mode.key())))
+                    .debug_selector(move || format!("settings-sync-realtime-{}", mode.key()))
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .rounded(px(crate::theme::RADIUS_CONTROL))
+                    .border_1()
+                    .border_color(if on { th.link } else { th.line })
+                    .when(on, |d| d.bg(th.line_soft).text_color(th.link))
+                    .when(!on, |d| {
+                        d.text_color(th.muted)
+                            .cursor_pointer()
+                            .hover(|x| x.bg(th.hover))
+                    })
+                    .child(mode.label())
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.choose_sync_realtime(mode, cx)),
+                    ),
+            );
+        }
+        div()
+            .debug_selector(|| "settings-sync-realtime".into())
+            .flex()
+            .flex_col()
+            .gap_0()
+            .mt_2()
+            .child(card_top(&th, "Live updates"))
+            .child(appearance_row(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_4()
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(div().child("Realtime updates over WebSocket"))
+                            .child(
+                                div()
+                                    .text_size(px(crate::theme::CAPTION_SIZE))
+                                    .text_color(th.muted)
+                                    .child(
+                                        "Polling continues either way — a closed socket only \
+                                         makes a change on another device arrive at the next \
+                                         check instead of at once.",
+                                    ),
+                            ),
+                    )
+                    .child(choices),
+                true,
+                &th,
+            ))
     }
 }
 
@@ -1754,9 +1849,11 @@ impl SettingsView {
     /// Setup is provided by the app for the open graph. Headless component tests can
     /// still render transport facts without installing a coordinator (§12, ST-5).
     fn render_sync(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let live = self.render_live_updates(cx);
         if let Some(setup) = cx.try_global::<crate::sync_setup::SetupHandle>() {
             return pane("settings-sync-pane", "settings-sync-pane")
                 .child(setup.0.clone())
+                .child(live)
                 .into_any_element();
         }
         let th = theme(cx).clone();
@@ -1819,6 +1916,7 @@ impl SettingsView {
         ));
         pane("settings-sync-pane", "settings-sync-pane")
             .child(this_graph)
+            .child(live)
             .into_any_element()
     }
 }

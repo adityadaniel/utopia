@@ -1995,6 +1995,358 @@ fn enabling_sync_twice_keeps_one_poll_loop(cx: &mut TestAppContext) {
     );
 }
 
+/// A stand-in realtime socket: counts opens and stops, so Settings → Sync "Live updates"
+/// is observable without a relay. The app's opener starts a real `Listener` (§12.3).
+struct FakeLive {
+    stopped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl utopia_ui::sync_runner::LiveSocket for FakeLive {
+    fn stop(self: Box<Self>) {
+        self.stopped
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// `(opened, stopped, opener)` for a fake socket; `opened - stopped` is the number of
+/// sockets alive, which the tests pin to at most one.
+fn live_opener() -> (
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    utopia_ui::sync_runner::LiveOpener,
+) {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    let opened = Arc::new(AtomicUsize::new(0));
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let (o, s) = (opened.clone(), stopped.clone());
+    let opener: utopia_ui::sync_runner::LiveOpener = Box::new(move |_| {
+        o.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Some(Box::new(FakeLive { stopped: s.clone() }))
+    });
+    (opened, stopped, opener)
+}
+
+fn live_target() -> utopia_ui::sync_runner::LiveTarget {
+    utopia_ui::sync_runner::LiveTarget {
+        url: "ws://127.0.0.1:1".into(),
+        graph: "g".into(),
+        token: None,
+        nudge: Default::default(),
+    }
+}
+
+/// §12.3, Settings → Sync "Live updates": `always` (the default) opens the socket with the
+/// target and never closes it — focus changes, long quiet spells and edits leave it alone.
+#[gpui::test]
+fn always_keeps_the_realtime_socket_open(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    let (_app, ws, cx) = setup(cx);
+    let (opened, stopped, opener) = live_opener();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "always opens with the target, before any window has focus"
+    );
+
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    cx.deactivate_window();
+    cx.run_until_parked();
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_secs(120));
+        cx.run_until_parked();
+    }
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "always is not an inactivity policy"
+    );
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 0),
+        "one socket, opened once, closed never"
+    );
+}
+
+/// §12.3: `while_active` follows the user. A window that gets focus opens the socket, the
+/// app going to the background closes it, and coming back opens exactly one again.
+#[gpui::test]
+fn while_active_closes_and_reopens_the_realtime_socket_with_focus(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+    let (_app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (opened, stopped, opener) = live_opener();
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "nobody is using the app yet, so there is no socket"
+    );
+
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 0)
+    );
+
+    cx.deactivate_window();
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "the app in the background has no socket"
+    );
+    assert_eq!(
+        (
+            opened.load(Ordering::SeqCst),
+            stopped.load(Ordering::SeqCst)
+        ),
+        (1, 1)
+    );
+
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    let (o, s) = (
+        opened.load(Ordering::SeqCst),
+        stopped.load(Ordering::SeqCst),
+    );
+    assert_eq!((o, s), (2, 1));
+    assert_eq!(o - s, 1, "never two sockets at once");
+}
+
+/// §12.3, Settings → Sync "Live updates": the socket follows the app, not the window it is
+/// drawn in. Settings is a window of this app, so with `while_active` the user leaving the
+/// app from Settings must close the socket even though the front window is Settings and the
+/// workspace window was already inactive.
+#[gpui::test]
+fn while_active_closes_the_socket_when_the_app_leaves_from_settings(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+
+    let (_app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (_opened, stopped, opener) = live_opener();
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    let mut settings = settings_window(cx, dir.path());
+    cx.run_until_parked();
+
+    // The workspace window opens the socket; then the user moves to Settings, which
+    // deactivates it while the app stays in front. The user is still here.
+    cx.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    settings.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "another window of this app having the keyboard is still the user being here"
+    );
+
+    // Switching to another application from Settings: every window of this app has let go
+    // of the keyboard, so the realtime socket closes.
+    settings.deactivate_window();
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "the app in the background has no socket, whichever window was in front"
+    );
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+}
+
+/// §12.3: the other half of the same rule. Coming back to the app with Settings still in
+/// front must reopen the socket, with no edit and without the workspace window ever
+/// becoming active.
+#[gpui::test]
+fn while_active_reopens_the_socket_from_the_settings_window_alone(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+
+    let (_app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (opened, stopped, opener) = live_opener();
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    // Settings gets the keyboard while the workspace window never does: no edit, no
+    // workspace activation, only a window of this app coming to the front.
+    let mut settings = settings_window(cx, dir.path());
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "no window had the keyboard yet, so there is no socket"
+    );
+
+    settings.update(|window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "the Settings window coming to the front means the user is here"
+    );
+    let (o, s) = (
+        opened.load(Ordering::SeqCst),
+        stopped.load(Ordering::SeqCst),
+    );
+    assert_eq!((o, s), (1, 0));
+    assert_eq!(o - s, 1, "never two sockets at once");
+}
+
+/// The Settings window, opened like the app opens it (Cmd+,) — a second window of the same
+/// app, which is what makes activation app-wide rather than workspace-wide.
+fn settings_window(cx: &mut VisualTestContext, dir: &std::path::Path) -> VisualTestContext {
+    use utopia_ui::settings::{SettingsView, Tab};
+    let path = dir.to_path_buf();
+    let mut app = cx.cx.clone();
+    let (_view, settings) =
+        app.add_window_view(|window, cx| SettingsView::new(path, Tab::Sync, window, cx));
+    settings.clone()
+}
+
+/// §12.3: `while_active` closes the socket after two quiet minutes with no edit and no
+/// focus change, and the next edit opens it again — even though no window gained focus.
+/// The countdown is the executor's clock, restarted by every edit.
+#[gpui::test]
+fn while_active_closes_the_realtime_socket_after_two_quiet_minutes(cx: &mut TestAppContext) {
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+    let (_app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (opened, stopped, opener) = live_opener();
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(Box::new(RelayTransport::new(Relay::new(), "g")), None, cx);
+        w.set_live_target(Some(live_target()), cx);
+    });
+    ws.update_in(cx, |_, window, _| window.activate_window());
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+
+    // An edit every 100 s keeps the same socket open well past two minutes.
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_secs(100));
+        cx.run_until_parked();
+        cx.simulate_input("a");
+        cx.run_until_parked();
+        assert!(
+            ws.read_with(cx, |w, _| w.live_socket_open()),
+            "an edit restarts the quiet minutes"
+        );
+    }
+    // 119 s after the last edit: still open. Two more seconds: closed.
+    cx.executor().advance_clock(Duration::from_secs(119));
+    cx.run_until_parked();
+    assert!(ws.read_with(cx, |w, _| w.live_socket_open()));
+    cx.executor().advance_clock(Duration::from_secs(2));
+    cx.run_until_parked();
+    assert!(
+        !ws.read_with(cx, |w, _| w.live_socket_open()),
+        "two quiet minutes close the socket"
+    );
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+    assert_eq!(opened.load(Ordering::SeqCst), 1);
+
+    // A local edit reopens it, with no focus change at all.
+    cx.simulate_input("b");
+    cx.run_until_parked();
+    assert!(
+        ws.read_with(cx, |w, _| w.live_socket_open()),
+        "an edit opens the socket back up"
+    );
+    let (o, s) = (
+        opened.load(Ordering::SeqCst),
+        stopped.load(Ordering::SeqCst),
+    );
+    assert_eq!((o, s), (2, 1));
+    assert_eq!(o - s, 1, "never two sockets at once");
+}
+
+/// §12.3: correctness never depends on the socket. With the `while_active` socket closed,
+/// polling still rounds on its own cadence.
+#[gpui::test]
+fn polling_continues_while_the_realtime_socket_is_closed(cx: &mut TestAppContext) {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+    use utopia_sync::relay::{Relay, RelayTransport};
+    use utopia_ui::appearance::{self, RealtimeMode};
+    let (_app, ws, cx) = setup(cx);
+    let dir = tempfile::tempdir().unwrap();
+    let (opened, _stopped, opener) = live_opener();
+    let calls = Arc::new(AtomicUsize::new(0));
+    cx.update(|_, cx| {
+        appearance::set_sync_realtime(cx, RealtimeMode::WhileActive, dir.path()).unwrap()
+    });
+    cx.run_until_parked();
+    ws.update(cx, |w, cx| {
+        w.set_live_opener(opener);
+        w.enable_sync_with(
+            Box::new(CountingTransport {
+                inner: RelayTransport::new(Relay::new(), "g"),
+                calls: calls.clone(),
+            }),
+            None,
+            cx,
+        );
+        w.set_live_target(Some(live_target()), cx);
+    });
+    // No window has focus, so no socket: only the poll loop moves.
+    cx.executor().advance_clock(Duration::from_secs(6));
+    cx.run_until_parked();
+    assert!(!ws.read_with(cx, |w, _| w.live_socket_open()));
+    assert!(
+        calls.load(Ordering::SeqCst) >= 1,
+        "a round ran with the socket closed"
+    );
+    assert_eq!(opened.load(Ordering::SeqCst), 0, "no socket was opened");
+}
+
 /// §12.6: a round that fails on the device (the store, not the relay) must not be reported
 /// as the relay being offline — the network was never tried.
 #[gpui::test]
@@ -7970,7 +8322,7 @@ fn ac_12_7_disabling_sync_stops_polling_and_reenable_starts_one_loop(cx: &mut Te
         );
     });
     ws.update(cx, |w, cx| {
-        drop(w.stop_sync(cx));
+        w.stop_sync(cx);
     });
     for _ in 0..4 {
         cx.executor().advance_clock(Duration::from_secs(5));

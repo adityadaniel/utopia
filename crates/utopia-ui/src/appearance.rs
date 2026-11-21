@@ -15,7 +15,8 @@
 //!   "ref_children": 2,
 //!   "pinned": [],
 //!   "right_sidebar_width": 380.0,
-//!   "view_mode": "single"
+//!   "view_mode": "single",
+//!   "sync_realtime": "always"
 //! }
 //! ```
 //!
@@ -28,7 +29,9 @@
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
 //! Pinned group (SB-3) and the right sidebar's Pinned tab (RS-3); `right_sidebar_width`
 //! is the width that sidebar was dragged to (RS-4); `view_mode` is `"single"` (the default)
-//! or `"panes"`, the main area's view mode (DESIGN.md §4.4, SP-6). A missing file means defaults; an
+//! or `"panes"`, the main area's view mode (DESIGN.md §4.4, SP-6); `sync_realtime` is
+//! `"always"` (the default) or `"while_active"`, how long the realtime WebSocket stays open
+//! while sync runs (§12.3, `crate::sync_runner::LiveUpdates`). A missing file means defaults; an
 //! unreadable file, an unknown value or a newer version is logged and read as far as it can
 //! be, never a panic (rule 11). Keys this version does not know are kept when the file is
 //! rewritten, so a newer release's preferences survive a round trip through an older one.
@@ -252,6 +255,43 @@ impl Indent {
     }
 }
 
+/// How long the realtime WebSocket is kept open (§12.3). Local to the machine, like the
+/// font: whether this device listens has nothing to do with the graph's sync settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RealtimeMode {
+    /// The socket opens with sync and stays open (the default, and what every release
+    /// before this setting did).
+    #[default]
+    Always,
+    /// The socket opens when a window gets focus or the user edits, and closes after two
+    /// quiet minutes or when the app goes to the background. Polling is unchanged, so a
+    /// closed socket costs delivery latency, never correctness.
+    WhileActive,
+}
+
+impl RealtimeMode {
+    pub const ALL: &'static [RealtimeMode] = &[RealtimeMode::Always, RealtimeMode::WhileActive];
+
+    /// How `settings.json` spells it.
+    pub fn key(self) -> &'static str {
+        match self {
+            RealtimeMode::Always => "always",
+            RealtimeMode::WhileActive => "while_active",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.iter().copied().find(|m| m.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            RealtimeMode::Always => "Always",
+            RealtimeMode::WhileActive => "Only while I'm using Utopia",
+        }
+    }
+}
+
 /// The right sidebar's width as it was before the setting existed.
 pub const RIGHT_SIDEBAR_DEFAULT_WIDTH: f32 = 380.;
 /// Narrow enough to leave a readable page beside it, wide enough for a reference.
@@ -284,6 +324,10 @@ pub struct Prefs {
     pub right_sidebar_width: f32,
     /// Panes or Single (DESIGN.md §4.4, SP-6): an app setting, not per page.
     pub view_mode: ViewMode,
+    /// How long the realtime WebSocket stays open (§12.3). This lives here rather than in
+    /// the per-graph sync preferences: that struct denies unknown fields, so a newer app
+    /// writing a key there would make an older one read the whole file as Off.
+    pub sync_realtime: RealtimeMode,
     /// Keys this version does not understand, written back untouched.
     rest: Map<String, Value>,
 }
@@ -298,6 +342,7 @@ impl Default for Prefs {
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
             view_mode: ViewMode::default(),
+            sync_realtime: RealtimeMode::default(),
             rest: Map::new(),
         }
     }
@@ -369,6 +414,23 @@ impl Prefs {
                     "{FILE}: view_mode should be a string, not {v}; using single"
                 ));
                 ViewMode::default()
+            }
+        };
+        let sync_realtime = match rest.remove("sync_realtime") {
+            None => RealtimeMode::default(),
+            Some(Value::String(s)) => RealtimeMode::from_key(&s).unwrap_or_else(|| {
+                warnings.push(format!(
+                    "{FILE}: unknown sync_realtime {s:?}; using {}",
+                    RealtimeMode::default().label()
+                ));
+                RealtimeMode::default()
+            }),
+            Some(v) => {
+                warnings.push(format!(
+                    "{FILE}: sync_realtime should be a string, not {v}; using {}",
+                    RealtimeMode::default().label()
+                ));
+                RealtimeMode::default()
             }
         };
         let indent = match rest.remove("indent") {
@@ -484,6 +546,7 @@ impl Prefs {
                 pinned,
                 right_sidebar_width,
                 view_mode,
+                sync_realtime,
                 rest,
             },
             warnings,
@@ -503,6 +566,7 @@ impl Prefs {
         );
         m.insert("ref_children".into(), self.ref_children.into());
         m.insert("view_mode".into(), self.view_mode.key().into());
+        m.insert("sync_realtime".into(), self.sync_realtime.key().into());
         m.insert(
             "pinned".into(),
             Value::Array(
@@ -615,6 +679,25 @@ pub fn set_right_sidebar_width(cx: &mut App, width: f32) {
 pub fn reset_right_sidebar_width(cx: &mut App, config_dir: &Path) -> std::io::Result<()> {
     cx.default_global::<Appearance>().prefs.right_sidebar_width = RIGHT_SIDEBAR_DEFAULT_WIDTH;
     cx.refresh_windows();
+    cx.global::<Appearance>().prefs.save(config_dir)
+}
+
+/// The realtime socket policy in force (§12.3). `Always` when nothing was installed (tests,
+/// early startup), which is also what the headless daemon does.
+pub fn sync_realtime(cx: &App) -> RealtimeMode {
+    cx.try_global::<Appearance>()
+        .map_or(RealtimeMode::default(), |a| a.prefs.sync_realtime)
+}
+
+/// Switch the realtime policy and remember it (Settings → Sync). Open windows notice the
+/// changed global and bring their socket in line at once; a failed write is returned, not
+/// fatal, so the choice still applies for this session (rule 11).
+pub fn set_sync_realtime(
+    cx: &mut App,
+    mode: RealtimeMode,
+    config_dir: &Path,
+) -> std::io::Result<()> {
+    cx.default_global::<Appearance>().prefs.sync_realtime = mode;
     cx.global::<Appearance>().prefs.save(config_dir)
 }
 
@@ -791,6 +874,7 @@ mod tests {
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,
                 "view_mode": "panes",
+                "sync_realtime": "always",
             })
         );
         assert_eq!(Prefs::from_json(&json), (p, vec![]));
@@ -806,6 +890,37 @@ mod tests {
         assert_eq!(w.len(), 1, "{w:?}");
         let (p, w) = Prefs::from_json(r#"{"version": 1, "view_mode": "panes"}"#);
         assert_eq!((p.view_mode, w), (ViewMode::Panes, vec![]));
+    }
+
+    /// §12.3: "Live updates" is a local setting. `always` is the default and what every
+    /// earlier release did; `while_active` round-trips; a value this build does not know is
+    /// logged and read as `always`, never a failure (rule 11).
+    #[test]
+    fn sync_realtime_round_trips_and_defaults_to_always() {
+        assert_eq!(Prefs::default().sync_realtime, RealtimeMode::Always);
+        for (key, want) in [
+            ("always", RealtimeMode::Always),
+            ("while_active", RealtimeMode::WhileActive),
+        ] {
+            let (p, warnings) =
+                Prefs::from_json(&format!(r#"{{"version": 1, "sync_realtime": "{key}"}}"#));
+            assert_eq!(p.sync_realtime, want, "{key}");
+            assert!(warnings.is_empty(), "{key}: {warnings:?}");
+            let v: Value = serde_json::from_str(&p.to_json()).unwrap();
+            assert_eq!(v["sync_realtime"], serde_json::json!(key));
+            assert_eq!(Prefs::from_json(&p.to_json()), (p, vec![]), "{key}");
+        }
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "sync_realtime": "sometimes"}"#);
+        assert_eq!(p.sync_realtime, RealtimeMode::Always);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("sometimes"), "{warnings:?}");
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "sync_realtime": true}"#);
+        assert_eq!(p.sync_realtime, RealtimeMode::Always);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        // A file from before the setting reads as the default with no complaint.
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "font": "system"}"#);
+        assert_eq!(p.sync_realtime, RealtimeMode::Always);
+        assert!(warnings.is_empty(), "{warnings:?}");
     }
 
     /// Merge fix: the branch before the merge stored the sidebar pins under
