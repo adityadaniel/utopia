@@ -441,6 +441,14 @@ impl Db {
     }
 }
 
+/// The per-graph quota when none is configured (`UTOPIA_SYNCD_QUOTA_MB` unset): 1 GiB.
+/// `relay-cloudflare` must default to the same (`tests/worker_constants.rs`).
+pub const DEFAULT_QUOTA_BYTES: u64 = 1 << 30;
+
+/// Largest request body: a 64 MiB attachment plus the encryption envelope. Applied to the
+/// bytes on the wire (compressed), as `relay-cloudflare` does (`tests/worker_constants.rs`).
+pub const MAX_BODY_BYTES: usize = (64 << 20) + (64 << 10);
+
 #[derive(Debug, Clone)]
 pub struct Config {
     /// Accepted bearer tokens; empty disables auth (local development only).
@@ -453,7 +461,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             tokens: Vec::new(),
-            quota_bytes: 1 << 30,
+            quota_bytes: DEFAULT_QUOTA_BYTES,
         }
     }
 }
@@ -672,8 +680,7 @@ pub fn router(db: Arc<Db>, cfg: Config) -> Router {
         .route("/v1/graphs/{gid}/events", get(events))
         .route("/v1/graphs/{gid}/blobs/{hash}", put(put_blob).get(get_blob))
         .route("/healthz", get(|| async { "ok" }))
-        // 64 MB attachments plus the encryption envelope.
-        .layer(DefaultBodyLimit::max((64 << 20) + (64 << 10)))
+        .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(Ctx {
             db,
             cfg: Arc::new(cfg),

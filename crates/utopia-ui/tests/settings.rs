@@ -491,6 +491,76 @@ fn the_sync_tab_shows_the_transport(cx: &mut TestAppContext) {
     );
 }
 
+/// §12.3, Settings → Sync "Live updates": the choice is machine-local, it is written to
+/// `settings.json` (not to the per-graph sync settings), and the open windows apply it.
+#[gpui::test]
+fn the_sync_tab_offers_the_live_updates_choice(cx: &mut TestAppContext) {
+    use utopia_ui::appearance::{self, RealtimeMode};
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|cx| {
+        cx.set_global(Theme::light());
+        install_keymap(cx, None);
+    });
+    let path = dir.path().to_path_buf();
+    let (view, cx) =
+        cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Sync, window, cx));
+    cx.simulate_resize(size(px(1100.), px(760.)));
+    cx.run_until_parked();
+
+    assert!(cx.debug_bounds("settings-sync-realtime").is_some());
+    assert_eq!(
+        view.read_with(cx, |_, app| appearance::sync_realtime(app)),
+        RealtimeMode::Always,
+        "always is the default"
+    );
+    // The card speaks to someone who has never heard of a socket: what the choice does
+    // for them, that nothing is lost, and no transport jargon.
+    let words = format!(
+        "{} {} {} {}",
+        utopia_ui::settings::LIVE_UPDATES_TITLE,
+        utopia_ui::settings::LIVE_UPDATES_CAPTION,
+        RealtimeMode::Always.label(),
+        RealtimeMode::WhileActive.label()
+    );
+    for jargon in ["WebSocket", "socket", "polling", "Polling", "\u{2014}"] {
+        assert!(!words.contains(jargon), "{jargon:?} in {words:?}");
+    }
+    assert!(
+        utopia_ui::settings::LIVE_UPDATES_CAPTION.contains(RealtimeMode::WhileActive.label()),
+        "the caption names the choice it explains"
+    );
+    assert!(utopia_ui::settings::LIVE_UPDATES_CAPTION.contains("Nothing is lost"));
+    let while_active = cx
+        .debug_bounds("settings-sync-realtime-while_active")
+        .expect("the choice is a control");
+    cx.simulate_click(while_active.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |_, app| appearance::sync_realtime(app)),
+        RealtimeMode::WhileActive,
+        "the choice applies at once"
+    );
+    let saved = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    assert!(
+        saved.contains("\"sync_realtime\": \"while_active\""),
+        "the local settings file holds it: {saved}"
+    );
+    assert!(
+        !dir.path().join("sync").exists(),
+        "the per-graph sync settings are untouched"
+    );
+
+    let always = cx.debug_bounds("settings-sync-realtime-always").unwrap();
+    cx.simulate_click(always.center(), gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(
+        view.read_with(cx, |_, app| appearance::sync_realtime(app)),
+        RealtimeMode::Always
+    );
+    let saved = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+    assert!(saved.contains("\"sync_realtime\": \"always\""), "{saved}");
+}
+
 /// ST-5: Help is one readable column now that the topics sit above it instead of in a
 /// second sidebar; the 640 px screenshots fit in the 720 px column.
 #[gpui::test]
@@ -1315,6 +1385,7 @@ mod appearance {
                 "pinned": [],
                 "right_sidebar_width": 380.0,
                 "view_mode": "single",
+                "sync_realtime": "always",
             }))
         );
         assert!(

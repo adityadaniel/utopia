@@ -1,0 +1,7 @@
+# Local development only: copy to .dev.vars (gitignored), which `wrangler dev` reads.
+# In a deployment RELAY_TOKENS is a secret: `npx wrangler secret put RELAY_TOKENS`.
+# Comma-separated; any listed token can read and write every graph on this relay.
+RELAY_TOKENS=dev-token
+
+# Turns auth off when RELAY_TOKENS is empty. Never set this in a deployment.
+# ALLOW_ANONYMOUS=1

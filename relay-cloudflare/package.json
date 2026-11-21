@@ -1,0 +1,23 @@
+{
+  "name": "utopia-relay-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Workers relay for Utopia sync (PRD §12.8): the utopia-syncd protocol on Workers, Durable Objects, R2 and the WebSocket Hibernation API.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "wrangler dev --local",
+    "test:rust-client": "bash scripts/test-against-rust-client.sh"
+  },
+  "dependencies": {
+    "fzstd": "^0.1.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261120.1",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.12",
+    "wrangler": "^4.124.0"
+  }
+}
