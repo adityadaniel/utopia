@@ -1,0 +1,35 @@
+{
+  // Cloudflare relay for Utopia sync (PRD §12.8). Local development and tests only in this
+  // repo: `npm test` runs the real workerd runtime through @cloudflare/vitest-pool-workers,
+  // and `npm run dev` (`wrangler dev --local`) serves it on 127.0.0.1.
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "utopia-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-15",
+  // `node:zlib` is what the tests use to build zstd request bodies; nothing in `src/` needs
+  // it, and it costs nothing measurable at start-up.
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "name": "GRAPH", "class_name": "GraphObject" }]
+  },
+  "migrations": [
+    // SQLite-backed Durable Objects: one per graph, holding the page logs, snapshots,
+    // the graph revision, the relay instance id and the blob index (PRD §12.8).
+    { "tag": "v1", "new_sqlite_classes": ["GraphObject"] }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BLOBS",
+      "bucket_name": "utopia-relay-blobs",
+      "preview_bucket_name": "utopia-relay-blobs"
+    }
+  ],
+  "vars": {
+    // Accepted bearer tokens, comma-separated. Empty means every request is 401 unless
+    // ALLOW_ANONYMOUS is "1" (unlike utopia-syncd, an empty token list does not silently
+    // disable auth). Set the real value with `wrangler secret put RELAY_TOKENS`.
+    "RELAY_TOKENS": "",
+    // Per-graph storage limit: 1 GiB, matching utopia-syncd's default (PRD §12.8).
+    "QUOTA_BYTES": "1073741824"
+  }
+}
