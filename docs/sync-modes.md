@@ -44,6 +44,17 @@ mode.
 - **The poll cadence is the same.** A round runs each 5 s while there is activity, and
   goes back to one round each 60 s when the rounds are quiet
   (`crates/utopia-ui/src/sync_runner.rs`, `FAST` and `SLOW`).
+- **The WebSocket is optional.** Settings → Sync → **Live updates** chooses whether the
+  realtime socket stays open (**Always**, the default) or only **while you are using
+  Utopia**: it then opens when a window gets focus or you edit, and closes after two quiet
+  minutes, or when Utopia goes to the background
+  (`crates/utopia-ui/src/sync_runner.rs`, `LIVE_IDLE`). Windows of the app count together,
+  so the socket follows the whole app: moving to Settings is not leaving, and leaving from
+  Settings closes it. Polling is unchanged in both, so a closed socket only means a change
+  on another device arrives at the next check rather than at once. The choice is
+  machine-local, in `settings.json`, never part of the graph; the headless daemon
+  `utopia sync --continuous` always keeps the socket open, because there is no user
+  activity there to follow.
 - **End-to-end encryption is available in every mode.** It wraps the transport
   (`crates/utopia-sync/src/e2e.rs`), so page updates, snapshots and attachments are sealed
   before they leave the device. See [End-to-end encryption](#end-to-end-encryption).

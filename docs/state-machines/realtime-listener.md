@@ -2,12 +2,32 @@
 
 ## Status
 
-The listener is held by the shared round, `utopia_sync::runner::SyncRunner`
-(`crates/utopia-sync/src/runner.rs`), not by GPUI: `utopia_sync::realtime::Listener` is
-started for a relay target, cancelled and joined when the runner is stopped or replaced, and
-its `nudge` wakes both the desktop loop and the headless `utopia sync --continuous` daemon.
-The UI adapter in `crates/utopia-ui/src/sync_runner.rs` only owns the GPUI loop task around
-that runner. References below to `sync_runner.rs` line numbers are historical.
+The desktop keeps its listener in `utopia_ui::sync_runner::LiveUpdates`, held by the
+`Workspace` (`crates/utopia-ui/src/workspace.rs`): one `Option<Box<dyn LiveSocket>>`
+(the real `utopia_sync::realtime::Listener`, or a stand-in in tests), opened when a relay
+target exists. How long it stays open is Settings → Sync **Live updates**
+(`crates/utopia-ui/src/appearance.rs`, `RealtimeMode`): `always` (the default) never closes
+it; `while_active` opens it on a window activation or a local edit and closes it on
+deactivation or after `LIVE_IDLE` with no activity (2 minutes, counted by a gpui timer, so
+a test clocks it with `advance_clock`). A socket that closes is joined on the background
+executor; there is never a second one. The headless daemon (`utopia sync --continuous`)
+still keeps `SyncRunner::realtime` in `crates/utopia-sync/src/runner.rs` and always
+listens, since it has no user activity to follow.
+
+Activation is app-wide, not window-wide: Settings is a window of the same app, and gpui
+reports activation per window with no app-level event, so every window reports to the
+workspace that owns the socket (`sync_runner::report_presence`, from a task so the platform
+has settled all of them) and a global weak handle names that workspace. "The app is in the
+background" therefore means no window of ours has the keyboard, and a `while_active`
+socket closes after the idle timeout *and* when the user leaves from Settings, reopening
+when Settings comes back to the front without an edit.
+
+Before that setting, the desktop's listener was held by the shared round
+`utopia_sync::runner::SyncRunner`, started for a relay target, cancelled and joined when
+the runner was stopped or replaced. Its `nudge` still wakes both the desktop loop and the
+daemon. The paragraph below describes that earlier ownership; references to
+`sync_runner.rs` line numbers in this document are historical, and the listener lifecycle
+(backoff, cancellation, the 10 s handshake deadline) is described below and unchanged.
 
 In-app setup replaces the desktop's detached blocking listener with
 `utopia_sync::realtime::Listener`, owned by `SyncRunner`. A oneshot cancellation signal
@@ -22,13 +42,15 @@ This fixes findings 1–4 below: successful connection resets backoff to 2 s; 40
 and a quiet or stalled connection no longer prevents cancellation. Connect/handshake has a
 10 s deadline. The blocking `listen` helper stays public for the relay's own end-to-end test
 (`crates/utopia-syncd/tests/http.rs`); the desktop no longer uses it. Jitter and server-side
-event-map retention (5–6) are unchanged. `Workspace::enable_sync` (the test path that builds
-its own transport) drops the previous listener without joining it; the signal still ends the
-thread, only the join is skipped.
+event-map retention (5–6) are unchanged.
 
 Regression tests: `ac_12_3_stop_cancels_a_quiet_socket_and_replacement_has_one_listener`
-and `ac_12_3_stop_cancels_a_stalled_handshake`. The sections below describe the original
-implementation and motivate the change; their line numbers are historical.
+and `ac_12_3_stop_cancels_a_stalled_handshake`, plus, for the activity policy,
+`live_updates_follow_the_mode_and_keep_one_socket` and the workspace scripts
+`always_keeps_the_realtime_socket_open`, `while_active_closes_and_reopens_the_realtime_socket_with_focus`,
+`while_active_closes_the_realtime_socket_after_two_quiet_minutes`,
+`while_active_closes_the_socket_when_the_app_leaves_from_settings` and
+`while_active_reopens_the_socket_from_the_settings_window_alone`.
 
 ## What it controls
 
