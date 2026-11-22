@@ -22,6 +22,7 @@ use crate::appearance::UiFontExt;
 use crate::editor::{BlockEditor, EditorEvent};
 use crate::graph_view::{GraphEvent, GraphView};
 use crate::icons::{icon, Icon, ICON_SIZE};
+use crate::motion::{ease_out_cubic, reduce_motion};
 use crate::page_view::{NextLink, PageView, PageViewEvent};
 use crate::pane_stack::{self, Click, Entry, Geometry, Origin, Plan, ViewMode};
 use crate::pdf_view::{PdfEvent, PdfView};
@@ -245,33 +246,6 @@ const LEFT_RAIL_WIDTH: f32 = 32.;
 
 /// A spine shows at most this many graphemes of its title; a window is never that tall.
 const SPINE_MAX_GLYPHS: usize = 64;
-
-/// macOS "Reduce motion" (DESIGN.md §5): a smooth scroll lands at once. Read when a
-/// scroll starts (a handler), never in a frame.
-#[cfg(target_os = "macos")]
-#[allow(unexpected_cfgs)] // objc 0.2's msg_send! checks a cfg this crate does not declare
-fn reduce_motion() -> bool {
-    use objc::runtime::{Class, Object, BOOL, NO};
-    use objc::{msg_send, sel, sel_impl};
-    let Some(cls) = Class::get("NSWorkspace") else {
-        return false;
-    };
-    // SAFETY: `sharedWorkspace` and `accessibilityDisplayShouldReduceMotion` are plain
-    // getters on AppKit's singleton (macOS 10.12+); a nil workspace is checked first.
-    unsafe {
-        let ws: *mut Object = msg_send![cls, sharedWorkspace];
-        if ws.is_null() {
-            return false;
-        }
-        let on: BOOL = msg_send![ws, accessibilityDisplayShouldReduceMotion];
-        on != NO
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-fn reduce_motion() -> bool {
-    false
-}
 
 pub struct Workspace {
     app: Entity<AppState>,
@@ -4006,7 +3980,7 @@ impl Workspace {
                 self.scroll_anim = None;
             } else {
                 // Ease-out cubic: quick to answer, gentle to land.
-                let e = 1. - (1. - t).powi(3);
+                let e = ease_out_cubic(t);
                 self.scroll_x = a.from + (a.to - a.from) * e;
                 window.request_animation_frame();
             }

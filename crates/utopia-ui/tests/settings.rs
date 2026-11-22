@@ -1381,6 +1381,7 @@ mod appearance {
                 "font": "ibm-plex-sans",
                 "density": "normal",
                 "indent": "wide",
+                "smooth_caret": false,
                 "ref_children": 2,
                 "pinned": [],
                 "right_sidebar_width": 380.0,
@@ -1493,6 +1494,28 @@ mod appearance {
         s.run_until_parked();
         assert_eq!(s.update(|_, cx| appearance::indent(cx)), Indent::Wide);
         assert_eq!(settings_json(dir.path()).unwrap()["indent"], "wide");
+    }
+
+    /// §13.5: the Appearance switch updates the live preference and survives a restart.
+    #[gpui::test]
+    fn smooth_caret_is_opt_in_and_the_switch_is_saved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let (_main, settings) = open_both(cx, dir.path());
+        let mut s = VisualTestContext::from_window(settings, cx);
+        s.simulate_resize(gpui::size(gpui::px(1100.), gpui::px(900.)));
+        s.run_until_parked();
+
+        assert!(!s.update(|_, cx| appearance::smooth_caret(cx)));
+        for enabled in [true, false] {
+            let toggle = s.debug_bounds("settings-smooth-caret").expect("the switch");
+            s.simulate_click(toggle.center(), Modifiers::default());
+            s.run_until_parked();
+
+            assert_eq!(s.update(|_, cx| appearance::smooth_caret(cx)), enabled);
+            let (saved, warnings) = appearance::Prefs::load(dir.path());
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(saved.smooth_caret, enabled);
+        }
     }
 
     /// SB-3: pins live in settings.json (not keymap.json, never the graph). Settings →

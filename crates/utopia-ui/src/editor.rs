@@ -417,6 +417,9 @@ impl FieldHost for BlockEditor {
     fn focus_handle_ref(&self) -> &FocusHandle {
         &self.focus
     }
+    fn smooth_caret(&self, cx: &gpui::App) -> bool {
+        crate::appearance::smooth_caret(cx)
+    }
     fn caret_visible(&self) -> bool {
         self.blink.visible()
     }
@@ -577,6 +580,7 @@ impl BlockEditor {
             self.session = EditorSession::Editing(Editing::new(target));
             self.ac = Autocomplete::Closed;
         } else if let Some(c) = caret {
+            self.field.reset_caret_motion();
             self.field.move_to(c);
         }
         // Up/Down from the neighbouring block lands under the caret's x once laid out.
@@ -2185,6 +2189,7 @@ impl BlockEditor {
         } else {
             self.field.move_to(ix);
         }
+        self.field.reset_caret_motion();
         self.field.selecting = true;
         self.refresh_autocomplete(cx);
         cx.notify();

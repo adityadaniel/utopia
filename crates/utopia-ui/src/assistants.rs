@@ -19,7 +19,7 @@ use gpui::{
 use utopia_api::{Access, Level};
 use utopia_mcp::SetupClient;
 
-use crate::theme::{theme, Theme};
+use crate::theme::{settings_switch, theme, Theme};
 
 /// The view the app installs for the open graph. A component test can install its own.
 pub struct AssistantsHandle(pub Entity<AssistantsSetup>);
@@ -186,23 +186,6 @@ fn level_control(
         .child(label)
 }
 
-/// A drawn switch (DESIGN.md §2.4: no image assets; every size is a token). A true control,
-/// so the whole row is the target and the knob shows the state.
-fn switch(on: bool, th: &Theme) -> Div {
-    div()
-        .w(px(34.))
-        .h(px(20.))
-        .flex_none()
-        .rounded_full()
-        .bg(if on { th.link } else { th.line_strong })
-        .p(px(2.))
-        .flex()
-        .items_center()
-        .when(on, |d| d.justify_end())
-        .when(!on, |d| d.justify_start())
-        .child(div().size(px(16.)).rounded_full().bg(th.paper))
-}
-
 impl Render for AssistantsSetup {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
@@ -253,7 +236,7 @@ impl Render for AssistantsSetup {
                             ),
                     ),
             )
-            .child(switch(self.access.when_closed, &th));
+            .child(settings_switch(self.access.when_closed, &th));
 
         // The cards are the Settings pattern (ST-1): a caption, then flush rows with a
         // hairline between them, in one centred readable column.
