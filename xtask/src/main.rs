@@ -2,6 +2,8 @@
 //! the timed acceptance criteria) on PRD-scale fixtures, print a table, and exit non-zero
 //! if any budget is missed. Run in release mode; debug timings are meaningless.
 
+mod icon;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -617,6 +619,7 @@ fn info_plist(version: &str) -> String {
   <key>CFBundleDisplayName</key><string>Utopia</string>
   <key>CFBundleIdentifier</key><string>app.utopia.Utopia</string>
   <key>CFBundleExecutable</key><string>utopia</string>
+  <key>CFBundleIconFile</key><string>AppIcon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>{version}</string>
   <key>CFBundleShortVersionString</key><string>{version}</string>
@@ -661,6 +664,10 @@ fn bundle(debug: bool) -> Result<()> {
         info_plist(env!("CARGO_PKG_VERSION")),
     )?;
     std::fs::write(contents.join("PkgInfo"), "APPL????")?;
+    icon::icns(
+        &root.join("crates/utopia-app/assets/icon.png"),
+        &contents.join("Resources/AppIcon.icns"),
+    )?;
     println!("{}", app.canonicalize()?.display());
     Ok(())
 }
