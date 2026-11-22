@@ -21,6 +21,9 @@ zstd.workspace = true
 rusqlite.workspace = true
 chrono.workspace = true
 tempfile.workspace = true
+# The raw HTTP client of tests/differential.rs and the Worker health check, as
+# utopia-sync's HttpTransport uses it.
+ureq.workspace = true
 utopia-core.workspace = true
 utopia-store.workspace = true
 utopia-sync.workspace = true

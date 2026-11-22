@@ -1,17 +1,313 @@
 //! Background sync for the desktop app (§12.3, §13.3): the round state machine and its
 //! rules live in [`utopia_sync::runner`], shared with the headless daemon. This module adds
 //! what only the window has: the GPUI task that drives the loop, the global the sidebar and
-//! Settings read, and the dot and status line. Store work (prepare/apply) runs on the UI
-//! thread in short steps; network exchange runs on a background thread.
+//! Settings read, the dot and status line, and the "Live updates" policy that decides how
+//! long the realtime socket stays open. Store work (prepare/apply) runs on the UI thread in
+//! short steps; network exchange runs on a background thread.
 
+use std::cell::Cell;
 use std::ops::{Deref, DerefMut};
+use std::time::{Duration, Instant};
 
 pub use utopia_sync::runner::{
     back_off, build_transport, exchange_owned, next_interval, BoxTransport, RefusalReason,
     SyncConfig, SyncPhase, SyncRunner as Round, SyncTarget, FAST, SLOW,
 };
 
+pub use crate::appearance::RealtimeMode;
+
+use utopia_sync::realtime::Listener;
 use utopia_sync::SyncStatus;
+
+/// How long a `while_active` socket stays open after the user's last sign of life (§12.3):
+/// a keystroke in any window of the app, a local edit, or a window of the app getting the
+/// keyboard. Two quiet minutes, then the WebSocket closes and polling runs alone until the
+/// user is back. Nothing is lost: the next poll still pulls, it just is not cut short early.
+pub const LIVE_IDLE: Duration = Duration::from_secs(120);
+
+/// What the app's keystroke hook does with a key (§12.3), kept current by the workspace
+/// each time it reconciles the socket so the hook itself decides with one load.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LiveWatch {
+    /// `always`, or no relay target: a keystroke is none of the policy's business. This is
+    /// the default and the whole cost a keystroke pays for the setting (§15.1).
+    #[default]
+    Off,
+    /// `while_active` with the socket open: a keystroke only moves [`LiveClock::touch`]; the
+    /// one countdown reads that time when it fires and re-arms itself for the rest.
+    Open,
+    /// `while_active` with the socket closed (quiet minutes passed, or the app is in the
+    /// background): a keystroke asks the workspace to reopen it, which it does only when a
+    /// window of the app has the keyboard.
+    Closed,
+}
+
+/// The time of the user's last sign of life, shared by the workspace and the app-wide
+/// keystroke hook (§12.3). UI thread only (`Cell`), and a keystroke never spawns a task or
+/// touches the socket through it: the countdown that closes a `while_active` socket is one
+/// timer, which on firing compares this time with [`LIVE_IDLE`] and either closes the
+/// socket or sleeps for what is left.
+#[derive(Debug, Default)]
+pub struct LiveClock {
+    watch: Cell<LiveWatch>,
+    last: Cell<Option<Instant>>,
+}
+
+impl LiveClock {
+    pub fn watch(&self) -> LiveWatch {
+        self.watch.get()
+    }
+
+    pub fn set_watch(&self, watch: LiveWatch) {
+        self.watch.set(watch);
+    }
+
+    /// The user did something at `now` (the executor's clock, so a test can drive it).
+    pub fn touch(&self, now: Instant) {
+        self.last.set(Some(now));
+    }
+
+    /// How long nothing has happened, as of `now`; forever when nothing ever did.
+    pub fn quiet(&self, now: Instant) -> Duration {
+        self.last
+            .get()
+            .map_or(Duration::MAX, |t| now.saturating_duration_since(t))
+    }
+
+    /// What is left of the quiet minutes as of `now`: `None` when they are up.
+    pub fn remaining(&self, now: Instant) -> Option<Duration> {
+        LIVE_IDLE
+            .checked_sub(self.quiet(now))
+            .filter(|d| !d.is_zero())
+    }
+}
+
+/// Where the realtime socket connects, kept while sync runs so the policy can reopen it.
+/// The token is the one sync already holds; it never reaches `settings.json` or a
+/// screenshot (§15.6).
+#[derive(Clone, Debug)]
+pub struct LiveTarget {
+    pub url: String,
+    pub graph: String,
+    pub token: Option<String>,
+    /// Shared with the round: a notice makes the next round start at once.
+    pub nudge: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// An owned realtime socket (§12.3). The app holds a [`Listener`]; a test holds a stand-in,
+/// so the activity policy can be driven without a relay.
+pub trait LiveSocket: Send + 'static {
+    /// Cancel and join it. The caller runs this off the UI thread: joining must not hold a
+    /// frame.
+    fn stop(self: Box<Self>);
+}
+
+impl LiveSocket for Listener {
+    fn stop(self: Box<Self>) {
+        Listener::stop(*self)
+    }
+}
+
+/// Opens a socket for a target; `None` when its thread cannot start (rule 11).
+pub type LiveOpener = Box<dyn Fn(&LiveTarget) -> Option<Box<dyn LiveSocket>>>;
+
+/// The one real opener: the listener the app has always used.
+pub fn open_listener(target: &LiveTarget) -> Option<Box<dyn LiveSocket>> {
+    match Listener::start(
+        target.url.clone(),
+        target.graph.clone(),
+        target.token.clone(),
+        target.nudge.clone(),
+    ) {
+        Ok(listener) => Some(Box::new(listener)),
+        Err(e) => {
+            eprintln!("utopia: realtime listener not started: {e}");
+            None
+        }
+    }
+}
+
+/// The workspace that owns the app's one realtime socket, so any window can report
+/// activation to it (§12.3).
+///
+/// The socket lives with the main window, but the user may be in another window of the same
+/// app — Settings, most importantly. gpui reports activation per window and has no app-level
+/// event, so every window forwards its own change here and the workspace applies it to the
+/// one policy. Without that, `while_active` would close the socket after the idle timeout and
+/// never reopen it while Settings had the keyboard, and would never close it when the whole
+/// app went to the background with Settings in front.
+#[derive(Clone)]
+pub struct LivePresence(pub gpui::WeakEntity<crate::workspace::Workspace>);
+
+impl gpui::Global for LivePresence {}
+
+/// Schedule a presence report to the window that owns the realtime socket (§12.3).
+///
+/// A task, not `cx.defer`: a deferred callback runs inside the outermost update, and
+/// updating an entity that update holds licensed panics ("cannot update … while it is
+/// already being updated"). A task leaves the update first, and by the time it polls every
+/// window's activation event of this round has been delivered, so `App::active_window`
+/// answers for the whole app rather than for whichever window reported first. That is what
+/// makes opening Settings — which deactivates the main window while the app stays in front —
+/// read as the user arriving, not leaving.
+pub fn report_presence(cx: &mut gpui::App) {
+    let app = cx.to_async();
+    cx.foreground_executor()
+        .spawn(async move {
+            app.update(presence_changed).ok();
+        })
+        .detach();
+}
+
+/// Tell the workspace whether any window of this app has the keyboard (§12.3). A report
+/// only counts with a workspace to receive it; tests without one are silently fine.
+fn presence_changed(cx: &mut gpui::App) {
+    let present = cx.active_window().is_some();
+    let Some(owner) = cx.try_global::<LivePresence>().cloned() else {
+        return;
+    };
+    owner
+        .0
+        .update(cx, |workspace, cx| workspace.set_present(present, cx))
+        .ok();
+}
+
+/// The "Live updates" policy for the realtime socket (§12.3, Settings → Sync).
+///
+/// `Always` keeps the socket open for as long as sync runs: the behaviour every release had
+/// before the setting. `WhileActive` opens it when a window gets focus, the user types in
+/// any window of the app, or edits, and closes it after [`LIVE_IDLE`] with none of those or
+/// when the whole app goes to the background. Pointer input alone (scrolling, clicking
+/// inside a window that already has the keyboard) does not count: gpui 0.2.2 has no
+/// app-level hook for mouse events, only per-frame element listeners. Polling is the same in both (5 s / 60 s), so a closed socket changes only
+/// how soon a remote change is noticed.
+///
+/// One socket at most: the handle is an `Option`, a transition replaces it, and the socket
+/// that is closed goes back to the caller to be joined off the UI thread.
+pub struct LiveUpdates {
+    mode: RealtimeMode,
+    target: Option<LiveTarget>,
+    socket: Option<Box<dyn LiveSocket>>,
+    /// A window of the app has the keyboard. Only a mode switch reads it: switching to
+    /// `while_active` while the app is in the front keeps the socket it already has.
+    focused: bool,
+    /// `while_active` wants a socket now: a focus change or an edit opened it and no idle
+    /// timeout has closed it since.
+    wanted: bool,
+    opener: LiveOpener,
+}
+
+impl LiveUpdates {
+    pub fn new(mode: RealtimeMode) -> Self {
+        Self {
+            mode,
+            target: None,
+            socket: None,
+            focused: false,
+            wanted: false,
+            opener: Box::new(open_listener),
+        }
+    }
+
+    pub fn mode(&self) -> RealtimeMode {
+        self.mode
+    }
+
+    /// Whether a socket is open (there is never more than one).
+    pub fn is_open(&self) -> bool {
+        self.socket.is_some()
+    }
+
+    /// Replace the opener: the app never does, a test installs a stand-in here.
+    pub fn set_opener(&mut self, opener: LiveOpener) {
+        self.opener = opener;
+    }
+
+    /// Switch policy without dropping the socket: the change applies at the next reconcile.
+    pub fn set_mode(&mut self, mode: RealtimeMode) {
+        self.mode = mode;
+        if mode == RealtimeMode::WhileActive {
+            // Coming from `Always` with the app in the background: close like any other
+            // `while_active` socket that nothing is happening in.
+            self.wanted = self.focused;
+        }
+    }
+
+    /// Point the socket at a relay, or drop it (`None`: sync off, a folder target).
+    pub fn set_target(&mut self, target: Option<LiveTarget>) {
+        self.target = target;
+    }
+
+    /// A window of the app got the keyboard: open the socket, and remember that the app is
+    /// in the front (a switch to `while_active` reads it).
+    pub fn focused(&mut self) {
+        self.focused = true;
+        self.wanted = true;
+    }
+
+    /// The user typed or edited: a sign of life that reopens the socket. Unlike a focus
+    /// change it does not say the app is in the front (only the platform does), so the
+    /// caller (`Workspace::live_activity`) decides whether it counts.
+    pub fn activity(&mut self) {
+        self.wanted = true;
+    }
+
+    /// Every window of the app lost focus.
+    pub fn deactivate(&mut self) {
+        self.focused = false;
+        self.wanted = false;
+    }
+
+    /// [`LIVE_IDLE`] passed with no edit and no focus change.
+    pub fn idle(&mut self) {
+        if self.mode == RealtimeMode::WhileActive {
+            self.wanted = false;
+        }
+    }
+
+    /// Whether the caller should be running the idle countdown.
+    pub fn counting_down(&self) -> bool {
+        self.mode == RealtimeMode::WhileActive && self.socket.is_some()
+    }
+
+    /// What a keystroke means for this policy right now (see [`LiveWatch`]).
+    pub fn watch(&self) -> LiveWatch {
+        if self.mode != RealtimeMode::WhileActive || self.target.is_none() {
+            LiveWatch::Off
+        } else if self.socket.is_some() {
+            LiveWatch::Open
+        } else {
+            LiveWatch::Closed
+        }
+    }
+
+    /// Bring the socket in line with the decision. A socket that has to close is pushed
+    /// onto `closed` rather than joined here: see [`LiveSocket::stop`].
+    pub fn reconcile(&mut self, closed: &mut Vec<Box<dyn LiveSocket>>) {
+        let want = self.target.is_some()
+            && match self.mode {
+                RealtimeMode::Always => true,
+                RealtimeMode::WhileActive => self.wanted,
+            };
+        if want {
+            if self.socket.is_none() {
+                if let Some(target) = self.target.as_ref() {
+                    self.socket = (self.opener)(target);
+                }
+            }
+        } else if let Some(socket) = self.socket.take() {
+            closed.push(socket);
+        }
+    }
+}
+
+impl Drop for LiveUpdates {
+    /// Teardown: signal without joining (the signal ends the thread, and Drop must not
+    /// block a frame).
+    fn drop(&mut self) {
+        self.socket = None;
+    }
+}
 
 /// What Settings → Sync can say about the transport in force (§12, ST-5): where it goes and
 /// whether the payloads are encrypted. Built from [`SyncConfig`], with the bearer token left
@@ -194,6 +490,106 @@ mod tests {
             "g",
         ));
         SyncRunner::new(engine, transport)
+    }
+
+    /// §12.3: `always` opens one socket with the target and closes it only when the target
+    /// goes; a `while_active` socket follows activation, edits and the idle timeout, and it
+    /// is never more than one.
+    #[test]
+    fn live_updates_follow_the_mode_and_keep_one_socket() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct Counted(Arc<AtomicUsize>);
+        impl LiveSocket for Counted {
+            fn stop(self: Box<Self>) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let opened = Arc::new(AtomicUsize::new(0));
+        let stopped = Arc::new(AtomicUsize::new(0));
+        let (o, s) = (opened.clone(), stopped.clone());
+        let mut live = LiveUpdates::new(RealtimeMode::Always);
+        live.set_opener(Box::new(move |_| {
+            o.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(Counted(s.clone())))
+        }));
+        let target = || LiveTarget {
+            url: "ws://127.0.0.1:1".into(),
+            graph: "g".into(),
+            token: Some("t".into()),
+            nudge: Arc::default(),
+        };
+        let mut closed = Vec::new();
+        // The caller joins what closes off the UI thread; here it is the same thread, and
+        // the fake counts the stops.
+        fn join(closed: &mut Vec<Box<dyn LiveSocket>>) -> usize {
+            for socket in closed.drain(..) {
+                socket.stop();
+            }
+            0
+        }
+
+        // `always` opens as soon as there is a target, with no activation, and focus
+        // changes never close it.
+        live.set_target(Some(target()));
+        live.reconcile(&mut closed);
+        assert!(live.is_open());
+        live.deactivate();
+        live.idle();
+        live.reconcile(&mut closed);
+        assert!(
+            live.is_open(),
+            "always keeps the socket through any of that"
+        );
+        assert_eq!((opened.load(Ordering::SeqCst), closed.len()), (1, 0));
+
+        // `while_active` with the app in the background closes it; an edit reopens it, and
+        // the timeout closes it again.
+        live.set_mode(RealtimeMode::WhileActive);
+        live.reconcile(&mut closed);
+        assert!(!live.is_open());
+        assert_eq!(closed.len(), 1, "the closed socket comes back to be joined");
+        join(&mut closed);
+        live.activity();
+        live.reconcile(&mut closed);
+        assert!(live.is_open(), "an edit opens the socket");
+        assert!(live.counting_down(), "and starts the quiet minutes");
+        live.idle();
+        live.reconcile(&mut closed);
+        assert!(!live.is_open(), "two quiet minutes close it");
+        join(&mut closed);
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            2,
+            "one open per file, never two"
+        );
+        assert_eq!(stopped.load(Ordering::SeqCst), 2);
+
+        // A target that goes away closes whatever is open.
+        live.activity();
+        live.reconcile(&mut closed);
+        live.set_target(None);
+        live.reconcile(&mut closed);
+        assert!(!live.is_open());
+        join(&mut closed);
+        assert_eq!(stopped.load(Ordering::SeqCst), 3);
+    }
+
+    /// An opener that cannot start a thread leaves no socket and no panic (rule 11).
+    #[test]
+    fn a_failed_open_is_no_socket() {
+        let mut live = LiveUpdates::new(RealtimeMode::Always);
+        live.set_opener(Box::new(|_| None));
+        live.set_target(Some(LiveTarget {
+            url: "ws://127.0.0.1:1".into(),
+            graph: "g".into(),
+            token: None,
+            nudge: Default::default(),
+        }));
+        live.reconcile(&mut Vec::new());
+        assert!(!live.is_open());
     }
 
     /// ST-5: Settings → Sync shows where the graph goes, and never the token or the

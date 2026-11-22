@@ -1344,6 +1344,9 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
                         "utopia: continuous sync for {} (graph {id}, {target_text})",
                         graph.display()
                     );
+                    // The daemon always listens: Settings → Sync "Live updates" is about a
+                    // user's presence, and there is no user here to follow (§12.3,
+                    // `docs/sync-modes.md`).
                     if let utopia_sync::runner::SyncTarget::Relay { url, token } = &config.target {
                         started.realtime = Some(
                             utopia_sync::realtime::Listener::start(

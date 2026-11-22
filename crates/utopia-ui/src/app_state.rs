@@ -24,6 +24,10 @@ pub struct Changed {
     pub pages: Vec<PageId>,
     /// Tree shape, page identity or references changed (not just a keystroke).
     pub structural: bool,
+    /// The change came from this device's UI (a keystroke, a click, a local API call), not
+    /// from a sync round (`AppState::imported`). Settings → Sync "Live updates" reads it to
+    /// tell "the user is here" from "a peer wrote".
+    pub local: bool,
     /// `AppState::version` after this change. A view that wrote and then rebuilt in the
     /// same handler compares this with the version it built from, so its own `Changed`
     /// (delivered after the update; gpui queues `emit`) does not dirty it again.
@@ -120,6 +124,23 @@ impl AppState {
     }
 
     pub fn changed(&mut self, pages: Vec<PageId>, structural: bool, cx: &mut Context<Self>) {
+        self.record(pages, structural, true, cx)
+    }
+
+    /// Pages imported from a sync round: the same bookkeeping as [`Self::changed`], but not
+    /// a sign that the user is here (§12.3). `Changed::local` keeps a peer's writes from
+    /// holding the `while_active` realtime socket open for an idle reader.
+    pub fn imported(&mut self, pages: Vec<PageId>, cx: &mut Context<Self>) {
+        self.record(pages, true, false, cx)
+    }
+
+    fn record(
+        &mut self,
+        pages: Vec<PageId>,
+        structural: bool,
+        local: bool,
+        cx: &mut Context<Self>,
+    ) {
         // A promoted draft that merged into the day, or a stale draft retired for it
         // (FR-1.2), leaves its id as a session alias: announce the replacement so views and
         // the editor retarget, and report the survivor in `Changed` so subscriptions keyed
@@ -148,6 +169,7 @@ impl AppState {
         cx.emit(Changed {
             pages,
             structural,
+            local,
             version: self.version,
         });
         if structural {

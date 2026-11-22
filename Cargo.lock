@@ -7625,6 +7625,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "ureq",
  "utopia-core",
  "utopia-proto",
  "utopia-store",

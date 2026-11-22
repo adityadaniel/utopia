@@ -17,7 +17,7 @@ INSTALL_DIR ?= /Applications
 SCRATCH ?= $(CURDIR)/target/scratch
 
 .DEFAULT_GOAL := help
-.PHONY: help run dev check build test clippy fmt fmt-check bench app zip install doctor clean-debug
+.PHONY: help run dev check build test clippy fmt fmt-check bench relay-check app zip install doctor clean-debug
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -45,6 +45,14 @@ fmt: ## Format the code
 
 fmt-check: ## Fail if the code is not formatted
 	$(CARGO) fmt --all -- --check
+
+# The same steps, in the same order, as .github/workflows/relay.yml. Needs Node and
+# `npm ci` in relay-cloudflare once; runs wrangler dev --local only, never an account.
+relay-check: ## Cloudflare relay: tsc, vitest, then the contract and differential tests against wrangler
+	cd relay-cloudflare && npx --no-install tsc --noEmit
+	cd relay-cloudflare && npm test
+	$(CARGO) test -p utopia-syncd
+	relay-cloudflare/scripts/test-against-rust-client.sh
 
 bench: ## Performance budgets (release build; opens a window for under a second)
 	$(CARGO) build --release -p utopia-app

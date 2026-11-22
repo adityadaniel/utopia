@@ -259,18 +259,18 @@ impl Coordinator {
                     sync_target::destination(&cfg, transport.cursor_space(), connected.instance);
                 Ok((Some(Prepared { cfg, transport, lan, key_check, destination }), "Sync is on.".into()))
             }).await;
-            let update = this.update(cx, |this, cx| -> (Option<utopia_sync::realtime::Listener>, bool) {
+            let update = this.update(cx, |this, cx| -> bool {
                 match result {
                     Ok((None, message)) => {
                         // Off (or a connection test): only stopping sync touches the runner.
-                        let old = if test_only { None } else { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)) };
+                        if !test_only { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)); }
                         if !test_only {
                             this.lan = None;
                             this.view.update(cx, |view, _| view.active_url = None);
                             if save {
                                 if let Err(error) = prefs.save(&file) {
                                     this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
-                                    return (old, false);
+                                    return false;
                                 }
                             }
                         }
@@ -278,13 +278,13 @@ impl Coordinator {
                             if !test_only { view.preferences = prefs.clone(); if save { view.notice = None; } }
                             view.finish(message, cx);
                         });
-                        (old, false)
+                        false
                     }
                     Ok((Some(prepared), message)) => {
                         // The old runner is stopped only now, and before the destination is
                         // queued: a round still in flight must not push the republished rows
                         // to the target being replaced.
-                        let old = if test_only { None } else { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)) };
+                        if !test_only { this.ws.update(cx, |ws, cx| ws.stop_sync(cx)); }
                         let graph = prepared.cfg.graph.clone();
                         let ready = this.ws.read(cx).app().clone().update(cx, |app, _| {
                             if let Some(marker) = &prepared.key_check { app.store.sync_set("setup_e2e_check", marker)?; }
@@ -297,7 +297,7 @@ impl Coordinator {
                         if ready.is_err() {
                             this.lan = None;
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: could not queue this graph for the new destination.".into(), cx));
-                            return (old, false);
+                            return false;
                         }
                         // The settings describe what is running, so they are written after
                         // the destination record, never before a target is known to work.
@@ -305,7 +305,7 @@ impl Coordinator {
                             if let Err(error) = prefs.save(&file) {
                                 this.lan = None;
                                 this.view.update(cx, |view, cx| view.finish(format!("Sync is Off: {error}"), cx));
-                                return (old, false);
+                                return false;
                             }
                         }
                         this.view.update(cx, |view, _| {
@@ -315,7 +315,7 @@ impl Coordinator {
                         if !started {
                             this.lan = None;
                             this.view.update(cx, |view, cx| view.finish("Sync is Off: it could not start.".into(), cx));
-                            return (old, false);
+                            return false;
                         }
                         this.lan = prepared.lan;
                         this.graph = graph.clone();
@@ -325,7 +325,7 @@ impl Coordinator {
                             if save { view.notice = None; }
                             view.finish(message, cx);
                         });
-                        (old, false)
+                        false
                     }
                     Err(message) => {
                         // A Nearby Mac that is asleep is the one failure worth waiting out:
@@ -338,24 +338,18 @@ impl Coordinator {
                             format!("Sync is Off: {message}")
                         };
                         this.view.update(cx, |view, cx| view.finish(message, cx));
-                        let old = if hosting {
+                        if hosting {
                             // Its listen socket is gone with the old host, so it cannot work.
-                            this.ws.update(cx, |ws, cx| ws.stop_sync(cx))
-                        } else {
-                            None
-                        };
-                        (old, retry)
+                            this.ws.update(cx, |ws, cx| ws.stop_sync(cx));
+                        }
+                        retry
                     }
                 }
             });
-            // Joining a listener blocks, so it never runs on the UI thread.
-            let (listener, retry) = match update {
-                Ok(update) => update,
+            let retry = match update {
+                Ok(retry) => retry,
                 Err(_) => break,
             };
-            if let Some(listener) = listener {
-                cx.background_executor().spawn(async move { listener.stop() }).await;
-            }
             if !retry {
                 break;
             }
