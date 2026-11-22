@@ -14,6 +14,9 @@ use utopia_core::text as t;
 
 use crate::theme::theme;
 
+mod caret_motion;
+use caret_motion::{CaretMotion, Target as CaretTarget};
+
 /// Where to put the caret once the next layout is known (Up/Down between blocks keeps
 /// the horizontal position, §13.5). The x is in window coordinates, so a block at another
 /// indent depth takes the caret at the same place on screen, not at the same distance
@@ -69,6 +72,7 @@ pub struct TextField {
     layout: Option<TextLayout>,
     layout_text: String,
     bounds: Option<Bounds<Pixels>>,
+    caret_motion: Option<CaretMotion>,
 }
 
 impl TextField {
@@ -94,6 +98,7 @@ impl TextField {
     /// Call before the glyphs land in the buffer, so [`Self::composition_base`] is the
     /// text they replaced.
     pub fn begin_composition(&mut self, range: Range<usize>) {
+        self.reset_caret_motion();
         if !self.composition.is_active() {
             self.composition_base = Some(self.text.clone());
         }
@@ -115,6 +120,7 @@ impl TextField {
     /// composing (callers check [`TextField::composing`] first, §13.5).
     pub fn set_text(&mut self, text: &str, caret: usize) {
         self.end_composition();
+        self.reset_caret_motion();
         self.text = text.to_string();
         let c = t::floor_char_boundary(&self.text, caret);
         self.sel = c..c;
@@ -136,6 +142,7 @@ impl TextField {
     }
 
     pub fn select_to(&mut self, o: usize) {
+        self.reset_caret_motion();
         let o = t::floor_char_boundary(&self.text, o);
         if self.reversed {
             self.sel.start = o;
@@ -367,6 +374,10 @@ impl TextField {
         Some(Bounds::from_corners(a, point(b.x.max(a.x), b.y + lh)))
     }
 
+    pub(crate) fn reset_caret_motion(&mut self) {
+        self.caret_motion = None;
+    }
+
     fn resolve_goal(&mut self) {
         let (Some(goal), Some(b)) = (self.goal, self.bounds) else {
             return;
@@ -389,6 +400,11 @@ pub trait FieldHost: EntityInputHandler + 'static {
     fn field(&self) -> &TextField;
     fn field_mut(&mut self) -> &mut TextField;
     fn focus_handle_ref(&self) -> &FocusHandle;
+    /// Smooth movement is a block editor preference. Controls like search stay immediate.
+    fn smooth_caret(&self, _cx: &App) -> bool {
+        false
+    }
+
     /// Whether the caret is drawn this frame. A host that blinks it (see [`Blink`])
     /// answers from its blink state; the default is a steady caret.
     fn caret_visible(&self) -> bool {
@@ -718,7 +734,9 @@ impl<V: FieldHost> Element for FieldElement<V> {
         // frame at the start or end of the block before it jumps to its column.
         let shown = self.shown.clone();
         let layout_now = layout.clone();
-        self.view.update(cx, |v, cx| {
+        let lh = layout.line_height();
+        let caret = self.view.update(cx, |v, cx| {
+            let smooth = v.smooth_caret(cx) && v.focus_handle_ref().is_focused(window);
             let f = v.field_mut();
             f.layout = Some(layout_now);
             f.layout_text = shown;
@@ -728,10 +746,44 @@ impl<V: FieldHost> Element for FieldElement<V> {
             if had_goal && f.goal.is_none() {
                 cx.notify();
             }
+
+            let ix = if f.layout_text == f.text {
+                f.cursor().min(f.text.len())
+            } else {
+                0
+            };
+            let caret = f
+                .sel
+                .is_empty()
+                .then(|| layout.position_for_index(ix))
+                .flatten();
+            if let Some(position) = caret.filter(|_| smooth && !f.composing() && !f.selecting) {
+                // Relative to the field, so the animation follows the text when it scrolls.
+                let target = CaretTarget {
+                    position: position - bounds.origin,
+                    cursor: ix,
+                    line_height: lh,
+                    width: bounds.size.width,
+                };
+                let motion = f
+                    .caret_motion
+                    .get_or_insert_with(|| CaretMotion::new(target));
+                let (position, moving) = motion.update(
+                    target,
+                    cx.background_executor().now(),
+                    crate::motion::reduce_motion,
+                );
+                if moving {
+                    window.request_animation_frame();
+                }
+                Some(position + bounds.origin)
+            } else {
+                f.reset_caret_motion();
+                caret
+            }
         });
         let th = theme(cx).clone();
         let f = self.view.read(cx).field();
-        let lh = layout.line_height();
         let real = self.shown == f.text;
         let pos = |ix: usize| -> Option<Point<Pixels>> {
             if real {
@@ -769,11 +821,7 @@ impl<V: FieldHost> Element for FieldElement<V> {
                 }
             }
         }
-        let cursor = if f.sel.is_empty() {
-            pos(f.cursor()).map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.link))
-        } else {
-            None
-        };
+        let cursor = caret.map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.link));
         Paint { selection, cursor }
     }
 

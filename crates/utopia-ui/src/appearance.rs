@@ -12,6 +12,7 @@
 //!   "font": "ibm-plex-sans",
 //!   "density": "normal",
 //!   "indent": "wide",
+//!   "smooth_caret": false,
 //!   "ref_children": 2,
 //!   "pinned": [],
 //!   "right_sidebar_width": 380.0,
@@ -23,7 +24,8 @@
 //! `font` is `"system"` (the default) or `"ibm-plex-sans"`; `density` is
 //! `"tight"`, `"normal"` (the default) or `"relaxed"` (ALL-5; the older `"compact"` and
 //! `"comfortable"` still read, as tight and normal); `indent` is `"wide"` (the
-//! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `ref_children` is how many
+//! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `smooth_caret` is false
+//! by default (DESIGN.md §2.6); `ref_children` is how many
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
@@ -313,6 +315,7 @@ pub struct Prefs {
     pub font: UiFont,
     pub density: Density,
     pub indent: Indent,
+    pub smooth_caret: bool,
     /// Children shown inline under a referencing block (LR-4); 0 folds them all.
     pub ref_children: usize,
     /// Page ids kept at the top of the sidebar, in the order they were pinned (SB-3), and
@@ -338,6 +341,7 @@ impl Default for Prefs {
             font: UiFont::default(),
             density: Density::default(),
             indent: Indent::default(),
+            smooth_caret: false,
             ref_children: DEFAULT_REF_CHILDREN,
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
@@ -446,6 +450,16 @@ impl Prefs {
                 Indent::default()
             }
         };
+        let smooth_caret = match rest.remove("smooth_caret") {
+            None => false,
+            Some(Value::Bool(on)) => on,
+            Some(v) => {
+                warnings.push(format!(
+                    "{FILE}: smooth_caret should be a boolean, not {v}; using false"
+                ));
+                false
+            }
+        };
         let right_sidebar_width = match rest.remove("right_sidebar_width") {
             None => RIGHT_SIDEBAR_DEFAULT_WIDTH,
             Some(Value::Number(n)) => match n.as_f64() {
@@ -542,6 +556,7 @@ impl Prefs {
                 font,
                 density,
                 indent,
+                smooth_caret,
                 ref_children,
                 pinned,
                 right_sidebar_width,
@@ -559,6 +574,7 @@ impl Prefs {
         m.insert("font".into(), self.font.key().into());
         m.insert("density".into(), self.density.key().into());
         m.insert("indent".into(), self.indent.key().into());
+        m.insert("smooth_caret".into(), self.smooth_caret.into());
         m.insert(
             "right_sidebar_width".into(),
             serde_json::Number::from_f64(clamp_sidebar_width(self.right_sidebar_width) as f64)
@@ -658,6 +674,12 @@ pub fn density(cx: &App) -> Density {
 pub fn indent(cx: &App) -> Indent {
     cx.try_global::<Appearance>()
         .map_or(Indent::default(), |a| a.prefs.indent)
+}
+
+/// Whether the block editor should animate its painted caret (DESIGN.md §2.6).
+pub fn smooth_caret(cx: &App) -> bool {
+    cx.try_global::<Appearance>()
+        .is_some_and(|a| a.prefs.smooth_caret)
 }
 
 /// The right sidebar's width in force (RS-4). 380 when nothing was installed.
@@ -793,6 +815,13 @@ pub fn set_indent(cx: &mut App, indent: Indent, config_dir: &Path) -> std::io::R
     cx.global::<Appearance>().prefs.save(config_dir)
 }
 
+/// Apply the preference in every window and save it (PRD §12.5, local UI state).
+pub fn set_smooth_caret(cx: &mut App, on: bool, config_dir: &Path) -> std::io::Result<()> {
+    cx.default_global::<Appearance>().prefs.smooth_caret = on;
+    cx.refresh_windows();
+    cx.global::<Appearance>().prefs.save(config_dir)
+}
+
 /// Change how many children a reference shows inline (LR-4) and remember it. Open reference
 /// panels notice the change on their next render and rebuild their rows.
 pub fn set_ref_children(cx: &mut App, count: usize, config_dir: &Path) -> std::io::Result<()> {
@@ -855,6 +884,7 @@ mod tests {
             font: UiFont::IbmPlexSans,
             density: Density::Relaxed,
             indent: Indent::Narrow,
+            smooth_caret: true,
             ref_children: 0,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
             right_sidebar_width: 420.0,
@@ -870,6 +900,7 @@ mod tests {
                 "font": "ibm-plex-sans",
                 "density": "relaxed",
                 "indent": "narrow",
+                "smooth_caret": true,
                 "ref_children": 0,
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,

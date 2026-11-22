@@ -48,7 +48,7 @@ use crate::appearance::{self, Density, Indent, RealtimeMode, UiFont, UiFontExt};
 use crate::help::{shot_image, TOPICS};
 use crate::line_input::{LineInput, LineInputEvent};
 use crate::sync_runner;
-use crate::theme::{quiet_control, theme, Theme};
+use crate::theme::{quiet_control, settings_switch, theme, Theme};
 
 /// Every pane is set in one readable column (ST-1), like the page column does.
 const CONTENT_WIDTH: f32 = 720.;
@@ -675,6 +675,14 @@ impl SettingsView {
             ),
             Ok(()) => None,
         };
+        cx.notify();
+    }
+
+    fn toggle_smooth_caret(&mut self, cx: &mut Context<Self>) {
+        let on = !appearance::smooth_caret(cx);
+        self.status = appearance::set_smooth_caret(cx, on, &self.config_dir)
+            .err()
+            .map(|e| format!("Could not save {}: {e}", appearance::FILE).into());
         cx.notify();
     }
 
@@ -1629,6 +1637,38 @@ impl SettingsView {
                 &th,
             ));
         }
+
+        let smooth_caret = appearance::smooth_caret(cx);
+        list = list.child(card_top(&th, "Editor").mt_4());
+        list = list.child(appearance_row(
+            div()
+                .id("smooth-caret")
+                .debug_selector(|| "settings-smooth-caret".into())
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap_4()
+                .cursor_pointer()
+                .hover(|d| d.bg(th.hover))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_smooth_caret(cx)))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child("Smooth caret movement")
+                        .child(
+                            div()
+                                .text_size(px(crate::theme::CAPTION_SIZE))
+                                .text_color(th.muted)
+                                .child(
+                                    "Animate the text caret while typing or moving within a block.",
+                                ),
+                        ),
+                )
+                .child(settings_switch(smooth_caret, &th)),
+            true,
+            &th,
+        ));
 
         // LR-4: how many children a Linked Reference shows inline, then PG-1's attribute
         // rows, both local preferences.

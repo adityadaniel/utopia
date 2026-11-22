@@ -350,6 +350,11 @@ pub const BULLET_SIZE: f32 = 6.;
 pub const COLLAPSED_RING: f32 = 12.;
 /// The collapse chevron (§3.1).
 pub const CARET_SIZE: f32 = 12.;
+const SWITCH_WIDTH: f32 = 34.;
+const SWITCH_HEIGHT: f32 = 20.;
+const SWITCH_PADDING: f32 = 2.;
+const SWITCH_THUMB: f32 = 16.;
+
 /// A to-do's checkbox and the gap before its text (§3.1).
 pub const TODO_SIZE: f32 = 16.;
 pub const TODO_GAP: f32 = 10.;
@@ -876,6 +881,23 @@ pub fn heading_metrics(level: u8) -> (f32, f32) {
         2 => (H2_SIZE, 26.),
         _ => (H3_SIZE, 24.),
     }
+}
+
+/// A drawn switch (DESIGN.md §2.4: no image assets; every size is a token). A true control,
+/// so the whole row is the target and the knob shows the state.
+pub(crate) fn settings_switch(on: bool, th: &Theme) -> Div {
+    div()
+        .w(px(SWITCH_WIDTH))
+        .h(px(SWITCH_HEIGHT))
+        .flex_none()
+        .rounded_full()
+        .bg(if on { th.link } else { th.line_strong })
+        .p(px(SWITCH_PADDING))
+        .flex()
+        .items_center()
+        .when(on, |d| d.justify_end())
+        .when(!on, |d| d.justify_start())
+        .child(div().size(px(SWITCH_THUMB)).rounded_full().bg(th.paper))
 }
 
 #[cfg(test)]

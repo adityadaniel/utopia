@@ -14,6 +14,7 @@ pub mod help;
 pub mod icons;
 pub mod kill;
 pub mod line_input;
+mod motion;
 pub mod page_view;
 pub mod pane_stack;
 pub mod pdf;

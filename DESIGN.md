@@ -161,10 +161,12 @@ An icon-only button has a tooltip with its name (GPUI has no accessible label, �
 |---|---|---|
 | `SCROLL_ANIM` | 200 ms, ease-out | Smooth scroll of the pane row (§4.3) |
 | `BLINK_INTERVAL` | 500 ms | Caret blink, after 500 ms steady from the last keystroke |
+| `CARET_GLIDE` | 80 ms, ease-out cubic | Optional movement of the painted caret while editing a block |
 
 Rules:
 - Nothing else animates. Collapse, expand, menus, the palette and the pinned day header appear and go at once.
-- With the system setting Reduce Motion on, a smooth scroll jumps (`workspace.rs` `reduce_motion`).
+- Smooth caret movement is off by default. When enabled, nearby moves within a block glide from the current painted position. Clicks, selection, IME composition, reflow, and long or cross-block moves place the caret immediately.
+- The system setting Reduce Motion makes smooth scrolls and caret movement immediate.
 - A new animation adds a token here. Opening is slower than closing (close in about two thirds of the time).
 
 ## 3. Components
@@ -686,7 +688,7 @@ A second window (⌘,), 1100 × 760, at least 900 × 520, titled "Settings". Pre
 
 The tabs:
 
-- **Appearance:** cards Font, Density and Indent (radio rows, §3.16; a font's sample line is set in that font; an indent's help is "45 px per level"), References ("Children shown", a segmented control 0 to 3), Pinned pages (how many, and a quiet "Clear"), Right sidebar (a quiet "Reset to 380 px").
+- **Appearance:** cards Font, Density and Indent (radio rows, §3.16; a font's sample line is set in that font; an indent's help is "45 px per level"), Editor ("Smooth caret movement" switch, §2.6), References ("Children shown", a segmented control 0 to 3), Pinned pages (how many, and a quiet "Clear"), Right sidebar (a quiet "Reset to 380 px").
 - **Keybindings:** a line of help ("Click a key, then press the new one.") with a quiet "Reset All" at the right; a filter text field ("name, description or key"); then one card for each category, one row for each action with its key chip (§3.16). "No match" is one line in Caption `--muted`.
 - **Shortcuts:** the same filter and cards, to read, not to change: the keys are Mono 12 `--muted` at the right of each row.
 - **Sync:** the mode (a segmented control: Off, Relay, Nearby Mac, Shared folder); the text fields the mode needs (address, token, passphrase, folder; the two secrets are masked, and a blank one keeps the saved value); then "Apply" (it reads "Working…" while it runs), "Test connection" and "Connect another device"; then one status line in `--muted`. A notice in `--warning` names the environment variables that override the saved settings; Apply is disabled while they do.
