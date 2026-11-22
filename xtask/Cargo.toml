@@ -10,6 +10,7 @@ publish = false
 [dependencies]
 anyhow.workspace = true
 chrono.workspace = true
+image.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 utopia-api.workspace = true

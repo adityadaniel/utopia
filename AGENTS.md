@@ -192,7 +192,11 @@ running server with no restart (the headless path re-reads it for each call), an
 environment variable or flag raises it. With Off and no `UTOPIA_API` there is no server and no
 socket. `utopia_api::Client` is the blocking client for an owner's API. `cargo run -p xtask -- bundle` builds `target/Utopia.app`, whose
 Info.plist claims the `utopia://` scheme (registering it with LaunchServices happens when the
-bundle is opened, so don't open it on a user's machine without asking).
+bundle is opened, so don't open it on a user's machine without asking). Its icon is built
+from one square picture, `crates/utopia-app/assets/icon.png` (full-bleed, at least 1024 px):
+`xtask/src/icon.rs` cuts it to the macOS tile shape, adds the shadow and writes
+`Contents/Resources/AppIcon.icns` with `iconutil`. To change the icon, replace that file. An
+app run with `cargo run` has no bundle, so it shows the generic icon in the Dock.
 
 Plugins (P2): directories under `<config>/plugins/<name>/` with `plugin.json` + a `.wasm`/`.wat`
 module; commands appear in the slash menu. See `crates/utopia-plugin/src/lib.rs` for the ABI and
