@@ -18,6 +18,7 @@ pub mod text;
 pub mod title;
 pub mod tree;
 pub mod undo;
+pub mod vim;
 
 pub use command::{BlockKind, Command, DocDelta, PageKind, PageMeta, TextEdit};
 pub use date::DateFormat;

@@ -102,6 +102,7 @@ actions!(
         ShowCharacterPalette,
         ToggleTodo,
         AcceptCompletion,
+        VimNormalMode,
     ]
 );
 
@@ -117,6 +118,7 @@ actions!(
         FocusPaneLeft,
         FocusPaneRight,
         ToggleViewMode,
+        ToggleVimMode,
     ]
 );
 
@@ -124,6 +126,11 @@ pub const EDITOR_CONTEXT: &str = "BlockEditor";
 /// Added to the editor's context while an autocomplete menu with suggestions is open.
 pub const AUTOCOMPLETE_CONTEXT: &str = "autocomplete";
 pub const INPUT_CONTEXT: &str = "LineInput";
+/// Vim mode (VM-3): one identifier for each state, added beside [`EDITOR_CONTEXT`] while
+/// Vim is on, so a binding can answer in one state and nowhere else.
+pub const VIM_NORMAL_CONTEXT: &str = "VimNormal";
+pub const VIM_INSERT_CONTEXT: &str = "VimInsert";
+pub const VIM_VISUAL_CONTEXT: &str = "VimVisual";
 
 /// Where an action is grouped in the Settings editor and the cheat sheet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -792,6 +799,17 @@ pub const CATALOG: &[ActionDoc] = &[
         context: TEXT,
         help: "Close the open menu or panel, or leave the block.",
     },
+    // Listed after Escape: for the same keys at the same depth gpui prefers the later
+    // binding, and this one is the narrower context (`BlockEditor && VimInsert`), so Escape
+    // leaves Insert first and only a second one leaves the block (VM-13).
+    ActionDoc {
+        action: "VimNormalMode",
+        label: "Vim: Normal Mode",
+        category: Category::Editing,
+        keys: "escape",
+        context: Some("BlockEditor && VimInsert"),
+        help: "Leave Insert mode. The block commits and the cursor steps one character left.",
+    },
     // Listed after Indent: for the same keys at the same depth gpui prefers the later
     // binding, so Tab accepts while a menu is open and indents otherwise.
     ActionDoc {
@@ -911,6 +929,16 @@ pub const CATALOG: &[ActionDoc] = &[
         help: "Open the guided tour of everything the app can do.",
     },
     ActionDoc {
+        action: "ToggleVimMode",
+        label: "Vim Mode",
+        category: Category::Application,
+        // No default key (VM-1): it is bound only when the user gives it one. A test
+        // asserts every other catalog default resolves to a binding.
+        keys: "",
+        context: None,
+        help: "Turn modal editing on or off (VM-1).",
+    },
+    ActionDoc {
         action: "Quit",
         label: "Quit",
         category: Category::Application,
@@ -1004,6 +1032,7 @@ pub fn action_for(name: &str) -> Option<Box<dyn gpui::Action>> {
         "Home" => Box::new(Home),
         "End" => Box::new(End),
         "Escape" => Box::new(Escape),
+        "VimNormalMode" => Box::new(VimNormalMode),
         "AcceptCompletion" => Box::new(AcceptCompletion),
         "ShowCharacterPalette" => Box::new(ShowCharacterPalette),
         "ToggleLeftSidebar" => Box::new(ToggleLeftSidebar),
@@ -1011,6 +1040,7 @@ pub fn action_for(name: &str) -> Option<Box<dyn gpui::Action>> {
         "FocusPaneLeft" => Box::new(FocusPaneLeft),
         "FocusPaneRight" => Box::new(FocusPaneRight),
         "ToggleViewMode" => Box::new(ToggleViewMode),
+        "ToggleVimMode" => Box::new(ToggleVimMode),
         "ToggleRightSidebar" => Box::new(ToggleRightSidebar),
         "ToggleReferences" => Box::new(ToggleReferences),
         "ShowGraph" => Box::new(ShowGraph),
@@ -1199,6 +1229,7 @@ pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBindi
             FocusPaneLeft,
             FocusPaneRight,
             ToggleViewMode,
+            ToggleVimMode,
             ToggleTodo,
             Newline,
             SoftBreak,
@@ -1264,6 +1295,7 @@ pub fn binding(name: &str, keys: &str, context: Option<&str>) -> Option<KeyBindi
             CopyBlockRef,
             DeleteBlock,
             Escape,
+            VimNormalMode,
             ShowCharacterPalette,
             AcceptCompletion,
         ]
@@ -1641,6 +1673,11 @@ mod tests {
     #[test]
     fn every_catalog_binding_resolves() {
         for d in CATALOG {
+            // VM-1: the Vim toggle has no default key, so it resolves to nothing until the
+            // user binds it, and `install` skips it without a word.
+            if d.keys.is_empty() {
+                continue;
+            }
             assert!(
                 binding(d.action, &platform_keys(d.keys), d.context).is_some(),
                 "{} {}",
