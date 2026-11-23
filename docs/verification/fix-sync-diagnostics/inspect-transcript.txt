@@ -1,0 +1,71 @@
+# utopia sync inspect / doctor / repair on two scratch graphs and a local utopia-syncd.
+# The gap is made like the old build made it: the phone's row for line two is marked
+# sent with sqlite3 and never pushed; line three depends on it.
+
+$ utopia sync inspect --graph mac.utopia
+graph id utopia · client 01M83R18BS9M8GR3C3T12YKDSX · relay:ea921acc22bbc0c8e75d44b78859cd8b#utopia
+destination: rev 2, 1 page(s) · this device: 1 page(s), 0 unsent change(s)
+compared with the destination's page list; add --deep to read each page's copy too
+
+page ed09cb68-3193-547b-8d26-92e2d41907e1 "November 23rd, 2026"
+  this device:  5574987974903894×35 · unsent 0 · pulled to 5
+                waiting: peer 5711483834779786 0..26
+  destination:  head 5 (snapshot 0)
+  ! waiting_here: another device wrote changes this device cannot apply yet; on the device that wrote them, update Utopia or run `utopia sync repair`, then sync
+(exit 1)
+
+$ utopia sync inspect --graph mac.utopia --deep
+graph id utopia · client 01M83R18BS9M8GR3C3T12YKDSX · relay:ea921acc22bbc0c8e75d44b78859cd8b#utopia
+destination: rev 2, 1 page(s) · this device: 1 page(s), 0 unsent change(s)
+compared each page's copy on the destination
+
+page ed09cb68-3193-547b-8d26-92e2d41907e1 "November 23rd, 2026"
+  this device:  5574987974903894×35 · unsent 0 · pulled to 5
+                waiting: peer 5711483834779786 0..26
+  destination:  head 5 (snapshot 0) · 5574987974903894×35
+                waiting: peer 5711483834779786 0..26
+  ! waiting_here: another device wrote changes this device cannot apply yet; on the device that wrote them, update Utopia or run `utopia sync repair`, then sync
+  ! destination_has_gap: the destination holds changes whose earlier changes never reached it; the device that wrote them must run `utopia sync repair` (inspect each device: that one reports this_device_has_more)
+(exit 1)
+
+$ utopia sync inspect --graph phone.utopia --page "November 23rd, 2026"
+graph id utopia · client 01M83R18B4T0B3FTND9TN7WKBE · relay:ea921acc22bbc0c8e75d44b78859cd8b#utopia
+destination: rev 2, 1 page(s) · this device: 1 page(s), 0 unsent change(s)
+compared each page's copy on the destination
+
+page ed09cb68-3193-547b-8d26-92e2d41907e1 "November 23rd, 2026"
+  this device:  5574987974903894×35, 5711483834779786×26, 8125049201824215×41 · unsent 0 · pulled to 5
+  destination:  head 5 (snapshot 0) · 5574987974903894×35
+                waiting: peer 5711483834779786 0..26
+  ! destination_has_gap: the destination holds changes whose earlier changes never reached it; the device that wrote them must run `utopia sync repair` (inspect each device: that one reports this_device_has_more)
+  ! this_device_has_more: run `utopia sync`; if this stays after it, run `utopia sync repair` on this device
+(exit 1)
+
+$ utopia doctor mac.utopia
+1 live pages, 1 live blocks, 0 references
+problem: sync: page ed09cb68-3193-547b-8d26-92e2d41907e1 holds changes from another device (peer 5711483834779786 0..26) that wait for earlier changes this device never received; on that device, update Utopia or run `utopia sync repair`, then sync (`utopia sync inspect` shows each side)
+(exit 1)
+
+$ utopia sync repair --graph phone.utopia && utopia sync --graph phone.utopia && utopia sync --graph mac.utopia
+forgot 1 pull position(s): the next sync compares every page with the destination and sends what it lacks
+
+$ utopia sync inspect --graph mac.utopia --deep
+graph id utopia · client 01M83R18BS9M8GR3C3T12YKDSX · relay:ea921acc22bbc0c8e75d44b78859cd8b#utopia
+destination: rev 3, 1 page(s) · this device: 1 page(s), 0 unsent change(s)
+compared each page's copy on the destination
+
+no findings: this device and the destination agree
+(exit 0)
+
+$ utopia doctor mac.utopia
+1 live pages, 3 live blocks, 0 references
+ok: all invariants hold
+(exit 0)
+
+$ cat <config>/logs/sync.jsonl   # one line per round that did something; no page text
+{"ts":1795422200219,"graph":"8ff89596301ddde7b98302169d6581d7fcc2a7f27f6793f2822f7708522447e2","source":"cli","destination":"http://127.0.0.1:8796","outcome":"synced","queued":0,"waiting":[],"pushed":3,"duplicates":0,"pulled_pages":1,"imported":0,"resent":0,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}
+{"ts":1795422200236,"graph":"e041258547de36ac74abdfe2fb9447bb8100aa0344f4d54f42d5d52950e4bd42","source":"cli","destination":"http://127.0.0.1:8796","outcome":"synced","queued":0,"waiting":[],"pushed":0,"duplicates":0,"pulled_pages":1,"imported":1,"resent":0,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}
+{"ts":1795422200279,"graph":"8ff89596301ddde7b98302169d6581d7fcc2a7f27f6793f2822f7708522447e2","source":"cli","destination":"http://127.0.0.1:8796","outcome":"synced","queued":0,"waiting":[],"pushed":2,"duplicates":0,"pulled_pages":1,"imported":0,"resent":0,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}
+{"ts":1795422200296,"graph":"e041258547de36ac74abdfe2fb9447bb8100aa0344f4d54f42d5d52950e4bd42","source":"cli","destination":"http://127.0.0.1:8796","outcome":"partial","queued":0,"waiting":[{"page":"ed09cb68-3193-547b-8d26-92e2d41907e1","since":1795422200296,"ranges":[{"peer":"5711483834779786","start":0,"end":26}]}],"pushed":0,"duplicates":0,"pulled_pages":1,"imported":0,"resent":0,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}
+{"ts":1795422200376,"graph":"8ff89596301ddde7b98302169d6581d7fcc2a7f27f6793f2822f7708522447e2","source":"cli","destination":"http://127.0.0.1:8796","outcome":"synced","queued":0,"waiting":[],"pushed":1,"duplicates":0,"pulled_pages":2,"imported":0,"resent":1,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}
+{"ts":1795422200392,"graph":"e041258547de36ac74abdfe2fb9447bb8100aa0344f4d54f42d5d52950e4bd42","source":"cli","destination":"http://127.0.0.1:8796","outcome":"synced","queued":0,"waiting":[],"pushed":0,"duplicates":0,"pulled_pages":1,"imported":1,"resent":0,"snapshots":0,"blobs_up":0,"blobs_down":0,"failed":[]}

@@ -55,6 +55,12 @@ usage:
   utopia sync config --graph <file.utopia> (--off | --mode relay|nearby|folder [--url …] [--folder …])
         change the saved settings (same file, same validation); a blank secret keeps the
         stored one
+  utopia sync inspect --graph <file.utopia> [--page <date|title|id>] [--deep] [--json]
+        compare this device with the destination, read-only (works while the app is
+        open): unsent changes, pages not pulled yet or not on the destination, and changes
+        that wait for another device; --deep (or --page) reads each page's copy on the
+        destination too (one full pull) and says which device has to act. Exit 1 when it
+        finds something
   utopia sync repair --graph <file.utopia> [--json]
         forget the pull positions, so the next sync compares every page with the
         destination and sends what it lacks (for a page another device reports as waiting
@@ -110,9 +116,10 @@ pub fn run(args: &[String]) -> Result<i32> {
         Some("config") => ("config", &args[1..]),
         Some("launchd-plist") => ("launchd-plist", &args[1..]),
         Some("repair") => ("repair", &args[1..]),
+        Some("inspect") => ("inspect", &args[1..]),
         Some(other) if !other.starts_with('-') => bail!(
-            "unknown utopia sync command {other:?}: use setup, status, config or repair, \
-             or no command to sync once.\n\n{USAGE}"
+            "unknown utopia sync command {other:?}: use setup, status, config, inspect or \
+             repair, or no command to sync once.\n\n{USAGE}"
         ),
         _ => ("sync", args),
     };
@@ -153,6 +160,10 @@ pub fn run(args: &[String]) -> Result<i32> {
             options.ensure_only("repair", &["--graph", "--json"])?;
             repair(&options)
         }
+        "inspect" => {
+            options.ensure_only("inspect", &["--graph", "--json", "--page", "--deep"])?;
+            inspect_command(&options, &config)
+        }
         _ => {
             options.ensure_only("sync", &["--graph", "--json", "--continuous"])?;
             if options.continuous {
@@ -192,6 +203,8 @@ struct Options {
     passphrase_stdin: bool,
     off: bool,
     continuous: bool,
+    page: Option<String>,
+    deep: bool,
 }
 
 impl Options {
@@ -210,6 +223,8 @@ impl Options {
                 "--passphrase-stdin" => options.passphrase_stdin = true,
                 "--off" => options.off = true,
                 "--continuous" => options.continuous = true,
+                "--page" => options.page = Some(take(args, &mut i, "--page")?),
+                "--deep" => options.deep = true,
                 other => bail!("unknown option {other:?} for utopia sync.\n\n{USAGE}"),
             }
             i += 1;
@@ -250,6 +265,12 @@ impl Options {
         }
         if self.continuous {
             given.push("--continuous");
+        }
+        if self.page.is_some() {
+            given.push("--page");
+        }
+        if self.deep {
+            given.push("--deep");
         }
         given
     }
@@ -836,11 +857,20 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
         mut engine,
     } = prepare_transport(&mut store, &graph, config_dir, &env, &preferences)?;
     let lan = target.lan;
+    // §12.6: one line per round that did something, in `<config>/logs/sync.jsonl`.
+    let sync_log = utopia_sync::log::SyncLog::new(
+        config_dir.join("logs"),
+        utopia_store::graph_key(&graph),
+        "cli",
+    );
+    let destination = target_text(&preferences);
 
     let mut totals = Totals::default();
     let mut errors: Vec<String> = Vec::new();
     for _ in 0..MAX_ROUNDS {
-        match engine.sync_once(&mut store, &mut transport) {
+        let result = engine.sync_once(&mut store, &mut transport);
+        sync_log.record(&result, &store, destination.as_deref());
+        match result {
             Ok(report) => {
                 totals.add(&report);
                 if !report.failed.is_empty() {
@@ -924,6 +954,163 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
         }
     }
     Ok(if ok { EXIT_OK } else { 1 })
+}
+
+/// `utopia sync inspect`: compare this device with its destination (§12.6). Read-only on
+/// the graph and the destination, so it takes no owner lock and runs while the app is open.
+/// The token and passphrase come from the same places as a sync and are never printed.
+fn inspect_command(options: &Options, config_dir: &Path) -> Result<i32> {
+    let graph = options.graph()?.to_path_buf();
+    if !graph.exists() {
+        bail!("no graph at {}", graph.display());
+    }
+    let mut store = crate::cli::open_store(&graph)?;
+    let env = Environment::read(|key| std::env::var(key).ok());
+    let file = crate::paths::sync_config(config_dir, &graph);
+    let (saved, _) = Preferences::load(&file);
+    let preferences = env.apply(&saved);
+    preferences.validate().map_err(anyhow::Error::msg)?;
+    if preferences.mode == Mode::Off {
+        eprintln!(
+            "Sync is Off for {}: there is no destination to compare with.",
+            graph.display()
+        );
+        return Ok(EXIT_OFF);
+    }
+    let id = graph_id(&store, &graph, &env)?;
+    let secrets = keychain();
+    let (token, passphrase) = credentials(&env, &secrets, &id).map_err(anyhow::Error::msg)?;
+    let marker = store.sync_get("setup_e2e_check")?;
+    verify_passphrase(passphrase.as_deref(), &id, marker.as_deref()).map_err(anyhow::Error::msg)?;
+    let discover = lan_discovery();
+    let Some(target) = sync_target::resolve(
+        &preferences,
+        &env,
+        &id,
+        sync_target::Credentials { token, passphrase },
+        &file,
+        None,
+        &discover,
+    )
+    .map_err(anyhow::Error::msg)?
+    else {
+        bail!("Sync is Off: choose a transport with `utopia sync setup`.");
+    };
+    let sync_target::Target { config, lan } = target;
+    let client = store
+        .sync_get("client_id")?
+        .unwrap_or_else(|| "inspect".into());
+    let mut transport = sync_target::transport(&config, &client).map_err(anyhow::Error::msg)?;
+    let only = match &options.page {
+        Some(p) => Some(vec![store
+            .find_page(p)?
+            .unwrap_or_else(|| PageId(p.clone()))]),
+        None => None,
+    };
+    let report =
+        utopia_sync::inspect::inspect(&mut store, &mut transport, only.as_deref(), options.deep)
+            .map_err(|e| anyhow::anyhow!(error_text(&e)))?;
+    drop(lan);
+    if options.json {
+        let mut value = serde_json::to_value(&report)?;
+        if let Some(pages) = value.get_mut("pages").and_then(|p| p.as_array_mut()) {
+            for (page, r) in pages.iter_mut().zip(&report.pages) {
+                page["advice"] = json!(r.findings.iter().map(|f| f.advice()).collect::<Vec<_>>());
+            }
+        }
+        value["graph_id"] = json!(id);
+        emit(&value)?;
+    } else {
+        print_inspection(&id, &report);
+    }
+    Ok(if report.has_findings() { 1 } else { EXIT_OK })
+}
+
+fn print_inspection(id: &str, r: &utopia_sync::inspect::Inspection) {
+    let peers = |p: &[utopia_sync::inspect::PeerCount]| {
+        if p.is_empty() {
+            "none".to_string()
+        } else {
+            p.iter()
+                .map(|c| format!("{}×{}", c.peer, c.changes))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+    let waiting = |w: &[utopia_sync::inspect::Waiting]| {
+        w.iter()
+            .map(|w| format!("peer {} {}..{}", w.peer, w.start, w.end))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    println!(
+        "graph id {id} · client {} · {}",
+        r.client_id.as_deref().unwrap_or("none yet"),
+        r.destination
+    );
+    println!(
+        "destination: rev {}, {} page(s) · this device: {} page(s), {} unsent change(s)",
+        r.rev, r.destination_pages, r.local_pages, r.unsent
+    );
+    if r.deep {
+        println!("compared each page's copy on the destination");
+    } else {
+        println!(
+            "compared with the destination's page list; add --deep to read each page's copy too"
+        );
+    }
+    for p in &r.pages {
+        println!();
+        match &p.title {
+            Some(t) => println!("page {} \"{t}\"", p.page_id),
+            None => println!("page {}", p.page_id),
+        }
+        let pulled = p.cursor.map_or("never pulled from here".into(), |c| {
+            format!("pulled to {c}")
+        });
+        match &p.local {
+            Some(local) => println!(
+                "  this device:  {} · unsent {} · {pulled}",
+                peers(local),
+                p.unsent
+            ),
+            None => println!("  this device:  does not have this page"),
+        }
+        if !p.waiting_here.is_empty() {
+            println!("                waiting: {}", waiting(&p.waiting_here));
+        }
+        match (p.head, &p.destination) {
+            (None, _) => println!("  destination:  does not list this page"),
+            (Some(head), Some(dest)) => {
+                println!(
+                    "  destination:  head {head} (snapshot {}) · {}",
+                    p.snapshot_seq.unwrap_or(0),
+                    peers(dest)
+                );
+                if !p.destination_waiting.is_empty() {
+                    println!(
+                        "                waiting: {}",
+                        waiting(&p.destination_waiting)
+                    );
+                }
+            }
+            (Some(head), None) => println!(
+                "  destination:  head {head} (snapshot {})",
+                p.snapshot_seq.unwrap_or(0)
+            ),
+        }
+        for f in &p.findings {
+            let name = serde_json::to_value(f)
+                .ok()
+                .and_then(|v| v.as_str().map(str::to_string))
+                .unwrap_or_default();
+            println!("  ! {name}: {}", f.advice());
+        }
+    }
+    if !r.has_findings() {
+        println!();
+        println!("no findings: this device and the destination agree");
+    }
 }
 
 /// `utopia sync repair`: drop the pull positions so the next round compares every page
@@ -1362,6 +1549,12 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
     let mut next_prepare = std::time::Instant::now();
     let mut round = 0u64;
     let mut fatal: Option<anyhow::Error> = None;
+    let sync_log = utopia_sync::log::SyncLog::new(
+        config_dir.join("logs"),
+        utopia_store::graph_key(graph),
+        "daemon",
+    );
+    let destination = target_text(&preferences);
 
     loop {
         if !STOP.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1375,6 +1568,7 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
                         let result = finish_round(current, &mut store, exchanged);
                         round += 1;
                         log_round(round, &result, current);
+                        sync_log.record(&result, &store, destination.as_deref());
                         next_due = std::time::Instant::now() + current.interval;
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => {}
@@ -1396,6 +1590,7 @@ pub fn continuous(graph: &Path, config_dir: &Path, addr: &str) -> Result<i32> {
                         RoundStart::Finished(result) => {
                             round += 1;
                             log_round(round, &result, current);
+                            sync_log.record(&result, &store, destination.as_deref());
                             next_due = std::time::Instant::now() + current.interval;
                         }
                     }

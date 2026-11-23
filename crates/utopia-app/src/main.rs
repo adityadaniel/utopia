@@ -446,6 +446,13 @@ impl Root {
                     graph: Some(paths::graph_id(&path)),
                     encrypted: false,
                 });
+                cx.set_global(utopia_ui::sync_runner::SyncLogGlobal(
+                    utopia_sync::log::SyncLog::new(
+                        config.join("logs"),
+                        utopia_store::graph_key(&path),
+                        "app",
+                    ),
+                ));
                 let plugins = config.join("plugins");
                 let app = cx.new(|_| {
                     let mut a = AppState::new(store);
