@@ -105,13 +105,22 @@ pub enum Command {
         count: usize,
         register: Option<char>,
     },
-    /// i a I A o O s S C
-    Insert(InsertAt),
+    /// i a I A o O s S C. The register matters for `s`, `S` and `C`, which delete before
+    /// they insert; `"_s` discards what they took and `"+s` puts it on the clipboard
+    /// (VM-11).
+    Insert {
+        at: InsertAt,
+        register: Option<char>,
+    },
     DeleteChar {
         back: bool,
         count: usize,
+        register: Option<char>,
     },
-    DeleteToLineEnd,
+    DeleteToLineEnd {
+        count: usize,
+        register: Option<char>,
+    },
     ReplaceChar(char),
     ToggleCase {
         count: usize,

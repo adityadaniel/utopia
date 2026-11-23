@@ -494,6 +494,13 @@ impl Store {
     /// Every block in `blocks` must be a tombstone in `src`: a live block is not a cut, and
     /// moving one is [`Store::move_block_to_page`]'s job. The tombstone is what the move
     /// restores — the rows arrive in `dst` live, carrying their kind and done state.
+    ///
+    /// Two things make this different from a drag. Every refusal is decided **before** the
+    /// first command is applied: a group that fails half-way goes through
+    /// [`Store::drop_shard`], and a dropped shard takes the owner's unflushed typing with it,
+    /// so a `p` that cannot move must write nothing at all. And a block the destination
+    /// already has (a page keeps a moved block as `moved_to` history) is the way back: its
+    /// own row is restored and moved rather than copied under a new id.
     pub fn restore_and_move_to_page(
         &mut self,
         src: &PageId,
@@ -512,6 +519,12 @@ impl Store {
         for b in blocks {
             match s.block(b) {
                 None => return Err(StoreError::NotFound(format!("block {b}"))),
+                // A block a drag, a merge or a sync has already taken out of this page is
+                // not a cut here any more: its row belongs to the page it went to, and
+                // restoring it would leave a live block marked `moved_to` (F11).
+                Some(n) if n.moved_to.is_some() => {
+                    return Err(utopia_core::DomainError::NoOp.into())
+                }
                 Some(n) if n.deleted_at.is_some() => {}
                 Some(_) => {
                     return Err(StoreError::Invalid(format!(
@@ -564,22 +577,59 @@ impl Store {
                 let a = if &id == root {
                     after.clone()
                 } else {
-                    // The previous sibling, when it is coming too; else it is the first child.
-                    s.prev_sibling(&id, false).filter(|x| blocks.contains(x))
+                    // The nearest previous sibling the cut is bringing too. A tombstone that
+                    // stays behind is not an anchor the destination has, and `InsertBlock`
+                    // with an anchor it cannot find puts the block first instead of after
+                    // its own sibling — which reversed every live child of a subtree that
+                    // held a tombstone between two of them (F1).
+                    let mut prev = s.prev_sibling(&id, false);
+                    while let Some(prev_id) = prev.clone() {
+                        if blocks.contains(&prev_id) {
+                            break;
+                        }
+                        prev = s.prev_sibling(&prev_id, false);
+                    }
+                    prev
                 };
-                dst_cmds.push(Command::InsertBlock {
-                    id: id.clone(),
-                    parent: p,
-                    after: a,
-                    text: n.text.clone(),
-                    kind: n.kind,
-                });
-                if n.checked {
-                    dst_cmds.push(Command::SetBlockKind {
-                        id: id.clone(),
-                        kind: n.kind,
-                        checked: true,
+                if d.block(&id).is_some() {
+                    // The way back (F3): the destination still has this block's row from the
+                    // move that took it away, as `moved_to` history, and `InsertBlock`
+                    // refuses an id the shard already knows (`DomainError::NoOp`). Restoring
+                    // the row the page already owns is what keeps the id, and with it every
+                    // `((reference))` (VM-10).
+                    if d.is_live(&id) {
+                        return Err(StoreError::Invalid(format!(
+                            "block {id} is already live on this page"
+                        )));
+                    }
+                    dst_cmds.push(Command::SetMoved {
+                        ids: vec![id.clone()],
+                        to: None,
                     });
+                    dst_cmds.push(Command::SetDeleted {
+                        ids: vec![id.clone()],
+                        deleted_at: None,
+                    });
+                    dst_cmds.push(Command::MoveBlock {
+                        id: id.clone(),
+                        parent: p,
+                        after: a,
+                    });
+                } else {
+                    dst_cmds.push(Command::InsertBlock {
+                        id: id.clone(),
+                        parent: p,
+                        after: a,
+                        text: n.text.clone(),
+                        kind: n.kind,
+                    });
+                    if n.checked {
+                        dst_cmds.push(Command::SetBlockKind {
+                            id: id.clone(),
+                            kind: n.kind,
+                            checked: true,
+                        });
+                    }
                 }
             }
             after = Some(root.clone());
@@ -682,7 +732,12 @@ impl Store {
     // ---------------------------------------------------------------- quick capture
 
     /// Global quick capture (FR-2.19): append `text` to today's daily note and commit it.
+    ///
+    /// A capture is not part of an open Vim Insert run: it closes the run first, so the
+    /// text the owner was typing and the captured line are separate undo steps (VM-12,
+    /// F4). The editor opens its run again on its next edit.
     pub fn capture(&mut self, text: &str) -> Result<(PageId, BlockId)> {
+        self.end_undo_run();
         let (page, first) = self.open_daily(self.today())?;
         let st = self.page_state(&page)?;
         let roots = st.live_roots();

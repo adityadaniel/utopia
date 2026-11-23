@@ -183,7 +183,12 @@ impl Parser {
         // every key that is not a command out of the block's text).
         if key == Key::Delete {
             let count = self.take_count();
-            let step = Command::DeleteChar { back: false, count };
+            let register = self.register.take();
+            let step = Command::DeleteChar {
+                back: false,
+                count,
+                register,
+            };
             return self.finish(Step::Run(step));
         }
         if let Some(c) = ctrl {
@@ -200,18 +205,53 @@ impl Parser {
         let count = self.take_count();
         let register = self.register.take();
         let command = match c {
-            'i' => Command::Insert(InsertAt::Cursor),
-            'a' => Command::Insert(InsertAt::After),
-            'I' => Command::Insert(InsertAt::LineStart),
-            'A' => Command::Insert(InsertAt::LineEnd),
-            'o' => Command::Insert(InsertAt::BlockBelow),
-            'O' => Command::Insert(InsertAt::BlockAbove),
-            's' => Command::Insert(InsertAt::ReplaceChar),
-            'S' => Command::Insert(InsertAt::ReplaceLine),
-            'C' => Command::Insert(InsertAt::ToLineEnd),
-            'x' => Command::DeleteChar { back: false, count },
-            'X' => Command::DeleteChar { back: true, count },
-            'D' => Command::DeleteToLineEnd,
+            'i' => Command::Insert {
+                at: InsertAt::Cursor,
+                register,
+            },
+            'a' => Command::Insert {
+                at: InsertAt::After,
+                register,
+            },
+            'I' => Command::Insert {
+                at: InsertAt::LineStart,
+                register,
+            },
+            'A' => Command::Insert {
+                at: InsertAt::LineEnd,
+                register,
+            },
+            'o' => Command::Insert {
+                at: InsertAt::BlockBelow,
+                register,
+            },
+            'O' => Command::Insert {
+                at: InsertAt::BlockAbove,
+                register,
+            },
+            's' => Command::Insert {
+                at: InsertAt::ReplaceChar,
+                register,
+            },
+            'S' => Command::Insert {
+                at: InsertAt::ReplaceLine,
+                register,
+            },
+            'C' => Command::Insert {
+                at: InsertAt::ToLineEnd,
+                register,
+            },
+            'x' => Command::DeleteChar {
+                back: false,
+                count,
+                register,
+            },
+            'X' => Command::DeleteChar {
+                back: true,
+                count,
+                register,
+            },
+            'D' => Command::DeleteToLineEnd { count, register },
             'Y' => Command::Operate {
                 op: Operator::Yank,
                 target: Target::Line,
@@ -573,23 +613,47 @@ mod tests {
             ("S", InsertAt::ReplaceLine),
             ("C", InsertAt::ToLineEnd),
         ] {
-            assert_eq!(run(keys), Command::Insert(at), "{keys}");
+            assert_eq!(run(keys), Command::Insert { at, register: None }, "{keys}");
         }
+        // A register before a command that deletes is kept for the delete it does first
+        // (`"_s` discards, `"+C` puts it on the clipboard; F9).
+        assert_eq!(
+            run("\"_s"),
+            Command::Insert {
+                at: InsertAt::ReplaceChar,
+                register: Some('_')
+            }
+        );
+        assert_eq!(
+            run("\"+3D"),
+            Command::DeleteToLineEnd {
+                count: 3,
+                register: Some('+')
+            }
+        );
         assert_eq!(
             run("3x"),
             Command::DeleteChar {
                 back: false,
-                count: 3
+                count: 3,
+                register: None
             }
         );
         assert_eq!(
             run("X"),
             Command::DeleteChar {
                 back: true,
-                count: 1
+                count: 1,
+                register: None
             }
         );
-        assert_eq!(run("D"), Command::DeleteToLineEnd);
+        assert_eq!(
+            run("D"),
+            Command::DeleteToLineEnd {
+                count: 1,
+                register: None
+            }
+        );
         assert_eq!(run("2~"), Command::ToggleCase { count: 2 });
         assert_eq!(
             run("2p"),
@@ -652,7 +716,8 @@ mod tests {
             parser.feed(Key::Delete),
             Step::Run(Command::DeleteChar {
                 back: false,
-                count: 1
+                count: 1,
+                register: None
             })
         );
     }

@@ -809,6 +809,12 @@ Four steps, in order, for PR 1 and PR 2.
   otherwise. Between an edit and the next paint, `x` then a fast `j` can therefore leave
   a multi-line block early. The fix is to queue the vertical move and resolve it in
   `prepaint`, where `Goal` is already resolved.
+- A count on a linewise change (`3cc`) changes the caret's block only: changing three
+  rows' text and opening Insert over them is the multi-block plan PR 4 owns. A count on
+  `>>` / `<<` has the same limit (2C.2). The count is not silently dropped from the
+  register or the cursor: `cc` still takes this block's text into it.
+- A count on `p` is honoured for a yank (that many copies) but not for a cut: the first
+  `p` moves the blocks and spends the cut, so `3p` after `dd` pastes them once.
 - Dot-repeat (`.`), Visual mode, folds, `{`, `}`, `%`, `il`/`al`, `gd` and `:` are PR 3
   and PR 4.
 - Vim is not available in `LineInput` fields: the palette, filters, rename and Settings.

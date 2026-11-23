@@ -162,6 +162,13 @@ impl UndoStack {
     /// Opening a run that is already open changes nothing: an Insert run opened by `c`
     /// covers the words typed after it, and the `i` of a following block is the same run
     /// until something closes it.
+    ///
+    /// Every group pushed while a run is open folds into it, so a write that is not the
+    /// editor's own must close the run first, or the owner's next undo would take it too:
+    /// an assistant's call through `/v1/op` (MC-8, MC-9) is closed by `utopia_api::handle`
+    /// and a capture by `Store::capture`, and the editor opens a new run on its next edit
+    /// (VM-12, F4). The stack cannot tell the two apart itself: `push` sees the same store
+    /// either way.
     pub fn begin_run(&mut self) {
         if self.run_start.is_some() {
             return;

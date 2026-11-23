@@ -604,32 +604,42 @@ pub fn block_tree(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<Tree
 ///
 /// The cursor goes to the NEXT visible block, as Vim's does; [`delete_subtree`], which
 /// Cmd+Shift+Backspace uses, puts it on the previous one. At the end of the page there is no
-/// next block, so it is the last one above.
+/// next block, so it is the last one above. *Visible* is the point: a zoom shows one subtree
+/// and a collapsed block hides its children, so the next row must come from
+/// [`PageState::visible_rows`] or `dd` on the last row of a zoom would hand the caret to a
+/// block the view cannot show and end the session (F12).
 pub fn delete_blocks(
     st: &PageState,
     id: &BlockId,
     count: usize,
     now: i64,
+    zoom: Option<&BlockId>,
+    collapsed: &dyn Fn(&BlockId) -> bool,
 ) -> Result<Plan, DomainError> {
     let ids = block_ids(st, id, count)?;
     if ids.is_empty() {
         return Err(DomainError::NoOp);
     }
-    let rows = st.live_preorder();
-    let ix = rows.iter().position(|(r, _)| r == id);
-    let focus = ix.and_then(|i| {
-        rows[i..]
+    let rows = st.visible_rows(zoom, collapsed);
+    // Where the caret goes: the nearest row below the delete in view, else the nearest one
+    // above. A block that is not a visible row at all (the zoom's own root, a stale focus)
+    // falls back to the whole page, so `dd` always leaves the caret somewhere it can be
+    // shown (F12).
+    let find = |rows: &[(BlockId, usize)]| {
+        let ix = rows.iter().position(|(r, _)| r == id)?;
+        rows[ix..]
             .iter()
             .find(|(r, _)| !ids.contains(r))
             .map(|(r, _)| (r.clone(), 0))
             .or_else(|| {
-                rows[..i]
+                rows[..ix]
                     .iter()
                     .rev()
                     .find(|(r, _)| !ids.contains(r))
                     .map(|(r, _)| (r.clone(), st.block(r).map_or(0, |b| b.text.len())))
             })
-    });
+    };
+    let focus = find(&rows).or_else(|| find(&st.live_preorder()));
     let plan = Plan {
         cmds: vec![Command::SetDeleted {
             ids,
@@ -694,6 +704,24 @@ pub fn join_next(
         } else {
             sim.last_child(Some(id), false)
         };
+        // FR-2.9: the joined block's children climb one level to land here, and their own
+        // descendants climb with them. `J` is a re-parent like `Indent`, so it is refused
+        // the same way instead of building an outline deeper than the ceiling allows.
+        for c in &n.children {
+            if sim.block(c).is_none_or(|b| !b.present) {
+                continue;
+            }
+            let deepest = sim
+                .subtree(c, false)
+                .into_iter()
+                .filter(|d| sim.block(d).is_some_and(|b| b.present))
+                .map(|d| sim.depth(&d).saturating_sub(sim.depth(c)))
+                .max()
+                .unwrap_or(0);
+            if sim.depth(id) + 1 + deepest >= MAX_DROP_DEPTH {
+                return Err(DomainError::TooDeep);
+            }
+        }
         for c in &n.children {
             if sim.block(c).is_some_and(|b| b.present) {
                 join.push(Command::MoveBlock {
@@ -796,8 +824,9 @@ pub fn insert_tree_after(
 ///
 /// `ids` are exactly the blocks the delete tombstoned ([`block_ids`]). A tombstone never
 /// unlinks the block, so moving the roots moves the subtrees. A live id means the cut was
-/// undone (or is not a cut at all): the caller copies instead, so the command never writes
-/// where the blocks already are.
+/// undone (or is not a cut at all), and an id that has `moved_to` has left this page (a
+/// drag, a merge or a sync): the caller copies instead, so the command never writes where
+/// the blocks already are (VM-10, F11).
 pub fn restore_after(
     st: &PageState,
     ids: &[BlockId],
@@ -811,9 +840,16 @@ pub fn restore_after(
     for id in ids {
         match st.block(id) {
             None => return Err(DomainError::BlockNotFound(id.clone())),
-            Some(b) if b.deleted_at.is_none() => return Err(DomainError::NoOp),
+            Some(b) if b.deleted_at.is_none() || b.moved_to.is_some() => {
+                return Err(DomainError::NoOp)
+            }
             Some(_) => {}
         }
+    }
+    // The target must not be inside the cut: `MoveBlock` would make a cycle (`p` on a live
+    // block a sync put under a tombstoned one), and it is not where a cut may go anyway.
+    if ids.contains(target) || ids.iter().any(|id| st.is_ancestor(id, target)) {
+        return Err(DomainError::NoOp);
     }
     let roots: Vec<BlockId> = ids
         .iter()
@@ -1223,7 +1259,7 @@ mod tests {
     #[test]
     fn vm_8_delete_blocks_takes_siblings_with_their_subtrees() {
         let (mut st, ids) = siblings(3, 2);
-        let plan = delete_blocks(&st, &ids[0], 3, 9).unwrap();
+        let plan = delete_blocks(&st, &ids[0], 3, 9, None, &|_| false).unwrap();
         assert_eq!(plan.cmds.len(), 1, "one SetDeleted, so one undo step");
         assert_eq!(plan.focus, None, "the whole page went with it");
         apply(&mut st, &plan);
@@ -1244,7 +1280,7 @@ mod tests {
         // r0, r0k0, r0k1, r1, r1k0, r1k1, r2, r2k0, r2k1.
         let (mut st, ids) = siblings(3, 2);
         // `dd` on r1, with children: the next visible block after the deleted rows is r2.
-        let plan = delete_blocks(&st, &ids[3], 1, 1).unwrap();
+        let plan = delete_blocks(&st, &ids[3], 1, 1, None, &|_| false).unwrap();
         assert_eq!(
             plan.focus,
             Some(Focus {
@@ -1254,7 +1290,7 @@ mod tests {
         );
         apply(&mut st, &plan);
         // The last live block of the page: the one above it, at its end.
-        let plan = delete_blocks(&st, &ids[6], 1, 1).unwrap();
+        let plan = delete_blocks(&st, &ids[6], 1, 1, None, &|_| false).unwrap();
         assert_eq!(
             plan.focus,
             Some(Focus {
@@ -1335,6 +1371,108 @@ mod tests {
             .all(|c| !matches!(c, Command::PurgeBlock { .. })));
     }
 
+    /// FR-2.9, F8: `J` re-parents the joined block's children under this one, so it is a
+    /// re-parent like `Indent` and is refused when the result would pass the ceiling. The
+    /// case that bites: the cursor is at the bottom of a chain and the next visible row is a
+    /// shallow root, so its children climb from depth 1 to depth 12.
+    #[test]
+    fn vm_8_join_next_refuses_a_join_that_would_pass_the_ceiling() {
+        // a / c0 … c10 (depths 0 to 11, the deepest the ceiling allows), then b / b1.
+        let mut lines: Vec<(String, usize)> = vec![("a".into(), 0)];
+        lines.extend((0..(MAX_DROP_DEPTH - 1)).map(|d| (format!("c{d}"), d + 1)));
+        lines.push(("b".into(), 0));
+        lines.push(("b1".into(), 1));
+        let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
+        let (mut st, ids) = page_with(&refs);
+        let deepest = ids[MAX_DROP_DEPTH - 1].clone(); // c10, depth 11
+        let before = rows(&st);
+        let r = join_next(&st, &deepest, 1, None, &|_| false, 7);
+        assert!(
+            matches!(r, Err(DomainError::TooDeep)),
+            "`b1` would land at depth {MAX_DROP_DEPTH}: {r:?}"
+        );
+        assert_eq!(rows(&st), before, "and nothing was planned");
+
+        // One level up there is room, and the join still works.
+        let shallow = ids[MAX_DROP_DEPTH - 2].clone(); // c9, depth 10
+        let plan = join_next(&st, &shallow, 1, None, &|_| false, 7).unwrap();
+        apply(&mut st, &plan);
+        assert!(
+            st.live_preorder().iter().all(|(_, d)| *d < MAX_DROP_DEPTH),
+            "the outline stays inside the ceiling: {:?}",
+            st.live_preorder()
+        );
+    }
+
+    /// VM-10, F11: a restore is refused, as a whole and before anything is written, when the
+    /// target is inside the cut — a live block a sync put under a tombstoned one — because
+    /// `MoveBlock` would make a cycle there.
+    #[test]
+    fn vm_10_restore_after_refuses_a_target_inside_the_cut() {
+        let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let cut = block_ids(&st, &ids[0], 1).unwrap();
+        let plan = delete_blocks(&st, &ids[0], 1, 3, None, &|_| false).unwrap();
+        apply(&mut st, &plan);
+        // What a sync can bring: a live child under the tombstone (§12.4).
+        let arrived = BlockId::new();
+        st.apply(
+            &Command::InsertBlock {
+                id: arrived.clone(),
+                parent: Some(ids[0].clone()),
+                after: None,
+                text: "from another device".into(),
+                kind: BlockKind::Bullet,
+            },
+            4,
+        )
+        .unwrap();
+        let before = st.clone();
+        assert!(matches!(
+            restore_after(&st, &cut, &arrived, false),
+            Err(DomainError::NoOp)
+        ));
+        assert_eq!(st.canonical(), before.canonical(), "nothing was written");
+    }
+
+    /// VM-10, F11: a cut block a drag, a merge or a sync has moved away has no row here to
+    /// restore, so the paste copies instead of resurrecting it half-way.
+    #[test]
+    fn vm_10_restore_after_refuses_a_block_that_moved_away() {
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0)]);
+        let cut = block_ids(&st, &ids[0], 1).unwrap();
+        let plan = delete_blocks(&st, &ids[0], 1, 3, None, &|_| false).unwrap();
+        apply(&mut st, &plan);
+        st.apply(
+            &Command::SetMoved {
+                ids: vec![ids[0].clone()],
+                to: Some("elsewhere".into()),
+            },
+            5,
+        )
+        .unwrap();
+        assert!(matches!(
+            restore_after(&st, &cut, &ids[1], false),
+            Err(DomainError::NoOp)
+        ));
+    }
+
+    /// VM-8, F12: the caret after `dd` goes to the next VISIBLE row. A collapsed block's
+    /// children are not on screen, so the previous row cannot be one of them.
+    #[test]
+    fn vm_8_delete_blocks_focus_ignores_rows_a_collapse_hides() {
+        // a / a1, then b (the last visible row).
+        let (st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let collapsed = |b: &BlockId| b == &ids[0];
+        let plan = delete_blocks(&st, &ids[2], 1, 9, None, &collapsed).unwrap();
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[0].clone(),
+                offset: "a".len()
+            }),
+            "the row above is `a`, not its hidden child"
+        );
+    }
     /// VM-8: `J` joins a child into its parent too, and a collapsed parent's own rows are the
     /// ones that count.
     #[test]
@@ -1447,7 +1585,7 @@ mod tests {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("b1", 1), ("c", 0)]);
         let cut = block_ids(&st, &ids[1], 1).unwrap();
         {
-            let p = delete_blocks(&st, &ids[1], 1, 5).unwrap();
+            let p = delete_blocks(&st, &ids[1], 1, 5, None, &|_| false).unwrap();
             apply(&mut st, &p);
         }
         assert_eq!(rows(&st), vec![("a".into(), 0), ("c".into(), 0)]);
@@ -1487,7 +1625,7 @@ mod tests {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("c", 0)]);
         let cut = block_ids(&st, &ids[1], 1).unwrap();
         {
-            let p = delete_blocks(&st, &ids[1], 1, 5).unwrap();
+            let p = delete_blocks(&st, &ids[1], 1, 5, None, &|_| false).unwrap();
             apply(&mut st, &p);
         }
         let plan = restore_after(&st, &cut, &ids[2], true).unwrap();
