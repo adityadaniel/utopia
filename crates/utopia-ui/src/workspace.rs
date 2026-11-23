@@ -33,10 +33,10 @@ use crate::sync_runner::{
 use crate::tasks_view::{TaskFilter, TasksEvent, TasksView};
 use crate::theme::{
     ghost_icon, ghost_text, kbd, label_mono, nav_row, quiet_control, quiet_danger, theme,
-    BUTTON_HEIGHT, COUNT, FOOTER_DOT, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
-    RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT,
-    TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI,
-    VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
+    BUTTON_HEIGHT, COUNT, FOOTER_DOT, LABEL, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT,
+    RADIUS_CHIP, RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL,
+    TAG, TAG_HEIGHT, TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X,
+    TOP_BAR_PADDING_Y, UI, VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
 };
 use crate::theme::{
     outline_button, PANE_HEADER_HEIGHT, PANE_SPINE, PANE_SPINE_THRESHOLD, PANE_WIDTH, SPINE_TITLE,
@@ -414,6 +414,12 @@ impl Workspace {
                     if matches!(e, EditorEvent::Blurred) && editor.read(cx).target().is_none() {
                         window.focus(&this.focus);
                     }
+                    // Task 1F: the mode label is the one thing a Normal-mode keystroke
+                    // changes, and `VimChanged` is the only event that redraws it. Every
+                    // other editor event leaves the window alone (architecture rule 10).
+                    if matches!(e, EditorEvent::VimChanged) {
+                        cx.notify();
+                    }
                 },
             ),
             // §13.5: the input method can only reach the editor while its handle has
@@ -484,24 +490,103 @@ impl Workspace {
         {
             // DESIGN.md §3.3: the page menu is transient. An interceptor sees Escape before
             // the keymap, so closing the menu does not also end the block edit behind it.
+            //
+            // The Vim branch lives in this same closure on purpose: gpui calls every
+            // interceptor even after one stops propagation, so a second one would act on
+            // the same Escape (Task 1D.1).
             let handle = window.window_handle();
             let me = cx.entity().downgrade();
             subs.push(cx.intercept_keystrokes(move |ev, window, cx| {
-                if window.window_handle() != handle || ev.keystroke.key != "escape" {
+                if window.window_handle() != handle {
                     return;
                 }
-                let closed = me
+                if ev.keystroke.key == "escape" {
+                    let closed = me
+                        .update(cx, |this, cx| {
+                            if this.page_menu {
+                                this.page_menu = false;
+                                cx.notify();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if closed {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if !crate::appearance::vim(cx) {
+                    return;
+                }
+                let Some(key) = crate::vim::key_from_keystroke(&ev.keystroke) else {
+                    // Tab, Shift-Tab, Cmd chords and Alt chords without a character must
+                    // still reach the keymap.
+                    return;
+                };
+                let claimed = me
                     .update(cx, |this, cx| {
                         if this.page_menu {
-                            this.page_menu = false;
-                            cx.notify();
-                            true
-                        } else {
-                            false
+                            return false;
                         }
+                        let editor = this.editor.clone();
+                        if editor.read(cx).target().is_some() {
+                            // A block is in edit: Normal or Visual, on this window's focused
+                            // editor, with no input method composition owning the buffer.
+                            // The main column's content is deliberately not tested here:
+                            // one editor serves the sidebar's pages too, and a page stays
+                            // editable there while the main pane shows the graph, the
+                            // tasks view or a PDF (F1).
+                            let focused = editor.read(cx).focus_handle(cx).is_focused(window);
+                            let state = editor.read(cx).vim().mode;
+                            if !focused
+                                || state == crate::vim::Mode::Insert
+                                || editor.read(cx).composing()
+                            {
+                                return false;
+                            }
+                            editor.update(cx, |e, cx| e.vim_key(key, window, cx));
+                            return true;
+                        }
+                        // Rest: a Normal key wakes the resume point (Task 1D.6). It belongs
+                        // to the main column — only a page there, and only the workspace's
+                        // own handle focused — so a key meant for a palette, a sidebar row
+                        // or the graph never reopens the editor.
+                        if !matches!(&this.content, MainContent::Page)
+                            || !this.focus.is_focused(window)
+                        {
+                            return false;
+                        }
+                        let resume = editor.read(cx).vim().resume.clone();
+                        let view = resume
+                            .as_ref()
+                            .and_then(|r| this.view_by_id(r.host))
+                            .unwrap_or_else(|| this.main_view());
+                        let woken = match &resume {
+                            Some(r) => {
+                                view.update(cx, |v, cx| v.restore_caret(&r.caret, window, cx))
+                            }
+                            None => false,
+                        };
+                        if !woken {
+                            // The resume point names a block that is no longer there (a
+                            // sync or an assistant tombstoned it, a rename merged it
+                            // away). Drop it and start from the page's first block, so the
+                            // waking key is not eaten and the editor is not stuck (F5).
+                            editor.update(cx, |e, _| e.vim_mut().resume = None);
+                            view.update(cx, |v, cx| v.focus_first(window, cx));
+                        }
+                        if editor.read(cx).target().is_none() {
+                            // Nothing could be opened (no page, no block to make): the key
+                            // is not ours to swallow.
+                            return false;
+                        }
+                        editor.update(cx, |e, cx| e.vim_key(key, window, cx));
+                        true
                     })
                     .unwrap_or(false);
-                if closed {
+                if claimed {
                     cx.stop_propagation();
                 }
             }));
@@ -1469,6 +1554,17 @@ impl Workspace {
         self.stack.iter().position(|v| v == view)
     }
 
+    /// The page view with this entity id: one of the stack's, or a sidebar pane's. A resume
+    /// point records the view that hosted the edit, and the same editor serves both, so the
+    /// wake-up has to find the view by id rather than assume the main pane (F5).
+    fn view_by_id(&self, id: EntityId) -> Option<Entity<PageView>> {
+        self.stack
+            .iter()
+            .chain(self.panes.iter().map(|p| &p.view))
+            .find(|v| v.entity_id() == id)
+            .cloned()
+    }
+
     /// Open from a click (`pane_stack::open`): `origin` is the pane the link was in.
     #[allow(clippy::too_many_arguments)]
     pub fn open_from(
@@ -1559,6 +1655,25 @@ impl Workspace {
             ViewMode::Single => ViewMode::Panes,
         };
         self.set_mode(next, window, cx);
+    }
+
+    /// The Vim Mode toggle (VM-1). Modal editing is a local preference, so it goes through
+    /// the same path as the Settings switches and every window follows at once. Settings has
+    /// its own config dir; the main window writes through the one `install` kept.
+    fn toggle_vim_mode(&mut self, _: &ToggleVimMode, _: &mut Window, cx: &mut Context<Self>) {
+        let on = !crate::appearance::vim(cx);
+        let dir = crate::appearance::config_dir(cx);
+        let saved = crate::appearance::set_vim(cx, on, &dir);
+        let message = match saved {
+            Ok(()) if on => "Vim mode on".to_string(),
+            Ok(()) => "Vim mode off".to_string(),
+            Err(e) => format!("Vim mode is on for this session only: {e}"),
+        };
+        self.app.update(cx, |app, cx| {
+            app.notice = Some(message);
+            cx.notify();
+        });
+        cx.notify();
     }
 
     fn close_pane_action(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
@@ -1726,6 +1841,12 @@ impl Workspace {
             .iter()
             .filter_map(|p| p.view.read(cx).page())
             .collect()
+    }
+
+    /// The view of pane `i` in the right sidebar, for tests and for anything that has to
+    /// reach a sidebar page without a pointer (`stack_view` is its main-pane pair).
+    pub fn sidebar_view(&self, i: usize) -> Option<Entity<PageView>> {
+        self.panes.get(i).map(|p| p.view.clone())
     }
 
     /// Open the configured launch page (FR-1.1): today by default, or the last page. The
@@ -4362,6 +4483,7 @@ impl Workspace {
                 .child(self.pin_button(p, cx))
                 .child(self.page_menu_button(cx));
         }
+        bar = bar.when_some(self.vim_mode_label(&th, cx), |bar, label| bar.child(label));
         bar = bar.child(self.mode_toggle(&th, cx));
         if self.mode == ViewMode::Panes {
             bar = bar.child(
@@ -4383,6 +4505,48 @@ impl Workspace {
                 })),
         )
         .into_any_element()
+    }
+
+    /// Vim's mode (task 1F, VM-3): the mode name in upper case, a space, and the keys the
+    /// parser is still waiting for ("NORMAL", "NORMAL 2d"). Mono `--ink-3`, at the right
+    /// end of the top bar, left of the view-mode control; shown only while Vim is on. It
+    /// redraws on [`EditorEvent::VimChanged`] and nothing else, so no other keystroke
+    /// repaints the window (architecture rule 10).
+    fn vim_mode_label(
+        &self,
+        th: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !crate::appearance::vim(cx) {
+            return None;
+        }
+        let (mode, pending) = {
+            let editor = self.editor.read(cx);
+            (editor.vim().mode, editor.vim().parser.pending())
+        };
+        Some(
+            div()
+                .debug_selector(|| "vim-mode".into())
+                .flex_none()
+                .font_family(label_mono())
+                .text_size(px(LABEL.size))
+                .line_height(px(LABEL.line))
+                .font_weight(LABEL.weight)
+                .text_color(th.ink_3)
+                .child(format!("{} {pending}", Self::mode_name(mode)))
+                .into_any_element(),
+        )
+    }
+
+    /// A mode's name as the label shows it: Vim's own words, in the upper case a mono
+    /// label uses (§2.2).
+    fn mode_name(mode: crate::vim::Mode) -> &'static str {
+        match mode {
+            crate::vim::Mode::Normal => "NORMAL",
+            crate::vim::Mode::Insert => "INSERT",
+            crate::vim::Mode::Visual { line: false, .. } => "VISUAL",
+            crate::vim::Mode::Visual { line: true, .. } => "VISUAL LINE",
+        }
     }
 
     /// The top bar over the Tasks view (DESIGN.md §4.5): Back (to the stack), the title,
@@ -5072,6 +5236,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_left))
             .on_action(cx.listener(Self::toggle_refs))
             .on_action(cx.listener(Self::toggle_view_mode))
+            .on_action(cx.listener(Self::toggle_vim_mode))
             .on_action(cx.listener(Self::close_pane_action))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))

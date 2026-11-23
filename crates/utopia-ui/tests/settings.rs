@@ -1382,6 +1382,7 @@ mod appearance {
                 "density": "normal",
                 "indent": "wide",
                 "smooth_caret": false,
+                "vim": false,
                 "ref_children": 2,
                 "pinned": [],
                 "right_sidebar_width": 380.0,
@@ -1515,6 +1516,35 @@ mod appearance {
             let (saved, warnings) = appearance::Prefs::load(dir.path());
             assert!(warnings.is_empty(), "{warnings:?}");
             assert_eq!(saved.smooth_caret, enabled);
+        }
+    }
+
+    /// VM-1: Vim mode is off unless the user turns it on, and the Keybindings switch writes
+    /// that into `settings.json` so it survives a restart.
+    #[gpui::test]
+    fn vm_1_vim_mode_is_opt_in_and_the_switch_is_saved(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            cx.set_global(Theme::light());
+            install_keymap(cx, None);
+            utopia_ui::appearance::install(cx, dir.path());
+        });
+        let path = dir.path().to_path_buf();
+        let (_view, cx) =
+            cx.add_window_view(|window, cx| SettingsView::new(path, Tab::Keybindings, window, cx));
+        cx.simulate_resize(gpui::size(gpui::px(1100.), gpui::px(900.)));
+        cx.run_until_parked();
+
+        assert!(!cx.update(|_, cx| appearance::vim(cx)));
+        for enabled in [true, false] {
+            let toggle = cx.debug_bounds("settings-vim").expect("the switch");
+            cx.simulate_click(toggle.center(), gpui::Modifiers::default());
+            cx.run_until_parked();
+
+            assert_eq!(cx.update(|_, cx| appearance::vim(cx)), enabled);
+            let (saved, warnings) = appearance::Prefs::load(dir.path());
+            assert!(warnings.is_empty(), "{warnings:?}");
+            assert_eq!(saved.vim, enabled);
         }
     }
 

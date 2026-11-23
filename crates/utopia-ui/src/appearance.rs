@@ -13,6 +13,7 @@
 //!   "density": "normal",
 //!   "indent": "wide",
 //!   "smooth_caret": false,
+//!   "vim": false,
 //!   "ref_children": 2,
 //!   "pinned": [],
 //!   "right_sidebar_width": 380.0,
@@ -25,7 +26,8 @@
 //! `"tight"`, `"normal"` (the default) or `"relaxed"` (ALL-5; the older `"compact"` and
 //! `"comfortable"` still read, as tight and normal); `indent` is `"wide"` (the
 //! default, DESIGN.md §3.1's 45 px step) or `"narrow"` (26 px); `smooth_caret` is false
-//! by default (DESIGN.md §2.6); `ref_children` is how many
+//! by default (DESIGN.md §2.6); `vim` is false by default (VM-1: modal editing is opt-in);
+//! `ref_children` is how many
 //! children a Linked Reference shows inline, 0 to `REF_CHILDREN_MAX` (LR-4, default 2,
 //! 0 folds every child behind the "+N more" chip); `pinned` is the list of page ids the
 //! sidebars keep, in the order they were pinned — one list shared by the left sidebar's
@@ -316,6 +318,9 @@ pub struct Prefs {
     pub density: Density,
     pub indent: Indent,
     pub smooth_caret: bool,
+    /// Modal editing (VM-1): off unless the user turns it on in Settings → Keybindings. Off
+    /// means behaviour and keystroke cost are unchanged (VM-2).
+    pub vim: bool,
     /// Children shown inline under a referencing block (LR-4); 0 folds them all.
     pub ref_children: usize,
     /// Page ids kept at the top of the sidebar, in the order they were pinned (SB-3), and
@@ -342,6 +347,7 @@ impl Default for Prefs {
             density: Density::default(),
             indent: Indent::default(),
             smooth_caret: false,
+            vim: false,
             ref_children: DEFAULT_REF_CHILDREN,
             pinned: Vec::new(),
             right_sidebar_width: RIGHT_SIDEBAR_DEFAULT_WIDTH,
@@ -460,6 +466,16 @@ impl Prefs {
                 false
             }
         };
+        let vim = match rest.remove("vim") {
+            None => false,
+            Some(Value::Bool(on)) => on,
+            Some(v) => {
+                warnings.push(format!(
+                    "{FILE}: vim should be a boolean, not {v}; using false"
+                ));
+                false
+            }
+        };
         let right_sidebar_width = match rest.remove("right_sidebar_width") {
             None => RIGHT_SIDEBAR_DEFAULT_WIDTH,
             Some(Value::Number(n)) => match n.as_f64() {
@@ -557,6 +573,7 @@ impl Prefs {
                 density,
                 indent,
                 smooth_caret,
+                vim,
                 ref_children,
                 pinned,
                 right_sidebar_width,
@@ -575,6 +592,7 @@ impl Prefs {
         m.insert("density".into(), self.density.key().into());
         m.insert("indent".into(), self.indent.key().into());
         m.insert("smooth_caret".into(), self.smooth_caret.into());
+        m.insert("vim".into(), self.vim.into());
         m.insert(
             "right_sidebar_width".into(),
             serde_json::Number::from_f64(clamp_sidebar_width(self.right_sidebar_width) as f64)
@@ -680,6 +698,20 @@ pub fn indent(cx: &App) -> Indent {
 pub fn smooth_caret(cx: &App) -> bool {
     cx.try_global::<Appearance>()
         .is_some_and(|a| a.prefs.smooth_caret)
+}
+
+/// Whether modal editing is on (VM-1). Off when nothing was installed (tests, early
+/// startup).
+pub fn vim(cx: &App) -> bool {
+    cx.try_global::<Appearance>().is_some_and(|a| a.prefs.vim)
+}
+
+/// The config dir [`install`] read `settings.json` from; empty when none was installed.
+/// Owners without a config dir of their own (the main window; Settings carries one) write
+/// through this, so a preference lands in the same file the app reads at launch.
+pub fn config_dir(cx: &App) -> PathBuf {
+    cx.try_global::<Appearance>()
+        .map_or_else(PathBuf::new, |a| a.config_dir.clone())
 }
 
 /// The right sidebar's width in force (RS-4). 380 when nothing was installed.
@@ -822,6 +854,18 @@ pub fn set_smooth_caret(cx: &mut App, on: bool, config_dir: &Path) -> std::io::R
     cx.global::<Appearance>().prefs.save(config_dir)
 }
 
+/// Switch modal editing on or off in every window and remember it (VM-1, local UI state).
+/// No config dir installed (tests, early startup) keeps the change for this session only,
+/// the same way [`remember`] refuses to write one.
+pub fn set_vim(cx: &mut App, on: bool, config_dir: &Path) -> std::io::Result<()> {
+    cx.default_global::<Appearance>().prefs.vim = on;
+    cx.refresh_windows();
+    if config_dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    cx.global::<Appearance>().prefs.save(config_dir)
+}
+
 /// Change how many children a reference shows inline (LR-4) and remember it. Open reference
 /// panels notice the change on their next render and rebuild their rows.
 pub fn set_ref_children(cx: &mut App, count: usize, config_dir: &Path) -> std::io::Result<()> {
@@ -885,6 +929,7 @@ mod tests {
             density: Density::Relaxed,
             indent: Indent::Narrow,
             smooth_caret: true,
+            vim: true,
             ref_children: 0,
             pinned: vec![PageId("page-a".into()), PageId("page-b".into())],
             right_sidebar_width: 420.0,
@@ -901,6 +946,7 @@ mod tests {
                 "density": "relaxed",
                 "indent": "narrow",
                 "smooth_caret": true,
+                "vim": true,
                 "ref_children": 0,
                 "pinned": ["page-a", "page-b"],
                 "right_sidebar_width": 420.0,
@@ -909,6 +955,14 @@ mod tests {
             })
         );
         assert_eq!(Prefs::from_json(&json), (p, vec![]));
+
+        // VM-1: off unless the file says otherwise, and a value that is not a boolean is
+        // logged and read as off (rule 11).
+        assert!(!Prefs::default().vim);
+        let (p, warnings) = Prefs::from_json(r#"{"version": 1, "vim": 3}"#);
+        assert!(!p.vim);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("vim"), "{warnings:?}");
     }
 
     /// SP-6: the view mode is Single unless the file says Panes; an unknown value is logged
