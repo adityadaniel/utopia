@@ -41,6 +41,29 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
+    /// `dd` (VM-8): this block and its next `count - 1` siblings, each with its subtree, as
+    /// one plan so it is one undo step. `register` is the register prefix: `"_` deletes
+    /// without writing one.
+    DeleteBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    /// `yy` / `Y` (VM-10, VM-11): put the blocks in the register and on the clipboard.
+    YankBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    /// `p` / `P` of the block register (VM-10): one plan, so a cut is restored and moved in
+    /// one undo step. `count` pastes that many copies.
+    PasteBlocks {
+        before: bool,
+        count: usize,
+    },
+    /// `J` (VM-8): join `count` following blocks into this one; each is tombstoned and its
+    /// children re-parent here.
+    JoinNext {
+        count: usize,
+    },
     /// Up/Down ran out of block. `x` is the column to keep, in window coordinates, and
     /// `count` is how many blocks are left to move in that direction (Vim's count).
     Navigate {
@@ -1517,7 +1540,7 @@ impl BlockEditor {
     /// taken as committed first (§13.5). Deferring the commit instead would let the host
     /// remove the row being composed and then queue a `begin` on its neighbour, which the
     /// focus change from that removal discards — the caret would not continue next door.
-    fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
+    pub(crate) fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }

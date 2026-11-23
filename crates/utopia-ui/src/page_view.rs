@@ -2760,6 +2760,55 @@ impl PageView {
                     cx,
                 );
             }
+            // `dd` (VM-8): one plan for the count, so `3dd` is one undo step. The register is
+            // written first, from the state the delete is about to change: its `cut` names the
+            // ids the first `p` may restore (VM-10).
+            EditorEvent::DeleteBlocks { count, register } => {
+                self.yank_blocks(&t, *count, *register, true, cx);
+                let now = self.app.read(cx).store.now();
+                self.run_plan(
+                    &t.page,
+                    |st| outline::delete_blocks(st, &t.block, *count, now),
+                    window,
+                    cx,
+                );
+            }
+            // `yy` / `Y` (VM-10, VM-11): the register and the system clipboard, and no write to
+            // the graph at all.
+            EditorEvent::YankBlocks { count, register } => {
+                self.yank_blocks(&t, *count, *register, false, cx)
+            }
+            EditorEvent::PasteBlocks { before, count } => {
+                self.paste_blocks(&t, *before, *count, window, cx)
+            }
+            // `J` (VM-8): join the following visible blocks into this one.
+            EditorEvent::JoinNext { count } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
+                let now = self.app.read(cx).store.now();
+                self.run_plan(
+                    &t.page,
+                    |st| {
+                        outline::join_next(
+                            st,
+                            &t.block,
+                            *count,
+                            zoom.as_ref(),
+                            &|b| collapsed.contains(b),
+                            now,
+                        )
+                    },
+                    window,
+                    cx,
+                );
+            }
             EditorEvent::PasteOutline(text) => {
                 let sel = editor.read(cx).selection();
                 self.run_plan(
@@ -2901,6 +2950,157 @@ impl PageView {
             t.block.clone(),
             Some(caret),
             None,
+            window,
+            cx,
+        );
+    }
+
+    /// Write the block register (VM-10, VM-11): the rows `p` writes back, and the Markdown
+    /// the system clipboard gets. `cut` records the ids a `dd` is about to tombstone, which is
+    /// what lets the first `p` move them instead of copying; `"_` writes nothing at all.
+    fn yank_blocks(
+        &mut self,
+        t: &EditTarget,
+        count: usize,
+        register: Option<char>,
+        is_cut: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if register == Some('_') {
+            return;
+        }
+        let data = self.app.update(cx, |app, _| {
+            let st = app.store.page_state(&t.page).ok()?;
+            let rows = outline::block_tree(st, &t.block, count).ok()?;
+            let roots = outline::block_roots(st, &t.block, count).ok()?;
+            let markdown = utopia_core::markdown::blocks_to_markdown(st, &roots);
+            let ids = if is_cut {
+                outline::block_ids(st, &t.block, count).ok()
+            } else {
+                None
+            };
+            Some((rows, markdown, ids))
+        });
+        let Some((tree, markdown, ids)) = data else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        let cut = ids
+            .filter(|i| !i.is_empty())
+            .map(|ids| (t.page.clone(), ids));
+        crate::vim::remember(crate::vim::Register::Blocks {
+            markdown: markdown.clone(),
+            tree,
+            cut,
+        });
+        // A yank goes to the system clipboard (VM-11); a cut writes the register only, as
+        // Vim's `dd` does.
+        if !is_cut {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
+            crate::vim::clipboard_written(&markdown);
+        }
+    }
+
+    /// `p` / `P` of the block register (VM-10). The first paste of a cut MOVE the blocks —
+    /// restore the tombstones and move them, in one plan on the page and in one group across
+    /// pages — so every id survives and `((references))` still resolve. Later pastes, a cut
+    /// that was undone and a cut whose blocks are gone all copy, with new ids.
+    fn paste_blocks(
+        &mut self,
+        t: &EditTarget,
+        before: bool,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::vim::Register::Blocks { tree, cut, .. } = crate::vim::last() else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        // The first paste of a cut moves; every later one copies, so a cut that no longer
+        // names tombstones — or that cannot be moved — is spent (VM-10).
+        let mut spent = false;
+        if let Some((src, ids)) = cut.clone() {
+            // The cut is still a cut while every block it took is a tombstone (VM-10).
+            let alive = self.app.update(cx, |app, _| {
+                let Ok(st) = app.store.page_state(&src) else {
+                    return false;
+                };
+                !ids.is_empty()
+                    && ids
+                        .iter()
+                        .all(|i| st.block(i).is_some_and(|b| b.deleted_at.is_some()))
+            });
+            spent = !alive;
+            if alive && src == t.page {
+                let plan = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&src).ok()?;
+                    outline::restore_after(st, &ids, &t.block, before).ok()
+                });
+                match plan {
+                    Some(plan) => {
+                        if let Some(f) = self.apply_plan(&t.page, plan, cx) {
+                            crate::vim::forget_cut();
+                            self.edit(t.page.clone(), f.block, Some(f.offset), None, window, cx);
+                        }
+                        return;
+                    }
+                    // The restore could not be planned (the blocks are gone, the depth
+                    // ceiling, a live id): the cut is spent, so copy instead.
+                    None => spent = true,
+                }
+            } else if alive {
+                // Another page: `cross_page_move` refuses a tombstone, so the store restores
+                // and moves in one group (`Store::restore_and_move_to_page`).
+                let place = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&t.page).ok()?;
+                    let after = if before {
+                        st.prev_sibling(&t.block, false)
+                    } else {
+                        Some(t.block.clone())
+                    };
+                    Some((st.parent_of(&t.block), after))
+                });
+                if let Some((parent, after)) = place {
+                    let moved = self.app.update(cx, |app, cx| {
+                        let r = app.store.restore_and_move_to_page(
+                            &src,
+                            &ids,
+                            &t.page,
+                            parent.as_ref(),
+                            after.as_ref(),
+                        );
+                        let ok = r.is_ok();
+                        app.report(r);
+                        if ok {
+                            app.changed(vec![src.clone(), t.page.clone()], true, cx);
+                        }
+                        ok
+                    });
+                    if moved {
+                        crate::vim::forget_cut();
+                        self.rebuild(cx);
+                        if let Some(first) = ids.first().cloned() {
+                            self.edit(t.page.clone(), first, Some(0), None, window, cx);
+                        }
+                        return;
+                    }
+                    // The move failed (it was refused, not half-applied): the cut is spent
+                    // and the copy below is what `p` does.
+                    spent = true;
+                }
+            }
+        }
+        if spent {
+            crate::vim::forget_cut();
+        }
+        self.run_plan(
+            &t.page,
+            |st| outline::insert_tree_after(st, &t.block, &tree, before, count),
             window,
             cx,
         );

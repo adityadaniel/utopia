@@ -486,6 +486,117 @@ impl Store {
         Ok(())
     }
 
+    /// `dd` then `p` on another page (VM-10): restore the blocks a cut tombstoned and move
+    /// them into `dst` in one undo group, keeping every id, so a `((reference))` to any of
+    /// them still resolves. The same-page half of this is `outline::restore_after`, which is
+    /// one plan; this one has to touch two shards, so it is a store method.
+    ///
+    /// Every block in `blocks` must be a tombstone in `src`: a live block is not a cut, and
+    /// moving one is [`Store::move_block_to_page`]'s job. The tombstone is what the move
+    /// restores — the rows arrive in `dst` live, carrying their kind and done state.
+    pub fn restore_and_move_to_page(
+        &mut self,
+        src: &PageId,
+        blocks: &[BlockId],
+        dst: &PageId,
+        parent: Option<&BlockId>,
+        after: Option<&BlockId>,
+    ) -> Result<()> {
+        if src == dst {
+            return Err(StoreError::Invalid("use a same-page restore".into()));
+        }
+        if blocks.is_empty() {
+            return Err(StoreError::Invalid("nothing to restore".into()));
+        }
+        let s = self.page_state(src)?.clone();
+        for b in blocks {
+            match s.block(b) {
+                None => return Err(StoreError::NotFound(format!("block {b}"))),
+                Some(n) if n.deleted_at.is_some() => {}
+                Some(_) => {
+                    return Err(StoreError::Invalid(format!(
+                        "block {b} is live, not a tombstone: copy it instead"
+                    )))
+                }
+            }
+        }
+        let roots: Vec<BlockId> = blocks
+            .iter()
+            .filter(|b| !s.parent_of(b).is_some_and(|p| blocks.contains(&p)))
+            .cloned()
+            .collect();
+        let d = self.page_state(dst)?.clone();
+        if let Some(p) = parent {
+            d.block(p)
+                .ok_or_else(|| StoreError::NotFound(format!("block {p}")))?;
+        }
+        // FR-2.9: the ceiling applies to a paste into another page exactly as it does to a
+        // drop, measured on the shape the blocks arrive with.
+        let own = roots.first().map(|r| s.depth(r)).unwrap_or(0);
+        let deepest = blocks.iter().map(|b| s.depth(b)).max().unwrap_or(own);
+        let base = parent.map_or(0, |p| d.depth(p) + 1);
+        if base + deepest.saturating_sub(own) >= outline::MAX_DROP_DEPTH {
+            return Err(StoreError::Domain(utopia_core::DomainError::TooDeep));
+        }
+        // Where each restored block hangs in `dst`: its own parent when that parent is coming
+        // too, else the nearest ancestor that is. A block the cut did not take (an earlier
+        // tombstone inside the subtree) stays behind, so its children are re-parented up
+        // rather than pointing at a block this page does not have.
+        let mut dst_cmds: Vec<Command> = Vec::new();
+        let mut after = after.cloned();
+        for root in &roots {
+            for id in s.subtree(root, false) {
+                if !blocks.contains(&id) {
+                    continue;
+                }
+                let Some(n) = s.block(&id) else { continue };
+                let p = if &id == root {
+                    parent.cloned()
+                } else if n.parent.as_ref().is_some_and(|p| blocks.contains(p)) {
+                    n.parent.clone()
+                } else {
+                    s.ancestors(&id)
+                        .into_iter()
+                        .rev()
+                        .find(|a| blocks.contains(a))
+                        .or_else(|| parent.cloned())
+                };
+                let a = if &id == root {
+                    after.clone()
+                } else {
+                    // The previous sibling, when it is coming too; else it is the first child.
+                    s.prev_sibling(&id, false).filter(|x| blocks.contains(x))
+                };
+                dst_cmds.push(Command::InsertBlock {
+                    id: id.clone(),
+                    parent: p,
+                    after: a,
+                    text: n.text.clone(),
+                    kind: n.kind,
+                });
+                if n.checked {
+                    dst_cmds.push(Command::SetBlockKind {
+                        id: id.clone(),
+                        kind: n.kind,
+                        checked: true,
+                    });
+                }
+            }
+            after = Some(root.clone());
+        }
+        let src_cmds = vec![Command::SetMoved {
+            ids: blocks.to_vec(),
+            to: Some(dst.clone()),
+        }];
+        self.seal_undo();
+        self.execute_multi(
+            vec![(dst.clone(), dst_cmds), (src.clone(), src_cmds)],
+            EditOpts::default(),
+        )?;
+        self.seal_undo();
+        Ok(())
+    }
+
     /// Move one block and its live subtree within its own page (PRD §13.8 MC-8, MC-9;
     /// FR-2.9): `Op::MoveBlock` when the target page is the page the block is already on.
     /// One undo step, like the editor's drag. A drop into the block's own subtree
