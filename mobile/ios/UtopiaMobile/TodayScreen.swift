@@ -16,14 +16,11 @@ struct TodayScreen: View {
     @State private var searching = false
     @State private var settingsOpen = false
 
-    @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
-    @ScaledMetric(relativeTo: .title2) private var titleSize: CGFloat = 22
     @ScaledMetric(relativeTo: .caption) private var statusSize: CGFloat = 13
 
     var body: some View {
         NavigationStack(path: $path) {
             VStack(spacing: 0) {
-                header
                 // The log is the one part that gives way: the compose box, the chips and a
                 // picker keep their height (§4.3, §4.6).
                 DayLog { page in path.append(Route(pageID: page)) }
@@ -33,12 +30,34 @@ struct TodayScreen: View {
                     .layoutPriority(1)
             }
             .background(Tokens.paper)
+            // The header of §4.3 is the system navigation bar: the day's title, the weekday
+            // under it, and the sync status and Find in the bar's trailing edge.
+            .navigationTitle(model.today?.title ?? "Today")
+            .navigationSubtitle(weekday)
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        settingsOpen = true
+                    } label: {
+                        SyncStatusLine(state: model.syncState, size: statusSize)
+                    }
+                    .accessibilityLabel("Sync: \(model.syncState.text)")
+                }
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        searching = true
+                    } label: {
+                        Label("Find", systemImage: "magnifyingglass")
+                    }
+                }
+            }
             .navigationDestination(for: Route.self) { route in
                 PageScreen(route: route) { target in
                     path.append(target)
                 }
             }
-            .toolbar(.hidden, for: .navigationBar)
         }
         .sheet(isPresented: $searching) {
             SearchScreen { page in
@@ -57,55 +76,8 @@ struct TodayScreen: View {
         }
     }
 
-    // MARK: - Header (§4.3)
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 10) {
-                Text(weekday)
-                    .font(.label(labelSize))
-                    .foregroundStyle(Tokens.muted)
-                Text("Today")
-                    .font(.system(size: labelSize, weight: .medium))
-                    .foregroundStyle(Tokens.link)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 2)
-                    .background(Capsule().fill(Tokens.linkTint))
-                Spacer(minLength: 8)
-                Button {
-                    searching = true
-                } label: {
-                    Image(systemName: "magnifyingglass")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Tokens.ink3)
-                        .frame(width: 44, height: 44)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Find")
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(model.today?.title ?? "")
-                    .font(.system(size: titleSize, weight: .semibold))
-                    .foregroundStyle(Tokens.ink)
-                Spacer(minLength: 8)
-                Button {
-                    settingsOpen = true
-                } label: {
-                    SyncStatusLine(state: model.syncState, size: statusSize)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Sync: \(model.syncState.text)")
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 8)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Tokens.lineSoft).frame(height: 1)
-        }
-    }
-
     private var weekday: String {
-        Date().formatted(.dateTime.weekday(.wide)).uppercased()
+        Date().formatted(.dateTime.weekday(.wide))
     }
 
     // MARK: - The bottom area: chips, the box, and a picker in the keyboard's place

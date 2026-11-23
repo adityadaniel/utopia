@@ -12,7 +12,6 @@ struct PageScreen: View {
     @State private var references: [(pageTitle: String, hits: [RefView])] = []
     @State private var loaded = false
 
-    @ScaledMetric(relativeTo: .title2) private var titleSize: CGFloat = 22
     @ScaledMetric(relativeTo: .callout) private var sectionSize: CGFloat = 13
     @ScaledMetric(relativeTo: .body) private var bodySize: CGFloat = 16
     @ScaledMetric(relativeTo: .body) private var childSize: CGFloat = 15
@@ -21,7 +20,6 @@ struct PageScreen: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            header
             ScrollViewReader { proxy in
                 ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
@@ -88,35 +86,12 @@ struct PageScreen: View {
             })
         }
         .background(Tokens.paper)
-        .toolbar(.hidden, for: .navigationBar)
+        // The system bar gives the Back button and the title (IO-7); the title stays one
+        // line when the page scrolls.
+        .navigationTitle(page?.title ?? "")
+        .toolbarTitleDisplayMode(.inlineLarge)
     }
 
-    private var header: some View {
-        HStack(alignment: .center, spacing: 4) {
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "chevron.left")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Tokens.ink3)
-                    .frame(width: 44, height: 44)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Back")
-            Text(page?.title ?? "")
-                .font(.system(size: titleSize, weight: .semibold))
-                .foregroundStyle(Tokens.ink)
-                .lineLimit(2)
-            Spacer(minLength: 0)
-        }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-        .overlay(alignment: .bottom) {
-            Rectangle().fill(Tokens.lineSoft).frame(height: 1)
-        }
-    }
-
-    @Environment(\.dismiss) private var dismiss
 
     @ViewBuilder
     private func blockRow(_ block: BlockView) -> some View {
@@ -181,7 +156,7 @@ struct PageScreen: View {
                             .foregroundStyle(Tokens.muted)
                     }
                     .padding(.horizontal, 20)
-                    .frame(height: 32)
+                    .frame(minHeight: 44)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -201,9 +176,8 @@ struct PageScreen: View {
                     .padding(.vertical, 2)
                     .contentShape(Rectangle())
                     .onTapGesture {
-                        if let hit = group.hits.first {
-                            open(Route(pageID: hit.pageId, blockID: hit.blockId))
-                        }
+                        // The tapped reference, not the first one of its page (AC-7.2).
+                        open(Route(pageID: hit.pageId, blockID: hit.blockId))
                     }
                 }
             }
@@ -220,39 +194,15 @@ struct SearchScreen: View {
     @State private var query = ""
     @State private var results = SearchResults(pages: [], blocks: [])
     @State private var task: Task<Void, Never>?
+    @FocusState private var fieldFocused: Bool
 
     @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 16
-    @ScaledMetric(relativeTo: .body) private var fieldHeight: CGFloat = 44
     @ScaledMetric(relativeTo: .caption) private var noteSize: CGFloat = 12
 
     private var trimmed: String { query.trimmingCharacters(in: .whitespaces) }
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                TextField("Find a page or words", text: $query)
-                    .font(.system(size: textSize))
-                    .autocorrectionDisabled()
-                    .padding(.horizontal, 12)
-                    .frame(height: fieldHeight)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(Tokens.well)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                    .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                            )
-                    )
-                    .onChange(of: query) { _, _ in search() }
-                Button("Close") { dismiss() }
-                    .font(.system(size: textSize))
-                    .foregroundStyle(Tokens.link)
-                    .frame(minWidth: 44, minHeight: 44)
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 12)
-            .padding(.bottom, 8)
-
+        NavigationStack {
             ScrollView {
                 LazyVStack(spacing: 0) {
                     if trimmed.isEmpty {
@@ -285,10 +235,28 @@ struct SearchScreen: View {
                     }
                 }
             }
+            .background(Tokens.paper)
+            .navigationTitle("Find")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .searchable(
+                text: $query,
+                placement: .navigationBarDrawer(displayMode: .always),
+                prompt: "Find a page or words"
+            )
+            .searchFocused($fieldFocused)
+            .autocorrectionDisabled()
+            .onChange(of: query) { _, _ in search() }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) { dismiss() }
+                }
+            }
         }
-        .background(Tokens.paper)
         .presentationDragIndicator(.visible)
-        .onAppear { Task { await model.refreshRecents() } }
+        .onAppear {
+            fieldFocused = true
+            Task { await model.refreshRecents() }
+        }
         .onDisappear { task?.cancel() }
     }
 

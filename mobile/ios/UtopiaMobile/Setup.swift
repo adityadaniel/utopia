@@ -12,23 +12,16 @@ struct SetupScreen: View {
     @State private var passphrase = ""
     @State private var busy = false
 
-    @ScaledMetric(relativeTo: .title) private var titleSize: CGFloat = 28
     @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 16
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Utopia")
-                    .font(.system(size: titleSize, weight: .semibold))
-                    .foregroundStyle(Tokens.ink)
-                    .padding(.top, 32)
-                Text("Add thoughts to today's note. Read your pages.")
-                    .font(.system(size: textSize))
-                    .foregroundStyle(Tokens.muted)
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text("Add thoughts to today's note. Read your pages.")
+                        .font(.system(size: textSize))
+                        .foregroundStyle(Tokens.muted)
 
-                if connecting {
-                    form
-                } else {
                     Button {
                         busy = true
                         Task {
@@ -38,12 +31,10 @@ struct SetupScreen: View {
                     } label: {
                         Text("Start a new graph")
                             .font(.system(size: textSize, weight: .medium))
-                            .foregroundStyle(Tokens.paper)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(RoundedRectangle(cornerRadius: 10).fill(Tokens.link))
+                            .frame(maxWidth: .infinity, minHeight: 44)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(.glassProminent)
+                    .tint(Tokens.link)
                     .disabled(busy)
 
                     Button {
@@ -51,65 +42,77 @@ struct SetupScreen: View {
                     } label: {
                         Text("Connect to my graph")
                             .font(.system(size: textSize, weight: .medium))
-                            .foregroundStyle(Tokens.ink)
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(
-                                RoundedRectangle(cornerRadius: 10)
-                                    .fill(Tokens.paper)
-                                    .overlay(
-                                        RoundedRectangle(cornerRadius: 10)
-                                            .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                                    )
-                            )
+                            .frame(maxWidth: .infinity, minHeight: 44)
                     }
-                    .buttonStyle(.plain)
-                }
+                    .buttonStyle(.glass)
 
-                if let message = model.errorMessage {
+                    if let message = model.errorMessage, !connecting {
+                        Text(message)
+                            .font(.system(size: textSize - 2))
+                            .foregroundStyle(Tokens.danger)
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Tokens.paper)
+            .navigationTitle("Utopia")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .navigationDestination(isPresented: $connecting) {
+                connectForm
+            }
+        }
+    }
+
+    /// "Connect to my graph" (AC-10.2): a pushed screen, so the system bar gives Back, and
+    /// Connect is the bar's confirmation action.
+    private var connectForm: some View {
+        Form {
+            Section("Relay") {
+                TextField("https://relay.example.com", text: $relayURL)
+                    .textContentType(.URL)
+                    .keyboardType(.URL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                TextField("Graph id", text: $graphID)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+            }
+            Section("Secrets") {
+                SecureField("Token", text: $token)
+                SecureField("Passphrase", text: $passphrase)
+            }
+            if let message = model.errorMessage {
+                Section {
                     Text(message)
-                        .font(.system(size: textSize - 2))
                         .foregroundStyle(Tokens.danger)
                 }
             }
-            .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Tokens.paper)
-    }
-
-    private var form: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            field("Relay URL", text: $relayURL, secure: false)
-            field("Graph id", text: $graphID, secure: false)
-            field("Token", text: $token, secure: true)
-            field("Passphrase", text: $passphrase, secure: true)
-            Button {
-                busy = true
-                Task {
-                    await model.connect(
-                        relayURL: relayURL,
-                        graphID: graphID,
-                        token: token,
-                        passphrase: passphrase,
-                        databasePassphrase: nil
-                    )
-                    busy = false
+        .navigationTitle("Connect")
+        .toolbarTitleDisplayMode(.inlineLarge)
+        .toolbar {
+            ToolbarItem(placement: .confirmationAction) {
+                if busy {
+                    ProgressView()
+                } else {
+                    Button("Connect") {
+                        busy = true
+                        Task {
+                            await model.connect(
+                                relayURL: relayURL,
+                                graphID: graphID,
+                                token: token,
+                                passphrase: passphrase,
+                                databasePassphrase: nil
+                            )
+                            busy = false
+                        }
+                    }
+                    .disabled(!canConnect)
                 }
-            } label: {
-                Text(busy ? "Connecting…" : "Connect")
-                    .font(.system(size: textSize, weight: .medium))
-                    .foregroundStyle(Tokens.paper)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 48)
-                    .background(RoundedRectangle(cornerRadius: 10).fill(canConnect ? Tokens.link : Tokens.disabled))
             }
-            .buttonStyle(.plain)
-            .disabled(!canConnect || busy)
-            Button("Back") { connecting = false }
-                .font(.system(size: textSize))
-                .foregroundStyle(Tokens.muted)
-                .frame(minHeight: 44)
         }
     }
 
@@ -119,83 +122,48 @@ struct SetupScreen: View {
             && !token.isEmpty
             && !passphrase.isEmpty
     }
-
-    @ViewBuilder
-    private func field(_ label: String, text: Binding<String>, secure: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(label)
-                .font(.system(size: textSize - 3))
-                .foregroundStyle(Tokens.muted)
-            Group {
-                if secure {
-                    SecureField(label, text: text)
-                } else {
-                    TextField(label, text: text)
-                }
-            }
-            .font(.system(size: textSize))
-            .textInputAutocapitalization(.never)
-            .autocorrectionDisabled()
-            .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Tokens.well)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                    )
-            )
-        }
-    }
 }
 
 /// A graph encrypted at rest asks for its passphrase before it opens.
 struct LockedScreen: View {
     @Environment(AppModel.self) private var model
     @State private var passphrase = ""
-
-    @ScaledMetric(relativeTo: .body) private var textSize: CGFloat = 16
+    @FocusState private var focused: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("This graph is locked")
-                .font(.system(size: textSize + 6, weight: .semibold))
-                .foregroundStyle(Tokens.ink)
-            Text("Type its passphrase to open it.")
-                .font(.system(size: textSize))
-                .foregroundStyle(Tokens.muted)
-            SecureField("Passphrase", text: $passphrase)
-                .font(.system(size: textSize))
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .padding(.horizontal, 12)
-                .frame(height: 44)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Tokens.well)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                        )
-                )
-            Button("Unlock") {
-                Task { await model.unlock(passphrase: passphrase) }
+        NavigationStack {
+            Form {
+                Section {
+                    SecureField("Passphrase", text: $passphrase)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .focused($focused)
+                        .onSubmit(unlock)
+                } footer: {
+                    Text("Type its passphrase to open it.")
+                }
+                if let message = model.errorMessage {
+                    Section {
+                        Text(message)
+                            .foregroundStyle(Tokens.danger)
+                    }
+                }
             }
-            .font(.system(size: textSize, weight: .medium))
-            .foregroundStyle(Tokens.paper)
-            .frame(maxWidth: .infinity)
-            .frame(height: 48)
-            .background(RoundedRectangle(cornerRadius: 10).fill(Tokens.link))
-            if let message = model.errorMessage {
-                Text(message)
-                    .font(.system(size: textSize - 2))
-                    .foregroundStyle(Tokens.danger)
+            .navigationTitle("This graph is locked")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Unlock", action: unlock)
+                        .disabled(passphrase.isEmpty)
+                }
             }
+            .onAppear { focused = true }
         }
-        .padding(24)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-        .background(Tokens.paper)
+    }
+
+    private func unlock() {
+        guard !passphrase.isEmpty else { return }
+        Task { await model.unlock(passphrase: passphrase) }
     }
 }
 
@@ -233,7 +201,16 @@ struct SyncSettingsScreen: View {
                         Task { await model.syncNow() }
                     }
                     .disabled(relayURL.isEmpty || graphID.isEmpty)
-                    Button("Done") {
+                }
+            }
+            .navigationTitle("Sync")
+            .toolbarTitleDisplayMode(.inlineLarge)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(role: .close) { dismiss() }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button(role: .confirm) {
                         // Whatever is in the fields is what is kept, including an empty relay
                         // turned off on purpose.
                         model.setSync(relayURL: relayURL, graphID: graphID, token: token, passphrase: passphrase)
@@ -241,7 +218,6 @@ struct SyncSettingsScreen: View {
                     }
                 }
             }
-            .navigationTitle("Sync")
             .onAppear {
                 let settings = SyncSettings.load()
                 relayURL = settings.relayURL
