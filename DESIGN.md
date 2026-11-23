@@ -195,6 +195,7 @@ Each component lists its states. A state that is not listed does not change the 
 |---|---|
 | Hover | The caret shows in the gutter; the bullet becomes a grip (2 × 3 dots, 2px each, `--bullet`) |
 | Editing | Raw markup, text caret; the gutter caret and the grip show. In the raw text a reference is `--link`, a tag is `--tag-ink`, and a Markdown link's `[text]` is `--link` with its `(url)` in `--muted` |
+| Editing, Vim Normal | A block cursor, not a bar: the cell from the cursor's grapheme to the next one on the same line, `--selection` fill with a 1px `--link` outline, painted under the text. Steady, never blinking (§2.6). An empty block, a line break and a wrap use a minimum width. The rest as Editing |
 | Selected (block selection) | `--selection` fill behind the row |
 
 | State (checkbox) | Look |
@@ -248,6 +249,7 @@ Back and forward icon buttons (forward is `--disabled` when there's nothing to g
 - Daily Notes: title "Daily Notes", then a day navigation group (prev | Today | next) with a 1px `--line-strong` border, radius 8, 32px tall, then the view mode control (§3.9), then a toggle for the right panel.
 - Page view: the current page's title in `--ink` 500, then the pin button, the more (⋯) button, the view mode control and the right panel toggle. The pin button is a ghost icon button (pin icon) that pins the page to the sidebar's Pinned group in one click; when the page is pinned it has the selected look of a choice chip (§3.16: `--line-soft` fill, `--link` icon) and no hover fill, and its tooltip says "Unpin from sidebar" (otherwise "Pin to sidebar"). The ⋯ menu (§3.14) holds Open in graph, Export, Rename, Rewrite references, then a divider and Delete page as the danger item. A page card's ⋯ menu in the right panel (§4.6) keeps Pin to sidebar, because a card has no room for a second button.
 - **Title or trail.** In Single mode the top bar shows only the current title. The pages before it are history, not a place the page sits in (pages have no hierarchy), so they are not drawn as a "›" trail. Back's tooltip names the page it goes to ("Back to Atlas Launch"). In Panes mode the top bar shows the trail of open panes (§4.3), because those panes are on screen side by side.
+- **Mode label (Vim mode only).** In the right-hand group, left of the view mode control: `NORMAL`, `INSERT` or `VISUAL` in the Label role (Mono 12, UPPERCASE), `--ink-3`, no fill. A pending count or operator follows it, for example `2d` or `"_`.
 
 1px `--line-soft` bottom border.
 
@@ -689,7 +691,7 @@ A second window (⌘,), 1100 × 760, at least 900 × 520, titled "Settings". Pre
 The tabs:
 
 - **Appearance:** cards Font, Density and Indent (radio rows, §3.16; a font's sample line is set in that font; an indent's help is "45 px per level"), Editor ("Smooth caret movement" switch, §2.6), References ("Children shown", a segmented control 0 to 3), Pinned pages (how many, and a quiet "Clear"), Right sidebar (a quiet "Reset to 380 px").
-- **Keybindings:** a line of help ("Click a key, then press the new one.") with a quiet "Reset All" at the right; a filter text field ("name, description or key"); then one card for each category, one row for each action with its key chip (§3.16). "No match" is one line in Caption `--muted`.
+- **Keybindings:** a "Vim mode" row above the list: the label, the help "Modal editing. Normal mode for motions and commands, Insert mode to type.", and a segmented control Standard | Vim (§3.16); then a line of help ("Click a key, then press the new one.") with a quiet "Reset All" at the right; a filter text field ("name, description or key"); then one card for each category, one row for each action with its key chip (§3.16). "No match" is one line in Caption `--muted`.
 - **Shortcuts:** the same filter and cards, to read, not to change: the keys are Mono 12 `--muted` at the right of each row.
 - **Sync:** the mode (a segmented control: Off, Relay, Nearby Mac, Shared folder); the text fields the mode needs (address, token, passphrase, folder; the two secrets are masked, and a blank one keeps the saved value); then "Apply" (it reads "Working…" while it runs), "Test connection" and "Connect another device"; then one status line in `--muted`. A notice in `--warning` names the environment variables that override the saved settings; Apply is disabled while they do.
 - **Assistants:** the access level (a segmented control: Off, Read, Read and write), the switch that lets an assistant work while the app is closed (`when_closed`), one row for each client (Claude Code, Claude Desktop, Codex) with its copy-ready entry (§3.16), and whether the bridge runs, in Caption `--muted`.

@@ -90,7 +90,8 @@ both env vars at a scratch folder when trying the app so you never touch the use
 `settings.json` holds local UI preferences (never synced, rule 9), a versioned object:
 `{"version": 1, "font": "system" | "ibm-plex-sans" | "geist", "density": "tight" | "normal" | "relaxed",
 "indent": "wide" | "narrow", "ref_children": 2, "attribute-blocks": "compact" | "blocks", "pinned": [],
-"right_sidebar_width": 380.0, "view_mode": "single" | "panes", "sync_realtime": "always" | "while_active"}`
+"right_sidebar_width": 380.0, "view_mode": "single" | "panes", "vim": false,
+"sync_realtime": "always" | "while_active"}`
 (`utopia_ui::appearance`); a missing file or
 an unknown value means the default, logged; it is written atomically and keeps keys it does
 not know.
