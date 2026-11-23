@@ -18,6 +18,7 @@ change, and write its id in tests and comments. A change to §4 goes through the
 | `UtopiaMobile/Draft.swift` | The draft outline in the compose box, and its rules (§4.5). |
 | `UtopiaMobile/Storage.swift` | Paths, relay settings (`UserDefaults`) and secrets (Keychain). |
 | `Check/main.swift` | A Swift program that runs the bindings against the real core on macOS. |
+| `project.yml`, `Makefile`, `scripts/build-core.sh` | The XcodeGen spec, the everyday tasks, and the Rust build phase. |
 | `crates/utopia-ffi` | The core the app calls (UniFFI). New calls go here, not in Swift. |
 
 ## Platform
@@ -32,6 +33,32 @@ change, and write its id in tests and comments. A change to §4 goes through the
 
 ## Build and run
 
+**In Xcode.** `mobile/ios/Makefile` and the XcodeGen spec `project.yml` make the Xcode project:
+
+```bash
+cd mobile/ios
+make open                 # bindings + xcodegen + open UtopiaMobile.xcodeproj; then Run in Xcode
+make sim                  # xcodebuild for the iOS Simulator (SIM="iPhone 18 Pro")
+make install DEVICE=<udid>   # xcodebuild for an iPhone, then install it (xcrun devicectl list devices)
+make check                # the scripted check (xtask mobile)
+make clean                # remove the project, Generated/ and target/xcode
+```
+
+- `UtopiaMobile.xcodeproj` and `Generated/` are not in git. Change `project.yml`, then run
+  `make project` again; never edit the generated project. A new `.swift` file in
+  `UtopiaMobile/` needs `make project` before Xcode sees it.
+- The target's first build phase, "Build Rust core", runs `scripts/build-core.sh`. It builds
+  `utopia-ffi` for the Mac and writes the Swift bindings into `Generated/`, then builds the
+  library for the platform and configuration Xcode builds for, into
+  `target/xcode/<platform>-<configuration>/`. Debug builds of the iOS library have no Rust
+  debug info (disk); Release builds it with `--release`.
+- The script runs cargo in a clean environment (`env -i`), because Xcode's `SDKROOT` breaks
+  the build scripts that cargo runs on the Mac.
+- Signing is automatic with team `9H8AZ8D28D` and bundle id `app.utopia.mobile`.
+- Apple silicon only: there is no x86_64 simulator slice.
+
+**Without Xcode.** `xtask mobile` is the scripted check that CI and agents use:
+
 ```bash
 source ~/.cargo/env
 export DEVELOPER_DIR="$(xcode-select -p)" CARGO_INCREMENTAL=0
@@ -40,19 +67,16 @@ cargo run -p xtask -- mobile --ios    # also links target/mobile/UtopiaMobile.ap
 cargo run -p xtask -- seed-phone target/phone/g.utopia   # the scratch graph the ACs name
 ```
 
-- `--ios` needs `rustup target add aarch64-apple-ios-sim` (installed on this machine).
-- There is no Xcode project. `xtask mobile --ios` compiles the sources with `swiftc` and
-  links `libutopia_ffi.a`, then signs the bundle ad hoc. Every `.swift` file in
-  `UtopiaMobile/` is part of the app.
-- Install with `xcrun simctl install <udid> target/mobile/UtopiaMobile.app`.
+- `xtask mobile --ios` compiles every `.swift` file in `UtopiaMobile/` with `swiftc`, links
+  `libutopia_ffi.a` and signs the bundle ad hoc. Install it with
+  `xcrun simctl install <udid> target/mobile/UtopiaMobile.app`.
 - The app opens `Documents/graph.utopia` in its container. To use a seeded graph, copy it
   there (`xcrun simctl get_app_container <udid> app.utopia.mobile data`) while the app is
   not running. `UTOPIA_MOBILE_GRAPH`, `UTOPIA_MOBILE_CONFIG` and `UTOPIA_TODAY` override the
-  graph, the draft folder and the day, for runs that can set the environment.
+  graph, the draft folder and the day (in Xcode: Edit Scheme → Run → Environment).
 - The draft is `Library/Application Support/Utopia/draft.json`. Delete it for a clean run.
-- `make check` does not build Swift. For a Swift change, `xtask mobile --ios` is the check.
-- The linker warns that the Rust library is built for 27.2 and linked as 27.0. The warnings
-  are harmless.
+- `make check` at the repo root does not build Swift. For a Swift change, `make sim` (or
+  `xtask mobile --ios`) is the check.
 - Disk is tight. A worktree's `target/debug` grows to more than 10 GB; delete it when it
   does (root `AGENTS.md`).
 

@@ -206,7 +206,8 @@ Mobile (PRD §14, `docs/ios-prd.md`): `cargo run -p xtask -- mobile` builds `uto
 generates Swift bindings (UniFFI) into `target/mobile/gen`, runs `mobile/ios/Check` against the
 real core, type-checks the iPhone app against the iOS SDK in Swift 6 language mode, and
 generates Kotlin bindings (`target/mobile/kotlin`) for an Android shell. `--ios` also links
-`target/mobile/UtopiaMobile.app` for the simulator. **`mobile/ios/AGENTS.md` has the rules for
+`target/mobile/UtopiaMobile.app` for the simulator. To work in Xcode, `cd mobile/ios && make open`
+(XcodeGen writes the project from `mobile/ios/project.yml`). **`mobile/ios/AGENTS.md` has the rules for
 work on the iPhone app**: platform (iOS 27), build and run, the simulator, native navigation
 bars and toolbars, and its known limits.
 
