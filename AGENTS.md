@@ -206,14 +206,9 @@ Mobile (PRD §14, `docs/ios-prd.md`): `cargo run -p xtask -- mobile` builds `uto
 generates Swift bindings (UniFFI) into `target/mobile/gen`, runs `mobile/ios/Check` against the
 real core, type-checks the iPhone app against the iOS SDK in Swift 6 language mode, and
 generates Kotlin bindings (`target/mobile/kotlin`) for an Android shell. `--ios` also links
-`target/mobile/UtopiaMobile.app`; it needs `rustup target add aarch64-apple-ios-sim`. The app
-is the one `docs/ios-prd.md` §4 describes (append to today, the draft outline, chips, pickers,
-the tick of a to-do, read-only pages and search), iOS 27 only, and it runs on the iPhone 18 Pro
-simulator (iOS 27.2): `xcrun simctl install booted <app>`, with the graph at
-`Documents/graph.utopia` or `UTOPIA_MOBILE_GRAPH`, and `UTOPIA_TODAY` to pin the day. There is
-no macOS preview of the shell any more (it uses UIKit for the draft's caret). `cargo run -p
-xtask -- seed-phone <graph>` seeds the scratch graph the acceptance criteria name.
-Widgets and the Control Center control (IO-2) are not built.
+`target/mobile/UtopiaMobile.app` for the simulator. **`mobile/ios/AGENTS.md` has the rules for
+work on the iPhone app**: platform (iOS 27), build and run, the simulator, native navigation
+bars and toolbars, and its known limits.
 
 Sync (§12; secrets never go into the graph file, §15.6):
 - **Settings → Sync is the primary setup path.** Choose Off, Relay, Nearby Mac (mDNS), or
