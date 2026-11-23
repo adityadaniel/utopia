@@ -385,7 +385,10 @@ pub fn paste(
         }
         .focus(id, start + len));
     }
-    let items = parse_outline(trimmed);
+    let items: Vec<(usize, String, BlockKind)> = parse_outline(trimmed)
+        .into_iter()
+        .map(|(depth, text)| (depth, text, BlockKind::Bullet))
+        .collect();
     if items.is_empty() {
         return Err(DomainError::NoOp);
     }
@@ -429,6 +432,23 @@ pub fn append_outline(
     anchor: Option<&BlockId>,
     items: &[(usize, String)],
 ) -> Result<Plan, DomainError> {
+    let items: Vec<(usize, String, BlockKind)> = items
+        .iter()
+        .map(|(depth, text)| (*depth, text.clone(), BlockKind::Bullet))
+        .collect();
+    append_outline_kinds(st, parent, anchor, &items)
+}
+
+/// [`append_outline`] with one kind for each line, so a caller can append to-dos (the
+/// phone's draft, ios-prd §4.5; PRD §13.8 MC-8). A reused `anchor` — the empty first block
+/// of a fresh page — takes the first line's kind, so a day's placeholder block becomes the
+/// to-do rather than staying a bullet.
+pub fn append_outline_kinds(
+    st: &PageState,
+    parent: Option<&BlockId>,
+    anchor: Option<&BlockId>,
+    items: &[(usize, String, BlockKind)],
+) -> Result<Plan, DomainError> {
     let Some((first, rest)) = items.split_first() else {
         return Err(DomainError::NoOp);
     };
@@ -451,8 +471,18 @@ pub fn append_outline(
         }
     };
     let base = anchor_parent.as_ref().map_or(0, |p| st.depth(p) + 1);
-    if too_deep(items, base) {
+    if items
+        .iter()
+        .any(|(depth, _, _)| base + depth >= MAX_DROP_DEPTH)
+    {
         return Err(DomainError::TooDeep);
+    }
+    if first.2 != BlockKind::Bullet {
+        cmds.push(Command::SetBlockKind {
+            id: anchor.clone(),
+            kind: first.2,
+            checked: false,
+        });
     }
     cmds.push(Command::SetBlockText {
         id: anchor.clone(),
@@ -488,7 +518,7 @@ fn insert_after(
     st: &PageState,
     anchor: &BlockId,
     anchor_parent: Option<BlockId>,
-    items: &[(usize, String)],
+    items: &[(usize, String, BlockKind)],
 ) -> (Vec<Command>, Option<Focus>) {
     let mut cmds = Vec::new();
     // last[d]: the most recent block at depth d; parents[d]: its parent.
@@ -498,7 +528,7 @@ fn insert_after(
     // child is None; for a pre-existing anchor it is its last child.
     let mut first_child_after: Option<Option<BlockId>> = Some(st.last_child(Some(anchor), false));
     let mut focus = None;
-    for (depth, text) in items {
+    for (depth, text, kind) in items {
         let d = (*depth).min(last.len());
         let new_id = BlockId::new();
         let (parent, after) = if d < last.len() {
@@ -518,7 +548,7 @@ fn insert_after(
             parent: parent.clone(),
             after,
             text: text.clone(),
-            kind: BlockKind::Bullet,
+            kind: *kind,
         });
         last.truncate(d);
         parents.truncate(d);

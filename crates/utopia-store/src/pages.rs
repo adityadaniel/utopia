@@ -648,17 +648,37 @@ impl Store {
         parent: Option<&BlockId>,
         items: &[(usize, String)],
     ) -> Result<Vec<BlockId>> {
+        let items: Vec<(usize, String, BlockKind)> = items
+            .iter()
+            .map(|(depth, text)| (*depth, text.clone(), BlockKind::Bullet))
+            .collect();
+        self.append_outline_kinds(page, parent, &items)
+    }
+
+    /// [`Store::append_outline`] with one kind for each line, so the phone's draft can send
+    /// to-dos (ios-prd §4.5). Everything else — one plan, one commit, the depth ceiling, the
+    /// pages the links make — is the same, which is what keeps a capture one write (C2).
+    pub fn append_outline_kinds(
+        &mut self,
+        page: &PageId,
+        parent: Option<&BlockId>,
+        items: &[(usize, String, BlockKind)],
+    ) -> Result<Vec<BlockId>> {
         // `heal_tags` reads live titles from the index, and `unresolved_page_links` reads it
         // to decide which pages to make, so the index must be current (rule 2).
         self.sync_index()?;
-        let mut shaped: Vec<(usize, String)> = Vec::with_capacity(items.len());
-        for (depth, text) in items {
+        let mut shaped: Vec<(usize, String, BlockKind)> = Vec::with_capacity(items.len());
+        for (depth, text, kind) in items {
             let mut text = nfc(text);
             if let Some(healed) = heal_tags(&text, |p| self.is_live_title(p)) {
                 text = healed;
             }
-            shaped.push((*depth, text));
+            shaped.push((*depth, text, *kind));
         }
+        let texts: Vec<(usize, String)> = shaped
+            .iter()
+            .map(|(depth, text, _)| (*depth, text.clone()))
+            .collect();
         // A page whose only block is empty (a fresh page or journal day for the owner's
         // first write) takes the first line in that block, as `AppendBlock` fills it.
         let st = self.page_state(page)?;
@@ -669,14 +689,15 @@ impl Store {
             }
             _ => None,
         };
-        let plan =
-            outline::append_outline(st, parent, anchor.as_ref(), &shaped).map_err(|e| match e {
+        let plan = outline::append_outline_kinds(st, parent, anchor.as_ref(), &shaped).map_err(
+            |e| match e {
                 DomainError::TooDeep => StoreError::Invalid(format!(
                     "an outline can be at most {} levels deep",
                     outline::MAX_DROP_DEPTH
                 )),
                 other => other.into(),
-            })?;
+            },
+        )?;
         // The blocks the outline lands in, in document order: a reused anchor first, then
         // each inserted block (the plan inserts nothing for the anchor it is given).
         let mut appended: Vec<BlockId> = anchor.into_iter().collect();
@@ -688,7 +709,7 @@ impl Store {
         // commit below writes it and the outline in one transaction (MC-8, rule 2). This is
         // after the plan, which borrows the page's state, and before anything is applied, so
         // a page that cannot be made still fails before the outline lands.
-        for target in &self.unresolved_page_links(&shaped)? {
+        for target in &self.unresolved_page_links(&texts)? {
             self.create_page_with(target, Ship::Later)?;
         }
         self.seal_undo();

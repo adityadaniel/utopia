@@ -743,9 +743,12 @@ fn mobile(ios: bool) -> Result<()> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "swift"))
         .collect();
+    // The app is iOS only (ios-prd §5: no iPad, no landscape) and is written for the latest
+    // iOS, so it type-checks and builds against that SDK in Swift 6 language mode.
+    let ios_target = "arm64-apple-ios27.0-simulator";
     let swiftc = |sdk: &str| {
         let mut c = Command::new("xcrun");
-        c.args(["--sdk", sdk, "swiftc", "-swift-version", "5"])
+        c.args(["--sdk", sdk, "swiftc", "-swift-version", "6"])
             .arg(&bindings)
             .args(["-Xcc", &modulemap, "-I"])
             .arg(&gen);
@@ -770,34 +773,19 @@ fn mobile(ios: bool) -> Result<()> {
     link(&mut c, &lib);
     run(&mut c)?;
     run(&mut Command::new(&check))?;
-    // 2. The shell on macOS (a preview of the same SwiftUI code).
-    let mac = out.join("UtopiaMobile-macos");
-    let mut c = swiftc("macosx");
-    c.arg("-parse-as-library")
-        .args(&app_sources)
-        .arg("-o")
-        .arg(&mac);
-    link(&mut c, &lib);
-    run(&mut c)?;
-    // 3. The shell against the iOS SDK.
+    // 2. The app against the iOS SDK.
     let mut c = swiftc("iphonesimulator");
-    c.args([
-        "-parse-as-library",
-        "-typecheck",
-        "-target",
-        "arm64-apple-ios17.0-simulator",
-    ])
-    .args(&app_sources);
+    c.args(["-parse-as-library", "-typecheck", "-target", ios_target])
+        .args(&app_sources);
     run(&mut c)?;
     println!(
-        "mobile: bindings checked, macOS preview at {}, iOS type-check ok, Kotlin bindings in {}",
-        mac.display(),
+        "mobile: bindings checked, iOS type-check ok, Kotlin bindings in {}",
         out.join("kotlin").display()
     );
     if !ios {
         return Ok(());
     }
-    // 4. The iOS Simulator app.
+    // 3. The iOS Simulator app.
     let target = "aarch64-apple-ios-sim";
     let installed = Command::new("rustup")
         .args(["target", "list", "--installed"])
@@ -821,14 +809,10 @@ fn mobile(ios: bool) -> Result<()> {
     }
     std::fs::create_dir_all(&app)?;
     let mut c = swiftc("iphonesimulator");
-    c.args([
-        "-parse-as-library",
-        "-target",
-        "arm64-apple-ios17.0-simulator",
-    ])
-    .args(&app_sources)
-    .arg("-o")
-    .arg(app.join("UtopiaMobile"));
+    c.args(["-parse-as-library", "-target", ios_target])
+        .args(&app_sources)
+        .arg("-o")
+        .arg(app.join("UtopiaMobile"));
     link(
         &mut c,
         &root.join(format!("target/{target}/debug/libutopia_ffi.a")),
@@ -862,6 +846,17 @@ fn insert_tree(
     page: &PageId,
     rows: &[(usize, BlockKind, &str)],
 ) -> Result<Vec<BlockId>> {
+    insert_tree_after(s, page, rows, None)
+}
+
+/// [`insert_tree`] with the sibling a top-level row comes behind, so several calls append in
+/// order instead of each putting its first row at the front of the page.
+fn insert_tree_after(
+    s: &mut Store,
+    page: &PageId,
+    rows: &[(usize, BlockKind, &str)],
+    first_after: Option<BlockId>,
+) -> Result<Vec<BlockId>> {
     let mut cmds = Vec::new();
     let mut stack: Vec<BlockId> = Vec::new();
     let mut ids = Vec::new();
@@ -872,7 +867,10 @@ fn insert_tree(
         );
         let id = BlockId::new();
         let parent = depth.checked_sub(1).map(|d| stack[d].clone());
-        let after = stack.get(depth).cloned();
+        let after = stack
+            .get(depth)
+            .cloned()
+            .or_else(|| (depth == 0).then(|| first_after.clone()).flatten());
         cmds.push(Command::InsertBlock {
             id: id.clone(),
             parent,
@@ -893,6 +891,97 @@ fn insert_tree(
         },
     )?;
     Ok(ids)
+}
+
+/// The scratch graph for the iPhone app's checks (docs/ios-prd.md §6): the four pages the
+/// acceptance criteria name, and a day log with a done and an open to-do, a nested entry and
+/// links. Seeded through the store, never typed, so a screenshot reads the same each run.
+fn seed_phone_graph(path: &Path) -> Result<()> {
+    use BlockKind::{Bullet, Quote, Todo};
+    let mut s = Store::open(path)?;
+    let today = chrono::Local::now().date_naive();
+    for (title, rows) in [
+        (
+            "Dana",
+            vec![
+                (0, Bullet, "design lead, Atlas Launch"),
+                (0, Bullet, "asked about the old phone"),
+            ],
+        ),
+        (
+            "Atlas Launch",
+            vec![
+                (0, Bullet, "status:: in progress"),
+                (0, Bullet, "owner:: [[Dana]]"),
+                (0, Bullet, "Send the deck by Friday"),
+            ],
+        ),
+        (
+            "Budget",
+            vec![
+                (0, Bullet, "approved up to 12k for the beta"),
+                (0, Bullet, "[[Relay]] hosting is in this line"),
+            ],
+        ),
+        (
+            "Relay",
+            vec![(0, Bullet, "the sync relay: https://relay.example.com")],
+        ),
+    ] {
+        let page = s.create_page(title)?;
+        insert_tree(&mut s, &page, &rows)?;
+    }
+    let day = s.ensure_daily_page(today)?;
+    let yesterday = s.ensure_daily_page(today - chrono::Duration::days(1))?;
+    insert_tree(
+        &mut s,
+        &yesterday,
+        &[
+            (0, Bullet, "Read the [[Brief]] twice"),
+            (1, Quote, "Ship small, ship often"),
+        ],
+    )?;
+    // One entry per call, each behind the one before: the day log's time column comes from the
+    // block id (a ULID), so the entries of one seed carry the seed's clock.
+    let entries: [&[(usize, BlockKind, &str)]; 4] = [
+        &[
+            (0, Bullet, "Planning with [[Dana]]"),
+            (1, Bullet, "Budget is approved"),
+            (1, Bullet, "Send the [[Atlas Launch]] deck by Friday"),
+        ],
+        &[(0, Todo, "Call the bank")],
+        &[(0, Todo, "Pay rent")],
+        &[
+            (0, Bullet, "Ideas from the [[Relay]] standup"),
+            (1, Todo, "Check the sync log"),
+        ],
+    ];
+    let mut ids = Vec::new();
+    let mut after: Option<BlockId> = None;
+    for rows in entries {
+        let entry = insert_tree_after(&mut s, &day, rows, after.clone())?;
+        after = entry.first().cloned();
+        ids.extend(entry);
+    }
+    // One to-do is already done, so the day log shows both states of the box (AC-5.1).
+    let pay_rent = ids
+        .iter()
+        .find(|id| {
+            s.page_state(&day)
+                .ok()
+                .and_then(|st| st.block(id))
+                .is_some_and(|b| b.text == "Pay rent")
+        })
+        .cloned();
+    if let Some(id) = pay_rent {
+        s.update_block(&day, &id, None, None, Some(true))?;
+    }
+    for id in &ids {
+        s.commit_block(&day, id)?;
+    }
+    s.sync_index()?;
+    println!("seeded {}", path.display());
+    Ok(())
 }
 
 /// The Tasks view's shots (PRD §9.2.2): the help graph, plus to-dos whose date links make
@@ -1837,13 +1926,15 @@ fn main() -> Result<()> {
         }
         Some("seed-daily") => seed_daily_feed(Path::new(args.get(1).context("graph path")?)),
         Some("seed-tasks") => seed_tasks_graph(Path::new(args.get(1).context("graph path")?)),
+        Some("seed-phone") => seed_phone_graph(Path::new(args.get(1).context("graph path")?)),
         Some("seed-panes") => seed_panes_graph(
             Path::new(args.get(1).context("graph path")?),
             args.get(2).map_or(Ok(0), |d| d.parse()).context("depth")?,
         ),
         _ => {
             println!(
-                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- readme-shots       (regenerate docs/images for the README)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
+                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- readme-shots       (regenerate docs/images for the README)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)
+       cargo run -p xtask -- seed-phone <graph>  (the scratch graph for the iPhone app)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
             );
             Ok(())
         }

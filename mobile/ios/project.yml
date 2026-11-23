@@ -1,0 +1,73 @@
+# XcodeGen spec for the iPhone app. `make project` (in this folder) writes UtopiaMobile.xcodeproj
+# from it; the .xcodeproj is not in git. Change this file, not the generated project.
+name: UtopiaMobile
+
+options:
+  bundleIdPrefix: app.utopia
+  deploymentTarget:
+    iOS: "27.0"
+  createIntermediateGroups: true
+  generateEmptyDirectories: true
+
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    DEVELOPMENT_TEAM: 9H8AZ8D28D
+    CODE_SIGN_STYLE: Automatic
+    # Apple silicon only: the core has no x86_64 simulator build.
+    ARCHS: arm64
+    ONLY_ACTIVE_ARCH: YES
+
+targets:
+  UtopiaMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: UtopiaMobile
+        excludes:
+          - Info.plist
+      # Written by scripts/build-core.sh (`make bindings`, and before each Xcode build).
+      - path: Generated/utopia_ffi.swift
+        optional: true
+        group: Generated
+    settings:
+      base:
+        PRODUCT_NAME: UtopiaMobile
+        PRODUCT_BUNDLE_IDENTIFIER: app.utopia.mobile
+        INFOPLIST_FILE: UtopiaMobile/Info.plist
+        TARGETED_DEVICE_FAMILY: "1"
+        SUPPORTS_MACCATALYST: NO
+        SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD: NO
+        SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+        # The C module of the bindings (module.modulemap + header).
+        SWIFT_INCLUDE_PATHS: $(SRCROOT)/Generated/include
+        HEADER_SEARCH_PATHS: $(SRCROOT)/Generated/include
+        # The Rust core, built by the "Build Rust core" phase for this platform and configuration.
+        LIBRARY_SEARCH_PATHS: $(SRCROOT)/../../target/xcode/$(PLATFORM_NAME)-$(CONFIGURATION)
+        OTHER_LDFLAGS:
+          - -lutopia_ffi
+          - -framework
+          - Security
+          - -framework
+          - SystemConfiguration
+        # The build phase runs cargo, which reads and writes outside the project.
+        ENABLE_USER_SCRIPT_SANDBOXING: NO
+        DEAD_CODE_STRIPPING: YES
+    preBuildScripts:
+      - name: Build Rust core
+        script: '"$SRCROOT/scripts/build-core.sh"'
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/Generated/utopia_ffi.swift
+          - $(SRCROOT)/../../target/xcode/$(PLATFORM_NAME)-$(CONFIGURATION)/libutopia_ffi.a
+
+schemes:
+  UtopiaMobile:
+    build:
+      targets:
+        UtopiaMobile: all
+    run:
+      config: Debug
+    archive:
+      config: Release

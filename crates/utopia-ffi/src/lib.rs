@@ -66,6 +66,90 @@ pub struct BlockView {
     /// Plain text with markup removed (for list rows).
     pub plain: String,
     pub depth: u32,
+    /// `bullet`, `numbered`, `todo`, `quote`, `code` or `heading`.
+    pub kind: String,
+    /// The level of a heading; 0 for every other kind.
+    pub heading_level: u32,
+    /// Whether a to-do is done (ios-prd AC-5.1).
+    pub checked: bool,
+    /// When the block was made, Unix ms UTC: the day log's time column (§4.4).
+    pub created_at_ms: i64,
+    /// The text split into what to draw, already resolved by the core (C1). Concatenating
+    /// the part texts gives `plain`.
+    pub parts: Vec<TextPart>,
+    /// A block the phone cannot draw in text, for example a query (§4.4, AC-7.5).
+    pub placeholder: Option<String>,
+    /// The key of a leading `key:: value` block: it is drawn as a row above the outline, not
+    /// as a block (§4.4, AC-7.3).
+    pub property_key: Option<String>,
+}
+
+/// What one piece of a block's text is (ios-prd §4.4). The core decides it: the app never
+/// parses a block itself (C1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum PartKind {
+    Plain,
+    /// A `[[page]]` or `[[tag]]` link.
+    Page,
+    /// A `#tag`.
+    Tag,
+    /// A link that names a day.
+    Date,
+    /// A `((block reference))`, shown as the text of the block it names.
+    Block,
+    /// An inline link or attachment name: `[name](url)`.
+    Link,
+    /// An inline code span.
+    Code,
+}
+
+/// One drawn piece of a block's text. `start`/`end` are UTF-16 offsets into the text the
+/// parts join into, which is what a `Text` view and VoiceOver measure in.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TextPart {
+    pub kind: PartKind,
+    pub text: String,
+    /// The page this piece opens, when it opens one.
+    pub page_id: Option<String>,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A title the core found in a draft line, with the range it covers (ios-prd §4.6): the
+/// whole-word, any-case match of a page title or alias, two characters or longer.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TitleMatch {
+    /// The page's own spelling of its title, which is what a link stores.
+    pub title: String,
+    pub page_id: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A link a reader accepted in a draft line: the title, and the UTF-16 range of the words
+/// that carry it. The core checks the words again before it writes the link, so a range
+/// the reader has since changed is written as plain text (AC-4.11).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AcceptedLink {
+    pub title: String,
+    pub start: u32,
+    pub end: u32,
+}
+
+/// One line of a draft outline (ios-prd §4.2): its text, its depth and whether it is a
+/// to-do. `depth` 0 is a top-level block.
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct OutlineLine {
+    pub text: String,
+    pub depth: u32,
+    pub todo: bool,
+}
+
+/// A `key:: value` block of a page, shown as a row above the outline (AC-7.3).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PropertyView {
+    pub key: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -75,6 +159,36 @@ pub struct PageView {
     /// `YYYY-MM-DD` for journal pages.
     pub date: Option<String>,
     pub blocks: Vec<BlockView>,
+    /// The page's leading `key:: value` blocks, in outline order (AC-7.3).
+    pub properties: Vec<PropertyView>,
+    /// Whether anything is on the page. A day that was only visited is empty and has no
+    /// page in the graph (FR-1.2).
+    pub exists: bool,
+}
+
+/// A page by name, without opening it: a search result or a recent page (AC-8.1, AC-8.2).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct PageRef {
+    pub id: String,
+    pub title: String,
+    /// `YYYY-MM-DD` for journal pages.
+    pub date: Option<String>,
+}
+
+/// One block found by search, with the page it is on (AC-8.1).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SearchHit {
+    pub page_id: String,
+    pub page_title: String,
+    pub block_id: String,
+    pub text: String,
+}
+
+/// What [`Graph::search`] found: pages first, then blocks (AC-8.1).
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct SearchResults {
+    pub pages: Vec<PageRef>,
+    pub blocks: Vec<SearchHit>,
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -221,28 +335,318 @@ impl Graph {
     }
 }
 
+/// The page's display title and, for a journal page, the day it names.
+fn page_label(store: &Store, page: &PageId) -> Option<(String, Option<String>)> {
+    let row = store.page_row(page).ok().flatten()?;
+    let fmt = store.date_format();
+    match row.daily_date {
+        Some(d) => Some((fmt.format(d), Some(d.to_string()))),
+        None => Some((row.title, None)),
+    }
+}
+
+/// UTF-16 length, the unit a `Text` view and VoiceOver measure a string in.
+fn utf16_len(s: &str) -> u32 {
+    s.encode_utf16().count() as u32
+}
+
+/// The byte offset of UTF-16 offset `at`, when it lands on a character boundary.
+fn utf16_to_byte(s: &str, at: u32) -> Option<usize> {
+    let mut units = 0u32;
+    for (i, c) in s.char_indices() {
+        if units == at {
+            return Some(i);
+        }
+        units += c.len_utf16() as u32;
+        if units > at {
+            return None;
+        }
+    }
+    (units == at).then_some(s.len())
+}
+
+/// The byte range that UTF-16 range `start..end` covers.
+fn utf16_range(s: &str, start: u32, end: u32) -> Option<std::ops::Range<usize>> {
+    let a = utf16_to_byte(s, start)?;
+    let b = utf16_to_byte(s, end)?;
+    (a <= b).then_some(a..b)
+}
+
+/// Walk an inline tree and give each piece its display text and the stored resolution it
+/// points at (rule 3), so the phone draws a link without parsing anything itself (C1).
+fn walk_parts(
+    store: &mut Store,
+    nodes: &[utopia_core::inline::Inline],
+    spans: &[utopia_store::BlockRefSpan],
+    out: &mut Vec<TextPart>,
+) {
+    use utopia_core::inline::Inline;
+    let push = |out: &mut Vec<TextPart>, kind, text: String, page: Option<String>| {
+        let start = out.last().map_or(0, |p| p.end);
+        let end = start + utf16_len(&text);
+        out.push(TextPart {
+            kind,
+            text,
+            page_id: page,
+            start,
+            end,
+        });
+    };
+    for node in nodes {
+        match node {
+            Inline::Text(t) => {
+                if !t.is_empty() {
+                    push(out, PartKind::Plain, t.clone(), None);
+                }
+            }
+            Inline::Emph { children, .. } => walk_parts(store, children, spans, out),
+            Inline::Code { text, .. } => push(out, PartKind::Code, text.clone(), None),
+            Inline::PageRef { title, range } => {
+                let span = spans
+                    .iter()
+                    .find(|s| s.kind == utopia_core::inline::RefKind::Page && s.range == *range);
+                let (text, kind, page) = match span.and_then(|s| s.page.clone()) {
+                    Some(p) => match page_label(store, &p) {
+                        Some((label, Some(_))) => {
+                            (label, PartKind::Date, Some(p.as_str().to_string()))
+                        }
+                        Some((label, None)) => {
+                            (label, PartKind::Page, Some(p.as_str().to_string()))
+                        }
+                        None => (title.clone(), PartKind::Page, None),
+                    },
+                    None => (title.clone(), PartKind::Page, None),
+                };
+                push(out, kind, text, page);
+            }
+            Inline::Tag {
+                title,
+                bracketed,
+                range,
+            } => {
+                let span = spans
+                    .iter()
+                    .find(|s| s.kind == utopia_core::inline::RefKind::Tag && s.range == *range);
+                let target = span.and_then(|s| s.page.clone());
+                let label = target
+                    .as_ref()
+                    .and_then(|p| page_label(store, p))
+                    .map(|(t, _)| t)
+                    .unwrap_or_else(|| title.clone());
+                let text = if *bracketed {
+                    label
+                } else {
+                    format!("#{label}")
+                };
+                push(
+                    out,
+                    PartKind::Tag,
+                    text,
+                    target.map(|p| p.as_str().to_string()),
+                );
+            }
+            Inline::BlockRef { uid, range } | Inline::Embed { uid, range } => {
+                let span = spans
+                    .iter()
+                    .find(|s| s.kind == utopia_core::inline::RefKind::Block && s.range == *range);
+                let target = span
+                    .and_then(|s| s.block.clone())
+                    .or_else(|| Some(BlockId(uid.clone())));
+                let (text, page) = match target.and_then(|b| store.block_row(&b).ok().flatten()) {
+                    Some(row) if row.deleted_at.is_none() => (
+                        utopia_core::inline::plain_text(&row.text),
+                        Some(row.page_id.as_str().to_string()),
+                    ),
+                    _ => ("Deleted block".to_string(), None),
+                };
+                push(out, PartKind::Block, text, page);
+            }
+            Inline::Link { text, .. } => push(out, PartKind::Link, text.clone(), None),
+        }
+    }
+}
+
+/// The drawn pieces of a block's text, as the plain text and the parts that join into it.
+fn parts_of(store: &mut Store, block: Option<&BlockId>, text: &str) -> (String, Vec<TextPart>) {
+    let spans = block
+        .and_then(|b| store.block_ref_spans(b).ok())
+        .unwrap_or_default();
+    let mut parts = Vec::new();
+    walk_parts(store, &utopia_core::inline::parse(text), &spans, &mut parts);
+    // A block with no text still needs a row to focus; an empty plain string keeps that.
+    for p in &mut parts {
+        if p.kind == PartKind::Plain && p.text.is_empty() {
+            p.text.clear();
+        }
+    }
+    let plain: String = parts.iter().map(|p| p.text.as_str()).collect();
+    (plain, parts)
+}
+
+fn kind_name(kind: utopia_core::BlockKind) -> (&'static str, u32) {
+    match kind {
+        utopia_core::BlockKind::Bullet => ("bullet", 0),
+        utopia_core::BlockKind::Numbered => ("numbered", 0),
+        utopia_core::BlockKind::Todo => ("todo", 0),
+        utopia_core::BlockKind::Quote => ("quote", 0),
+        utopia_core::BlockKind::Code => ("code", 0),
+        utopia_core::BlockKind::Heading(level) => ("heading", level as u32),
+    }
+}
+
 fn page_view(store: &mut Store, page: &PageId) -> Result<PageView> {
     let fmt = store.date_format().clone();
+    let exists = store.page_exists(page)?;
+    if !exists {
+        return Ok(PageView {
+            id: page.as_str().to_string(),
+            title: String::new(),
+            date: None,
+            blocks: Vec::new(),
+            properties: Vec::new(),
+            exists: false,
+        });
+    }
     let st = store.page_state(page)?.clone();
-    let blocks = st
-        .live_preorder()
-        .into_iter()
-        .filter_map(|(id, depth)| {
-            let b = st.block(&id)?;
-            Some(BlockView {
-                id: id.as_str().to_string(),
-                plain: utopia_core::inline::plain_text(&b.text),
-                text: b.text.clone(),
-                depth: depth as u32,
-            })
-        })
-        .collect();
+    let times = store.block_times(page)?;
+    // Leading `key:: value` blocks are shown once, as rows above the outline (AC-7.3,
+    // DESIGN §3.8). The shape comes from the core, not from the app.
+    let mut properties = Vec::new();
+    let mut property_blocks: Vec<BlockId> = Vec::new();
+    for id in st.live_roots() {
+        let Some(b) = st.block(&id) else { break };
+        match utopia_core::inline::attribute(&b.text) {
+            Some((key, range)) => {
+                properties.push(PropertyView {
+                    key,
+                    value: utopia_core::inline::plain_text(b.text[range].trim()),
+                });
+                property_blocks.push(id);
+            }
+            None => break,
+        }
+    }
+    let mut blocks = Vec::with_capacity(times.len());
+    for (id, depth) in st.live_preorder() {
+        let Some(b) = st.block(&id) else { continue };
+        let (plain, parts) = parts_of(store, Some(&id), &b.text);
+        let (kind, heading_level) = kind_name(b.kind);
+        let placeholder =
+            utopia_core::query::query_block(&b.text).map(|_| "Query — open on Mac".to_string());
+        let property_key = property_blocks
+            .contains(&id)
+            .then(|| utopia_core::inline::attribute(&b.text).map(|(key, _)| key))
+            .flatten();
+        blocks.push(BlockView {
+            id: id.as_str().to_string(),
+            text: b.text.clone(),
+            plain,
+            depth: depth as u32,
+            kind: kind.to_string(),
+            heading_level,
+            checked: b.checked,
+            created_at_ms: times.get(&id).copied().unwrap_or(0),
+            parts,
+            placeholder,
+            property_key,
+        });
+    }
     Ok(PageView {
         id: page.as_str().to_string(),
         title: utopia_store::display_title(&st, &fmt),
         date: st.meta.daily_date.map(|d| d.to_string()),
         blocks,
+        properties,
+        exists: true,
     })
+}
+
+/// A day that has no page yet: the day's identity and title, and nothing to write (FR-1.2).
+fn blank_day(store: &Store, date: NaiveDate) -> PageView {
+    PageView {
+        id: PageId::for_date(date).as_str().to_string(),
+        title: store.date_format().format(date),
+        date: Some(date.to_string()),
+        blocks: Vec::new(),
+        properties: Vec::new(),
+        exists: false,
+    }
+}
+
+fn parse_day(s: &str) -> Result<NaiveDate> {
+    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|e| FfiError::Invalid { msg: e.to_string() })
+}
+
+/// The title a page's words name, with the page's own spelling, when the words are still
+/// that title or one of its aliases (AC-4.1, AC-4.11). `None` means the words changed.
+fn link_title_for(store: &Store, words: &str) -> Option<(String, String)> {
+    let key = utopia_core::title::normalize_title(words);
+    if key.is_empty() {
+        return None;
+    }
+    let page = utopia_store::resolve_page_key(store.conn(), &key, store.date_format()).ok()??;
+    let (title, date) = page_label(store, &page)?;
+    // A day is named by the Date control, never by suggestion (§4.6).
+    date.is_none().then(|| (page.as_str().to_string(), title))
+}
+
+/// The title an accepted link writes, when its words still name it (AC-4.1, AC-4.11): the
+/// page's own spelling for a page that exists, and the typed words for a title no page has
+/// yet — that page is made by the Send (AC-4.6). `None` means the words changed, so the text
+/// stays plain.
+fn written_link(store: &Store, words: &str, accepted: &str) -> Option<(Option<String>, String)> {
+    let key = utopia_core::title::normalize_title(words);
+    let accepted_key = utopia_core::title::normalize_title(accepted);
+    if key.is_empty() {
+        return None;
+    }
+    if let Some(page) = utopia_store::resolve_page_key(store.conn(), &key, store.date_format())
+        .ok()
+        .flatten()
+    {
+        let (title, _) = page_label(store, &page)?;
+        let page_key = utopia_core::title::normalize_title(&title);
+        if key == accepted_key || page_key == accepted_key {
+            return Some((Some(page.as_str().to_string()), title));
+        }
+        return None;
+    }
+    (key == accepted_key).then(|| (None, words.trim().to_string()))
+}
+
+/// The word windows of a line: byte ranges of one word, and of each run of words up to
+/// `MAX_SUGGESTION_WORDS`. A word is letters, digits, `_`, `-` and an inner `'`.
+const MAX_SUGGESTION_WORDS: usize = 6;
+
+fn word_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '\'';
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in text.char_indices() {
+        match (is_word(c), start) {
+            (true, None) => start = Some(i),
+            (true, Some(_)) => {}
+            (false, Some(s)) => {
+                // A word never ends on a quote or a hyphen: it belongs to the word.
+                let mut end = i;
+                while end > s
+                    && text[s..end]
+                        .chars()
+                        .next_back()
+                        .is_some_and(|c| c == '\'' || c == '-')
+                {
+                    end -= text[s..end].chars().next_back().map_or(1, |c| c.len_utf8());
+                }
+                out.push(s..end);
+                start = None;
+            }
+            (false, None) => {}
+        }
+    }
+    if let Some(s) = start {
+        out.push(s..text.len());
+    }
+    out
 }
 
 #[uniffi::export]
@@ -275,16 +679,318 @@ impl Graph {
         })
     }
 
-    /// Today's journal page, created (with one empty block) on first open (FR-1.1).
+    /// Today's journal page (FR-1.1). A visit writes nothing: a day that has no page yet is
+    /// answered empty, and the first Send creates it (FR-1.2, AC-1.3, AC-1.4).
     pub fn today(&self) -> Result<PageView> {
         self.with(|s| {
-            let (page, _) = s.open_daily(s.today())?;
-            page_view(s, &page)
+            let date = s.today();
+            let page = s.days_between(date, date)?.get(&date).cloned();
+            match page {
+                Some(p) => page_view(s, &p),
+                None => Ok(blank_day(s, date)),
+            }
+        })
+    }
+
+    /// One day, read-only, whether or not it has a page (the day log's earlier days, §4.4).
+    pub fn day(&self, date: String) -> Result<PageView> {
+        let d = parse_day(&date)?;
+        self.with(|s| match s.days_between(d, d)?.get(&d).cloned() {
+            Some(p) => page_view(s, &p),
+            None => Ok(blank_day(s, d)),
+        })
+    }
+
+    /// The days before `date` that have notes, newest first (scrolling up in the day log).
+    /// A day that was only visited is not a page and is not among them (FR-1.2).
+    pub fn days_before(&self, date: String, count: u32) -> Result<Vec<PageView>> {
+        let d = parse_day(&date)?;
+        self.with(|s| {
+            let from = s.oldest_daily()?.unwrap_or(d);
+            if from >= d {
+                return Ok(Vec::new());
+            }
+            let days = s.days_between(from, d.pred_opt().unwrap_or(d))?;
+            let mut found = Vec::new();
+            for (day, page) in days.into_iter().rev() {
+                if found.len() >= count as usize {
+                    break;
+                }
+                let st = s.page_state(&page)?.clone();
+                let has_content = st
+                    .live_roots()
+                    .iter()
+                    .any(|id| st.block(id).is_some_and(|b| !b.text.trim().is_empty()));
+                if !has_content {
+                    continue;
+                }
+                let _ = day;
+                found.push(page_view(s, &page)?);
+            }
+            Ok(found)
         })
     }
 
     pub fn page(&self, page_id: String) -> Result<PageView> {
         self.with(|s| page_view(s, &PageId(page_id)))
+    }
+
+    /// Append a draft outline to today's note (ios-prd C3, K11, AC-3.1): new top-level
+    /// blocks at the end of the day, in the order written, in one plan and one commit, so
+    /// one Send is one write and the whole capture arrives or none of it does.
+    ///
+    /// Empty lines are dropped first, then the depth rule (§4.5 rule 1) is applied again, so
+    /// emptying a middle line makes the line below it a child of the line above (AC-3.5). A
+    /// line that is a to-do becomes a to-do block that is not done (AC-5.1). Links are
+    /// written by [`Graph::text_with_links`] before the call; their pages are made by the
+    /// store on the same commit (C1).
+    pub fn append_outline(&self, lines: Vec<OutlineLine>) -> Result<PageView> {
+        let mut shaped: Vec<(usize, String, utopia_core::BlockKind)> = Vec::new();
+        for line in lines {
+            let text = line.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let depth = match shaped.last() {
+                None => 0,
+                Some((d, _, _)) => (line.depth as usize).min(d + 1),
+            };
+            if depth >= utopia_core::outline::MAX_DROP_DEPTH {
+                return Err(FfiError::Invalid {
+                    msg: format!(
+                        "a line can be at most {} levels deep",
+                        utopia_core::outline::MAX_DROP_DEPTH - 1
+                    ),
+                });
+            }
+            let kind = if line.todo {
+                utopia_core::BlockKind::Todo
+            } else {
+                utopia_core::BlockKind::Bullet
+            };
+            shaped.push((depth, text.to_string(), kind));
+        }
+        if shaped.is_empty() {
+            return Err(FfiError::Invalid {
+                msg: "the draft has no text".into(),
+            });
+        }
+        self.with(|s| {
+            let date = s.today();
+            s.seal_undo();
+            let page = s.ensure_daily_page(date)?;
+            s.append_outline_kinds(&page, None, &shaped)?;
+            s.flush()?;
+            page_view(s, &page)
+        })
+    }
+
+    /// Set whether a to-do is done (K9, AC-5.1, AC-5.6): one command, the same one the Mac's
+    /// tick makes, and one undo step. A block that is not a to-do becomes one in the same
+    /// call, because only a to-do has that state.
+    pub fn set_todo_done(&self, block_id: String, done: bool) -> Result<()> {
+        self.with(|s| {
+            let block = BlockId(block_id);
+            let row = s.block_row(&block)?.ok_or_else(|| FfiError::NotFound {
+                msg: format!("block {block}"),
+            })?;
+            let kind =
+                (row.kind != utopia_core::BlockKind::Todo).then_some(utopia_core::BlockKind::Todo);
+            s.update_block(&row.page_id, &block, None, kind, Some(done))?;
+            s.flush()?;
+            Ok(())
+        })
+    }
+
+    /// The pages that match `words`, in the day log's order, then the blocks that contain
+    /// them (AC-8.1). Pages first, then blocks, each with its page's title.
+    pub fn search(&self, words: String, limit: u32) -> Result<SearchResults> {
+        let n = limit as usize;
+        self.with(|s| {
+            let mut pages = Vec::new();
+            for hit in s.search_titles(&words, n)? {
+                let (title, date) = page_label(s, &hit.page).unwrap_or((hit.title, None));
+                pages.push(PageRef {
+                    id: hit.page.as_str().to_string(),
+                    title,
+                    date,
+                });
+            }
+            let mut blocks = Vec::new();
+            for hit in s.search_blocks(&words, n)? {
+                blocks.push(SearchHit {
+                    page_id: hit.page.as_str().to_string(),
+                    page_title: hit.page_title,
+                    block_id: hit.block.as_str().to_string(),
+                    text: utopia_core::inline::plain_text(&hit.text),
+                });
+            }
+            Ok(SearchResults { pages, blocks })
+        })
+    }
+
+    /// The pages changed most recently (AC-8.2), newest first.
+    pub fn recent_pages(&self, limit: u32) -> Result<Vec<PageRef>> {
+        self.with(|s| {
+            Ok(s.recent_pages(limit as usize)?
+                .into_iter()
+                .map(|row| {
+                    let date = row.daily_date.map(|d| d.to_string());
+                    let title = match row.daily_date {
+                        Some(d) => s.date_format().format(d),
+                        None => row.title.clone(),
+                    };
+                    PageRef {
+                        id: row.id.as_str().to_string(),
+                        title,
+                        date,
+                    }
+                })
+                .collect())
+        })
+    }
+
+    /// How many of this device's changes have not reached the relay yet (AC-9.1: "Offline —
+    /// 3 changes queued").
+    pub fn queued_changes(&self) -> Result<u32> {
+        self.with(|s| Ok(s.outbox_count()? as u32))
+    }
+
+    /// The pages whose title or alias is in a draft line, as a whole phrase and in any letter
+    /// case (AC-4.1, AC-4.3, AC-4.10). The ranges are UTF-16 offsets into `text`. Titles of
+    /// one or two characters are not suggested (§4.6). `accepted` ranges are skipped.
+    pub fn title_suggestions(
+        &self,
+        text: String,
+        accepted: Vec<AcceptedLink>,
+        limit: u32,
+    ) -> Result<Vec<TitleMatch>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let words = word_ranges(&text);
+        // Longest window that starts here, so "Atlas Launch" wins over "Launch" (AC-4.3).
+        let mut candidates: Vec<(std::ops::Range<usize>, String, String)> = Vec::new();
+        self.with(|s| {
+            for i in 0..words.len() {
+                for take in (1..=MAX_SUGGESTION_WORDS.min(words.len() - i)).rev() {
+                    let range = words[i].start..words[i + take - 1].end;
+                    let phrase = &text[range.clone()];
+                    if phrase.trim().chars().count() < 3 {
+                        continue;
+                    }
+                    let Some((page_id, title)) = link_title_for(s, phrase) else {
+                        continue;
+                    };
+                    candidates.push((range, page_id, title));
+                    break;
+                }
+            }
+            Ok(())
+        })?;
+        candidates.sort_by_key(|(r, _, _)| (r.start, std::cmp::Reverse(r.end)));
+        let mut out: Vec<TitleMatch> = Vec::new();
+        let mut taken: Vec<std::ops::Range<usize>> = accepted
+            .iter()
+            .filter_map(|a| utf16_range(&text, a.start, a.end))
+            .collect();
+        for (range, page_id, title) in candidates {
+            if out.len() >= limit as usize {
+                break;
+            }
+            if taken
+                .iter()
+                .any(|t| t.start < range.end && range.start < t.end)
+            {
+                continue;
+            }
+            out.push(TitleMatch {
+                title,
+                page_id,
+                start: utf16_len(&text[..range.start]),
+                end: utf16_len(&text[..range.end]),
+            });
+            taken.push(range);
+        }
+        Ok(out)
+    }
+
+    /// The text to store for a draft line, with each accepted link written as `[[Title]]` in
+    /// the page's own spelling (AC-4.1, AC-4.11). A link whose words no longer name its page
+    /// is written as plain text, so a changed word never leaves a stale link behind.
+    pub fn text_with_links(&self, text: String, links: Vec<AcceptedLink>) -> Result<String> {
+        let mut spans: Vec<(std::ops::Range<usize>, String)> = Vec::new();
+        self.with(|s| {
+            for link in &links {
+                let Some(range) = utf16_range(&text, link.start, link.end) else {
+                    continue;
+                };
+                if let Some((_, title)) = written_link(s, &text[range.clone()], &link.title) {
+                    spans.push((range, title));
+                }
+            }
+            Ok(())
+        })?;
+        spans.sort_by_key(|(r, _)| r.start);
+        let mut out = String::with_capacity(text.len() + 4 * spans.len());
+        let mut at = 0usize;
+        for (range, title) in spans {
+            if range.start < at {
+                continue;
+            }
+            out.push_str(&text[at..range.start]);
+            out.push_str("[[");
+            out.push_str(&title);
+            out.push_str("]]");
+            at = range.end;
+        }
+        out.push_str(&text[at..]);
+        Ok(out)
+    }
+
+    /// The drawn pieces of a draft line: plain runs and the links the reader accepted, in
+    /// link colour (AC-4.1). A link whose words changed is plain again (AC-4.11).
+    pub fn draft_parts(&self, text: String, links: Vec<AcceptedLink>) -> Result<Vec<TextPart>> {
+        let mut spans: Vec<(std::ops::Range<usize>, Option<String>, String)> = Vec::new();
+        self.with(|s| {
+            for link in &links {
+                let Some(range) = utf16_range(&text, link.start, link.end) else {
+                    continue;
+                };
+                if let Some((page_id, title)) = written_link(s, &text[range.clone()], &link.title) {
+                    spans.push((range, page_id, title));
+                }
+            }
+            Ok(())
+        })?;
+        spans.sort_by_key(|(r, _, _)| r.start);
+        let mut out: Vec<TextPart> = Vec::new();
+        let mut at = 0usize;
+        let mut offset = 0u32;
+        let mut push = |out: &mut Vec<TextPart>, kind, text: &str, page: Option<String>| {
+            if text.is_empty() {
+                return;
+            }
+            let start = offset;
+            offset += utf16_len(text);
+            out.push(TextPart {
+                kind,
+                text: text.to_string(),
+                page_id: page,
+                start,
+                end: offset,
+            });
+        };
+        for (range, page_id, title) in spans {
+            if range.start < at {
+                continue;
+            }
+            push(&mut out, PartKind::Plain, &text[at..range.start], None);
+            push(&mut out, PartKind::Page, &title, page_id);
+            at = range.end;
+        }
+        push(&mut out, PartKind::Plain, &text[at..], None);
+        Ok(out)
     }
 
     /// The page a title names (dates and aliases resolve like links), if any.
@@ -325,12 +1031,20 @@ impl Graph {
             s.set_block_text(&page, &block, &text, None, None)?;
             s.commit_block(&page, &block)?;
             s.flush()?;
-            let depth = 0;
+            let (plain, parts) = parts_of(s, Some(&block), &text);
+            let (kind, heading_level) = kind_name(utopia_core::BlockKind::Bullet);
             Ok(BlockView {
                 id: block.as_str().to_string(),
-                plain: utopia_core::inline::plain_text(&text),
+                plain,
                 text,
-                depth,
+                depth: 0,
+                kind: kind.to_string(),
+                heading_level,
+                checked: false,
+                created_at_ms: s.block_row(&block)?.map_or(0, |r| r.updated_at),
+                parts,
+                placeholder: None,
+                property_key: None,
             })
         })
     }
@@ -370,7 +1084,8 @@ impl Graph {
                         page_id: pid.clone(),
                         page_title: title.clone(),
                         block_id: h.block.as_str().to_string(),
-                        text: h.text,
+                        // A row the phone draws is readable text, never raw markup (§4.4).
+                        text: utopia_core::inline::plain_text(&h.text),
                     })
                 })
                 .collect())
@@ -612,11 +1327,9 @@ mod tests {
     fn graph_with_two_days() -> (Arc<Graph>, PageView, PageView) {
         let g = Graph::in_memory().unwrap();
         g.set_today(Some("2026-11-02".into())).unwrap();
-        let day = g.today().unwrap();
-        g.append_block(day.id.clone(), "one".into()).unwrap();
+        let day = g.append_outline(vec![line("one", 0, false)]).unwrap();
         g.set_today(Some("2026-11-03".into())).unwrap();
-        let next = g.today().unwrap();
-        g.append_block(next.id.clone(), "two".into()).unwrap();
+        let next = g.append_outline(vec![line("two", 0, false)]).unwrap();
         (g, day, next)
     }
 
@@ -626,8 +1339,7 @@ mod tests {
     fn a_round_does_not_hold_the_store_lock_on_the_wire() {
         let g = Graph::in_memory().unwrap();
         g.set_today(Some("2026-11-02".into())).unwrap();
-        let day = g.today().unwrap();
-        g.append_block(day.id.clone(), "queued".into()).unwrap();
+        let day = g.append_outline(vec![line("queued", 0, false)]).unwrap();
         let free = Arc::new(AtomicBool::new(true));
         let probes = Arc::new(AtomicU32::new(0));
         let probe = |free: &Arc<AtomicBool>, probes: &Arc<AtomicU32>, g: &Arc<Graph>| {
@@ -804,8 +1516,7 @@ mod tests {
     fn a_queued_snapshot_rides_the_next_round() {
         let g = Graph::in_memory().unwrap();
         g.set_today(Some("2026-11-02".into())).unwrap();
-        let day = g.today().unwrap();
-        g.append_block(day.id.clone(), "long tail".into()).unwrap();
+        let day = g.append_outline(vec![line("long tail", 0, false)]).unwrap();
         let page = PageId(day.id.clone());
 
         // Round 1: the relay's tail for the page looks 1000 updates long, so applying it
@@ -891,8 +1602,7 @@ mod tests {
     fn a_snapshot_queued_for_one_relay_is_not_uploaded_to_another() {
         let g = Graph::in_memory().unwrap();
         g.set_today(Some("2026-11-02".into())).unwrap();
-        let day = g.today().unwrap();
-        g.append_block(day.id.clone(), "long tail".into()).unwrap();
+        let day = g.append_outline(vec![line("long tail", 0, false)]).unwrap();
         let page = PageId(day.id.clone());
 
         // Round 1 against the first relay: the tail looks 1000 updates long, so applying
@@ -951,9 +1661,9 @@ mod tests {
     fn an_edit_made_during_the_exchange_is_pushed_before_the_round_reports_synced() {
         let g = Graph::in_memory().unwrap();
         g.set_today(Some("2026-11-02".into())).unwrap();
-        let day = g.today().unwrap();
-        // Opening today's page queued its first write; send it so the round under test
-        // really starts with nothing to push.
+        g.append_outline(vec![line("first", 0, false)]).unwrap();
+        // The append queued its first write; send it so the round under test really starts
+        // with nothing to push.
         g.sync_via(Box::new(Scripted::quiet())).unwrap();
         assert_eq!(
             g.guard().expect("not poisoned").outbox_count().unwrap(),
@@ -965,12 +1675,11 @@ mod tests {
         let mut t = Scripted::quiet();
         t.on_manifest = Box::new({
             let g = g.clone();
-            let day = day.id.clone();
             let captured = captured.clone();
             move || {
                 if !captured.swap(true, Ordering::SeqCst) {
                     // A capture lands while the manifest request is on the wire.
-                    g.append_block(day.clone(), "typed during the round".into())
+                    g.append_outline(vec![line("typed during the round", 0, false)])
                         .expect("the store is free during the exchange");
                 }
                 Ok(Some(empty_manifest()))
@@ -996,5 +1705,430 @@ mod tests {
             pushed.load(Ordering::SeqCst) >= 1,
             "the round pushed nothing"
         );
+    }
+
+    // ---- The phone's contract (docs/ios-prd.md §4, §6, C1-C3) -------------------------
+
+    fn phone() -> Arc<Graph> {
+        let g = Graph::in_memory().unwrap();
+        g.set_today(Some("2026-11-21".into())).unwrap();
+        g
+    }
+
+    fn line(text: &str, depth: u32, todo: bool) -> OutlineLine {
+        OutlineLine {
+            text: text.into(),
+            depth,
+            todo,
+        }
+    }
+
+    /// Rows of the last write, as `(text, depth, kind)`.
+    fn rows(day: &PageView) -> Vec<(String, u32, String)> {
+        day.blocks
+            .iter()
+            .map(|b| (b.text.clone(), b.depth, b.kind.clone()))
+            .collect()
+    }
+
+    /// FR-1.2, AC-1.3: looking at a day never makes it a page; the first Send does.
+    #[test]
+    fn ac_1_3_a_visit_creates_no_page() {
+        let g = phone();
+        let day = g.today().unwrap();
+        assert!(!day.exists, "a visit must not create the day");
+        assert!(day.blocks.is_empty());
+        assert!(
+            !g.with(|s| Ok(s.page_exists(&PageId(day.id.clone()))?))
+                .unwrap(),
+            "no shard may be written for a day that was only visited"
+        );
+        let after = g
+            .append_outline(vec![line("Call the bank", 0, false)])
+            .unwrap();
+        assert!(after.exists, "the first Send makes the page");
+        assert_eq!(
+            rows(&after),
+            vec![("Call the bank".into(), 0, "bullet".into())]
+        );
+    }
+
+    /// AC-3.1: a nested draft arrives as a parent and its child.
+    #[test]
+    fn ac_3_1_a_nested_draft_lands_as_a_parent_and_child() {
+        let g = phone();
+        let day = g
+            .append_outline(vec![
+                line("Meeting with Dana", 0, false),
+                line("Budget is approved", 1, false),
+            ])
+            .unwrap();
+        assert_eq!(
+            rows(&day),
+            vec![
+                ("Meeting with Dana".into(), 0, "bullet".into()),
+                ("Budget is approved".into(), 1, "bullet".into()),
+            ]
+        );
+    }
+
+    /// AC-3.5: emptying the middle line makes the third line the first line's child.
+    #[test]
+    fn ac_3_5_empty_middle_line_reparents() {
+        let g = phone();
+        let day = g
+            .append_outline(vec![
+                line("first", 0, false),
+                line("   ", 1, false),
+                line("third", 2, false),
+            ])
+            .unwrap();
+        assert_eq!(
+            rows(&day),
+            vec![
+                ("first".into(), 0, "bullet".into()),
+                ("third".into(), 1, "bullet".into()),
+            ]
+        );
+    }
+
+    /// AC-3.6: two lines at depth 0 are two entries, in the order written.
+    #[test]
+    fn ac_3_6_two_top_level_lines_are_two_entries() {
+        let g = phone();
+        let day = g
+            .append_outline(vec![line("one", 0, false), line("two", 0, false)])
+            .unwrap();
+        assert_eq!(
+            rows(&day),
+            vec![
+                ("one".into(), 0, "bullet".into()),
+                ("two".into(), 0, "bullet".into()),
+            ]
+        );
+    }
+
+    /// AC-3.7, FR-2.9: no line may sit at block depth 12.
+    #[test]
+    fn ac_3_7_a_line_can_be_eleven_levels_deep_at_most() {
+        let g = phone();
+        let mut lines = vec![line("level 0", 0, false)];
+        for d in 1..=11u32 {
+            lines.push(line(&format!("level {d}"), d, false));
+        }
+        assert!(g.append_outline(lines).is_ok(), "depth 11 is allowed");
+        let g = phone();
+        let mut too_deep = vec![line("level 0", 0, false)];
+        for d in 1..=12u32 {
+            too_deep.push(line(&format!("level {d}"), d, false));
+        }
+        assert!(
+            g.append_outline(too_deep).is_err(),
+            "a line at depth 12 is refused"
+        );
+    }
+
+    /// K11: each Send starts new top-level blocks at the end of the note, never below an
+    /// entry sent before.
+    #[test]
+    fn k11_a_second_send_is_a_new_top_level_block() {
+        let g = phone();
+        g.append_outline(vec![
+            line("first entry", 0, false),
+            line("under it", 1, false),
+        ])
+        .unwrap();
+        let day = g
+            .append_outline(vec![line("second entry", 0, false)])
+            .unwrap();
+        assert_eq!(
+            rows(&day),
+            vec![
+                ("first entry".into(), 0, "bullet".into()),
+                ("under it".into(), 1, "bullet".into()),
+                ("second entry".into(), 0, "bullet".into()),
+            ]
+        );
+    }
+
+    /// AC-4.1: the words stay as typed and the stored text carries the page's spelling.
+    #[test]
+    fn ac_4_1_accepted_link_written_with_page_spelling() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let text = "Lunch with dana".to_string();
+        let found = g.title_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].title, "Dana");
+        let stored = g
+            .text_with_links(
+                text,
+                vec![AcceptedLink {
+                    title: found[0].title.clone(),
+                    start: found[0].start,
+                    end: found[0].end,
+                }],
+            )
+            .unwrap();
+        assert_eq!(stored, "Lunch with [[Dana]]");
+        let day = g.append_outline(vec![line(&stored, 0, false)]).unwrap();
+        assert_eq!(day.blocks[0].text, "Lunch with [[Dana]]");
+        let dana = g.find_page("dana".into()).unwrap().unwrap();
+        let refs = g.backlinks(dana.id.clone()).unwrap();
+        assert_eq!(refs.len(), 1, "the link is a reference the page sees");
+    }
+
+    /// AC-4.3: a two-word title is suggested one word at a time, and one tap links it all.
+    #[test]
+    fn ac_4_3_a_two_word_title_links_as_one_phrase() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Atlas Launch").map(|_| ())?))
+            .unwrap();
+        assert!(
+            g.title_suggestions("Atlas".into(), vec![], 5)
+                .unwrap()
+                .is_empty(),
+            "half a title is not a suggestion"
+        );
+        let found = g
+            .title_suggestions("Ship the Atlas Launch deck".into(), vec![], 5)
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].title, "Atlas Launch");
+        assert_eq!(
+            &"Ship the Atlas Launch deck"[found[0].start as usize..found[0].end as usize],
+            "Atlas Launch"
+        );
+    }
+
+    /// AC-4.4: a suggestion never changes the text by itself.
+    #[test]
+    fn ac_4_4_suggestions_never_change_the_text() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let text = "Lunch with dana".to_string();
+        let _ = g.title_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(
+            g.text_with_links(text.clone(), vec![]).unwrap(),
+            text,
+            "no accepted link, no change"
+        );
+    }
+
+    /// AC-4.11: a word changed after the chip was tapped is plain text after Send.
+    #[test]
+    fn ac_4_11_changed_word_drops_the_link() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let accepted = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+        }];
+        assert_eq!(
+            g.text_with_links("Lunch with dana".into(), accepted.clone())
+                .unwrap(),
+            "Lunch with [[Dana]]"
+        );
+        assert_eq!(
+            g.text_with_links("Lunch with Dan".into(), accepted.clone())
+                .unwrap(),
+            "Lunch with Dan",
+            "a word that is no longer the title is plain text"
+        );
+        let parts = g.draft_parts("Lunch with Dan".into(), accepted).unwrap();
+        assert!(
+            parts.iter().all(|p| p.kind == PartKind::Plain),
+            "the word draws as plain text again: {parts:?}"
+        );
+    }
+
+    /// AC-4.10: chips belong to the line, so another line finds other titles.
+    #[test]
+    fn ac_4_10_suggestions_follow_the_active_line() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        assert_eq!(
+            g.title_suggestions("Ask Dana about it".into(), vec![], 5)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(g
+            .title_suggestions("Ask about it".into(), vec![], 5)
+            .unwrap()
+            .is_empty());
+    }
+
+    /// §4.6: titles of one or two characters are not suggested, and a day is not either.
+    #[test]
+    fn io_4_short_titles_and_days_are_not_suggested() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("On").map(|_| ())?)).unwrap();
+        assert!(g
+            .title_suggestions("On the way".into(), vec![], 5)
+            .unwrap()
+            .is_empty());
+        assert!(
+            g.title_suggestions("November 21st, 2026".into(), vec![], 5)
+                .unwrap()
+                .is_empty(),
+            "a day is named with the Date control, not a chip"
+        );
+    }
+
+    /// AC-5.1: a sent to-do is not done.
+    #[test]
+    fn ac_5_1_a_sent_todo_is_not_done() {
+        let g = phone();
+        let day = g.append_outline(vec![line("Pay rent", 0, true)]).unwrap();
+        assert_eq!(rows(&day), vec![("Pay rent".into(), 0, "todo".into())]);
+        assert!(!day.blocks[0].checked);
+    }
+
+    /// AC-5.3, AC-5.6: a tick is one command on the same block, and a second tap removes it.
+    #[test]
+    fn ac_5_3_a_tick_and_its_removal_keep_the_block() {
+        let g = phone();
+        let day = g
+            .append_outline(vec![line("Pay rent", 0, true), line("child", 1, false)])
+            .unwrap();
+        let todo = day.blocks[0].id.clone();
+        g.set_todo_done(todo.clone(), true).unwrap();
+        let day = g.today().unwrap();
+        assert!(day.blocks[0].checked, "the tick shows at once");
+        assert_eq!(day.blocks[0].text, "Pay rent", "the text does not change");
+        assert_eq!(day.blocks[1].text, "child", "the children do not change");
+        g.set_todo_done(todo, false).unwrap();
+        assert!(
+            !g.today().unwrap().blocks[0].checked,
+            "a second tap removes it"
+        );
+    }
+
+    /// AC-7.3, AC-7.5: attributes are rows above the outline; a block type the phone cannot
+    /// draw in text gets a label instead of raw markup.
+    #[test]
+    fn ac_7_3_properties_and_ac_7_5_placeholders() {
+        let g = phone();
+        let page = g
+            .with(|s| {
+                let p = s.create_page("Atlas Launch")?;
+                s.append_outline(
+                    &p,
+                    None,
+                    &[
+                        (0, "Status:: Active".to_string()),
+                        (0, "{{query: [[TODO]]}}".to_string()),
+                    ],
+                )?;
+                s.flush()?;
+                Ok(p)
+            })
+            .unwrap();
+        let view = g.page(page.as_str().to_string()).unwrap();
+        assert_eq!(view.properties.len(), 1);
+        assert_eq!(view.properties[0].key, "Status");
+        assert_eq!(view.properties[0].value, "Active");
+        let query = view
+            .blocks
+            .iter()
+            .find(|b| b.placeholder.is_some())
+            .expect("the query block gets a label");
+        assert_eq!(query.placeholder.as_deref(), Some("Query — open on Mac"));
+    }
+
+    /// AC-8.1, AC-8.2: search lists pages first, then blocks; recents are the changed pages.
+    #[test]
+    fn ac_8_1_search_lists_pages_then_blocks_and_ac_8_2_recents() {
+        let g = phone();
+        g.with(|s| {
+            let p = s.create_page("Atlas Launch")?;
+            s.append_outline(&p, None, &[(0, "the atlas is late".to_string())])?;
+            s.create_page("Budget")?;
+            s.flush()?;
+            Ok(())
+        })
+        .unwrap();
+        let found = g.search("atl".into(), 10).unwrap();
+        assert_eq!(found.pages.len(), 1);
+        assert_eq!(found.pages[0].title, "Atlas Launch");
+        assert!(found.blocks.iter().any(|b| b.page_title == "Atlas Launch"));
+        let recents = g.recent_pages(8).unwrap();
+        assert!(recents.len() >= 2);
+        assert!(recents.iter().any(|p| p.title == "Atlas Launch"));
+    }
+
+    /// AC-7.1, §4.4: a link draws in link colour with no brackets, and names its page.
+    #[test]
+    fn ac_7_1_a_link_part_names_the_page_it_opens() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let day = g
+            .append_outline(vec![line("Lunch with [[Dana]]", 0, false)])
+            .unwrap();
+        let block = &day.blocks[0];
+        let link = block
+            .parts
+            .iter()
+            .find(|p| p.kind == PartKind::Page)
+            .expect("the link is a part");
+        assert_eq!(link.text, "Dana", "no brackets in the drawn text");
+        assert!(link.page_id.is_some());
+        assert_eq!(
+            block.plain, "Lunch with Dana",
+            "the parts join into the plain text"
+        );
+    }
+
+    /// §4.4: the time column comes from the block, and a day that exists is a page.
+    #[test]
+    fn io_4_the_day_log_has_a_creation_time() {
+        let g = phone();
+        let day = g
+            .append_outline(vec![line("Call the bank", 0, false)])
+            .unwrap();
+        assert!(day.blocks[0].created_at_ms > 0, "a block carries its time");
+    }
+
+    /// AC-4.6: a title that no page has is written as a link by the Send, and the page is
+    /// made then — not when the picker inserts it.
+    #[test]
+    fn ac_4_6_a_created_page_exists_after_send_only() {
+        let g = phone();
+        let accepted = vec![AcceptedLink {
+            title: "Quarterly plan".into(),
+            start: 14,
+            end: 28,
+        }];
+        let text = g
+            .text_with_links("Ask about the Quarterly plan".into(), accepted.clone())
+            .unwrap();
+        assert_eq!(text, "Ask about the [[Quarterly plan]]");
+        assert!(
+            g.find_page("Quarterly plan".into()).unwrap().is_none(),
+            "the picker makes no page (AC-4.6)"
+        );
+        let day = g.append_outline(vec![line(&text, 0, false)]).unwrap();
+        assert_eq!(day.blocks[0].text, "Ask about the [[Quarterly plan]]");
+        assert!(
+            g.find_page("Quarterly plan".into()).unwrap().is_some(),
+            "the Send makes the page"
+        );
+        // A link whose words changed to another existing title does not silently retarget.
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        assert_eq!(
+            g.text_with_links(
+                "Ask Dana".into(),
+                vec![AcceptedLink {
+                    title: "Quarterly plan".into(),
+                    start: 4,
+                    end: 8
+                }]
+            )
+            .unwrap(),
+            "Ask Dana"
+        );
+        let _ = accepted;
     }
 }

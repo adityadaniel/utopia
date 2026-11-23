@@ -202,13 +202,14 @@ Plugins (P2): directories under `<config>/plugins/<name>/` with `plugin.json` + 
 module; commands appear in the slash menu. See `crates/utopia-plugin/src/lib.rs` for the ABI and
 `examples/plugins/word-count` for a complete one.
 
-Mobile (§14): `cargo run -p xtask -- mobile` builds `utopia-ffi`, generates Swift bindings
-(UniFFI) into `target/mobile/gen`, runs `mobile/ios/Check` against the real core, builds the
-SwiftUI shell for macOS (`target/mobile/UtopiaMobile-macos`, `UTOPIA_MOBILE_GRAPH`,
-`UTOPIA_TODAY`, `UTOPIA_SHOT=<png>`), type-checks it for the iOS Simulator SDK, and generates
-Kotlin bindings (`target/mobile/kotlin`) for an Android shell. `--ios` also
-links the simulator app; it needs `rustup target add aarch64-apple-ios-sim` and an installed
-iOS Simulator runtime (neither is present here; both are large downloads, so ask first).
+Mobile (PRD §14, `docs/ios-prd.md`): `cargo run -p xtask -- mobile` builds `utopia-ffi`,
+generates Swift bindings (UniFFI) into `target/mobile/gen`, runs `mobile/ios/Check` against the
+real core, type-checks the iPhone app against the iOS SDK in Swift 6 language mode, and
+generates Kotlin bindings (`target/mobile/kotlin`) for an Android shell. `--ios` also links
+`target/mobile/UtopiaMobile.app` for the simulator. To work in Xcode, `cd mobile/ios && make open`
+(XcodeGen writes the project from `mobile/ios/project.yml`). **`mobile/ios/AGENTS.md` has the rules for
+work on the iPhone app**: platform (iOS 27), build and run, the simulator, native navigation
+bars and toolbars, and its known limits.
 
 Sync (§12; secrets never go into the graph file, §15.6):
 - **Settings → Sync is the primary setup path.** Choose Off, Relay, Nearby Mac (mDNS), or
@@ -506,10 +507,11 @@ Known limits (pick these up deliberately, don't paper over them):
 - `open_settings` is deferred (`cx.defer`): gpui refuses to update a window from inside its own
   update, and global action handlers run during one, so Cmd+, pressed while Settings is focused
   would otherwise open a second Settings window instead of raising the first.
-- Mobile has not run on an iOS device or simulator here. `aarch64-apple-ios-sim` is installed and
-  the core builds for it; the iOS Simulator runtime is not (download stopped: the user chose to
-  focus on desktop first). The Swift bindings run against the real core on macOS and the SwiftUI shell
-  type-checks against the iOS SDK. Android: Kotlin bindings generate; no Compose shell (the PRD
+- The iPhone app (`docs/ios-prd.md`) has run on the iPhone 18 Pro simulator (iOS 27.2) and not on
+  a device. Widgets and the Control Center/Action button control (IO-2) are not built, so a
+  capture always starts from the app's own icon. The day log's time column shows equal times for
+  seeded blocks: a block's creation time is its ULID's timestamp, so `Store::set_clock` cannot
+  fake a day for a screenshot. Android: Kotlin bindings generate; no Compose shell (the PRD
   ships iOS first, §14.2, M4) and no kotlinc here to compile them.
 - PDF highlights select text the way a reader does (per-line rectangles + quoted text); Option-drag
   highlights an area instead. New highlights go under the block the PDF was opened from. PDF

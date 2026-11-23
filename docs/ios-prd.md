@@ -132,9 +132,11 @@ and a builder agent cannot open it, so everything necessary is written here.
 From top to bottom. The screen does not scroll as a whole; only the day log and, when it
 is long, the draft scroll.
 
-1. **Header.** The weekday in capitals (label font, 12 pt, muted), a "Today" pill, the
-   day's title (22/28 pt, semibold), and the sync status at the trailing edge (an 8 pt dot
-   and a short text, 13 pt). A 1 pt `line-soft` rule below it.
+1. **Header.** The system navigation bar, with the inline large title display mode
+   (`.inlineLarge`): the day's title as the title and the weekday as the subtitle. The
+   sync status (an 8 pt dot and a short text, 13 pt) and Find are toolbar buttons at the
+   trailing edge. Changed by the owner on 2026-11-23: every screen uses the native
+   navigation bar and toolbar, and there is no custom header, back or close button.
 2. **Day log.** Takes all the height that is left. It scrolls. See §4.4.
 3. **Suggestion row.** Shown only when the active line has a suggestion. See §4.6.
 4. **Compose box.** See §4.5.

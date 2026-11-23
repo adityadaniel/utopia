@@ -6,7 +6,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use utopia_ffi::{FfiError, Graph, SyncOutcome, SyncSummary};
+use utopia_ffi::{FfiError, Graph, OutlineLine, SyncOutcome, SyncSummary};
+
+/// One draft line: the phone's whole write (ios-prd §4.2).
+fn line(text: &str, depth: u32, todo: bool) -> OutlineLine {
+    OutlineLine {
+        text: text.into(),
+        depth,
+        todo,
+    }
+}
 
 /// The counts of a clean round; every other answer is the test's failure.
 fn synced(outcome: SyncOutcome) -> SyncSummary {
@@ -24,13 +33,14 @@ fn capture_links_and_backlinks() {
     let today = g.today().unwrap();
     assert_eq!(today.title, "November 2nd, 2026");
     assert_eq!(today.date.as_deref(), Some("2026-11-02"));
-    assert_eq!(today.blocks.len(), 1, "one empty block to type into");
-    // The first capture fills the empty block; the next ones append.
-    let b1 = g
-        .append_block(today.id.clone(), "Call [[Dana]] about #taxes".into())
+    // A visit makes no page (FR-1.2, AC-1.3); the first Send writes the day and its blocks.
+    assert_eq!(today.blocks.len(), 0, "a visit writes nothing");
+    let page = g
+        .append_outline(vec![line("Call [[Dana]] about #taxes", 0, false)])
         .unwrap();
+    let b1 = page.blocks[0].clone();
     assert_eq!(b1.plain, "Call Dana about #taxes");
-    g.append_block(today.id.clone(), "Lunch with [[Dana]]".into())
+    g.append_outline(vec![line("Lunch with [[Dana]]", 0, false)])
         .unwrap();
     let today = g.today().unwrap();
     assert_eq!(today.blocks.len(), 2);
@@ -75,9 +85,8 @@ fn phone_and_desktop_sync_through_a_relay() {
         )
     };
     // Offline capture on the phone, then sync.
-    let day = phone.today().unwrap();
     phone
-        .append_block(day.id.clone(), "idea on the train [[Atlas]]".into())
+        .append_outline(vec![line("idea on the train [[Atlas]]", 0, false)])
         .unwrap();
     assert!(sync(&phone).pushed > 0);
     sync(&laptop);
@@ -157,8 +166,8 @@ fn ac_14_3_a_slow_relay_does_not_block_other_calls() {
     let round = std::thread::spawn(move || g2.sync(url, "g1".into(), None, None));
     std::thread::sleep(Duration::from_millis(300));
     let started = Instant::now();
-    let day = g.today().unwrap();
-    g.append_block(day.id, "captured while syncing".into())
+    let _ = g.today().unwrap();
+    g.append_outline(vec![line("captured while syncing", 0, false)])
         .unwrap();
     let waited = started.elapsed();
     assert!(
