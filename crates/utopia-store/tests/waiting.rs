@@ -117,7 +117,14 @@ fn ac_12_3_waiting_changes_survive_compaction_and_reopen_then_apply() {
         }
         b.sync_index().unwrap();
         b.compact().unwrap();
-        assert!(b.doctor().unwrap().is_ok());
+        // §12.6: `doctor` reports the page, and the report is the only problem.
+        let report = b.doctor().unwrap();
+        assert_eq!(report.problems.len(), 1, "{:?}", report.problems);
+        assert!(
+            report.problems[0].starts_with("sync: page"),
+            "{:?}",
+            report.problems
+        );
     }
     {
         let mut b = open(&path);

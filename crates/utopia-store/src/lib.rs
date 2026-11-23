@@ -1417,6 +1417,22 @@ impl Store {
         Ok(n as usize)
     }
 
+    /// Unsent outbox rows for each page, for diagnostics (`utopia sync inspect`). Counts
+    /// only: the payloads are not read.
+    pub fn outbox_pending_by_page(&self) -> Result<Vec<(PageId, usize)>> {
+        self.read_barrier()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT page_id, count(*) FROM outbox WHERE sent_at IS NULL
+             GROUP BY page_id ORDER BY page_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((PageId(r.get::<_, String>(0)?), r.get::<_, i64>(1)? as usize))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     pub fn outbox_mark_sent(&self, seqs: &[i64]) -> Result<()> {
         let now = self.now();
         for s in seqs {

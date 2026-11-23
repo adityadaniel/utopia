@@ -532,3 +532,17 @@ fn ac_12_3_a_destination_holding_only_waiting_changes_has_less() {
     assert!(!mine.has_more_than(&whole).unwrap());
     assert!(!Frontier::default().has_more_than(&whole).unwrap());
 }
+
+/// §12.6 diagnostics: a copy that holds only the later change reports it as waiting and
+/// does not count it in its version; with both, nothing waits.
+#[test]
+fn ac_12_6_copy_state_names_changes_that_wait() {
+    let (first, later) = gap();
+    let partial = copy_state([later.as_slice()]).unwrap();
+    assert_eq!(partial.waiting.len(), 1);
+    assert_eq!(partial.waiting[0].peer, 7);
+    assert!(partial.version.peers().unwrap().is_empty());
+    let whole = copy_state([first.as_slice(), later.as_slice()]).unwrap();
+    assert!(whole.waiting.is_empty());
+    assert_eq!(whole.version.peers().unwrap().len(), 1);
+}

@@ -371,6 +371,48 @@ override the saved transport for a run (setup and config refuse to save while on
 and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the Keychain credentials without
 being saved.
 
+## Debugging sync
+
+When a device does not show what another device wrote, work through these steps in order.
+None of them prints a token, a passphrase or page text, except the titles of your own pages
+in `inspect`.
+
+1. **`utopia sync status --graph <file>`.** The mode, the target, the graph id, the queued
+   changes, and a `waiting:` line when a page holds changes from another device that
+   cannot apply yet. Make sure that every device shows the same graph id.
+2. **`utopia sync inspect --graph <file> [--deep] [--page <date|title|id>]`.** This compares
+   this device with its destination. It is read-only and works while the app is open. For
+   each page with a problem it prints the two versions (peers and change counts), the
+   waiting changes on each side, the cursor and the destination's head. It also prints
+   one or more findings, each with the action to take:
+   - `unsent`, `not_pulled_yet`, `destination_has_more`: run `utopia sync`.
+   - `waiting_here`: this device holds another device's changes that wait for earlier
+     ones. Run `inspect` on the other devices. The one that reports `this_device_has_more`
+     must run `utopia sync repair`.
+   - `destination_has_gap`: the destination holds changes whose earlier changes never
+     reached it. The same remedy applies.
+   - `this_device_has_more`, `not_on_destination`: run `utopia sync`. If the finding stays,
+     run `utopia sync repair` on this device.
+
+   Without `--deep`, it reads only the destination's page list, which is fast. With
+   `--deep` or `--page`, it also reads each page's copy (one full pull). `--json` gives the
+   same data for a script. The exit code is 1 when there is a finding.
+3. **`utopia doctor <file>`.** It reports `sync: page … holds changes from another device
+   (peer … a..b) that wait for earlier changes this device never received` for each
+   waiting page. The peer and counters name the waiting changes, not the missing ones:
+   the missing ones may come from another peer of the same device.
+4. **The sync log**, `<config>/logs/sync.jsonl` (on macOS
+   `~/Library/Application Support/Utopia/logs/sync.jsonl`). The app, `utopia sync` and the
+   daemon each write one JSON line for each round that did something, or whose state
+   changed. A line holds the time, the graph key, the source, the destination, the outcome,
+   the counts (`pushed`, `pulled_pages`, `imported`, `resent`, …), failed pages, queued
+   changes and waiting pages with their peers and counters. The log rotates at 1 MB and
+   keeps three files. Example: `tail -f …/sync.jsonl | jq -c '{ts, source, outcome, waiting}'`.
+5. **`utopia sync repair --graph <file>`** on the device that has more. The next sync
+   compares every page with the destination and sends what it lacks.
+6. **The relay itself.** For the Cloudflare relay, `npx wrangler tail` in
+   `relay-cloudflare/` shows each request. `GET /healthz` must answer `ok`.
+
 ## Sources
 
 - `PRD.md` §11.7 (encryption), §12.1–12.8 (sync design), and the security section on the

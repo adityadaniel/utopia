@@ -16,6 +16,8 @@
 pub mod e2e;
 pub mod folder;
 pub mod http;
+pub mod inspect;
+pub mod log;
 pub mod realtime;
 pub mod relay;
 pub mod runner;

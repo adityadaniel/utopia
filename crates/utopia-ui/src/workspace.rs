@@ -1015,7 +1015,12 @@ impl Workspace {
             };
             // 3. Import on the UI thread and announce merges.
             let applied = this.update(cx, |this, cx| {
-                let Workspace { app, sync, .. } = this;
+                let Workspace {
+                    app,
+                    sync,
+                    sync_target,
+                    ..
+                } = this;
                 let Some(runner) = sync.as_mut().filter(|r| r.is_generation(generation)) else {
                     return;
                 };
@@ -1044,6 +1049,21 @@ impl Workspace {
                     }
                 }
                 let status = utopia_sync::SyncStatus::from_result(&report, &app.read(cx).store);
+                // §12.6: the line is a few counts, built here; the file write is blocking
+                // I/O and goes to the background executor (rule 10).
+                if let Some(log) = cx.try_global::<crate::sync_runner::SyncLogGlobal>() {
+                    let log = log.0.clone();
+                    let line = log.entry(&report, &app.read(cx).store, sync_target.as_deref());
+                    if let Some(line) = line {
+                        cx.background_executor()
+                            .spawn(async move {
+                                if let Err(e) = log.append(&line) {
+                                    eprintln!("utopia: cannot write the sync log: {e}");
+                                }
+                            })
+                            .detach();
+                    }
+                }
                 runner.end_round(transport, &report, status);
                 cx.notify();
             });

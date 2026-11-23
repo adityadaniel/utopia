@@ -354,6 +354,12 @@ pub fn facts(cx: &gpui::App) -> SyncFacts {
 /// The round plus the window's loop task. The task is kept here so replacing the runner
 /// drops (and so cancels) the previous loop: it is replaced, never accumulated (`_tasks`
 /// would only release it with the workspace).
+/// Where the app writes its sync log lines (§12.6), set by the app for the open graph.
+/// Absent in tests and before a graph is open; then nothing is written.
+pub struct SyncLogGlobal(pub utopia_sync::log::SyncLog);
+
+impl gpui::Global for SyncLogGlobal {}
+
 pub struct SyncRunner {
     round: Round,
     pub loop_task: Option<gpui::Task<()>>,

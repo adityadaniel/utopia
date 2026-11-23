@@ -65,6 +65,17 @@ impl Frontier {
         VersionVector::decode(&bytes).map_err(DocError::from)
     }
 
+    /// Each peer and the number of its changes in this version, sorted, for diagnostics.
+    pub fn peers(&self) -> Result<Vec<(u64, u64)>> {
+        let mut out: Vec<(u64, u64)> = self
+            .to_vv()?
+            .iter()
+            .map(|(peer, end)| (*peer, (*end).max(0) as u64))
+            .collect();
+        out.sort();
+        Ok(out)
+    }
+
     /// Whether this version holds a change `other` does not: what a sender asks of a
     /// destination's copy before it decides to send more (§12.3 step 4, §12.7).
     pub fn has_more_than(&self, other: &Frontier) -> Result<bool> {
@@ -73,6 +84,36 @@ impl Frontier {
             .iter()
             .any(|(peer, end)| *end > theirs.get(peer).copied().unwrap_or(0)))
     }
+}
+
+/// What a copy of a page (a destination's snapshot and updates) holds, for diagnostics
+/// (§12.6): the version its changes add up to, and the changes in it that wait for earlier
+/// ones the copy does not have. A non-empty `waiting` on a destination's copy means some
+/// device marked changes sent that never reached it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CopyState {
+    pub version: Frontier,
+    pub waiting: Vec<WaitingRange>,
+}
+
+/// Read a copy of a page without building it; see [`CopyState`].
+pub fn copy_state<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<CopyState> {
+    let doc = LoroDoc::new();
+    for b in blobs {
+        doc.import(b)
+            .map_err(|e| DocError::Corrupt(e.to_string()))?;
+    }
+    let waiting = match doc
+        .export_pending_updates()
+        .map_err(|e| DocError::Crdt(e.to_string()))?
+    {
+        Some(bytes) => waiting_ranges(&bytes)?,
+        None => Vec::new(),
+    };
+    Ok(CopyState {
+        version: Frontier::from_vv(&doc.oplog_vv()),
+        waiting,
+    })
 }
 
 /// The version that a destination's copy of a page adds up to (its snapshot, then its

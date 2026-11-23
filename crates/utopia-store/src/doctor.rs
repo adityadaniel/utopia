@@ -175,6 +175,27 @@ impl Store {
                 r.problems.push(format!("invariant {name}: {id}"));
             }
         }
+        // §2.3.7, §12.6: another device's changes that cannot apply yet are kept, but the
+        // graph is missing what they say until the device that wrote them sends the rest.
+        for w in self.waiting_pages()? {
+            let ranges: Vec<String> = w
+                .ranges
+                .iter()
+                .map(|r| format!("peer {} {}..{}", r.peer, r.start, r.end))
+                .collect();
+            r.problems.push(format!(
+                "sync: page {} holds changes from another device ({}) that wait for \
+                 earlier changes this device never received; on that device, update Utopia \
+                 or run `utopia sync repair`, then sync (`utopia sync inspect` shows each \
+                 side)",
+                w.page,
+                if ranges.is_empty() {
+                    "unreadable".to_string()
+                } else {
+                    ranges.join(", ")
+                }
+            ));
+        }
         // 3: no cycles in parent_id.
         let parents: HashMap<String, Option<String>> = {
             let mut stmt = c.prepare("SELECT id, parent_id FROM block")?;

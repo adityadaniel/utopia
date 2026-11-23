@@ -115,7 +115,10 @@ one of them; `sync setup --graph <file> --mode relay|nearby|folder [--url …] [
 <file> [--json]` runs one sync to completion (then exit 0; 2 = Sync is Off, 3 = another
 process owns the graph), `sync status` reports the saved settings (and pages that wait for another
 device's changes), `sync repair` makes the next sync compare every page with the
-destination and send what it lacks, and `sync config` changes
+destination and send what it lacks, `sync inspect [--deep] [--page …]` compares this device
+with the destination read-only and says which device has to act (`docs/sync-modes.md`,
+"Debugging sync"; every round that did something also writes a line to
+`<config>/logs/sync.jsonl`), and `sync config` changes
 them (the continuous daemon exits 2/3 the same way, and on a clean stop flushes the store,
 releases the lock and removes its discovery file); the token and E2E passphrase come from
 stdin without echo or from

@@ -1797,3 +1797,60 @@ fn ac_12_3_the_destination_comparison_runs_once() {
         Some("from this build")
     );
 }
+
+/// §12.6 diagnostics on the incident: each device's `inspect` names its side of the gap,
+/// and says nothing once the sender repaired it.
+#[test]
+fn ac_12_6_inspect_names_each_side_of_a_gap() {
+    use utopia_sync::inspect::{inspect, Finding};
+    let mut i = incident();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+
+    let findings = |s: &mut Store, c: &mut SyncClient<RelayTransport>, page: &PageId| {
+        let r = inspect(s, c.transport_mut(), None, true).unwrap();
+        r.pages
+            .into_iter()
+            .find(|p| p.page_id == page.as_str())
+            .map(|p| p.findings)
+            .unwrap_or_default()
+    };
+    let mac = findings(&mut i.mac, &mut i.mac_client, &i.page);
+    assert!(mac.contains(&Finding::WaitingHere), "{mac:?}");
+    assert!(mac.contains(&Finding::DestinationHasGap), "{mac:?}");
+    let phone = findings(&mut i.phone, &mut i.phone_client, &i.page);
+    assert!(phone.contains(&Finding::ThisDeviceHasMore), "{phone:?}");
+    assert!(phone.contains(&Finding::DestinationHasGap), "{phone:?}");
+    assert!(!phone.contains(&Finding::WaitingHere), "{phone:?}");
+
+    utopia_sync::SyncEngine::reset_positions(&i.phone).unwrap();
+    i.phone_client.sync_once(&mut i.phone).unwrap();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    for (s, c) in [
+        (&mut i.mac, &mut i.mac_client),
+        (&mut i.phone, &mut i.phone_client),
+    ] {
+        let r = inspect(s, c.transport_mut(), None, true).unwrap();
+        assert!(!r.has_findings(), "{:?}", r.pages);
+    }
+}
+
+/// `inspect` reads; it never moves a cursor, a manifest or an outbox row.
+#[test]
+fn ac_12_6_inspect_writes_nothing() {
+    let mut i = incident();
+    let before = (
+        i.phone.sync_prefixed("cursor").unwrap(),
+        i.phone.sync_get("rev").unwrap(),
+        i.phone.outbox_count().unwrap(),
+        i.relay.manifest("utopia").rev,
+    );
+    utopia_sync::inspect::inspect(&mut i.phone, i.phone_client.transport_mut(), None, true)
+        .unwrap();
+    let after = (
+        i.phone.sync_prefixed("cursor").unwrap(),
+        i.phone.sync_get("rev").unwrap(),
+        i.phone.outbox_count().unwrap(),
+        i.relay.manifest("utopia").rev,
+    );
+    assert_eq!(before, after);
+}
