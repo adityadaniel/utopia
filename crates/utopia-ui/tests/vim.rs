@@ -1570,3 +1570,695 @@ fn vm_12_an_object_that_is_not_there_writes_nothing(cx: &mut TestAppContext) {
     assert_eq!(undo_depth(&app, cx), depth, "no undo step");
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
+
+// ------------------------------------------------------------------------ PR 2 — 2C
+// Linewise block commands: `dd yy p P J >> <<`, counted over siblings (VM-8, VM-10, VM-11).
+
+/// Every id a page's shard knows, live or tombstoned — rule 5 keeps the rows, which is what
+/// lets `p` put the same ids back.
+fn all_block_ids(
+    app: &Entity<AppState>,
+    page: &PageId,
+    cx: &mut VisualTestContext,
+) -> Vec<BlockId> {
+    app.update(cx, |app, _| {
+        let st = app.store.page_state(page).unwrap();
+        let mut ids: Vec<BlockId> = st.blocks.keys().cloned().collect();
+        ids.sort();
+        ids
+    })
+}
+
+/// A block's `(kind, checked)` as the store has it.
+fn kind_of(
+    app: &Entity<AppState>,
+    page: &PageId,
+    block: &BlockId,
+    cx: &mut VisualTestContext,
+) -> Option<(BlockKind, bool)> {
+    app.update(cx, |app, _| {
+        app.store
+            .page_state(page)
+            .unwrap()
+            .block(block)
+            .map(|b| (b.kind, b.checked))
+    })
+}
+
+/// Seed a child under `parent` (the Daily Notes seed helper writes roots only).
+fn seed_child(store: &mut Store, page: &PageId, parent: &BlockId, text: &str) -> BlockId {
+    let id = BlockId::new();
+    store
+        .execute(
+            page,
+            vec![Command::InsertBlock {
+                id: id.clone(),
+                parent: Some(parent.clone()),
+                after: None,
+                text: text.to_string(),
+                kind: BlockKind::Bullet,
+            }],
+            Default::default(),
+        )
+        .unwrap();
+    id
+}
+
+/// VM-8: `dd` tombstones the block and its subtree in one undo step, keeps the ids as
+/// tombstones (rule 5) and leaves the cursor on the NEXT block, not the previous one.
+#[gpui::test]
+fn vm_8_dd_deletes_the_subtree_in_one_undo_step(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["parent", "next", "last"]);
+        let child = seed_child(s, &page, &ids[0], "child");
+        seeded.replace(Some((page, ids, child)));
+    });
+    let (page, ids, child) = seeded.into_inner().expect("seeded");
+    let before = all_block_ids(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("d d");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("next".to_string(), 0), ("last".to_string(), 0)],
+        "the block and its subtree went"
+    );
+    assert_eq!(undo_depth(&app, cx), depth + 1, "`dd` is one undo step");
+    assert_eq!(
+        target_block(&ws, cx),
+        Some(ids[1].clone()),
+        "the cursor is on the NEXT block, as Vim's is (VM-8)"
+    );
+    assert_eq!(
+        all_block_ids(&app, &page, cx),
+        before,
+        "rule 5: the ids are still there, as tombstones"
+    );
+    assert_eq!(
+        kind_of(&app, &page, &child, cx),
+        Some((BlockKind::Bullet, false)),
+        "the child is a row, not a purge"
+    );
+
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("parent".to_string(), 0),
+            ("child".to_string(), 1),
+            ("next".to_string(), 0),
+            ("last".to_string(), 0)
+        ],
+        "one undo brings the whole subtree back"
+    );
+}
+
+/// VM-10, the headline: `dd` then `p` MOVES the blocks, so every id survives — and a
+/// `((reference))` to one of them still resolves, which a copy with new ids would break.
+#[gpui::test]
+fn vm_10_dd_then_p_moves_the_blocks_and_keeps_every_id(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["parent", "next", "last"]);
+        let child = seed_child(s, &page, &ids[0], "child");
+        // Something that points at the block which is about to move.
+        let other = s.create_page("Other").unwrap();
+        let ref_block = BlockId::new();
+        s.execute(
+            &other,
+            vec![Command::InsertBlock {
+                id: ref_block,
+                parent: None,
+                after: None,
+                text: format!("see (({child}))"),
+                kind: BlockKind::Bullet,
+            }],
+            Default::default(),
+        )
+        .unwrap();
+        seeded.replace(Some((page, ids, child, other)));
+    });
+    let (page, ids, child, other) = seeded.into_inner().expect("seeded");
+    let before = all_block_ids(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    // `dd` on `parent`, then `p` after `next`.
+    cx.simulate_keystrokes("d d p");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("next".to_string(), 0),
+            ("parent".to_string(), 0),
+            ("child".to_string(), 1),
+            ("last".to_string(), 0)
+        ],
+        "the blocks moved, subtree and all (VM-10)"
+    );
+    assert_eq!(
+        all_block_ids(&app, &page, cx),
+        before,
+        "every block id survived the move"
+    );
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth + 2,
+        "`dd` and `p` are one undo step each"
+    );
+    assert_eq!(
+        target_block(&ws, cx),
+        Some(ids[0].clone()),
+        "the cursor is on the block that moved"
+    );
+    let backlinks = app.update(cx, |app, _| {
+        app.store.block_backlinks(&child).unwrap().len()
+    });
+    assert_eq!(backlinks, 1, "the ((reference)) still resolves");
+    let _ = other;
+
+    // The next `p` is a COPY (Vim's second `p` pastes twice), so it mints new ids.
+    let before_second = all_block_ids(&app, &page, cx);
+    cx.simulate_keystrokes("p");
+    cx.run_until_parked();
+    let after_second = all_block_ids(&app, &page, cx);
+    assert_eq!(
+        after_second.len(),
+        before_second.len() + 2,
+        "two new blocks: the first paste moved, the second copies"
+    );
+    assert!(
+        before_second.iter().all(|id| after_second.contains(id)),
+        "and the copy did not take the originals' ids"
+    );
+}
+
+/// VM-10: `P` puts the pasted blocks above the cursor's block, with the same ids.
+// The test's own name spells the key.
+#[allow(non_snake_case)]
+#[gpui::test]
+fn vm_10_dd_then_P_puts_the_blocks_above(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["alpha", "beta"]);
+    });
+    let page = today_page(&app, cx);
+    let ids = live_blocks(&app, &page, cx);
+    let before = all_block_ids(&app, &page, cx);
+
+    // `dd` on `alpha` leaves the cursor on `beta`; `P` puts it back above.
+    cx.simulate_keystrokes("d d P");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("alpha".to_string(), 0), ("beta".to_string(), 0)],
+        "`P` restores it above the block the cursor is on"
+    );
+    assert_eq!(all_block_ids(&app, &page, cx), before, "same ids");
+    assert_eq!(target_block(&ws, cx), Some(ids[0].clone()));
+}
+
+/// VM-10: `yy` then `p` makes a copy — and a to-do stays a to-do, done state and all.
+#[gpui::test]
+fn vm_10_yy_then_p_copies_a_todo(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["done thing", "anchor"]);
+        s.set_block_kind(&page, &ids[0], BlockKind::Todo, true)
+            .unwrap();
+        seed_child(s, &page, &ids[0], "child");
+        seeded.replace(Some((page, ids)));
+    });
+    let (page, ids) = seeded.into_inner().expect("seeded");
+
+    // `yy` on the to-do, then `p` after the anchor (two rows down: the child, then the
+    // anchor).
+    cx.simulate_keystrokes("y y j j p");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("done thing".to_string(), 0),
+            ("child".to_string(), 1),
+            ("anchor".to_string(), 0),
+            ("done thing".to_string(), 0),
+            ("child".to_string(), 1)
+        ],
+        "a copy, new ids, after the anchor"
+    );
+    let copy = live_blocks(&app, &page, cx)[3].clone();
+    assert_ne!(copy, ids[0], "a copy, not the original");
+    assert_eq!(
+        kind_of(&app, &page, &copy, cx),
+        Some((BlockKind::Todo, true)),
+        "a checked to-do is still a checked to-do (VM-10)"
+    );
+    let original = live_blocks(&app, &page, cx)[0].clone();
+    assert_eq!(original, ids[0], "the original did not move or change");
+}
+
+/// VM-8: `3dd` is ONE undo step, and nine blocks (three roots with two children each) become
+/// tombstones rather than disappearing.
+#[gpui::test]
+fn vm_8_3dd_is_one_undo_step_and_tombstones_nine_blocks(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["r0", "r1", "r2", "kept"]);
+        for root in &ids[..3] {
+            seed_child(s, &page, root, "kid a");
+            seed_child(s, &page, root, "kid b");
+        }
+        seeded.replace(Some((page, ids)));
+    });
+    let (page, ids) = seeded.into_inner().expect("seeded");
+    assert_eq!(rows(&app, &page, cx).len(), 10, "3 x (1 + 2) + 1");
+    let before = all_block_ids(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("3 d d");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("kept".to_string(), 0)],
+        "the three roots and their six children went"
+    );
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth + 1,
+        "`3dd` is ONE undo step, not three (VM-8)"
+    );
+    assert_eq!(
+        all_block_ids(&app, &page, cx),
+        before,
+        "nine tombstones, none hard-deleted (rule 5)"
+    );
+    assert_eq!(
+        target_block(&ws, cx),
+        Some(ids[3].clone()),
+        "the next block"
+    );
+
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx).len(),
+        10,
+        "one undo brings all nine back"
+    );
+    assert_eq!(undo_depth(&app, cx), depth);
+}
+
+/// VM-8: `J` appends the next visible block's text with a space, re-parents its children and
+/// leaves the joined block as a tombstone (rule 5).
+#[gpui::test]
+fn vm_8_join_tombstones_the_joined_block(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["one", "two", "three"]);
+        let kid = seed_child(s, &page, &ids[1], "under two");
+        seeded.replace(Some((page, ids, kid)));
+    });
+    let (page, ids, kid) = seeded.into_inner().expect("seeded");
+    let before = all_block_ids(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("J");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("one two".to_string(), 0),
+            ("under two".to_string(), 1),
+            ("three".to_string(), 0)
+        ],
+        "the next block's text joined on with a space, its child re-parented"
+    );
+    assert_eq!(undo_depth(&app, cx), depth + 1, "`J` is one undo step");
+    assert_eq!(
+        all_block_ids(&app, &page, cx),
+        before,
+        "the joined block is a tombstone, not a purge (rule 5)"
+    );
+    app.update(cx, |app, _| {
+        let st = app.store.page_state(&page).unwrap();
+        assert!(
+            st.block(&ids[1]).unwrap().deleted_at.is_some(),
+            "tombstoned"
+        );
+        assert_eq!(
+            st.block(&ids[1]).unwrap().text,
+            "two",
+            "its text is not lost"
+        );
+        assert_eq!(
+            st.parent_of(&kid),
+            Some(ids[0].clone()),
+            "its child moved up"
+        );
+    });
+}
+
+/// VM-8: `>>` and `<<` reuse the editor's own indent and outdent, so a count of one works
+/// and the caret stays in the block.
+#[gpui::test]
+fn vm_8_indent_and_outdent_act_on_the_block(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["a", "b"]);
+    });
+    let page = today_page(&app, cx);
+    let ids = live_blocks(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("j > >");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("a".to_string(), 0), ("b".to_string(), 1)],
+        "`>>` indents the block under the caret"
+    );
+    assert_eq!(undo_depth(&app, cx), depth + 1, "one undo step");
+    assert_eq!(
+        target_block(&ws, cx),
+        Some(ids[1].clone()),
+        "the caret stayed"
+    );
+
+    cx.simulate_keystrokes("< <");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("a".to_string(), 0), ("b".to_string(), 0)],
+        "`<<` outdents it again"
+    );
+    assert_eq!(undo_depth(&app, cx), depth + 2, "one undo step each");
+}
+
+/// VM-11: a block yank writes the register AND the system clipboard as Markdown; a delete
+/// writes the register only. `p` pastes from the register while the clipboard still holds
+/// Utopia's own write, and from the clipboard once something else has replaced it.
+#[gpui::test]
+fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
+    cx: &mut TestAppContext,
+) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["parent", "anchor"]);
+        seed_child(s, &page, &ids[0], "child");
+    });
+    let page = today_page(&app, cx);
+
+    cx.simulate_keystrokes("y y");
+    cx.run_until_parked();
+    assert_eq!(
+        clipboard(cx),
+        "- parent\n  - child\n",
+        "a yank puts the blocks on the clipboard as nested Markdown (VM-11)"
+    );
+    assert!(
+        matches!(utopia_ui::vim::last(), Register::Blocks { ref markdown, .. } if markdown == "- parent\n  - child\n"),
+        "and in the block register"
+    );
+
+    // The clipboard is still ours, so `p` uses the structured register: a copy with new ids.
+    // Two rows down (the child, then the anchor) puts the copy below both.
+    cx.simulate_keystrokes("j j p");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("parent".to_string(), 0),
+            ("child".to_string(), 1),
+            ("anchor".to_string(), 0),
+            ("parent".to_string(), 0),
+            ("child".to_string(), 1)
+        ]
+    );
+
+    // Something else takes the clipboard: `p` now pastes that, as characters.
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("XYZ".to_string()));
+    cx.simulate_keystrokes("0 p");
+    cx.run_until_parked();
+    let text = field_text(&ws, cx);
+    assert!(
+        text.starts_with('X') || text.contains("XYZ"),
+        "the changed clipboard is what `p` pastes in: {text:?}"
+    );
+    // A delete writes the register only.
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".to_string()));
+    cx.simulate_keystrokes("j 0 d d");
+    cx.run_until_parked();
+    assert_eq!(clipboard(cx), "sentinel", "`dd` writes the register only");
+    assert!(
+        matches!(utopia_ui::vim::last(), Register::Blocks { .. }),
+        "but the register has the blocks"
+    );
+    let _ = ws;
+}
+
+/// VM-11: `p` of clipboard text with line breaks is today's outline paste.
+#[gpui::test]
+fn vm_11_pasting_multiline_clipboard_text_makes_blocks(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["anchor"]);
+    });
+    let page = today_page(&app, cx);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+        "one\n  two\nthree".to_string(),
+    ));
+    cx.simulate_keystrokes("p");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("anchor".to_string(), 0),
+            ("one".to_string(), 0),
+            ("two".to_string(), 1),
+            ("three".to_string(), 0)
+        ],
+        "line breaks paste as an outline, as Cmd+V does"
+    );
+    let _ = ws;
+}
+
+/// The whole set of block commands in one session: `doctor` must stay clean (rule 2) and
+/// every id must still resolve.
+#[gpui::test]
+fn vm_8_a_scripted_block_session_leaves_doctor_clean(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["a", "b", "c", "d"]);
+        seed_child(s, &page, &ids[0], "a1");
+        let other = s.create_page("Other").unwrap();
+        s.execute(
+            &other,
+            vec![Command::InsertBlock {
+                id: BlockId::new(),
+                parent: None,
+                after: None,
+                text: format!("(({})) and (({}))", ids[0], ids[1]),
+                kind: BlockKind::Todo,
+            }],
+            Default::default(),
+        )
+        .unwrap();
+        seeded.replace(Some((page, ids, other)));
+    });
+    let (page, ids, other) = seeded.into_inner().expect("seeded");
+    let before = all_block_ids(&app, &page, cx);
+
+    for keys in [
+        "y y", "j p", "d d", "p", "J", "j > >", "< <", "3 d d", "p", "j p",
+    ] {
+        cx.simulate_keystrokes(keys);
+        cx.run_until_parked();
+        app.update(cx, |app, _| {
+            let report = app.store.doctor().unwrap();
+            assert!(report.is_ok(), "rule 2 after `{keys}`\n{report:?}");
+        });
+    }
+    cx.simulate_keystrokes("escape escape");
+    cx.run_until_parked();
+
+    let after = all_block_ids(&app, &page, cx);
+    for id in &before {
+        assert!(
+            after.contains(id),
+            "id {id} left the graph: nothing here hard-deletes (rule 5)"
+        );
+    }
+    let refs = app.update(cx, |app, _| {
+        (
+            app.store.block_backlinks(&ids[0]).unwrap().len(),
+            app.store.block_backlinks(&ids[1]).unwrap().len(),
+        )
+    });
+    assert_eq!(refs, (1, 1), "both ((references)) still resolve");
+    let _ = (ws, other);
+    app.update(cx, |app, _| {
+        let report = app.store.doctor().unwrap();
+        assert!(report.is_ok(), "rule 2 at the end\n{report:?}");
+    });
+}
+
+// ------------------------------------------------------------------------ PR 2 — 2D
+// Text objects. `iw aw iW aW i( a( i[ a[ i{ a{ i" a" i' a' i\`` are wired through
+// `utopia_core::vim::textobj::range_of` (2B's table); `il` and `al` are the Utopia reference
+// object and answer `None` until PR 4, which is the case pinned here.
+
+/// 2D: `il` / `al` — a `[[page]]`, `#tag` or `((block))` under the cursor — are PR 4, so
+/// they write nothing at all: no text, no undo step, and no trip into Insert.
+#[gpui::test]
+fn vm_8_a_reference_text_object_is_pr_4_and_writes_nothing(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["see [[Alpha]] now", "see #tag now"]);
+        s.create_page("Alpha").unwrap();
+    });
+    let page = today_page(&app, cx);
+    let before = rows(&app, &page, cx);
+    let depth = undo_depth(&app, cx);
+
+    // On the `h` of `Alpha`, inside the brackets, then `il` and `al`.
+    cx.simulate_keystrokes("0 5 l d i l");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("d a l");
+    cx.run_until_parked();
+
+    assert_eq!(rows(&app, &page, cx), before, "no text changed");
+    assert_eq!(undo_depth(&app, cx), depth, "and no undo step");
+    assert_eq!(mode(&ws, cx), Mode::Normal);
+
+    // `c` with it does not enter Insert either: nothing to change.
+    cx.simulate_keystrokes("c i l");
+    cx.run_until_parked();
+    assert_eq!(
+        mode(&ws, cx),
+        Mode::Normal,
+        "`cil` stays in Normal until PR 4"
+    );
+    assert_eq!(rows(&app, &page, cx), before);
+}
+
+/// VM-10: `dd` on one page and `p` on another MOVES the blocks, keeping every id. The store
+/// does the restore and the move in one undo group, because `cross_page_move` refuses a
+/// block that is not live.
+#[gpui::test]
+fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["alpha", "beta"]);
+        let child = seed_child(s, &page, &ids[0], "alpha child");
+        // The destination page needs a block to click into: Vim's cursor lives in one.
+        let other = s.create_page("Other").unwrap();
+        let anchor = BlockId::new();
+        s.execute(
+            &other,
+            vec![Command::InsertBlock {
+                id: anchor.clone(),
+                parent: None,
+                after: None,
+                text: "here".to_string(),
+                kind: BlockKind::Bullet,
+            }],
+            Default::default(),
+        )
+        .unwrap();
+        seeded.replace(Some((page, ids, child, other, anchor)));
+    });
+    let (page, ids, child, other, anchor) = seeded.into_inner().expect("seeded");
+    let before = all_block_ids(&app, &page, cx);
+
+    // `dd` on `alpha`, which leaves the cursor on `beta`.
+    cx.simulate_keystrokes("d d");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx), vec![("beta".to_string(), 0)]);
+
+    // Open the other page and click into its block: the cut is still in the register.
+    let other2 = other.clone();
+    ws.update_in(cx, |w, window, cx| {
+        w.open(other2, None, None, false, window, cx)
+    });
+    cx.run_until_parked();
+    let selector: &'static str = Box::leak(format!("text-{}", anchor.0).into_boxed_str());
+    let row = cx.debug_bounds(selector).expect("the destination row");
+    cx.simulate_click(row.center(), Modifiers::default());
+    cx.run_until_parked();
+    assert_eq!(target_block(&ws, cx), Some(anchor.clone()));
+
+    cx.simulate_keystrokes("p");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &other, cx),
+        vec![
+            ("here".to_string(), 0),
+            ("alpha".to_string(), 0),
+            ("alpha child".to_string(), 1)
+        ],
+        "the blocks were restored and moved into this page (VM-10)"
+    );
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("beta".to_string(), 0)],
+        "and left the page they were on"
+    );
+    assert_eq!(
+        all_block_ids(&app, &page, cx),
+        before,
+        "every id is still in the source shard, and the moved ones kept theirs"
+    );
+    assert_eq!(
+        app.update(cx, |app, _| app.store.block_page(&ids[0]).unwrap()),
+        other,
+        "the moved block resolves to the page it moved to"
+    );
+    assert_eq!(
+        app.update(cx, |app, _| app.store.block_page(&child).unwrap()),
+        other,
+        "the subtree came too"
+    );
+}
+
+/// VM-10: after the delete was undone the blocks are live again, so `p` copies instead of
+/// moving them — the ids a cut names must never be dragged a second time.
+#[gpui::test]
+fn vm_10_p_after_an_undone_cut_copies(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["alpha", "beta"]);
+    });
+    let page = today_page(&app, cx);
+    let before = all_block_ids(&app, &page, cx);
+
+    cx.simulate_keystrokes("d d");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx), vec![("beta".to_string(), 0)]);
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![("alpha".to_string(), 0), ("beta".to_string(), 0)],
+        "the undo brought the block back"
+    );
+
+    // The cut is no longer a cut: `p` copies with a new id.
+    cx.simulate_keystrokes("j p");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("alpha".to_string(), 0),
+            ("beta".to_string(), 0),
+            ("alpha".to_string(), 0)
+        ],
+        "a copy, not a move"
+    );
+    let after = all_block_ids(&app, &page, cx);
+    assert_eq!(after.len(), before.len() + 1, "a new id was minted");
+    assert!(before.iter().all(|id| after.contains(id)));
+    let _ = ws;
+}

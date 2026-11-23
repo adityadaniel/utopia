@@ -41,7 +41,21 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
-    /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
+    DeleteBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    YankBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    PasteBlocks {
+        before: bool,
+        count: usize,
+    },
+    JoinNext {
+        count: usize,
+    },
     Navigate {
         up: bool,
         x: Option<Pixels>,
@@ -1468,7 +1482,7 @@ impl BlockEditor {
     /// taken as committed first (§13.5). Deferring the commit instead would let the host
     /// remove the row being composed and then queue a `begin` on its neighbour, which the
     /// focus change from that removal discards — the caret would not continue next door.
-    fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
+    pub(crate) fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }

@@ -6,7 +6,7 @@ use utopia_core::undo::Caret;
 use utopia_core::vim::{
     motion, operator, textobj, Command, InsertAt, Key, Motion, Operator, Parser, Step, Target,
 };
-use utopia_core::{BlockId, BlockKind, PageId};
+use utopia_core::{BlockId, PageId};
 
 use crate::actions::{VIM_INSERT_CONTEXT, VIM_NORMAL_CONTEXT, VIM_VISUAL_CONTEXT};
 use crate::editor::{BlockEditor, EditorEvent};
@@ -86,16 +86,14 @@ pub enum Register {
     },
 }
 
-#[derive(Clone, Debug)]
-pub struct TreeRow {
-    pub depth: usize,
-    pub text: String,
-    pub kind: BlockKind,
-    pub checked: bool,
-}
+pub use utopia_core::outline::TreeRow;
 
 thread_local! {
     static REGISTER: RefCell<Register> = const { RefCell::new(Register::Chars(String::new())) };
+    /// What Utopia itself last put on the system clipboard (VM-11). `p` uses the clipboard
+    /// only when its text differs from this, so a block yank survives the round trip as a
+    /// structured register instead of coming back as Markdown.
+    static CLIPBOARD: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn remember(register: Register) {
@@ -104,6 +102,22 @@ pub fn remember(register: Register) {
 
 pub fn last() -> Register {
     REGISTER.with(|r| r.borrow().clone())
+}
+
+pub fn clipboard_written(text: &str) {
+    CLIPBOARD.with(|c| *c.borrow_mut() = Some(text.to_string()));
+}
+
+pub fn clipboard_is_ours(text: &str) -> bool {
+    CLIPBOARD.with(|c| c.borrow().as_deref() == Some(text))
+}
+
+pub fn forget_cut() {
+    REGISTER.with(|r| {
+        if let Register::Blocks { cut, .. } = &mut *r.borrow_mut() {
+            *cut = None;
+        }
+    });
 }
 
 pub fn key_from_keystroke(keystroke: &Keystroke) -> Option<Key> {
@@ -364,6 +378,14 @@ impl BlockEditor {
                 count,
                 register,
             } => self.vim_operate(op, target, count, register, window, cx),
+            Command::Paste {
+                before,
+                count,
+                register,
+            } => self.vim_paste(before, count, register, window, cx),
+            Command::JoinNext { count } => {
+                self.emit_after_commit(EditorEvent::JoinNext { count }, cx)
+            }
             Command::Undo { count } => {
                 for _ in 0..count.max(1) {
                     self.history(true, cx);
@@ -410,6 +432,7 @@ impl BlockEditor {
         remember(Register::Chars(text.to_string()));
         if clipboard || register == Some('+') {
             cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            clipboard_written(text);
         }
     }
 
@@ -559,6 +582,10 @@ impl BlockEditor {
 
     /// `d`, `c` and `y` with a motion or a text object: one range from
     /// [`utopia_core::vim::operator`] or [`utopia_core::vim::textobj`], one undo step.
+    ///
+    /// A linewise operator (`dd`, `yy`, `>>`, `<<`) acts on BLOCKS rather than on text, so it
+    /// is one host plan; only `cc` stays here, because it changes the block's own text and
+    /// leaves its children (VM-8, 2B).
     fn vim_operate(
         &mut self,
         op: Operator,
@@ -571,16 +598,33 @@ impl BlockEditor {
         if self.field().composing() {
             return;
         }
+        if matches!(target, Target::Line) {
+            // A count on `>>` / `<<` would take the next siblings too; multi-block indent is
+            // PR 4, so a count there indents the block the caret is on and nothing else.
+            let event = match op {
+                Operator::Delete => Some(EditorEvent::DeleteBlocks {
+                    count: count.max(1),
+                    register,
+                }),
+                Operator::Yank => Some(EditorEvent::YankBlocks {
+                    count: count.max(1),
+                    register,
+                }),
+                Operator::Indent => Some(EditorEvent::Indent),
+                Operator::Outdent => Some(EditorEvent::Outdent),
+                Operator::Change => None,
+            };
+            if let Some(event) = event {
+                self.emit_after_commit(event, cx);
+                return;
+            }
+        }
         let text = self.field().text.clone();
         let cursor = self.field().cursor();
         let count = count.max(1);
         let range = match target {
             // `cc`: the block's text. Its children are other blocks, so they stay (VM-8).
-            // `dd`, `yy`, `>>` and `<<` act on blocks and are PR 2C.
-            Target::Line => match op {
-                Operator::Change => 0..text.len(),
-                _ => return,
-            },
+            Target::Line => 0..text.len(),
             Target::Object(obj) => match textobj::range_of(&text, cursor, obj) {
                 Some(range) => range,
                 // Not in such an object: the command writes nothing.
@@ -626,9 +670,89 @@ impl BlockEditor {
                 self.vim_mut().mode = Mode::Insert;
                 self.refresh_autocomplete(cx);
             }
-            // PR 2C: `>>` and `<<` indent blocks.
+            // `>` with a motion (`>w`) would indent lines; that is PR 4.
             Operator::Indent | Operator::Outdent => {}
         }
+    }
+
+    /// `p` / `P` (VM-10, VM-11).
+    ///
+    /// What gets pasted: a block register goes to the host as one plan (it makes or moves
+    /// blocks); characters insert at the caret, and clipboard text with line breaks is today's
+    /// outline paste. The system clipboard wins over the register whenever its text is not what
+    /// Utopia last put there, so copying in another app and then `p` pastes that.
+    fn vim_paste(
+        &mut self,
+        before: bool,
+        count: usize,
+        register_char: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        // `"_p` is the black hole: it pastes nothing at all.
+        if register_char == Some('_') {
+            return;
+        }
+        let count = count.max(1);
+        let clipboard = cx.read_from_clipboard().and_then(|c| c.text());
+        let register = last();
+        // A cut whose blocks are still tombstones wins over the clipboard: `dd` then `p` is
+        // the MOVE that keeps ids (VM-10), and the clipboard cannot carry a linewise flag, so
+        // preferring it would silently turn the move into a copy. `"+` still asks for the
+        // clipboard by name.
+        let pending_cut = matches!(&register, Register::Blocks { cut: Some(_), .. });
+        let pasted = match clipboard {
+            Some(text) if register_char == Some('+') => Register::Chars(text),
+            Some(_) if pending_cut => register,
+            Some(text) if !clipboard_is_ours(&text) => Register::Chars(text),
+            _ => register,
+        };
+        match pasted {
+            Register::Blocks { tree, .. } if register_char != Some('+') && !tree.is_empty() => {
+                self.emit_after_commit(EditorEvent::PasteBlocks { before, count }, cx)
+            }
+            Register::Blocks { markdown, .. } => {
+                // The clipboard copy of a block yank is Markdown, which is all a system paste
+                // can carry (the clipboard has no linewise flag).
+                self.vim_paste_text(&markdown, before, count, window, cx)
+            }
+            Register::Chars(text) => self.vim_paste_text(&text, before, count, window, cx),
+        }
+    }
+
+    /// Insert `text` at the caret (`P`) or just after it (`p`), as one undo step. Text with a
+    /// line break goes to the host as an outline paste, which is what Cmd+V does.
+    fn vim_paste_text(
+        &mut self,
+        text: &str,
+        before: bool,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if text.trim_end_matches('\n').contains('\n') {
+            return self.emit_after_commit(EditorEvent::PasteOutline(text), cx);
+        }
+        let line = text.trim_end_matches('\n');
+        if line.is_empty() {
+            return;
+        }
+        let repeated = line.repeat(count.max(1));
+        let field = self.field();
+        let start = if before {
+            field.cursor()
+        } else {
+            next_grapheme(&field.text, field.cursor())
+        };
+        // Vim leaves the cursor on the last character it pasted; `clamp_normal_cursor`
+        // puts it back on a grapheme once the text is in the buffer.
+        let after = start + repeated.len();
+        self.discrete_edit(start..start, &repeated, Some(after), window, cx);
+        self.clamp_normal_cursor(cx);
     }
 }
 
