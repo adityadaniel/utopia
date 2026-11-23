@@ -25,6 +25,7 @@ it proves. "The tests pass" is not proof that a feature works.
 - [ ] **Looked at** every screenshot captured, not just checked the run succeeded
 - [ ] Screenshots committed under `docs/verification/<branch>/` and inlined above
 - [ ] `cargo run -p xtask --release -- bench --ui` (only if performance-sensitive)
+- [ ] `make sync-fuzz` (only if the sync engine, the store's import/outbox path or `utopia-doc` changed)
 - [ ] Settings → Help screenshots regenerated if the UI they show changed
       (`cargo run -p xtask -- help-shots`)
 
