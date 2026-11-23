@@ -243,6 +243,84 @@ mod tests {
     use super::*;
     use crate::command::TextEdit;
 
+    // ---- Adversarial tests for the run fold (added during review of PR 2) ----
+
+    /// A run that outlives the 1000-group limit must not fold groups from BEFORE it.
+    /// `push` decrements `run_start` on each eviction, so the worry is that it saturates at
+    /// 0 while pre-run groups are still on the stack.
+    #[test]
+    fn a_run_that_outlives_the_limit_never_folds_the_edit_before_it() {
+        let mut u = UndoStack::new();
+        // One sealed group before the run, which must survive as its own step.
+        u.push(edit_group("BEFORE", "b0", 0));
+        u.seal();
+        u.begin_run();
+        // Push far more groups than the stack may hold, each sealed so none coalesce.
+        for i in 0..(LIMIT + 50) {
+            u.push(edit_group("run", &format!("b{}", i + 1), i as i64 * 10_000));
+            u.seal();
+        }
+        u.end_run();
+        assert!(u.len() <= LIMIT, "the limit still holds: {}", u.len());
+        // Whatever survived, undoing everything must not panic.
+        let mut steps = 0;
+        while u.can_undo() {
+            let Some(g) = u.begin(Direction::Undo) else {
+                break;
+            };
+            u.finish(Direction::Undo, g);
+            steps += 1;
+            assert!(steps <= LIMIT + 2, "undo did not terminate");
+        }
+    }
+
+    /// `begin_run` twice without `end_run` is documented as a no-op. Prove the second call
+    /// does not move the start forward and orphan the groups pushed since the first.
+    #[test]
+    fn opening_a_run_twice_keeps_the_first_start() {
+        let mut u = UndoStack::new();
+        u.begin_run();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.begin_run(); // must not re-anchor here
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        u.end_run();
+        assert_eq!(u.len(), 1, "both groups fold into one step");
+    }
+
+    /// `end_run` with no run open must do nothing, not fold the whole history.
+    #[test]
+    fn closing_a_run_that_was_never_opened_folds_nothing() {
+        let mut u = UndoStack::new();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        let before = u.len();
+        u.end_run();
+        assert_eq!(u.len(), before, "the history is untouched");
+    }
+
+    /// A run left open must not keep folding every later edit into one step forever.
+    /// `begin(Direction::Undo)` closes it, which is the only guarantee the stack makes.
+    #[test]
+    fn an_undo_closes_a_run_that_nobody_closed() {
+        let mut u = UndoStack::new();
+        u.begin_run();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        let g = u.begin(Direction::Undo).expect("something to undo");
+        u.finish(Direction::Undo, g);
+        assert!(!u.in_run(), "the undo closed the run");
+        // A later edit is its own step, not folded with the run.
+        u.push(edit_group("three", "b3", 20_000));
+        u.seal();
+        assert!(u.can_undo());
+    }
+
     fn text_group(block: &str, at: i64) -> UndoGroup {
         let cmd = Command::SetBlockText {
             id: block.into(),
