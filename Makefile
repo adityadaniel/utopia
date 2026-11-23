@@ -17,7 +17,7 @@ INSTALL_DIR ?= /Applications
 SCRATCH ?= $(CURDIR)/target/scratch
 
 .DEFAULT_GOAL := help
-.PHONY: help run dev check build test clippy fmt fmt-check bench relay-check app zip install doctor clean-debug
+.PHONY: help run dev check build test clippy fmt fmt-check bench relay-check sync-fuzz app zip install doctor clean-debug
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -53,6 +53,11 @@ relay-check: ## Cloudflare relay: tsc, vitest, then the contract and differentia
 	cd relay-cloudflare && npm test
 	$(CARGO) test -p utopia-syncd
 	relay-cloudflare/scripts/test-against-rust-client.sh
+
+# 2,000 seeds of crates/utopia-sync/tests/convergence.rs (make check runs 20). SEEDS=n changes
+# the count; a failure names its seed, rerun one with UTOPIA_SYNC_FUZZ_SEED=<seed>.
+sync-fuzz: ## Multi-device sync convergence, the long run (about 2 minutes)
+	UTOPIA_SYNC_FUZZ_SEEDS=$(or $(SEEDS),2000) $(CARGO) test --release -p utopia-sync --test convergence -- --ignored
 
 bench: ## Performance budgets (release build; opens a window for under a second)
 	$(CARGO) build --release -p utopia-app

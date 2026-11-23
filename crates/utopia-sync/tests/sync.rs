@@ -1854,3 +1854,47 @@ fn ac_12_6_inspect_writes_nothing() {
     );
     assert_eq!(before, after);
 }
+
+/// Found by `tests/convergence.rs` (seed 508): the missing changes reach the relay only
+/// inside the sender's compaction snapshot, which covers sequences the waiting device has
+/// already passed. A pull from its cursor never returns that snapshot, so a waiting page is
+/// read from 0 and heals without any repair.
+#[test]
+fn ac_12_6_a_waiting_page_heals_from_the_senders_compaction_snapshot() {
+    let mut i = incident();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert!(i.mac.has_waiting(&i.page).unwrap(), "the gap is there");
+
+    // The phone never repairs. It pushes enough edits for the relay to ask for
+    // compaction, and the Mac pulls them (they wait too) before the phone's snapshot,
+    // which holds the whole page, lost changes included, replaces the log.
+    let block = write(&mut i.phone, &i.page, "edited a lot");
+    for n in 0..=utopia_sync::SNAPSHOT_TAIL_UPDATES {
+        i.phone
+            .set_block_text(&i.page, &block, &format!("edit {n}"), None, None)
+            .unwrap();
+        i.phone.commit_block(&i.page, &block).unwrap();
+    }
+    let mut engine = utopia_sync::SyncEngine::new(&i.phone).unwrap();
+    let mut t = RelayTransport::new(i.relay.clone(), "utopia");
+    let out = engine.prepare(&mut i.phone).unwrap();
+    let inc = utopia_sync::exchange(&mut t, out).unwrap();
+    assert!(!inc.compact.is_empty(), "the relay asks for compaction");
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert!(i.mac.has_waiting(&i.page).unwrap(), "still waiting");
+    engine.apply(&mut i.phone, inc).unwrap();
+    let out = engine.prepare(&mut i.phone).unwrap();
+    assert_eq!(out.snapshots.len(), 1, "the phone queued its snapshot");
+    let inc = utopia_sync::exchange(&mut t, out).unwrap();
+    assert_eq!(inc.snapshots_sent, 1, "the phone compacted the relay");
+    engine.apply(&mut i.phone, inc).unwrap();
+
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert_eq!(i.mac.waiting_count().unwrap(), 0, "nothing waits any more");
+    let seen = texts(&mut i.mac, &i.page);
+    assert!(seen.contains(&"Now syncing".to_string()), "{seen:?}");
+    assert!(
+        seen.contains(&"Testing from mobile".to_string()),
+        "{seen:?}"
+    );
+}

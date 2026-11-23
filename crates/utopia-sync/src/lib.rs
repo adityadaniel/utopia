@@ -399,6 +399,8 @@ pub struct Outgoing {
     /// Every page with a shard here, so a destination that lacks one entirely gets it
     /// (§12.3 step 4).
     pub local_pages: Vec<PageId>,
+    /// Pages holding changes that wait for missing ones (`page_pending`).
+    pub waiting: BTreeSet<PageId>,
 }
 
 /// What one exchange did to one page (§12.3 steps 2–4): the one place the round's
@@ -588,9 +590,14 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
             // A cursor from another transport (or another relay) is not comparable with
             // this manifest's `head_seq`: treat the page as never pulled (§12.3 step 4).
             let local = out.cursors.get(&page).filter(|c| c.space == space);
-            let up_to_date = local.is_some_and(|c| c.covers(&space, p.head_seq));
+            // A page whose changes wait is read from 0 on every fresh manifest: the missing
+            // changes may arrive inside a compaction snapshot that covers sequences this
+            // device already passed, and a pull from its cursor never returns that
+            // snapshot (found by `tests/convergence.rs`, seed 508).
+            let waits = out.waiting.contains(&page);
+            let up_to_date = !waits && local.is_some_and(|c| c.covers(&space, p.head_seq));
             if !up_to_date {
-                let since = local.map_or(0, |c| c.pos);
+                let since = if waits { 0 } else { local.map_or(0, |c| c.pos) };
                 match t.pull(&page, since) {
                     Ok(resp) => {
                         // First contact in this space: everything the destination holds
@@ -762,6 +769,7 @@ impl SyncEngine {
             }
         }
         out.local_pages = store.all_page_ids()?;
+        out.waiting = store.waiting_pages()?.into_iter().map(|w| w.page).collect();
         out.blob_puts = store.blobs_to_upload(BLOBS_PER_ROUND)?;
         out.blob_wants = store.missing_blobs()?;
         out.blob_wants.truncate(BLOBS_PER_ROUND);

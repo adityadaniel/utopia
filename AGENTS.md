@@ -70,6 +70,18 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
+A change to the sync engine or the store's import/outbox path (`crates/utopia-sync`,
+`crates/utopia-doc`, `utopia-store`'s `import_batch`, `waiting.rs`, `sync_destination.rs`, the
+outbox) also runs `make sync-fuzz`: 2,000 seeds of `crates/utopia-sync/tests/convergence.rs`
+(three devices on disk, two relays × two graph ids, switches with and without a reset,
+restarts, compaction, edit bursts past the relay's snapshot threshold, and outbox rows marked
+sent without a push). It asserts that no page differs between devices without some device's
+`utopia sync inspect` naming it, that a device holding changes it cannot apply says so in its
+own status, and that every line converges once the devices `inspect` names have repaired.
+`make check` runs 20 of those seeds. A failure prints its seed and steps; rerun one with
+`UTOPIA_SYNC_FUZZ_SEED=<seed>`. Block ids and Loro peers are random, so a seed can fail on one
+run only: rerun it a few times before calling it fixed.
+
 A change to either sync relay (`crates/utopia-syncd`, `relay-cloudflare/`), the wire format or the
 sync client also runs `make relay-check`: the Worker's `tsc` and vitest suite, `cargo test -p
 utopia-syncd`, then `relay-cloudflare/scripts/test-against-rust-client.sh`, which starts `wrangler dev
