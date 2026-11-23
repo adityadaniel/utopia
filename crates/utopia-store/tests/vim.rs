@@ -137,7 +137,15 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
 
     // `dd`: one plan, one undo step.
     let deleted_at = s.now();
-    let plan = outline::delete_blocks(s.page_state(&src).unwrap(), &a, 1, deleted_at).unwrap();
+    let plan = outline::delete_blocks(
+        s.page_state(&src).unwrap(),
+        &a,
+        1,
+        deleted_at,
+        None,
+        &|_| false,
+    )
+    .unwrap();
     assert_eq!(
         run(&mut s, &src, plan),
         Some(b.clone()),
@@ -198,13 +206,28 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
 }
 
 /// VM-10: `dd` then `p` on ANOTHER page restores and moves in one undo group, keeping the
-/// ids, so a `((reference))` written on the first page still resolves.
+/// ids, so a `((reference))` written on the first page still resolves. The subtree has a
+/// tombstone between two live children, which is what Enter-then-Backspace leaves: the paste
+/// must still put the children back in order (F1), and `doctor` is clean in the moved state,
+/// not only after the undo.
 #[test]
 fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
     let mut s = store();
     let src = s.create_page("Source").unwrap();
     let a = write(&mut s, &src, "alpha");
     let a1 = write_under(&mut s, &src, Some(&a), "alpha child", BlockKind::Todo);
+    let gone = write_last(&mut s, &src, Some(&a), "a tombstoned child");
+    write_last(&mut s, &src, Some(&a), "alpha last child");
+    let now = s.now();
+    s.execute(
+        &src,
+        vec![Command::SetDeleted {
+            ids: vec![gone.clone()],
+            deleted_at: Some(now),
+        }],
+        Default::default(),
+    )
+    .unwrap();
     write(&mut s, &src, "kept");
     let dst = s.create_page("Destination").unwrap();
     let target = write(&mut s, &dst, "here");
@@ -213,7 +236,8 @@ fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
 
     let cut = outline::block_ids(s.page_state(&src).unwrap(), &a, 1).unwrap();
     let now = s.now();
-    let plan = outline::delete_blocks(s.page_state(&src).unwrap(), &a, 1, now).unwrap();
+    let plan =
+        outline::delete_blocks(s.page_state(&src).unwrap(), &a, 1, now, None, &|_| false).unwrap();
     run(&mut s, &src, plan);
     assert_eq!(rows(&mut s, &src), vec![("kept".into(), 0)]);
     let depth = s.undo_depth();
@@ -226,10 +250,13 @@ fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
         vec![
             ("here".into(), 0),
             ("alpha".into(), 0),
-            ("alpha child".into(), 1)
+            ("alpha child".into(), 1),
+            ("alpha last child".into(), 1)
         ],
-        "restored live, in order, under the target block"
+        "restored live, in order, under the target block (F1: the tombstone between them \
+         stays behind)"
     );
+    doctor_clean(&mut s);
     assert_eq!(
         rows(&mut s, &src),
         vec![("kept".into(), 0)],
@@ -288,7 +315,10 @@ fn vm_8_3dd_is_one_undo_step_and_never_hard_deletes() {
     }
     let depth0 = s.undo_depth();
     let now = s.now();
-    let plan = outline::delete_blocks(s.page_state(&page).unwrap(), &ids[0], 3, now).unwrap();
+    let plan = outline::delete_blocks(s.page_state(&page).unwrap(), &ids[0], 3, now, None, &|_| {
+        false
+    })
+    .unwrap();
     assert_eq!(plan.cmds.len(), 1, "one plan, so one undo step");
     run(&mut s, &page, plan);
 
@@ -388,6 +418,25 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     let referrer = s.create_page("Referrer").unwrap();
     write(&mut s, &referrer, &format!("(({a1})) and (({b}))"));
     let ids_before = all_ids(&mut s, &page);
+    // Every column of the page's rows, not only text and depth: an undo that restored the
+    // text but moved a block, flipped its kind or dropped a tombstone would still compare
+    // equal on `(text, depth)` alone.
+    let projection = |s: &mut Store| -> Vec<String> {
+        let st = s.page_state(&page).unwrap();
+        let mut out: Vec<String> = st
+            .blocks
+            .iter()
+            .map(|(id, b)| {
+                format!(
+                    "{id}|{:?}|{}|{:?}|{}|{:?}|{:?}|{:?}",
+                    b.parent, b.live, b.kind, b.checked, b.deleted_at, b.moved_to, b.text
+                )
+            })
+            .collect();
+        out.sort();
+        out
+    };
+    let start_projection = projection(&mut s);
 
     // `yy` then `p`: a copy with new ids.
     let tree = outline::block_tree(s.page_state(&page).unwrap(), &a, 1).unwrap();
@@ -399,7 +448,8 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     // `dd` then `p`: the same ids move.
     let cut = outline::block_ids(s.page_state(&page).unwrap(), &a, 1).unwrap();
     let now = s.now();
-    let plan = outline::delete_blocks(s.page_state(&page).unwrap(), &a, 1, now).unwrap();
+    let plan =
+        outline::delete_blocks(s.page_state(&page).unwrap(), &a, 1, now, None, &|_| false).unwrap();
     run(&mut s, &page, plan);
     let plan = outline::restore_after(s.page_state(&page).unwrap(), &cut, &c, false).unwrap();
     run(&mut s, &page, plan);
@@ -448,6 +498,299 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
             ("c".into(), 0)
         ],
         "a full undo restores the starting outline"
+    );
+    assert_eq!(
+        projection(&mut s),
+        start_projection,
+        "every row — parent, kind, done state, tombstone, moved_to, text — is byte-identical \
+         after the 200-undo round trip"
+    );
+    doctor_clean(&mut s);
+}
+
+/// Append `text` as the last child of `parent` (or the last root), so a test can build
+/// children in the order it wants to assert on.
+fn write_last(s: &mut Store, page: &PageId, parent: Option<&BlockId>, text: &str) -> BlockId {
+    let after = s.page_state(page).unwrap().last_child(parent, false);
+    let id = BlockId::new();
+    s.execute(
+        page,
+        vec![Command::InsertBlock {
+            id: id.clone(),
+            parent: parent.cloned(),
+            after,
+            text: text.to_string(),
+            kind: BlockKind::Bullet,
+        }],
+        Default::default(),
+    )
+    .unwrap();
+    id
+}
+
+/// `dd` in the store: the plan from `block_ids`/`delete_blocks`, run as one step. Returns the
+/// ids the cut took, which is what the register's `cut` holds.
+fn delete(s: &mut Store, page: &PageId, block: &BlockId) -> Vec<BlockId> {
+    let cut = outline::block_ids(s.page_state(page).unwrap(), block, 1).unwrap();
+    let now = s.now();
+    let plan = outline::delete_blocks(s.page_state(page).unwrap(), block, 1, now, None, &|_| false)
+        .unwrap();
+    run(s, page, plan);
+    cut
+}
+
+/// VM-10, F1: a child that comes after a TOMBSTONE keeps its place across a cross-page
+/// paste. The cut is the live subtree, so the tombstone between two live children is not in
+/// it; anchoring the second child on that tombstone left `InsertBlock` with an anchor the
+/// destination does not have, and the child came back FIRST (c, a).
+#[test]
+fn vm_10_a_cross_page_paste_keeps_the_order_around_a_tombstone() {
+    let mut s = store();
+    let src = s.create_page("Source").unwrap();
+    let parent = write(&mut s, &src, "parent");
+    let a = write_last(&mut s, &src, Some(&parent), "a");
+    let b = write_last(&mut s, &src, Some(&parent), "b");
+    let c = write_last(&mut s, &src, Some(&parent), "c");
+    // Enter then Backspace leaves exactly this: a tombstone between two live children.
+    let now = s.now();
+    s.execute(
+        &src,
+        vec![Command::SetDeleted {
+            ids: vec![b.clone()],
+            deleted_at: Some(now),
+        }],
+        Default::default(),
+    )
+    .unwrap();
+    let dst = s.create_page("Destination").unwrap();
+    let here = write(&mut s, &dst, "here");
+
+    let cut = outline::block_ids(s.page_state(&src).unwrap(), &parent, 1).unwrap();
+    assert_eq!(
+        cut,
+        vec![parent.clone(), a.clone(), c.clone()],
+        "b is not in the cut"
+    );
+    let cut = delete(&mut s, &src, &parent);
+    s.restore_and_move_to_page(&src, &cut, &dst, None, Some(&here))
+        .unwrap();
+
+    assert_eq!(
+        rows(&mut s, &dst),
+        vec![
+            ("here".into(), 0),
+            ("parent".into(), 0),
+            ("a".into(), 1),
+            ("c".into(), 1),
+        ],
+        "the children kept the order they had on the page they came from (F1)"
+    );
+    doctor_clean(&mut s);
+}
+
+/// VM-10, F3: `dd` A on one page and `p` on another is a MOVE, and doing it back moves the
+/// same block again. The page a block left keeps its row as `moved_to` history, so
+/// `InsertBlock` refuses the id — the way back restores the destination's own row instead
+/// (F3), and the text typed on that page before the paste is still there, because the
+/// refusal path that used to drop the shard is never reached.
+#[test]
+fn vm_10_a_move_back_restores_the_destinations_own_row() {
+    let mut s = store();
+    let monday = s.create_page("Monday").unwrap();
+    let a = write(&mut s, &monday, "alpha");
+    let anchor = write(&mut s, &monday, "beta");
+    let tuesday = s.create_page("Tuesday").unwrap();
+    let here = write(&mut s, &tuesday, "here");
+    let referrer = s.create_page("Referrer").unwrap();
+    write(&mut s, &referrer, &format!("see (({a}))"));
+    s.sync_index().unwrap();
+    s.flush().unwrap();
+
+    // `dd` A on Monday, `p` on Tuesday: the move, with the same id.
+    let cut = delete(&mut s, &monday, &a);
+    s.restore_and_move_to_page(&monday, &cut, &tuesday, None, Some(&here))
+        .unwrap();
+    assert_eq!(s.page_state(&tuesday).unwrap().parent_of(&a), None);
+
+    // `dd` A on Tuesday, and the owner types on Monday without a flush.
+    let cut = delete(&mut s, &tuesday, &a);
+    s.set_debounced(true).unwrap();
+    s.set_block_text(&monday, &anchor, "beta and more", None, None)
+        .unwrap();
+
+    // `p` on Monday: the way back, refused before it restores the destination's row (F3).
+    let landed = s.restore_and_move_to_page(&tuesday, &cut, &monday, None, Some(&anchor));
+    assert!(
+        landed.is_ok(),
+        "the way back is a move, not a refusal: {landed:?}"
+    );
+    assert_eq!(
+        rows(&mut s, &monday),
+        vec![("beta and more".into(), 0), ("alpha".into(), 0)],
+        "alpha is back on Monday, live and after its anchor"
+    );
+    assert!(
+        !deleted(&mut s, &monday, &a),
+        "and its own row is live again"
+    );
+    assert!(
+        s.page_state(&monday)
+            .unwrap()
+            .block(&a)
+            .is_some_and(|b| b.moved_to.is_none()),
+        "with no `moved_to` left behind"
+    );
+    assert_eq!(
+        s.page_state(&tuesday).unwrap().block(&a).unwrap().moved_to,
+        Some(monday.clone()),
+        "Tuesday keeps its row as history"
+    );
+    assert_eq!(
+        text(&mut s, &monday, &anchor),
+        "beta and more",
+        "the text typed before the paste was not dropped with a shard"
+    );
+    assert_eq!(
+        s.block_backlinks(&a).unwrap().len(),
+        1,
+        "the ((reference)) still resolves (VM-10)"
+    );
+    s.flush().unwrap();
+    doctor_clean(&mut s);
+}
+
+/// VM-10, F11: a cut block a drag has already taken out of the page is not restorable — its
+/// row went with its parent — so the store refuses, and the owner copies instead of
+/// resurrecting half of the subtree on the page it left.
+#[test]
+fn vm_10_a_cut_a_drag_took_away_is_refused() {
+    let mut s = store();
+    let src = s.create_page("Source").unwrap();
+    let parent = write(&mut s, &src, "parent");
+    let child = write_last(&mut s, &src, Some(&parent), "child");
+    let dst = s.create_page("Destination").unwrap();
+    let here = write(&mut s, &dst, "here");
+
+    let cut = delete(&mut s, &src, &child);
+    let third = s.create_page("Third").unwrap();
+    s.move_block_to_page(&src, &parent, &third, None, None)
+        .unwrap();
+    assert!(
+        s.page_state(&src)
+            .unwrap()
+            .block(&child)
+            .is_some_and(|b| b.moved_to.is_some()),
+        "the drag took the tombstone's row with its parent"
+    );
+
+    let r = s.restore_and_move_to_page(&src, &cut, &dst, None, Some(&here));
+    assert!(r.is_err(), "a block that left the page is not a cut: {r:?}");
+    assert_eq!(
+        rows(&mut s, &dst),
+        vec![("here".into(), 0)],
+        "and nothing was written"
+    );
+    doctor_clean(&mut s);
+}
+
+/// VM-10, F11: a live block a sync put under a tombstoned one is inside the cut's subtree, so
+/// `p` on it cannot move the cut there (`MoveBlock` into its own subtree). The restore is
+/// refused as a whole, before the first command, so no shard is dropped and the typing on
+/// that page survives.
+#[test]
+fn vm_10_a_paste_under_a_cut_block_is_refused_and_drops_no_shard() {
+    let mut s = store();
+    let page = s.create_page("Page").unwrap();
+    let a = write(&mut s, &page, "alpha");
+    let keep = write(&mut s, &page, "keep");
+    s.sync_index().unwrap();
+    s.flush().unwrap();
+
+    let cut = delete(&mut s, &page, &a);
+    // What a sync can bring: a live child under the tombstone (§12.4).
+    let arrived = write_last(&mut s, &page, Some(&a), "from another device");
+    s.sync_index().unwrap();
+    s.flush().unwrap();
+
+    s.set_debounced(true).unwrap();
+    s.set_block_text(&page, &keep, "keep and more", None, None)
+        .unwrap();
+    let r = (|| {
+        let st = s.page_state(&page)?;
+        let plan = outline::restore_after(st, &cut, &arrived, false)?;
+        s.execute_plan(&page, plan, None)
+    })();
+    assert!(r.is_err(), "a paste under the cut cannot move it: {r:?}");
+    assert_eq!(
+        text(&mut s, &page, &keep),
+        "keep and more",
+        "the refused paste dropped no shard, so the typing is still there"
+    );
+    assert!(
+        s.page_state(&page)
+            .unwrap()
+            .block(&a)
+            .is_some_and(|b| b.deleted_at.is_some()),
+        "and the cut is untouched"
+    );
+    doctor_clean(&mut s);
+}
+
+/// VM-10, F3: a cut that would pass FR-2.9's ceiling is refused before anything is written —
+/// no shard is dropped, so the text typed on the page a moment before is still there.
+#[test]
+fn vm_10_a_cut_that_is_too_deep_writes_nothing_and_drops_no_shard() {
+    let mut s = store();
+    let src = s.create_page("Source").unwrap();
+    // A chain deep enough that pasting it under a deep block cannot fit.
+    let mut chain: Vec<BlockId> = Vec::new();
+    let mut parent: Option<BlockId> = None;
+    for d in 0..outline::MAX_DROP_DEPTH {
+        let id = write_last(&mut s, &src, parent.as_ref(), &format!("d{d}"));
+        parent = Some(id.clone());
+        chain.push(id);
+    }
+    let root = chain[0].clone();
+    let dst = s.create_page("Destination").unwrap();
+    // A destination chain nearly as deep as the ceiling, so a subtree of eleven levels
+    // cannot fit under its last block.
+    let mut dchain: Vec<BlockId> = Vec::new();
+    let mut parent: Option<BlockId> = None;
+    for d in 0..(outline::MAX_DROP_DEPTH - 1) {
+        let id = write_last(&mut s, &dst, parent.as_ref(), &format!("t{d}"));
+        parent = Some(id.clone());
+        dchain.push(id);
+    }
+    let deep = dchain.last().cloned().unwrap();
+    let mid = dchain[dchain.len() - 2].clone();
+    s.sync_index().unwrap();
+    s.flush().unwrap();
+
+    let cut = delete(&mut s, &src, &root);
+    s.set_debounced(true).unwrap();
+    s.set_block_text(&dst, &mid, "mid and more", None, None)
+        .unwrap();
+    let r = s.restore_and_move_to_page(&src, &cut, &dst, Some(&deep), None);
+    assert!(
+        matches!(r, Err(utopia_store::StoreError::Domain(_))),
+        "too deep is refused before anything is written: {r:?}"
+    );
+    assert_eq!(
+        text(&mut s, &dst, &mid),
+        "mid and more",
+        "the refused paste dropped no shard, so the typing is still there"
+    );
+    assert_eq!(
+        s.page_state(&dst).unwrap().live_count(),
+        outline::MAX_DROP_DEPTH - 1,
+        "and nothing was pasted"
+    );
+    assert!(
+        s.page_state(&src)
+            .unwrap()
+            .block(&root)
+            .is_some_and(|b| b.deleted_at.is_some()),
+        "the cut is still a cut, so a later `p` somewhere shallower moves it"
     );
     doctor_clean(&mut s);
 }

@@ -622,6 +622,18 @@ struct DraggedBlock {
 
 struct DragPreview(SharedString);
 
+/// What a `p` that would move a cut did (VM-10, F3). A refused move writes nothing, and
+/// whether the cut survives it depends on why it was refused: no room is not the cut's
+/// fault, but a cut whose blocks are gone or already elsewhere is spent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutPaste {
+    Moved,
+    /// The depth ceiling: nothing was written, and the cut stays for a shallower `p`.
+    NoRoom,
+    /// The blocks left the page, or are live, or cannot be restored: copy instead.
+    Spent,
+}
+
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
@@ -2745,13 +2757,29 @@ impl PageView {
             }
             // `dd` (VM-8): one plan for the count, so `3dd` is one undo step. The register is
             // written first, from the state the delete is about to change: its `cut` names the
-            // ids the first `p` may restore (VM-10).
+            // ids the first `p` may restore (VM-10). A property row is not part of the outline,
+            // so the bar cannot be deleted from under the page (F12).
             EditorEvent::DeleteBlocks { count, register } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 self.yank_blocks(&t, *count, *register, true, cx);
                 let now = self.app.read(cx).store.now();
+                // The caret goes to the next row the view can show: the zoom and the collapsed
+                // set decide what that is (F12).
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
                 self.run_plan(
                     &t.page,
-                    |st| outline::delete_blocks(st, &t.block, *count, now),
+                    |st| {
+                        outline::delete_blocks(st, &t.block, *count, now, zoom.as_ref(), &|b| {
+                            collapsed.contains(b)
+                        })
+                    },
                     window,
                     cx,
                 );
@@ -2762,6 +2790,11 @@ impl PageView {
                 self.yank_blocks(&t, *count, *register, false, cx)
             }
             EditorEvent::PasteBlocks { before, count } => {
+                // The properties bar is not the outline: a block pasted into it would be a
+                // property with no key, and the bar has no row to hold it (F12).
+                if self.is_property_block(&t.block) {
+                    return;
+                }
                 self.paste_blocks(&t, *before, *count, window, cx)
             }
             // `J` (VM-8): join the following visible blocks into this one.
@@ -2974,10 +3007,15 @@ impl PageView {
             cut,
         });
         // A yank goes to the system clipboard (VM-11); a cut writes the register only, as
-        // Vim's `dd` does.
-        if !is_cut {
+        // Vim's `dd` does. `"+dd` names the clipboard, so it writes it too (F9), and a plain
+        // cut records what the clipboard held, so `p` can tell its own register from a copy
+        // made after the delete (F2, F6).
+        if !is_cut || register == Some('+') {
             cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
             crate::vim::clipboard_written(&markdown);
+        } else {
+            let current = cx.read_from_clipboard().and_then(|c| c.text());
+            crate::vim::clipboard_at_register(current);
         }
     }
 
@@ -2985,6 +3023,14 @@ impl PageView {
     /// restore the tombstones and move them, in one plan on the page and in one group across
     /// pages — so every id survives and `((references))` still resolve. Later pastes, a cut
     /// that was undone and a cut whose blocks are gone all copy, with new ids.
+    ///
+    /// A move that is refused (the depth ceiling, a cut a drag or a sync has already moved
+    /// away) writes nothing and **keeps the cut**, so the next `p` in a place the move can
+    /// reach still moves it instead of silently copying (F3).
+    ///
+    /// A count on a paste of a cut is not honoured: the first `p` moves the blocks and spends
+    /// the cut, and `3p` pastes them once. A count on a yank's paste does make that many
+    /// copies. (Known limit, F9.)
     fn paste_blocks(
         &mut self,
         t: &EditTarget,
@@ -3003,33 +3049,38 @@ impl PageView {
         // names tombstones — or that cannot be moved — is spent (VM-10).
         let mut spent = false;
         if let Some((src, ids)) = cut.clone() {
-            // The cut is still a cut while every block it took is a tombstone (VM-10).
+            // The cut is still a cut while every block it took is a tombstone of the source
+            // page and has not been moved away from it (VM-10, F11).
             let alive = self.app.update(cx, |app, _| {
                 let Ok(st) = app.store.page_state(&src) else {
                     return false;
                 };
                 !ids.is_empty()
-                    && ids
-                        .iter()
-                        .all(|i| st.block(i).is_some_and(|b| b.deleted_at.is_some()))
+                    && ids.iter().all(|i| {
+                        st.block(i)
+                            .is_some_and(|b| b.deleted_at.is_some() && b.moved_to.is_none())
+                    })
             });
             spent = !alive;
             if alive && src == t.page {
                 let plan = self.app.update(cx, |app, _| {
                     let st = app.store.page_state(&src).ok()?;
-                    outline::restore_after(st, &ids, &t.block, before).ok()
+                    Some(outline::restore_after(st, &ids, &t.block, before))
                 });
                 match plan {
-                    Some(plan) => {
+                    Some(Ok(plan)) => {
                         if let Some(f) = self.apply_plan(&t.page, plan, cx) {
                             crate::vim::forget_cut();
                             self.edit(t.page.clone(), f.block, Some(f.offset), None, window, cx);
                         }
                         return;
                     }
-                    // The restore could not be planned (the blocks are gone, the depth
-                    // ceiling, a live id): the cut is spent, so copy instead.
-                    None => spent = true,
+                    // Refused for want of room: nothing was written and the cut stays, so a
+                    // `p` somewhere shallower still moves it.
+                    Some(Err(utopia_core::DomainError::TooDeep)) => return,
+                    // The blocks went away under the register, or cannot be put here at all:
+                    // the cut is spent and the copy below is what `p` does.
+                    _ => spent = true,
                 }
             } else if alive {
                 // Another page: `cross_page_move` refuses a tombstone, so the store restores
@@ -3052,24 +3103,39 @@ impl PageView {
                             parent.as_ref(),
                             after.as_ref(),
                         );
-                        let ok = r.is_ok();
-                        app.report(r);
-                        if ok {
-                            app.changed(vec![src.clone(), t.page.clone()], true, cx);
+                        match r {
+                            Ok(()) => {
+                                app.changed(vec![src.clone(), t.page.clone()], true, cx);
+                                CutPaste::Moved
+                            }
+                            // Refused for want of room, before anything was written: no
+                            // shard was dropped, so the text typed on this page a moment
+                            // ago is still there, and the cut is still a cut.
+                            Err(utopia_store::StoreError::Domain(
+                                utopia_core::DomainError::TooDeep,
+                            )) => CutPaste::NoRoom,
+                            // The blocks left the page, or cannot be put here at all.
+                            Err(e) => {
+                                app.report::<()>(Err(e));
+                                CutPaste::Spent
+                            }
                         }
-                        ok
                     });
-                    if moved {
-                        crate::vim::forget_cut();
-                        self.rebuild(cx);
-                        if let Some(first) = ids.first().cloned() {
-                            self.edit(t.page.clone(), first, Some(0), None, window, cx);
+                    match moved {
+                        CutPaste::Moved => {
+                            crate::vim::forget_cut();
+                            self.rebuild(cx);
+                            if let Some(first) = ids.first().cloned() {
+                                self.edit(t.page.clone(), first, Some(0), None, window, cx);
+                            }
+                            return;
                         }
-                        return;
+                        // No room here: the cut stays, nothing was written.
+                        CutPaste::NoRoom => return,
+                        // Refused for another reason: the cut is spent, and the copy below
+                        // is what `p` does.
+                        CutPaste::Spent => spent = true,
                     }
-                    // The move failed (it was refused, not half-applied): the cut is spent
-                    // and the copy below is what `p` does.
-                    spent = true;
                 }
             }
         }
