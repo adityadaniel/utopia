@@ -314,3 +314,38 @@ struct SearchScreen: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Page") {
+    NavigationStack {
+        PageScreen(route: Route(pageID: PreviewData.budgetID)) { _ in }
+    }
+    .environment(AppModel.preview())
+}
+
+#Preview("Page · A day") {
+    NavigationStack {
+        PageScreen(route: Route(pageID: PreviewData.yesterdayID)) { _ in }
+    }
+    .environment(AppModel.preview())
+}
+
+#Preview("Page · Empty") {
+    NavigationStack {
+        PageScreen(route: Route(pageID: PreviewData.projectID)) { _ in }
+    }
+    .environment(AppModel.preview())
+}
+
+#Preview("Page · Missing") {
+    NavigationStack {
+        PageScreen(route: Route(pageID: "page-missing")) { _ in }
+    }
+    .environment(AppModel.preview())
+}
+
+#Preview("Find") {
+    SearchScreen { _ in }
+        .environment(AppModel.preview())
+}
+#endif

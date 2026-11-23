@@ -1,32 +1,51 @@
-// The "Quiet paper" tokens of DESIGN.md §2.1, under the same names as the Mac, with the
-// dark values from the same table. A view names a token and never a colour (ios-prd §4.7,
-// C8). Sizes come from the ios-prd §4 tables and follow Dynamic Type through @ScaledMetric
-// in the views that draw them.
+// The colours of the phone. The one accent is the blue `--link` of DESIGN.md §2.1, with
+// its light and dark values: links, the caret, the Send button and a control that is on.
+// Every other colour is an iOS system colour, so the app follows the system's light, dark
+// and Increase Contrast looks (ios-prd §4.7). The names stay the Mac token names, so a view
+// still names a token and never a colour. Sizes come from the ios-prd §4 tables and follow
+// Dynamic Type through @ScaledMetric in the views that draw them.
 
 import SwiftUI
 import UIKit
 
 enum Tokens {
-    static let paper = dynamic(0xFFFFFF, 0x1B1B19)
-    static let shelf = dynamic(0xF6F6F4, 0x151514)
-    static let well = dynamic(0xFAFAF8, 0x202020)
-    static let selected = dynamic(0xE9E9E5, 0x2C2C29)
-    static let line = dynamic(0xE8E7E3, 0x33332F)
-    static let lineSoft = dynamic(0xEFEEEA, 0x2A2A27)
-    static let lineStrong = dynamic(0xE1E0DB, 0x3D3D38)
-    static let ink = dynamic(0x1B1B19, 0xE9E8E3)
-    static let ink3 = dynamic(0x57574F, 0xA3A29A)
-    static let muted = dynamic(0x6C6C65, 0x8F8E86)
-    static let bullet = dynamic(0x8A8A83, 0x6E6D66)
-    static let disabled = dynamic(0xB9B8B1, 0x55554F)
-    static let link = dynamic(0x2D5BD2, 0x7FA3F0)
-    static let linkHover = dynamic(0x2249B0, 0x9DB9F5)
-    static let linkTint = dynamic(0xEAEFFB, 0x262F45)
-    static let success = dynamic(0x1F7A3D, 0x6FD08C)
-    static let warning = dynamic(0x9A5A00, 0xF0B45A)
-    static let danger = dynamic(0xB42318, 0xFF9C94)
+    // MARK: The accent (DESIGN.md §2.1)
 
-    /// A `--mark` on a `--link` fill is `--paper`, never white: `DESIGN.md` §2.1.
+    /// `--link`: links, the text caret, the Send button, a done to-do, a control that is on.
+    static let link = dynamic(0x2D5BD2, 0x7FA3F0)
+    /// `--link-tint`: the fill behind a control that is on.
+    static let linkTint = dynamic(0xEAEFFB, 0x262F45)
+
+    // MARK: System colours
+
+    /// The screen behind the log and the pages.
+    static let paper = Color(uiColor: .systemBackground)
+    /// The compose box.
+    static let shelf = Color(uiColor: .secondarySystemBackground)
+    /// The panels that take the keyboard's place.
+    static let well = Color(uiColor: .secondarySystemBackground)
+    /// The fill of a control that cannot act now (Send with an empty draft).
+    static let selected = Color(uiColor: .tertiarySystemFill)
+    static let line = Color(uiColor: .separator)
+    static let lineSoft = Color(uiColor: .separator)
+    static let lineStrong = Color(uiColor: .opaqueSeparator)
+    /// Primary text.
+    static let ink = Color(uiColor: .label)
+    /// Secondary text: the lines below an entry, row notes.
+    static let ink3 = Color(uiColor: .secondaryLabel)
+    /// Labels, times, empty states, a done to-do.
+    static let muted = Color(uiColor: .secondaryLabel)
+    /// The hint in an empty line of the draft.
+    static let placeholder = Color(uiColor: .placeholderText)
+    /// Bullets and to-do borders. Never text.
+    static let bullet = Color(uiColor: .systemGray2)
+    /// A control that cannot act, the offline dot. Never text.
+    static let disabled = Color(uiColor: .tertiaryLabel)
+    static let success = Color(uiColor: .systemGreen)
+    static let warning = Color(uiColor: .systemOrange)
+    static let danger = Color(uiColor: .systemRed)
+
+    /// A colour with a light and a dark value, for the accent only.
     static func dynamic(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(uiColor: UIColor { traits in
             UIColor(rgb: traits.userInterfaceStyle == .dark ? dark : light)

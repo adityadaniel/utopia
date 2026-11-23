@@ -13,7 +13,8 @@ change, and write its id in tests and comments. A change to §4 goes through the
 | Path | What it is |
 |---|---|
 | `UtopiaMobile/` | The SwiftUI app. One graph, the Today screen, read-only pages, Find, Sync, first run. |
-| `UtopiaMobile/Tokens.swift` | The colour tokens of `DESIGN.md` §2.1, light and dark, under the Mac names. |
+| `UtopiaMobile/Tokens.swift` | The colours under the Mac token names: the blue `link` accent of `DESIGN.md` §2.1, and iOS system colours for the rest (ios-prd §4.7). |
+| `UtopiaMobile/PreviewData.swift` | Mock pages, blocks and a draft for the SwiftUI previews (`DEBUG` only). |
 | `UtopiaMobile/CoreClient.swift` | The one place that calls the generated bindings. It runs each call off the main actor. |
 | `UtopiaMobile/Draft.swift` | The draft outline in the compose box, and its rules (§4.5). |
 | `UtopiaMobile/Storage.swift` | Paths, relay settings (`UserDefaults`) and secrets (Keychain). |
@@ -112,6 +113,10 @@ cargo run -p xtask -- seed-phone target/phone/g.utopia   # the scratch graph the
 5. **Local state stays local (C7).** The draft, recents and scroll position never sync.
    Secrets go only to the Keychain (C6).
 6. **VoiceOver.** Each control has a spoken label from §4.5.
+7. **Previews.** Every view file ends with `#Preview`s inside `#if DEBUG`, one for each state
+   that matters (empty, error, picker open, dark). They use `AppModel.preview(...)` and
+   `PreviewData`; a preview model never opens a graph or calls the relay. A new view adds
+   its previews, and new mock data goes into `PreviewData.swift`.
 
 ## Skills
 

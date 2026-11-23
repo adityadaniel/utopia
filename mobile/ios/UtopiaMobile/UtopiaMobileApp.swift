@@ -11,6 +11,8 @@ struct UtopiaMobileApp: App {
         WindowGroup {
             RootScreen()
                 .environment(model)
+                // The one accent of the app (Tokens.swift); every system control takes it.
+                .tint(Tokens.link)
         }
     }
 }
@@ -40,3 +42,25 @@ struct RootScreen: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Root · Launching") {
+    RootScreen()
+        .environment(AppModel.preview(phase: .launching))
+}
+
+#Preview("Root · Setup") {
+    RootScreen()
+        .environment(AppModel.preview(phase: .setup))
+}
+
+#Preview("Root · Locked") {
+    RootScreen()
+        .environment(AppModel.preview(phase: .locked))
+}
+
+#Preview("Root · Ready") {
+    RootScreen()
+        .environment(AppModel.preview())
+}
+#endif
