@@ -1347,18 +1347,24 @@ mod tests {
             s.commit_block(page, &id).unwrap();
         }
         let relay = Relay::new();
-        // The other device pushes its first change to a mistyped graph id, then its next
-        // one to the real graph: the second depends on the first.
+        // The other device's first change is marked sent but never reaches this relay (an
+        // older build that sent it to a mistyped graph id); its next one does, and depends
+        // on the first.
         let mut other = Store::open_in_memory().unwrap();
-        let page = other.create_page("Shared").unwrap();
-        write(&mut other, &page, "pushed to the wrong graph id");
-        SyncClient::new(RelayTransport::new(relay.clone(), "Utopia"), &other)
-            .unwrap()
-            .sync_once(&mut other)
-            .unwrap();
         let mut right =
             SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &other).unwrap();
+        let page = other.create_page("Shared").unwrap();
+        write(&mut other, &page, "synced normally");
         right.sync_once(&mut other).unwrap();
+        right.sync_once(&mut other).unwrap();
+        write(&mut other, &page, "never reached this relay");
+        let lost: Vec<i64> = other
+            .outbox_pending(100)
+            .unwrap()
+            .into_iter()
+            .map(|(seq, _, _, _)| seq)
+            .collect();
+        other.outbox_mark_sent(&lost).unwrap();
         write(&mut other, &page, "pushed to the right graph id");
         right.sync_once(&mut other).unwrap();
 
@@ -1375,6 +1381,48 @@ mod tests {
             }
             other => panic!("expected Partial with a blocked page, got {other:?}"),
         }
+    }
+
+    /// §12.3 step 4, §12.7 (the 2026-11-23 incident, mobile side): the phone syncs today's
+    /// note to a mistyped graph id, then to the real one with no destination reset. At
+    /// first contact it sends what the real graph lacks, so the Mac gets every line.
+    #[test]
+    fn ac_12_7_mobile_changed_graph_id_sends_earlier_changes() {
+        use utopia_sync::relay::{Relay, RelayTransport};
+        use utopia_sync::SyncClient;
+        let relay = Relay::new();
+        let phone = Graph::in_memory().unwrap();
+        phone.set_today(Some("2026-11-23".into())).unwrap();
+        phone
+            .append_outline(vec![line("Now syncing", 0, false)])
+            .unwrap();
+        phone
+            .sync_via(Box::new(RelayTransport::new(relay.clone(), "Utopia")))
+            .unwrap();
+        phone
+            .sync_via(Box::new(RelayTransport::new(relay.clone(), "utopia")))
+            .unwrap();
+        let day = phone
+            .append_outline(vec![line("Testing from mobile", 0, false)])
+            .unwrap();
+        phone
+            .sync_via(Box::new(RelayTransport::new(relay.clone(), "utopia")))
+            .unwrap();
+
+        let mut mac = Store::open_in_memory().unwrap();
+        let mut client =
+            SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &mac).unwrap();
+        client.sync_once(&mut mac).unwrap();
+        assert_eq!(mac.waiting_count().unwrap(), 0, "nothing waits on the Mac");
+        let page = PageId(day.id.clone());
+        let st = mac.page_state(&page).unwrap().clone();
+        let mut texts: Vec<String> = st
+            .live_preorder()
+            .into_iter()
+            .map(|(id, _)| st.block(&id).unwrap().text.clone())
+            .collect();
+        texts.sort();
+        assert_eq!(texts, vec!["Now syncing", "Testing from mobile"]);
     }
 
     fn graph_with_two_days() -> (Arc<Graph>, PageView, PageView) {

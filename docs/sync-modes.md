@@ -120,7 +120,14 @@ hosted relay in §12.7 item 1 does not exist yet.
   in `page_pending` (schema v11), apply them when the missing changes arrive, and never
   compact that page on the relay. The status says "N pages wait for changes from another
   device", not "Synced", and `utopia sync --json` lists them in `blocked_pages` (§12.6,
-  §2.3.7). To heal the page, the sending device must send what the relay lacks.
+  §2.3.7).
+- **A device sends what its destination lacks.** An outbox acknowledgement is only true
+  for the destination that gave it. At first contact with a destination (the pull from 0
+  of a new graph id, relay or folder), a device compares what the destination holds with
+  its own copy of each page, and sends the difference under a new change id. A page the
+  destination does not list at all is sent whole. This heals a blocked page on the other
+  devices. Each device runs the comparison once after the upgrade that added it (one full
+  pull); `utopia sync repair --graph …` runs it again on demand.
 - **Quota.** The relay limits the storage for each graph (default 1024 MB).
 
 **Cons**

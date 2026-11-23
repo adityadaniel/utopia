@@ -113,7 +113,9 @@ serves the API until SIGTERM/SIGINT; `sync launchd-plist --graph <file>` prints 
 one of them; `sync setup --graph <file> --mode relay|nearby|folder [--url …] [--folder …]
 [--graph-id …]` writes the same per-graph settings Settings → Sync uses, and `sync --graph
 <file> [--json]` runs one sync to completion (then exit 0; 2 = Sync is Off, 3 = another
-process owns the graph), `sync status` reports the saved settings and `sync config` changes
+process owns the graph), `sync status` reports the saved settings (and pages that wait for another
+device's changes), `sync repair` makes the next sync compare every page with the
+destination and send what it lacks, and `sync config` changes
 them (the continuous daemon exits 2/3 the same way, and on a clean stop flushes the store,
 releases the lock and removes its discovery file); the token and E2E passphrase come from
 stdin without echo or from

@@ -64,6 +64,28 @@ impl Frontier {
         let bytes = unhex(&self.0).ok_or_else(|| DocError::Corrupt("bad frontier".into()))?;
         VersionVector::decode(&bytes).map_err(DocError::from)
     }
+
+    /// Whether this version holds a change `other` does not: what a sender asks of a
+    /// destination's copy before it decides to send more (§12.3 step 4, §12.7).
+    pub fn has_more_than(&self, other: &Frontier) -> Result<bool> {
+        let (mine, theirs) = (self.to_vv()?, other.to_vv()?);
+        Ok(mine
+            .iter()
+            .any(|(peer, end)| *end > theirs.get(peer).copied().unwrap_or(0)))
+    }
+}
+
+/// The version that a destination's copy of a page adds up to (its snapshot, then its
+/// updates), without building the page (§12.3 step 4). Changes that wait for missing ones
+/// do not count: no device can apply them until the missing ones arrive, so a sender must
+/// treat them as absent.
+pub fn version_of<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<Frontier> {
+    let doc = LoroDoc::new();
+    for b in blobs {
+        doc.import(b)
+            .map_err(|e| DocError::Corrupt(e.to_string()))?;
+    }
+    Ok(Frontier::from_vv(&doc.oplog_vv()))
 }
 
 /// One peer's changes that wait for earlier changes of a page (§12.3 step 3): counters

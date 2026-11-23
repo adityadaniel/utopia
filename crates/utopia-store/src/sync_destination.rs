@@ -50,6 +50,37 @@ const ORIGIN: &str = "setup_destination";
 const INSTANCE: &str = "setup_destination_instance";
 
 impl Store {
+    /// Queue, as one new outbox row, every change of `page` that a destination's copy
+    /// (`has`) lacks, and return whether one was queued (§12.3 step 4, §12.7).
+    ///
+    /// An outbox acknowledgement belongs to the destination that gave it. A device that
+    /// pushed its first changes to one graph id and its later ones to another left the
+    /// later ones waiting on every other device, because their predecessors are only on
+    /// the first destination. Comparing with what the destination actually holds, and
+    /// sending the difference under a new change id, is what heals that page: a relay
+    /// ignores a change id it already stored, so the old rows cannot simply go again.
+    pub fn queue_missing(&mut self, page: &PageId, has: &Frontier) -> Result<bool> {
+        self.sync_index()?;
+        // A draft day is not on any destination until its first write (FR-1.2).
+        if self.drafts.contains_key(page) || !self.page_exists(page)? {
+            return Ok(false);
+        }
+        if !self.frontier(page)?.has_more_than(has)? {
+            return Ok(false);
+        }
+        let payload = self.export_since(page, has)?;
+        let now = self.now();
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO outbox(page_id, payload, client_seq, created_at) SELECT ?1, ?2, ifnull(max(seq), 0) + 1, ?3 FROM outbox",
+            params![page.as_str(), payload, now],
+        )?;
+        tx.commit()?;
+        Ok(true)
+    }
+
     /// Queue full CRDT updates, never a truncating relay snapshot. Existing cursor spaces
     /// remain tagged; only a pull from the new relay may authorize its compaction (§12.6).
     pub fn prepare_sync_destination(&mut self, destination: &Destination) -> Result<()> {

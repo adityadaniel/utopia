@@ -1463,6 +1463,12 @@ impl Store {
         )?)
     }
 
+    pub fn sync_delete(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM sync_state WHERE key=?1", [key])?;
+        Ok(())
+    }
+
     pub fn sync_set(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT OR REPLACE INTO sync_state(key, value) VALUES (?1, ?2)",

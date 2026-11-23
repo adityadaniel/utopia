@@ -515,3 +515,20 @@ fn ac_12_3_waiting_changes_survive_a_snapshot_reload_and_apply_later() {
     assert_eq!(texts.len(), 2, "{texts:?}");
     assert!(texts.contains(&"second".to_string()));
 }
+
+/// §12.3 step 4: a destination that holds only the later change has less than the sender,
+/// because the change waits; one that holds both has everything.
+#[test]
+fn ac_12_3_a_destination_holding_only_waiting_changes_has_less() {
+    let (first, later) = gap();
+    let mut sender = LoroPageDoc::new(page(), 9);
+    sender.import(&first).unwrap();
+    sender.import(&later).unwrap();
+    let mine = sender.frontier();
+
+    let partial = version_of([later.as_slice()]).unwrap();
+    assert!(mine.has_more_than(&partial).unwrap());
+    let whole = version_of([later.as_slice(), first.as_slice()]).unwrap();
+    assert!(!mine.has_more_than(&whole).unwrap());
+    assert!(!Frontier::default().has_more_than(&whole).unwrap());
+}
