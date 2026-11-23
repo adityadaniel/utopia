@@ -219,9 +219,16 @@ pub struct SyncSummary {
 pub enum SyncOutcome {
     /// The relay was reached and every page went through.
     Synced { summary: SyncSummary },
-    /// The relay was reached but at least one page failed; the rest of the round applied
-    /// (§12.6). `queued` counts this device's unsent updates afterwards.
-    Partial { summary: SyncSummary, queued: u32 },
+    /// The relay was reached but at least one page failed, or holds another device's
+    /// changes that cannot apply yet; the rest of the round applied (§12.6). `queued`
+    /// counts this device's unsent updates afterwards. `blocked` counts pages that wait
+    /// for changes another device has not sent to this relay: they are kept, not lost,
+    /// and apply when that device sends them (§2.3.7). Neither is "Synced".
+    Partial {
+        summary: SyncSummary,
+        queued: u32,
+        blocked: u32,
+    },
     /// The relay was not reached: everything is still queued locally (§12.6).
     Offline { queued: u32 },
     /// The round failed on this device (the store, a shard, a projection), so the network
@@ -1160,9 +1167,12 @@ fn outcome_of(result: &std::result::Result<SyncReport, SyncError>, store: &Store
     let summary = || result.as_ref().map(summary_of).unwrap_or_default();
     match SyncStatus::from_result(result, store) {
         SyncStatus::Synced { .. } => SyncOutcome::Synced { summary: summary() },
-        SyncStatus::Partial { queued, .. } => SyncOutcome::Partial {
+        SyncStatus::Partial {
+            queued, blocked, ..
+        } => SyncOutcome::Partial {
             summary: summary(),
             queued: queued as u32,
+            blocked: blocked as u32,
         },
         SyncStatus::Offline { queued } => SyncOutcome::Offline {
             queued: queued as u32,
@@ -1321,6 +1331,49 @@ mod tests {
                 deleted: false,
             }],
             ..empty_manifest()
+        }
+    }
+
+    /// §12.6, §2.3.7 (the 2026-11-23 incident, mobile side): a page holding another
+    /// device's changes that cannot apply yet is `Partial` with `blocked`, never "Synced".
+    #[test]
+    fn ac_12_6_mobile_outcome_names_blocked_pages() {
+        use utopia_sync::relay::{Relay, RelayTransport};
+        use utopia_sync::SyncClient;
+        fn write(s: &mut Store, page: &PageId, text: &str) {
+            let plan = utopia_core::outline::append_block(s.page_state(page).unwrap(), None);
+            let id = s.execute_plan(page, plan, None).unwrap().unwrap().block;
+            s.set_block_text(page, &id, text, None, None).unwrap();
+            s.commit_block(page, &id).unwrap();
+        }
+        let relay = Relay::new();
+        // The other device pushes its first change to a mistyped graph id, then its next
+        // one to the real graph: the second depends on the first.
+        let mut other = Store::open_in_memory().unwrap();
+        let page = other.create_page("Shared").unwrap();
+        write(&mut other, &page, "pushed to the wrong graph id");
+        SyncClient::new(RelayTransport::new(relay.clone(), "Utopia"), &other)
+            .unwrap()
+            .sync_once(&mut other)
+            .unwrap();
+        let mut right =
+            SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &other).unwrap();
+        right.sync_once(&mut other).unwrap();
+        write(&mut other, &page, "pushed to the right graph id");
+        right.sync_once(&mut other).unwrap();
+
+        let g = Graph::in_memory().unwrap();
+        match g
+            .sync_via(Box::new(RelayTransport::new(relay.clone(), "utopia")))
+            .unwrap()
+        {
+            SyncOutcome::Partial {
+                summary, blocked, ..
+            } => {
+                assert_eq!(blocked, 1, "the page that waits is named");
+                assert_eq!(summary.failed, 0, "nothing failed: it is held");
+            }
+            other => panic!("expected Partial with a blocked page, got {other:?}"),
         }
     }
 
@@ -1501,7 +1554,9 @@ mod tests {
             }
         });
         match g.sync_via(Box::new(t)).unwrap() {
-            SyncOutcome::Partial { summary, queued } => {
+            SyncOutcome::Partial {
+                summary, queued, ..
+            } => {
                 assert_eq!(summary.failed, 1, "one page failed");
                 assert!(summary.pushed > 0, "the other page's push was accepted");
                 assert!(queued >= 1, "the refused page's rows stay queued");

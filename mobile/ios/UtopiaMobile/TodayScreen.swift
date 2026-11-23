@@ -136,7 +136,7 @@ struct SyncStatusLine: View {
         case .syncing: Tokens.bullet
         case .offline, .off: Tokens.disabled
         case .needsAuth, .failed: Tokens.danger
-        case .unsupported: Tokens.warning
+        case .unsupported, .blocked: Tokens.warning
         }
     }
 }

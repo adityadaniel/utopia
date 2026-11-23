@@ -909,7 +909,8 @@ fn ac_12_6_a_partial_round_has_its_own_status() {
         SyncStatus::from_result(&Ok(report), &store),
         SyncStatus::Partial {
             failed: 1,
-            queued: 0
+            queued: 0,
+            blocked: 0
         }
     );
 }
@@ -1533,4 +1534,137 @@ fn ac_12_6_an_empty_target_never_proves_a_key() {
         pushed.pages.len(),
         "A pushed ciphertext into a graph it cannot read"
     );
+}
+
+/// The 2026-11-23 incident, step by step: a phone syncs a page to a mistyped graph id
+/// (`Utopia`), then to the real one (`utopia`) without a destination reset. Its first
+/// changes are marked sent but are only on the wrong graph, so every later change it pushes
+/// depends on changes the Mac never receives.
+struct Incident {
+    relay: std::sync::Arc<Relay>,
+    mac: Store,
+    mac_client: SyncClient<RelayTransport>,
+    phone: Store,
+    phone_client: SyncClient<RelayTransport>,
+    page: PageId,
+}
+
+fn incident() -> Incident {
+    let relay = Relay::new();
+    let new_device = |gid: &str| {
+        let mut s = Store::open_in_memory().unwrap();
+        s.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 23).unwrap()));
+        let c = SyncClient::new(RelayTransport::new(relay.clone(), gid), &s).unwrap();
+        (s, c)
+    };
+    let (mut mac, mut mac_client) = new_device("utopia");
+    let page = mac.create_page("Shared").unwrap();
+    write(&mut mac, &page, "from the Mac");
+    mac_client.sync_once(&mut mac).unwrap();
+
+    let (mut phone, mut wrong) = new_device("Utopia");
+    assert_eq!(phone.create_page("Shared").unwrap(), page);
+    write(&mut phone, &page, "Now syncing");
+    wrong.sync_once(&mut phone).unwrap();
+
+    let mut phone_client =
+        SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &phone).unwrap();
+    phone_client.sync_once(&mut phone).unwrap();
+    write(&mut phone, &page, "Testing from mobile");
+    phone_client.sync_once(&mut phone).unwrap();
+    assert_eq!(
+        texts(&mut phone, &page).len(),
+        3,
+        "the phone has every line"
+    );
+    Incident {
+        relay,
+        mac,
+        mac_client,
+        phone,
+        phone_client,
+        page,
+    }
+}
+
+/// §12.6, §2.3.7: the Mac keeps the phone's changes it cannot apply and says so, instead
+/// of moving its cursor past them and reporting "Synced". A quiet round after that still
+/// says so: the status comes from the store, not from the round.
+#[test]
+fn ac_12_6_changes_that_wait_for_a_missing_change_are_reported_not_dropped() {
+    let mut i = incident();
+    let report = i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert!(report.failed.is_empty(), "nothing failed: {report:?}");
+    assert_eq!(texts(&mut i.mac, &i.page), vec!["from the Mac"]);
+    assert!(i.mac.has_waiting(&i.page).unwrap());
+    let blocked = SyncStatus::Partial {
+        failed: 0,
+        queued: 0,
+        blocked: 1,
+    };
+    assert_eq!(SyncStatus::from_result(&Ok(report), &i.mac), blocked);
+
+    let quiet = i.mac_client.sync_once(&mut i.mac);
+    assert_eq!(
+        quiet.as_ref().map(|r| r.pulled_pages).unwrap_or(0),
+        0,
+        "the cursor moved past the waiting changes: no pull loop"
+    );
+    assert_eq!(SyncStatus::from_result(&quiet, &i.mac), blocked);
+}
+
+/// Rule 5: a snapshot never holds waiting changes, and the relay drops what it covers. The
+/// Mac must not compact a page whose other device's changes it is holding.
+#[test]
+fn ac_12_6_a_page_with_waiting_changes_is_never_compacted_by_the_holder() {
+    let mut i = incident();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    let block = write(&mut i.mac, &i.page, "edit 0");
+    for n in 1..=utopia_sync::SNAPSHOT_TAIL_UPDATES + 5 {
+        i.mac
+            .set_block_text(&i.page, &block, &format!("edit {n}"), None, None)
+            .unwrap();
+        i.mac.commit_block(&i.page, &block).unwrap();
+    }
+    let before = i.relay.log_len("utopia", i.page.as_str());
+    for _ in 0..3 {
+        let r = i.mac_client.sync_once(&mut i.mac).unwrap();
+        assert_eq!(r.snapshots, 0, "no snapshot from the holder");
+    }
+    assert!(
+        i.relay.log_len("utopia", i.page.as_str()) >= before,
+        "the phone's rows are still on the relay"
+    );
+}
+
+/// The page heals once the phone sends what the relay lacks (here through the destination
+/// reset the desktop already runs on a switch): the Mac applies everything and nothing
+/// waits any more.
+#[test]
+fn ac_12_6_a_blocked_page_heals_when_the_sender_resends() {
+    use utopia_store::Destination;
+    let mut i = incident();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert!(i.mac.has_waiting(&i.page).unwrap());
+
+    i.phone
+        .prepare_sync_destination(&Destination::new("relay:test#Utopia", None))
+        .unwrap();
+    i.phone
+        .prepare_sync_destination(&Destination::new("relay:test#utopia", None))
+        .unwrap();
+    i.phone_client.sync_once(&mut i.phone).unwrap();
+    let report = i.mac_client.sync_once(&mut i.mac).unwrap();
+
+    assert_eq!(i.mac.waiting_count().unwrap(), 0);
+    let mut seen = texts(&mut i.mac, &i.page);
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec!["Now syncing", "Testing from mobile", "from the Mac"]
+    );
+    assert!(matches!(
+        SyncStatus::from_result(&Ok(report), &i.mac),
+        SyncStatus::Synced { .. }
+    ));
 }

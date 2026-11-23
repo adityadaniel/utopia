@@ -1232,7 +1232,14 @@ impl Store {
             let did = if self.page_exists(page)? {
                 self.load_doc(page)?.doc.import(bytes)
             } else {
-                self.new_doc(page).doc.import(bytes)
+                // A page this device knows only through waiting changes has no shard row:
+                // start from those changes, or a restart would forget them (§2.3.7).
+                let waiting = self.waiting_payload(page)?;
+                let doc = &mut self.new_doc(page).doc;
+                match waiting {
+                    Some(w) => doc.import(&w).and_then(|_| doc.import(bytes)),
+                    None => doc.import(bytes),
+                }
             };
             let did = match did {
                 Ok(did) => did,
@@ -1263,6 +1270,16 @@ impl Store {
         }
         for page in &changed {
             self.reconcile_merged(page)?;
+        }
+        // Every shard of the batch is committed now, so the waiting changes can be
+        // recorded, or their row cleared, before the caller moves any cursor past the
+        // updates that brought them (§12.3 steps 3–4).
+        let mut seen: Vec<&PageId> = Vec::new();
+        for (page, _) in batch {
+            if !seen.contains(&page) {
+                seen.push(page);
+                self.save_waiting(page)?;
+            }
         }
         Ok(changed)
     }

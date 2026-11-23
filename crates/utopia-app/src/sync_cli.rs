@@ -865,6 +865,17 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
             "{pending} change(s) are still queued after {MAX_ROUNDS} rounds."
         ));
     }
+    // §12.6, §2.3.7: another device's changes are held, not applied. The run is not a
+    // clean sync, and the error says which side has to act.
+    let blocked = store.waiting_pages()?;
+    if !blocked.is_empty() {
+        errors.push(format!(
+            "{} page(s) hold changes from another device that cannot apply yet: that device \
+             has not sent this relay the earlier changes they build on. They are kept, and \
+             apply when it does.",
+            blocked.len()
+        ));
+    }
     if errors.is_empty() && attachments_pending {
         errors.push(
             "Attachment(s) are still queued for upload; run `utopia sync` again to finish.".into(),
@@ -888,6 +899,7 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
             "blobs_down": totals.blobs_down,
             "attachments_pending": attachments_pending,
             "pending": pending,
+            "blocked_pages": blocked_json(&blocked),
             "errors": errors,
         });
         emit(&report)?;
@@ -945,6 +957,7 @@ fn status(options: &Options, config_dir: &Path) -> Result<i32> {
             .map_err(anyhow::Error::msg)?
             .is_some();
     let pending = store.outbox_count()?;
+    let blocked = store.waiting_pages()?;
     let last = store
         .sync_get("synced_at")?
         .and_then(|raw| raw.parse::<i64>().ok());
@@ -959,6 +972,7 @@ fn status(options: &Options, config_dir: &Path) -> Result<i32> {
         "environment": env.names,
         "last_synced_at": last,
         "pending": pending,
+        "blocked_pages": blocked_json(&blocked),
         "owned": owned,
         "notice": notice,
     });
@@ -992,6 +1006,12 @@ fn status(options: &Options, config_dir: &Path) -> Result<i32> {
             }
         );
         println!("pending: {pending} change(s)");
+        if !blocked.is_empty() {
+            println!(
+                "waiting: {} page(s) hold changes from another device that cannot apply yet",
+                blocked.len()
+            );
+        }
         println!(
             "owner: {}",
             if owned {
@@ -1056,6 +1076,27 @@ fn error_text(error: &SyncError) -> String {
         }
         other => other.to_string(),
     }
+}
+
+/// Pages that hold another device's changes which cannot apply yet (§12.6): the page id,
+/// when it started to wait, and the peers and counters that wait. No page text (§15.6).
+fn blocked_json(pages: &[utopia_store::WaitingPage]) -> serde_json::Value {
+    serde_json::Value::Array(
+        pages
+            .iter()
+            .map(|p| {
+                json!({
+                    "page_id": p.page.as_str(),
+                    "since": p.since,
+                    "waiting": p.ranges.iter().map(|r| json!({
+                        "peer": r.peer.to_string(),
+                        "start": r.start,
+                        "end": r.end,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    )
 }
 
 fn emit(value: &serde_json::Value) -> Result<()> {

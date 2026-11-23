@@ -10,7 +10,7 @@ use rusqlite::Connection;
 
 use crate::{Result, StoreError};
 
-pub const SCHEMA_VERSION: i64 = 10;
+pub const SCHEMA_VERSION: i64 = 11;
 
 const V1: &str = r#"
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -250,6 +250,19 @@ CREATE INDEX IF NOT EXISTS block_todo ON block(page_id, checked)
   WHERE block_type = 'todo' AND deleted_at IS NULL;
 "#;
 
+/// v11: remote changes a page received but cannot apply yet, because changes they depend
+/// on never reached this device (§12.3 step 3, §2.3.7). Loro keeps them out of snapshots,
+/// so this row is their only durable copy; the shard imports it again on load. No foreign
+/// key: the page may exist only through these changes. `since` is when the page first
+/// started to wait, for diagnostics (`utopia sync --json`).
+const V11: &str = r#"
+CREATE TABLE IF NOT EXISTS page_pending (
+  page_id TEXT PRIMARY KEY,
+  payload BLOB NOT NULL,
+  since   INTEGER NOT NULL
+);
+"#;
+
 /// Attribute row values for a block's text, if it is an attribute block.
 pub(crate) fn attr_row(text: &str) -> Option<(String, String, String, String)> {
     use utopia_core::{inline, title::normalize_title};
@@ -374,6 +387,12 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         let tx = conn.transaction()?;
         tx.execute_batch(V10)?;
         tx.execute_batch("PRAGMA user_version = 10")?;
+        tx.commit()?;
+    }
+    if version < 11 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(V11)?;
+        tx.execute_batch("PRAGMA user_version = 11")?;
         tx.commit()?;
     }
     Ok(())
