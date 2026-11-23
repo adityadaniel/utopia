@@ -471,7 +471,84 @@ struct SearchRow {
     daily: Option<NaiveDate>,
 }
 
+/// One stored resolution of a block's text: what a link, tag or block reference points at,
+/// with the byte range it covers (rule 3). A renderer reads these instead of resolving the
+/// text again at paint time, so the phone and the Mac name the same page for the same words
+/// (ios-prd C1, AC-4.8).
+pub struct BlockRefSpan {
+    pub kind: RefKind,
+    /// The page the span resolves to; `None` when no page has that title (an intent).
+    pub page: Option<PageId>,
+    /// The block a `((reference))` names, resolved or not.
+    pub block: Option<BlockId>,
+    pub range: std::ops::Range<usize>,
+}
+
 impl Store {
+    /// The `limit` pages changed most recently (ios-prd AC-8.2), newest first. Draft days are
+    /// not rows, so a day that was only visited never appears.
+    pub fn recent_pages(&self, limit: usize) -> Result<Vec<PageRow>> {
+        self.read_barrier()?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {PAGE_COLS} FROM page WHERE deleted_at IS NULL
+             ORDER BY updated_at DESC LIMIT ?1"
+        ))?;
+        let rows = stmt
+            .query_map([limit as i64], page_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// When each live block of a page was made: the day log's time column (ios-prd §4.4).
+    pub fn block_times(&self, page: &PageId) -> Result<HashMap<BlockId, i64>> {
+        self.read_barrier()?;
+        let mut stmt = self
+            .conn
+            .prepare_cached("SELECT id, created_at FROM block WHERE page_id=?1")?;
+        let rows = stmt
+            .query_map([page.as_str()], |r| {
+                Ok((BlockId(r.get(0)?), r.get::<_, i64>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows.into_iter().collect())
+    }
+
+    /// The stored resolutions of one block's references, in text order (rule 3): the edges
+    /// the projection already made, so a caller draws links without parsing the text.
+    pub fn block_ref_spans(&self, block: &BlockId) -> Result<Vec<BlockRefSpan>> {
+        self.read_barrier()?;
+        let mut stmt = self.conn.prepare_cached(
+            "SELECT dst_kind, dst_page_id, dst_block_id, anchor_start, anchor_end
+               FROM ref WHERE src_block_id=?1 ORDER BY anchor_start",
+        )?;
+        let rows = stmt
+            .query_map([block.as_str()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows
+            .into_iter()
+            .map(|(kind, page, target, start, end)| BlockRefSpan {
+                kind: if kind == "block" {
+                    RefKind::Block
+                } else if kind == "tag" {
+                    RefKind::Tag
+                } else {
+                    RefKind::Page
+                },
+                page: page.map(PageId),
+                block: target.map(BlockId),
+                range: start as usize..end as usize,
+            })
+            .collect())
+    }
+
     pub fn page_row(&self, id: &PageId) -> Result<Option<PageRow>> {
         self.read_barrier()?;
         Ok(self
