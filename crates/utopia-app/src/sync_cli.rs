@@ -55,6 +55,10 @@ usage:
   utopia sync config --graph <file.utopia> (--off | --mode relay|nearby|folder [--url …] [--folder …])
         change the saved settings (same file, same validation); a blank secret keeps the
         stored one
+  utopia sync repair --graph <file.utopia> [--json]
+        forget the pull positions, so the next sync compares every page with the
+        destination and sends what it lacks (for a page another device reports as waiting
+        for changes from this one); costs one full pull, sends only what is missing
 
 `serve-api --sync` is an alias for `sync --continuous`. The daemon takes the graph's owner
 lock for its whole life (MC-4), so a second utopia process forwards writes to it instead of
@@ -105,9 +109,10 @@ pub fn run(args: &[String]) -> Result<i32> {
         Some("status") => ("status", &args[1..]),
         Some("config") => ("config", &args[1..]),
         Some("launchd-plist") => ("launchd-plist", &args[1..]),
+        Some("repair") => ("repair", &args[1..]),
         Some(other) if !other.starts_with('-') => bail!(
-            "unknown utopia sync command {other:?}: use setup, status or config, or no \
-             command to sync once.\n\n{USAGE}"
+            "unknown utopia sync command {other:?}: use setup, status, config or repair, \
+             or no command to sync once.\n\n{USAGE}"
         ),
         _ => ("sync", args),
     };
@@ -143,6 +148,10 @@ pub fn run(args: &[String]) -> Result<i32> {
         "launchd-plist" => {
             options.ensure_only("launchd-plist", &["--graph"])?;
             launchd_plist(&options)
+        }
+        "repair" => {
+            options.ensure_only("repair", &["--graph", "--json"])?;
+            repair(&options)
         }
         _ => {
             options.ensure_only("sync", &["--graph", "--json", "--continuous"])?;
@@ -915,6 +924,31 @@ fn one_shot(options: &Options, config_dir: &Path) -> Result<i32> {
         }
     }
     Ok(if ok { EXIT_OK } else { 1 })
+}
+
+/// `utopia sync repair`: drop the pull positions so the next round compares every page
+/// with its destination (§12.3 step 4). It writes `sync_state`, so it owns the graph for
+/// the moment it takes (MC-4); it does not sync, and the next `utopia sync` or the app does.
+fn repair(options: &Options) -> Result<i32> {
+    let graph = options.graph()?.to_path_buf();
+    if !graph.exists() {
+        bail!("no graph at {}", graph.display());
+    }
+    let _lock = match owner_or_exit(&graph, options.json)? {
+        Ok(lock) => lock,
+        Err(code) => return Ok(code),
+    };
+    let store = crate::cli::open_store(&graph)?;
+    let reset = utopia_sync::SyncEngine::reset_positions(&store)?;
+    if options.json {
+        emit(&json!({ "version": 1, "ok": true, "positions_reset": reset }))?;
+    } else {
+        eprintln!(
+            "forgot {reset} pull position(s): the next sync compares every page with the \
+             destination and sends what it lacks"
+        );
+    }
+    Ok(EXIT_OK)
 }
 
 /// `utopia sync status`: read the saved settings, the graph and the owner sidecar without

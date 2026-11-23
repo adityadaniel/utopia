@@ -881,6 +881,9 @@ fn encrypted_device(
 #[test]
 fn ac_12_3_legacy_seq_positions_are_removed() {
     let s = Store::open_in_memory().unwrap();
+    // The one-time destination comparison drops every cursor on the first launch; this
+    // test is about the launches after it.
+    let _first = utopia_sync::SyncEngine::new(&s).unwrap();
     s.sync_set("seq:page-1", "42").unwrap();
     s.sync_set("seq:page-2", "7").unwrap();
     s.sync_set("cursor:page-3", "keep").unwrap();
@@ -1536,10 +1539,11 @@ fn ac_12_6_an_empty_target_never_proves_a_key() {
     );
 }
 
-/// The 2026-11-23 incident, step by step: a phone syncs a page to a mistyped graph id
-/// (`Utopia`), then to the real one (`utopia`) without a destination reset. Its first
-/// changes are marked sent but are only on the wrong graph, so every later change it pushes
-/// depends on changes the Mac never receives.
+/// The 2026-11-23 incident's end state: a phone's later change for a page is on the relay,
+/// and its earlier ones are not, although the phone marked them sent. The phone first
+/// pushed them to a mistyped graph id; the build of that day never compared with its new
+/// destination. Here the rows are marked sent without a push, which leaves the same gap
+/// where today's engine cannot see it (the phone already had first contact with `utopia`).
 struct Incident {
     relay: std::sync::Arc<Relay>,
     mac: Store,
@@ -1549,27 +1553,30 @@ struct Incident {
     page: PageId,
 }
 
+fn new_device(relay: &std::sync::Arc<Relay>, gid: &str) -> (Store, SyncClient<RelayTransport>) {
+    let mut s = Store::open_in_memory().unwrap();
+    s.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 23).unwrap()));
+    let c = SyncClient::new(RelayTransport::new(relay.clone(), gid), &s).unwrap();
+    (s, c)
+}
+
 fn incident() -> Incident {
     let relay = Relay::new();
-    let new_device = |gid: &str| {
-        let mut s = Store::open_in_memory().unwrap();
-        s.set_today(Some(NaiveDate::from_ymd_opt(2026, 11, 23).unwrap()));
-        let c = SyncClient::new(RelayTransport::new(relay.clone(), gid), &s).unwrap();
-        (s, c)
-    };
-    let (mut mac, mut mac_client) = new_device("utopia");
+    let (mut mac, mut mac_client) = new_device(&relay, "utopia");
     let page = mac.create_page("Shared").unwrap();
     write(&mut mac, &page, "from the Mac");
     mac_client.sync_once(&mut mac).unwrap();
 
-    let (mut phone, mut wrong) = new_device("Utopia");
-    assert_eq!(phone.create_page("Shared").unwrap(), page);
-    write(&mut phone, &page, "Now syncing");
-    wrong.sync_once(&mut phone).unwrap();
-
-    let mut phone_client =
-        SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &phone).unwrap();
+    let (mut phone, mut phone_client) = new_device(&relay, "utopia");
     phone_client.sync_once(&mut phone).unwrap();
+    write(&mut phone, &page, "Now syncing");
+    let lost: Vec<i64> = phone
+        .outbox_pending(100)
+        .unwrap()
+        .into_iter()
+        .map(|(seq, _, _, _)| seq)
+        .collect();
+    phone.outbox_mark_sent(&lost).unwrap();
     write(&mut phone, &page, "Testing from mobile");
     phone_client.sync_once(&mut phone).unwrap();
     assert_eq!(
@@ -1667,4 +1674,126 @@ fn ac_12_6_a_blocked_page_heals_when_the_sender_resends() {
         SyncStatus::from_result(&Ok(report), &i.mac),
         SyncStatus::Synced { .. }
     ));
+}
+
+fn sorted(mut v: Vec<String>) -> Vec<String> {
+    v.sort();
+    v
+}
+
+/// §12.3 step 4, §12.7: the incident as it happened. A phone syncs to a mistyped graph id,
+/// then to the real one with no destination reset (the phone has none). At first contact
+/// it learns what `utopia` holds and sends the rest, so the Mac gets every line and nothing
+/// waits.
+#[test]
+fn ac_12_7_a_changed_graph_id_sends_what_the_new_destination_lacks() {
+    let relay = Relay::new();
+    let (mut mac, mut mac_client) = new_device(&relay, "utopia");
+    let page = mac.create_page("Shared").unwrap();
+    write(&mut mac, &page, "from the Mac");
+    mac_client.sync_once(&mut mac).unwrap();
+
+    let (mut phone, mut wrong) = new_device(&relay, "Utopia");
+    assert_eq!(phone.create_page("Shared").unwrap(), page);
+    write(&mut phone, &page, "Now syncing");
+    wrong.sync_once(&mut phone).unwrap();
+
+    let mut right = SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &phone).unwrap();
+    let first = right.sync_once(&mut phone).unwrap();
+    assert_eq!(first.resent, 1, "one page lacked changes: {first:?}");
+    write(&mut phone, &page, "Testing from mobile");
+    right.sync_once(&mut phone).unwrap();
+
+    let report = mac_client.sync_once(&mut mac).unwrap();
+    assert_eq!(mac.waiting_count().unwrap(), 0);
+    assert_eq!(
+        sorted(texts(&mut mac, &page)),
+        vec!["Now syncing", "Testing from mobile", "from the Mac"]
+    );
+    assert!(matches!(
+        SyncStatus::from_result(&Ok(report), &mac),
+        SyncStatus::Synced { .. }
+    ));
+}
+
+/// §12.7: a page that only the first destination ever received is not listed by the new
+/// one at all; it is sent whole.
+#[test]
+fn ac_12_7_a_page_the_new_destination_lacks_entirely_is_sent() {
+    let relay = Relay::new();
+    let (mut phone, mut wrong) = new_device(&relay, "Utopia");
+    let page = phone.create_page("Only on the phone").unwrap();
+    write(&mut phone, &page, "written before the fix of the graph id");
+    wrong.sync_once(&mut phone).unwrap();
+
+    let mut right = SyncClient::new(RelayTransport::new(relay.clone(), "utopia"), &phone).unwrap();
+    right.sync_once(&mut phone).unwrap();
+
+    let (mut mac, mut mac_client) = new_device(&relay, "utopia");
+    mac_client.sync_once(&mut mac).unwrap();
+    assert_eq!(
+        texts(&mut mac, &page),
+        vec!["written before the fix of the graph id"]
+    );
+}
+
+/// §12.3 step 4: a gap made after first contact (an older build, rows acknowledged
+/// elsewhere) heals with `reset_positions` on the sender: the repair `utopia sync repair`
+/// runs, and what every device runs once on upgrade.
+#[test]
+fn ac_12_6_a_repair_on_the_sender_heals_a_blocked_page() {
+    let mut i = incident();
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+    assert!(i.mac.has_waiting(&i.page).unwrap(), "the gap is there");
+
+    utopia_sync::SyncEngine::reset_positions(&i.phone).unwrap();
+    let r = i.phone_client.sync_once(&mut i.phone).unwrap();
+    assert_eq!(r.resent, 1, "{r:?}");
+    i.mac_client.sync_once(&mut i.mac).unwrap();
+
+    assert_eq!(i.mac.waiting_count().unwrap(), 0);
+    assert_eq!(
+        sorted(texts(&mut i.mac, &i.page)),
+        vec!["Now syncing", "Testing from mobile", "from the Mac"]
+    );
+}
+
+/// The comparison costs a pull, never a push: a device that lacks nothing sends nothing.
+#[test]
+fn ac_12_3_a_device_that_lacks_nothing_resends_nothing() {
+    let relay = Relay::new();
+    let (mut a, mut ca) = new_device(&relay, "g");
+    let (mut b, mut cb) = new_device(&relay, "g");
+    let page = a.create_page("Shared").unwrap();
+    write(&mut a, &page, "one");
+    ca.sync_once(&mut a).unwrap();
+    cb.sync_once(&mut b).unwrap();
+    write(&mut b, &page, "two");
+    cb.sync_once(&mut b).unwrap();
+    ca.sync_once(&mut a).unwrap();
+
+    for (s, c) in [(&mut a, &mut ca), (&mut b, &mut cb)] {
+        utopia_sync::SyncEngine::reset_positions(s).unwrap();
+        let r = c.sync_once(s).unwrap();
+        assert_eq!((r.resent, r.pushed), (0, 0), "{r:?}");
+    }
+}
+
+/// The upgrade's comparison runs once: the first engine drops the positions, later ones
+/// keep them.
+#[test]
+fn ac_12_3_the_destination_comparison_runs_once() {
+    let s = Store::open_in_memory().unwrap();
+    s.sync_set("cursor:page-1", "from an older build").unwrap();
+    s.sync_set("rev", "from an older build").unwrap();
+    let _first = utopia_sync::SyncEngine::new(&s).unwrap();
+    assert!(s.sync_get("cursor:page-1").unwrap().is_none());
+    assert!(s.sync_get("rev").unwrap().is_none());
+
+    s.sync_set("cursor:page-1", "from this build").unwrap();
+    let _second = utopia_sync::SyncEngine::new(&s).unwrap();
+    assert_eq!(
+        s.sync_get("cursor:page-1").unwrap().as_deref(),
+        Some("from this build")
+    );
 }

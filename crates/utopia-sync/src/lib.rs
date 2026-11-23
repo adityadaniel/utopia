@@ -268,6 +268,8 @@ pub struct SyncReport {
     pub blobs_down: usize,
     /// Pages that failed while the rest of the round carried on; empty on a clean round.
     pub failed: Vec<Failure>,
+    /// Pages for which this device queued what the destination lacked (§12.3 step 4).
+    pub resent: usize,
 }
 
 impl SyncReport {
@@ -279,6 +281,7 @@ impl SyncReport {
         self.snapshots += other.snapshots;
         self.blobs_up += other.blobs_up;
         self.blobs_down += other.blobs_down;
+        self.resent += other.resent;
         for p in other.imported {
             if !self.imported.contains(&p) {
                 self.imported.push(p);
@@ -391,6 +394,9 @@ pub struct Outgoing {
     pub blob_puts: Vec<(String, Vec<u8>)>,
     /// Attachments referenced here but missing locally.
     pub blob_wants: Vec<String>,
+    /// Every page with a shard here, so a destination that lacks one entirely gets it
+    /// (§12.3 step 4).
+    pub local_pages: Vec<PageId>,
 }
 
 /// What one exchange did to one page (§12.3 steps 2–4): the one place the round's
@@ -403,6 +409,9 @@ pub struct PageExchange {
     pub duplicates: usize,
     /// This page's pull result when the relay was ahead of the local cursor.
     pub pull: Option<PullResponse>,
+    /// What the destination holds of this page, learned at first contact (a pull from 0,
+    /// or a page it does not list at all). `apply` sends what this device has beyond it.
+    pub relay_has: Option<Frontier>,
 }
 
 /// What came back from the relay; applied on the store's thread.
@@ -425,6 +434,10 @@ pub struct Incoming {
     /// them.
     pub failed: Vec<Failure>,
 }
+
+/// `sync_state` key of the one-time destination comparison, and its current value.
+const AUDIT_EPOCH: &str = "audit_epoch";
+const AUDIT_EPOCH_NOW: &str = "1";
 
 fn cursor_key(page: &PageId) -> String {
     format!("cursor:{page}")
@@ -464,6 +477,11 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
     let first = t.manifest(if_none_match)?;
     check_protocol(&first)?;
     let space = t.cursor_space();
+    let pushing: BTreeSet<PageId> = out.pushes.iter().map(|(p, _, _)| p.clone()).collect();
+    // No manifest from this destination was ever applied: a new graph id or relay, the
+    // upgrade's comparison, or `utopia sync repair`. Only then can a page it does not list
+    // mean "it never got this page"; afterwards it is a page still on its way.
+    let first_contact = out.rev.as_ref().is_none_or(|r| r.space != space);
     // Batches of one page are causally ordered (`prepare` splits a page's outbox by
     // `MAX_PUSH_BYTES`). Once one is refused, a later batch must not reach the relay
     // without its predecessors: a peer could pull it, advance its cursor over an update
@@ -573,7 +591,23 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
                 let since = local.map_or(0, |c| c.pos);
                 match t.pull(&page, since) {
                     Ok(resp) => {
-                        inc.pages.entry(page.clone()).or_default().pull = Some(resp);
+                        // First contact in this space: everything the destination holds
+                        // came back, so this is the one time the round can tell what it
+                        // lacks (§12.3 step 4). An acknowledgement from another space says
+                        // nothing about it. Measured here, off the store's thread.
+                        let relay_has = if since == 0 {
+                            let blobs = resp
+                                .snapshot
+                                .iter()
+                                .map(Vec::as_slice)
+                                .chain(resp.updates.iter().map(|u| u.payload.as_slice()));
+                            utopia_doc::version_of(blobs).ok()
+                        } else {
+                            None
+                        };
+                        let done = inc.pages.entry(page.clone()).or_default();
+                        done.pull = Some(resp);
+                        done.relay_has = relay_has;
                     }
                     Err(e) => {
                         // One page the relay serves but this device cannot read (an E2E
@@ -591,6 +625,22 @@ pub fn exchange<T: Transport + ?Sized>(t: &mut T, out: Outgoing) -> Result<Incom
             if p.tail_bytes > SNAPSHOT_TAIL_BYTES || tail > SNAPSHOT_TAIL_UPDATES {
                 inc.compact.push((page, p.head_seq));
             }
+        }
+        // A page this device has that the destination does not list at all, and that this
+        // round is not pushing: its changes were acknowledged by another destination, or
+        // never queued. The destination holds nothing of it (§12.3 step 4, §12.7).
+        let listed: BTreeSet<&str> = m.pages.iter().map(|p| p.page_id.as_str()).collect();
+        let local_pages = if first_contact {
+            out.local_pages
+        } else {
+            Vec::new()
+        };
+        for page in local_pages {
+            let pulled_here = out.cursors.get(&page).is_some_and(|c| c.space == space);
+            if listed.contains(page.as_str()) || pushing.contains(&page) || pulled_here {
+                continue;
+            }
+            inc.pages.entry(page).or_default().relay_has = Some(Frontier::default());
         }
     }
     inc.cursor_space = Some(space);
@@ -622,10 +672,30 @@ impl SyncEngine {
         if stale > 0 {
             eprintln!("utopia-sync: dropped {stale} pre-cursor sync position(s)");
         }
+        // Once, on the first launch of a build that compares with its destination: every
+        // page gets a first contact again, so a page whose earlier changes went to another
+        // destination is found and sent (the 2026-11-23 incident). Costs one full pull.
+        if store.sync_get(AUDIT_EPOCH)?.as_deref() != Some(AUDIT_EPOCH_NOW) {
+            let reset = Self::reset_positions(store)?;
+            if reset > 0 {
+                eprintln!("utopia-sync: comparing {reset} page(s) with the destination once");
+            }
+            store.sync_set(AUDIT_EPOCH, AUDIT_EPOCH_NOW)?;
+        }
         Ok(Self {
             client_id,
             pending_snapshots: Vec::new(),
         })
+    }
+
+    /// Forget every pull position and the remembered manifest, so the next round pulls
+    /// each page from 0 and compares it with what this device holds (§12.3 step 4): the
+    /// repair for a destination that lacks changes this device marked sent. Imports are
+    /// idempotent, so the cost is one full pull. Returns how many positions were dropped.
+    pub fn reset_positions(store: &Store) -> Result<usize> {
+        let n = store.sync_delete_prefixed("cursor")?;
+        store.sync_delete("rev")?;
+        Ok(n)
     }
 
     /// This device's sync client id (stable per graph file).
@@ -689,6 +759,7 @@ impl SyncEngine {
                 None => eprintln!("utopia-sync: ignoring unreadable cursor for page {k}"),
             }
         }
+        out.local_pages = store.all_page_ids()?;
         out.blob_puts = store.blobs_to_upload(BLOBS_PER_ROUND)?;
         out.blob_wants = store.missing_blobs()?;
         out.blob_wants.truncate(BLOBS_PER_ROUND);
@@ -768,6 +839,12 @@ impl SyncEngine {
                 }
             }
         }
+        let resend: Vec<(PageId, Frontier)> = inc
+            .pages
+            .iter()
+            .filter(|(page, _)| !unstored.contains(page))
+            .filter_map(|(page, done)| Some((page.clone(), done.relay_has.clone()?)))
+            .collect();
         for (page, done) in inc.pages {
             if unstored.contains(&page) {
                 continue;
@@ -790,6 +867,19 @@ impl SyncEngine {
                     rev: m.rev,
                 };
                 store.sync_set("rev", &rev.encode())?;
+            }
+        }
+        // After the imports: the local doc now holds the destination's copy too, so what
+        // goes out is only what this device has beyond it. `sync_round` pushes it in the
+        // next pass of the same round.
+        for (page, has) in resend {
+            match store.queue_missing(&page, &has) {
+                Ok(true) => report.resent += 1,
+                Ok(false) => {}
+                Err(e) => report.failed.push(Failure {
+                    page: Some(page),
+                    kind: FailureKind::Store(e.to_string()),
+                }),
             }
         }
         store.sync_set("synced_at", &store.now().to_string())?;
