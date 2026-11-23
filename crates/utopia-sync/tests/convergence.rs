@@ -367,7 +367,7 @@ fn settle(devices: &mut [Device]) {
 /// Pages where some device lacks a line's last text, or devices read differently.
 fn divergent(devices: &mut [Device], expected: &Expected) -> BTreeSet<PageId> {
     let mut out = BTreeSet::new();
-    for (_, (_, page, text)) in expected.blocks.iter() {
+    for (_, page, text) in expected.blocks.values() {
         for dev in devices.iter_mut() {
             if !texts(&mut dev.store, page).contains(text) {
                 out.insert(page.clone());
