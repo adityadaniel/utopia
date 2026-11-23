@@ -1,9 +1,11 @@
 use std::cell::RefCell;
 
-use gpui::{Context, EntityId, Keystroke, Window};
+use gpui::{ClipboardItem, Context, EntityId, Keystroke, Window};
 use utopia_core::text::{next_grapheme, prev_grapheme};
 use utopia_core::undo::Caret;
-use utopia_core::vim::{motion, Command, InsertAt, Key, Motion, Parser, Step};
+use utopia_core::vim::{
+    motion, operator, textobj, Command, InsertAt, Key, Motion, Operator, Parser, Step, Target,
+};
 use utopia_core::{BlockId, BlockKind, PageId};
 
 use crate::actions::{VIM_INSERT_CONTEXT, VIM_NORMAL_CONTEXT, VIM_VISUAL_CONTEXT};
@@ -64,12 +66,10 @@ impl Default for VimState {
 impl VimState {
     pub fn reset(&mut self) {
         self.mode = Mode::Normal;
-        self.insert_run = false;
         self.parser.reset();
     }
 
     pub fn leave_insert(&mut self) {
-        self.insert_run = false;
         if self.mode == Mode::Insert {
             self.mode = Mode::Normal;
         }
@@ -216,6 +216,8 @@ impl BlockEditor {
         if !crate::appearance::vim(cx) {
             return;
         }
+        // The click leaves Insert, so it leaves the Insert run too (VM-12).
+        self.close_insert_run(cx);
         self.vim_mut().leave_insert();
         self.vim_mut().mode = Mode::Normal;
         self.vim_mut().parser.reset();
@@ -245,7 +247,7 @@ impl BlockEditor {
     pub fn vim_run(
         &mut self,
         command: Command,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<BlockEditor>,
     ) {
         match command {
@@ -306,6 +308,10 @@ impl BlockEditor {
                 }
             }
             Command::Insert(at) => {
+                // The run opens before the caret moves, the text is deleted or the block is
+                // split, so what the command does and what is typed afterwards undo
+                // together (VM-12).
+                self.begin_insert_run(cx);
                 match at {
                     InsertAt::Cursor => {}
                     InsertAt::After => {
@@ -326,24 +332,38 @@ impl BlockEditor {
                     InsertAt::BlockBelow => {
                         let caret = self.field().text.len();
                         self.vim_mut().mode = Mode::Insert;
-                        self.vim_mut().insert_run = true;
                         self.commit(cx);
                         cx.emit(EditorEvent::Split { caret });
                         return;
                     }
                     InsertAt::BlockAbove => {
                         self.vim_mut().mode = Mode::Insert;
-                        self.vim_mut().insert_run = true;
                         self.commit(cx);
                         cx.emit(EditorEvent::InsertAbove);
                         return;
                     }
-                    InsertAt::ReplaceChar | InsertAt::ReplaceLine | InsertAt::ToLineEnd => return,
+                    InsertAt::ReplaceChar => self.vim_delete_chars(false, 1, false, window, cx),
+                    InsertAt::ReplaceLine => {
+                        let len = self.field().text.len();
+                        self.vim_delete(0..len, None, false, false, window, cx);
+                    }
+                    InsertAt::ToLineEnd => self.vim_delete_to_line_end(false, window, cx),
                 }
                 self.vim_mut().mode = Mode::Insert;
-                self.vim_mut().insert_run = true;
                 self.refresh_autocomplete(cx);
             }
+            Command::DeleteChar { back, count } => {
+                self.vim_delete_chars(back, count, true, window, cx)
+            }
+            Command::DeleteToLineEnd => self.vim_delete_to_line_end(true, window, cx),
+            Command::ReplaceChar(ch) => self.vim_replace_char(ch, window, cx),
+            Command::ToggleCase { count } => self.vim_toggle_case(count, window, cx),
+            Command::Operate {
+                op,
+                target,
+                count,
+                register,
+            } => self.vim_operate(op, target, count, register, window, cx),
             Command::Undo { count } => {
                 for _ in 0..count.max(1) {
                     self.history(true, cx);
@@ -371,5 +391,262 @@ impl BlockEditor {
             _ => {}
         }
         cx.notify();
+    }
+
+    // ------------------------------------------------------- charwise operators (2B)
+
+    /// Write a register (VM-11). A yank (`clipboard`) and `"+` also put the text on the
+    /// system clipboard; `d`, `c` and `x` write the register only; `"_` discards.
+    fn vim_set_register(
+        &self,
+        text: &str,
+        register: Option<char>,
+        clipboard: bool,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if register == Some('_') {
+            return;
+        }
+        remember(Register::Chars(text.to_string()));
+        if clipboard || register == Some('+') {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+        }
+    }
+
+    /// Delete `range` as one undo step, putting what it took in the register. The caret
+    /// lands where the text was removed from; `clamp` then puts it on the block cursor's
+    /// resting place, which a delete wants and a `c` command does not — its Insert bar may
+    /// sit past the last grapheme of the line.
+    fn vim_delete(
+        &mut self,
+        range: std::ops::Range<usize>,
+        register: Option<char>,
+        clipboard: bool,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let len = self.field().text.len();
+        let range = range.start.min(len)..range.end.min(len);
+        if range.is_empty() {
+            return;
+        }
+        let cut = self.field().text[range.clone()].to_string();
+        self.vim_set_register(&cut, register, clipboard, cx);
+        let at = range.start;
+        self.discrete_edit(range, "", Some(at), window, cx);
+        if clamp {
+            self.clamp_normal_cursor(cx);
+        }
+    }
+
+    /// `x` and `X`: `count` graphemes under and after the cursor, or before it, inside the
+    /// line (Vim's `x` never joins two lines).
+    fn vim_delete_chars(
+        &mut self,
+        back: bool,
+        count: usize,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let count = count.max(1);
+        let range = if back {
+            let limit = motion::line_start(&text, cursor);
+            let mut start = cursor;
+            for _ in 0..count {
+                if start <= limit {
+                    break;
+                }
+                start = prev_grapheme(&text, start);
+            }
+            start..cursor
+        } else {
+            let limit = motion::line_end_exclusive(&text, cursor);
+            let mut end = cursor;
+            for _ in 0..count {
+                if end >= limit {
+                    break;
+                }
+                end = next_grapheme(&text, end);
+            }
+            cursor..end
+        };
+        self.vim_delete(range, None, false, clamp, window, cx);
+    }
+
+    /// `D` and `C`'s delete: the caret to the end of the line, exclusive of its break.
+    fn vim_delete_to_line_end(
+        &mut self,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let end = motion::line_end_exclusive(&text, cursor);
+        self.vim_delete(cursor..end, None, false, clamp, window, cx);
+    }
+
+    /// `r{char}`: put `ch` over the grapheme under the cursor. Vim writes no register for
+    /// it — nothing was taken, it was replaced.
+    fn vim_replace_char(&mut self, ch: char, window: &mut Window, cx: &mut Context<BlockEditor>) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let end = next_grapheme(&text, cursor);
+        if end == cursor {
+            // An empty block has nothing under the cursor.
+            return;
+        }
+        self.discrete_edit(cursor..end, &ch.to_string(), Some(cursor), window, cx);
+        self.clamp_normal_cursor(cx);
+    }
+
+    /// `~`: swap the case of `count` graphemes and step over them, as Vim's does. It is a
+    /// replacement, so it writes no register.
+    fn vim_toggle_case(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let limit = motion::line_end_exclusive(&text, cursor);
+        let mut end = cursor;
+        for _ in 0..count.max(1) {
+            if end >= limit {
+                break;
+            }
+            end = next_grapheme(&text, end);
+        }
+        if end == cursor {
+            return;
+        }
+        let mut swapped = String::with_capacity(end - cursor);
+        for c in text[cursor..end].chars() {
+            if c.is_lowercase() {
+                swapped.extend(c.to_uppercase());
+            } else if c.is_uppercase() {
+                swapped.extend(c.to_lowercase());
+            } else {
+                swapped.push(c);
+            }
+        }
+        // The cursor steps past the last toggled grapheme, and rests on it at a line's
+        // end (1E.3).
+        let at = motion::clamp_normal(&text, end);
+        self.discrete_edit(cursor..end, &swapped, Some(at), window, cx);
+        self.clamp_normal_cursor(cx);
+    }
+
+    /// `d`, `c` and `y` with a motion or a text object: one range from
+    /// [`utopia_core::vim::operator`] or [`utopia_core::vim::textobj`], one undo step.
+    fn vim_operate(
+        &mut self,
+        op: Operator,
+        target: Target,
+        count: usize,
+        register: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let count = count.max(1);
+        let range = match target {
+            // `cc`: the block's text. Its children are other blocks, so they stay (VM-8).
+            // `dd`, `yy`, `>>` and `<<` act on blocks and are PR 2C.
+            Target::Line => match op {
+                Operator::Change => 0..text.len(),
+                _ => return,
+            },
+            Target::Object(obj) => match textobj::range_of(&text, cursor, obj) {
+                Some(range) => range,
+                // Not in such an object: the command writes nothing.
+                None => return,
+            },
+            Target::Motion(motion) => {
+                let motion = change_word_as_word_end(&text, cursor, op, motion);
+                match operator::motion_range(
+                    &text,
+                    cursor,
+                    motion,
+                    count,
+                    self.vim().parser.last_find(),
+                ) {
+                    Some(range) => range,
+                    None => return,
+                }
+            }
+        };
+        let len = text.len();
+        let range = range.start.min(len)..range.end.min(len);
+        match op {
+            Operator::Yank => {
+                // VM-11: a yank writes the register and the system clipboard, and the
+                // cursor moves to the start of what it took.
+                if range.is_empty() {
+                    return;
+                }
+                let taken = text[range.clone()].to_string();
+                self.vim_set_register(&taken, register, true, cx);
+                let at = range.start;
+                self.field_mut().move_to(at);
+                self.field_mut().reset_caret_motion();
+                self.clamp_normal_cursor(cx);
+            }
+            Operator::Delete => self.vim_delete(range, register, false, true, window, cx),
+            Operator::Change => {
+                // The run opens before the delete, so the delete and the typing are one
+                // undo step (VM-12), and Insert starts after it. A range of no width
+                // (`ci(` in `()`) still enters Insert, as Vim's does.
+                self.begin_insert_run(cx);
+                self.vim_delete(range, register, false, false, window, cx);
+                self.vim_mut().mode = Mode::Insert;
+                self.refresh_autocomplete(cx);
+            }
+            // PR 2C: `>>` and `<<` indent blocks.
+            Operator::Indent | Operator::Outdent => {}
+        }
+    }
+}
+
+/// `cw` on a word acts like `ce`: Vim changes the word and leaves the blank after it, so
+/// what is typed replaces the word and not the gap (2B). On a blank it behaves as `w` does.
+fn change_word_as_word_end(text: &str, cursor: usize, op: Operator, motion: Motion) -> Motion {
+    match (op, motion) {
+        (Operator::Change, Motion::WordForward { big }) => {
+            let on_blank = text
+                .get(cursor..)
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(char::is_whitespace);
+            if on_blank {
+                motion
+            } else {
+                Motion::WordEnd { big }
+            }
+        }
+        _ => motion,
     }
 }

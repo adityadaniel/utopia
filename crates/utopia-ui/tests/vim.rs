@@ -12,7 +12,7 @@ use utopia_ui::actions::install_keymap;
 use utopia_ui::app_state::AppState;
 use utopia_ui::editor::BlockEditor;
 use utopia_ui::theme::Theme;
-use utopia_ui::vim::{Mode, Resume};
+use utopia_ui::vim::{Mode, Register, Resume};
 use utopia_ui::workspace::Workspace;
 
 fn today() -> NaiveDate {
@@ -1141,4 +1141,432 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
         let report = app.store.doctor().unwrap();
         assert!(report.is_ok(), "rule 2 after the undos\\n{report:?}");
     });
+}
+
+// ------------------------------------------------------------------------ PR 2 — 2A
+// Undo runs (VM-12; PRD §9.1.1, the FR-2.12 note): one Insert run is one undo group.
+
+/// The system clipboard's text, as the app would paste it.
+fn clipboard(cx: &mut VisualTestContext) -> String {
+    cx.read_from_clipboard()
+        .and_then(|item| item.text())
+        .unwrap_or_default()
+}
+
+/// 2A.4 (VM-12): pauses longer than the 500 ms coalesce window do not split an Insert run.
+/// The store's clock is settable, so this jumps it instead of sleeping.
+#[gpui::test]
+fn vm_12_an_insert_run_with_long_pauses_is_one_undo_group(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["x"]);
+    });
+    let page = today_page(&app, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("A");
+    for (i, ch) in ["a", "b", "c"].iter().enumerate() {
+        // 600 ms apart: three groups outside a run, one inside it.
+        app.update(cx, |app, _| {
+            app.store.set_clock(Some(1_000 + 600 * i as i64))
+        });
+        cx.simulate_input(ch);
+    }
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(rows(&app, &page, cx)[0].0, "xabc");
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth + 1,
+        "one Insert run is one undo group, whatever the pauses (VM-12)"
+    );
+    // And one `u` takes the whole run back.
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "x", "one undo, the whole run");
+    assert_eq!(undo_depth(&app, cx), depth);
+    assert_eq!(mode(&ws, cx), Mode::Normal);
+}
+
+/// 2A.3 (VM-12): a blur closes the run, so `i`, two typed characters and a click elsewhere
+/// are still one undo step.
+#[gpui::test]
+fn vm_12_a_run_closed_by_a_blur_is_one_group(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["x"]);
+    });
+    let page = today_page(&app, cx);
+    let editor = editor(&ws, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("A");
+    app.update(cx, |app, _| app.store.set_clock(Some(1_000)));
+    cx.simulate_input("a");
+    app.update(cx, |app, _| app.store.set_clock(Some(2_000)));
+    cx.simulate_input("b");
+    cx.run_until_parked();
+    assert!(
+        app.update(cx, |app, _| app.store.in_undo_run()),
+        "typing in Insert holds the run open"
+    );
+
+    // The keyboard goes somewhere else without an Escape.
+    editor.update(cx, |e, cx| e.focus_lost(cx));
+    cx.run_until_parked();
+
+    assert!(
+        !app.update(cx, |app, _| app.store.in_undo_run()),
+        "the blur closed the run (2A.3)"
+    );
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth + 1,
+        "the whole run is one step even when the blur closed it"
+    );
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "x");
+}
+
+/// 2A.1 (VM-12): an undo that starts while a run is open closes the run first, so it takes
+/// the whole Insert run and not the edit before it.
+#[gpui::test]
+fn vm_12_an_undo_during_an_open_run_closes_it_first(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["x"]);
+    });
+    let page = today_page(&app, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("A");
+    app.update(cx, |app, _| app.store.set_clock(Some(1_000)));
+    cx.simulate_input("a");
+    app.update(cx, |app, _| app.store.set_clock(Some(2_000)));
+    cx.simulate_input("b");
+    cx.run_until_parked();
+    assert_eq!(rows(&app, &page, cx)[0].0, "xab");
+
+    // An undo with the run still open: the run is folded and undone as one step.
+    app.update(cx, |app, _| app.store.undo().unwrap());
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        "x",
+        "the undo took the whole run, not one keystroke of it"
+    );
+    assert!(!app.update(cx, |app, _| app.store.in_undo_run()));
+    assert_eq!(undo_depth(&app, cx), depth);
+}
+
+// ------------------------------------------------------------------------ PR 2 — 2B
+// Charwise operators: one command is one undo step, and `c`/`s`/`S`/`C` type inside it.
+
+/// 2B (VM-12): each charwise edit is ONE undo step. One block per case, so each starts from
+/// its own text; `j` reaches the next one and `0` plus `l` place the Normal cursor.
+#[gpui::test]
+fn vm_12_each_charwise_edit_is_one_undo_step(cx: &mut TestAppContext) {
+    // (text, cursor offset, keys, text after)
+    let cases: &[(&str, usize, &str, &str)] = &[
+        ("abc", 1, "x", "ac"),
+        ("abc", 1, "X", "bc"),
+        ("abc def", 4, "D", "abc "),
+        ("abc", 0, "~", "Abc"),
+        ("abc", 0, "r x", "xbc"),
+        ("alpha beta", 0, "d w", "beta"),
+        // The last word of the block: no stray character and no other block joined.
+        ("alpha beta", 6, "d w", "alpha "),
+        ("alpha beta", 0, "d e", " beta"),
+        ("alpha beta", 6, "d $", "alpha "),
+        ("alpha beta", 6, "d 0", "beta"),
+        ("alpha beta", 7, "d i w", "alpha "),
+        ("alpha beta", 7, "d a w", "alpha"),
+        ("f(a b)c", 3, "d i (", "f()c"),
+        ("a b-c d", 0, "d W", "b-c d"),
+        ("alpha beta", 7, "d i W", "alpha "),
+        ("a [x] b", 3, "d i [", "a [] b"),
+        ("a {x} b", 3, "d i {", "a {} b"),
+        ("say \"hi\" now", 6, "d i \"", "say \"\" now"),
+        ("say 'hi' now", 6, "d a '", "say  now"),
+        ("run `now` ok", 6, "d i `", "run `` ok"),
+    ];
+    let texts: Vec<&str> = cases.iter().map(|(text, ..)| *text).collect();
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &texts);
+    });
+    let page = today_page(&app, cx);
+
+    for (i, (text, at, keys, want)) in cases.iter().enumerate() {
+        let mut strokes = String::new();
+        if i > 0 {
+            strokes.push_str("j ");
+        }
+        strokes.push_str("0 ");
+        for _ in 0..*at {
+            strokes.push_str("l ");
+        }
+        strokes.push_str(keys);
+        let depth = undo_depth(&app, cx);
+        cx.simulate_keystrokes(&strokes);
+        cx.run_until_parked();
+
+        assert_eq!(
+            rows(&app, &page, cx)[i].0,
+            *want,
+            "`{keys}` on {text:?} (block {i})"
+        );
+        assert_eq!(
+            undo_depth(&app, cx),
+            depth + 1,
+            "`{keys}` on {text:?} is one undo step (VM-12)"
+        );
+    }
+}
+
+/// 2B (VM-12): `c`, `s`, `S` and `C` delete and then type inside one run, so the whole
+/// change is one undo step.
+#[gpui::test]
+fn vm_12_each_change_types_inside_one_run(cx: &mut TestAppContext) {
+    // (text, cursor offset, keys, text after)
+    let cases: &[(&str, usize, &str, &str)] = &[
+        ("abc def", 4, "C", "abc X"),
+        ("abc", 1, "s", "aXc"),
+        ("abc def", 0, "S", "X"),
+        ("abc def", 0, "c c", "X"),
+        ("say \"hi\" now", 5, "c i \"", "say \"X\" now"),
+        ("alpha beta", 0, "c w", "X beta"),
+        ("alpha beta", 7, "c i w", "alpha X"),
+        ("alpha beta", 0, "c a w", "Xbeta"),
+    ];
+    let texts: Vec<&str> = cases.iter().map(|(text, ..)| *text).collect();
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &texts);
+    });
+    let page = today_page(&app, cx);
+
+    for (i, (text, at, keys, want)) in cases.iter().enumerate() {
+        let mut strokes = String::new();
+        if i > 0 {
+            strokes.push_str("j ");
+        }
+        strokes.push_str("0 ");
+        for _ in 0..*at {
+            strokes.push_str("l ");
+        }
+        strokes.push_str(keys);
+        let depth = undo_depth(&app, cx);
+        cx.simulate_keystrokes(&strokes);
+        cx.run_until_parked();
+        cx.simulate_input("X");
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+
+        assert_eq!(
+            rows(&app, &page, cx)[i].0,
+            *want,
+            "`{keys}` then typing on {text:?} (block {i})"
+        );
+        assert_eq!(
+            undo_depth(&app, cx),
+            depth + 1,
+            "`{keys}` and its typing are one undo step (VM-12)"
+        );
+    }
+}
+
+/// 2A.4 + 2B, the headline acceptance: `ciw`, a typed word and Escape are one undo step, and
+/// `u` brings the original word back in one more.
+#[gpui::test]
+fn vm_12_ciw_typing_and_escape_undo_as_one_step(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["alpha beta"]);
+    });
+    let page = today_page(&app, cx);
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("0 w"); // on `beta`
+    assert_eq!(cursor(&ws, cx), 6);
+    cx.simulate_keystrokes("c i w");
+    cx.run_until_parked();
+    assert_eq!(mode(&ws, cx), Mode::Insert, "`ciw` enters Insert");
+    assert_eq!(field_text(&ws, cx), "alpha ", "the word is gone first");
+    cx.simulate_input("gamma");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(rows(&app, &page, cx)[0].0, "alpha gamma");
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth + 1,
+        "`ciw` and its typing are one undo step (2A.4)"
+    );
+
+    cx.simulate_keystrokes("u");
+    cx.run_until_parked();
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        "alpha beta",
+        "`u` restores the original word in one step"
+    );
+    assert_eq!(undo_depth(&app, cx), depth);
+    assert_eq!(mode(&ws, cx), Mode::Normal);
+    assert!(
+        cursor(&ws, cx) <= "alpha beta".len(),
+        "the cursor is still in the restored block"
+    );
+}
+
+/// 2B (VM-8): `cc` changes the block's own text and leaves its children alone.
+#[gpui::test]
+fn vm_12_cc_changes_the_text_and_keeps_the_children(cx: &mut TestAppContext) {
+    let seeded = std::cell::RefCell::new(None);
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        let (page, ids) = seed_roots(s, &["parent", "sibling"]);
+        let child = BlockId::new();
+        s.execute(
+            &page,
+            vec![Command::InsertBlock {
+                id: child,
+                parent: Some(ids[0].clone()),
+                after: None,
+                text: "child".to_string(),
+                kind: BlockKind::Bullet,
+            }],
+            Default::default(),
+        )
+        .unwrap();
+        seeded.replace(Some(page));
+    });
+    let page = seeded.into_inner().expect("seeded");
+    let depth = undo_depth(&app, cx);
+
+    cx.simulate_keystrokes("0 c c");
+    cx.run_until_parked();
+    cx.simulate_input("new");
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+
+    assert_eq!(
+        rows(&app, &page, cx),
+        vec![
+            ("new".to_string(), 0),
+            ("child".to_string(), 1),
+            ("sibling".to_string(), 0),
+        ],
+        "`cc` took the block's text, not the blocks below it (VM-8)"
+    );
+    assert_eq!(undo_depth(&app, cx), depth + 1, "one undo step");
+    assert_eq!(mode(&ws, cx), Mode::Normal);
+}
+
+/// 2B: `ci[` inside `[[Alpha]]` leaves the caret inside the link, and entering Insert
+/// re-reads the trigger, so the page menu opens (PR 1's rule, relied on here).
+#[gpui::test]
+fn vm_12_ci_bracket_inside_a_link_opens_the_menu(cx: &mut TestAppContext) {
+    let (_app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["[[Alpha]]"]);
+        s.create_page("Alphabet").unwrap();
+    });
+    // On the `h` of `Alpha`, inside the brackets.
+    cx.simulate_keystrokes("0 3 l");
+    assert_eq!(cursor(&ws, cx), 3);
+    assert_eq!(field_text(&ws, cx), "[[Alpha]]");
+
+    cx.simulate_keystrokes("c i [");
+    cx.run_until_parked();
+
+    assert_eq!(mode(&ws, cx), Mode::Insert, "`ci[` enters Insert");
+    assert_eq!(
+        field_text(&ws, cx),
+        "[[]]",
+        "the link's text is what was changed"
+    );
+    assert_eq!(
+        cursor(&ws, cx),
+        2,
+        "the caret is inside the brackets, where the menu is"
+    );
+    let menu = ws
+        .update(cx, |w, cx| {
+            w.editor().read(cx).autocomplete().menu().cloned()
+        })
+        .expect("`ci[` inside `[[…]]` opens the link's menu");
+    assert_eq!(menu.start, 0, "the trigger is the link's opening `[[`");
+}
+
+/// 2B (VM-11): `y` writes the register *and* the system clipboard; `d`, `c` and `x` write
+/// the register only. `"_` discards.
+#[gpui::test]
+fn vm_11_a_yank_writes_the_clipboard_and_a_delete_does_not(cx: &mut TestAppContext) {
+    let (app, _ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["alpha beta", "gamma delta", "one two"]);
+    });
+    let page = today_page(&app, cx);
+
+    let depth = undo_depth(&app, cx);
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+    cx.simulate_keystrokes("0 y w");
+    cx.run_until_parked();
+    assert_eq!(
+        clipboard(cx),
+        "alpha ",
+        "a yank puts what it took on the system clipboard (VM-11)"
+    );
+    assert_eq!(
+        undo_depth(&app, cx),
+        depth,
+        "`yw` is a yank, not an edit: it takes nothing and leaves no undo step"
+    );
+    assert!(
+        matches!(utopia_ui::vim::last(), Register::Chars(t) if t == "alpha "),
+        "and in the register"
+    );
+    assert_eq!(
+        rows(&app, &page, cx)[0].0,
+        "alpha beta",
+        "yanking writes no text"
+    );
+
+    // `d`, `c` and `x` leave the clipboard as it was.
+    for (keys, typed) in [("0 d w", false), ("0 x", false), ("j 0 c w", true)] {
+        cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+        cx.simulate_keystrokes(keys);
+        if typed {
+            cx.simulate_input("Z");
+            cx.simulate_keystrokes("escape");
+        }
+        cx.run_until_parked();
+        assert_eq!(
+            clipboard(cx),
+            "sentinel",
+            "`{keys}` writes the register only"
+        );
+    }
+
+    // `"_` writes neither: the black hole register.
+    cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
+    cx.simulate_keystrokes("\" _ y y");
+    cx.run_until_parked();
+    assert_eq!(clipboard(cx), "sentinel", "`\"_` discards");
+}
+
+/// 2B (VM-12): a text object with no object under the cursor writes nothing and leaves no
+/// undo step — `di(` outside any bracket.
+#[gpui::test]
+fn vm_12_an_object_that_is_not_there_writes_nothing(cx: &mut TestAppContext) {
+    let (app, ws, cx) = setup_seeded(cx, true, |s| {
+        seed_roots(s, &["plain text"]);
+    });
+    let page = today_page(&app, cx);
+    let depth = undo_depth(&app, cx);
+    let before = rows(&app, &page, cx);
+
+    cx.simulate_keystrokes("0 d i (");
+    cx.run_until_parked();
+
+    assert_eq!(rows(&app, &page, cx), before, "no text changed");
+    assert_eq!(undo_depth(&app, cx), depth, "no undo step");
+    assert_eq!(mode(&ws, cx), Mode::Normal);
 }

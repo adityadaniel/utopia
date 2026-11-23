@@ -1,4 +1,5 @@
 pub mod motion;
+pub mod operator;
 pub mod parse;
 pub mod textobj;
 
