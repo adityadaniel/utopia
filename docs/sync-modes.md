@@ -374,6 +374,8 @@ being saved.
 ## Debugging sync
 
 When a device does not show what another device wrote, work through these steps in order.
+The incident that led to these tools, and what it taught, is in
+[`sync-incident-2026-11-23.md`](sync-incident-2026-11-23.md).
 None of them prints a token, a passphrase or page text, except the titles of your own pages
 in `inspect`.
 
