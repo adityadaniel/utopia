@@ -9,7 +9,7 @@
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
-  <key>MinimumOSVersion</key><string>17.0</string>
+  <key>MinimumOSVersion</key><string>27.0</string>
   <key>UILaunchScreen</key><dict/>
   <key>UIApplicationSupportsIndirectInputEvents</key><true/>
   <key>LSRequiresIPhoneOS</key><true/>
