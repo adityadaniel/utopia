@@ -102,6 +102,7 @@ struct ComposeBox: View {
                         }
                         _ = offset
                     },
+                    onFocus: { model.focusLine(line.id, at: nil) },
                     onPasteLines: { lines in model.pasteLines(lines, after: line.id) }
                 )
                 .padding(.vertical, textInset)

@@ -18,6 +18,8 @@ struct LineEditor: UIViewRepresentable {
     let onDeleteAtStart: () -> Void
     let onPicker: () -> Void
     let onCaret: (Int) -> Void
+    /// The line took the caret, however it happened: a tap in the text, or Return above it.
+    let onFocus: () -> Void
     /// A paste of several lines: each line becomes a line of the draft (§7).
     let onPasteLines: ([String]) -> Void
 
@@ -44,6 +46,7 @@ struct LineEditor: UIViewRepresentable {
         coordinator.onDeleteAtStart = onDeleteAtStart
         coordinator.onPicker = onPicker
         coordinator.onPasteLines = onPasteLines
+        coordinator.onFocus = onFocus
         coordinator.onText = onText
         coordinator.onReturn = onReturn
         coordinator.onCaret = onCaret
@@ -121,6 +124,7 @@ struct LineEditor: UIViewRepresentable {
         var onDeleteAtStart: (() -> Void)?
         var onPicker: (() -> Void)?
         var onCaret: ((Int) -> Void)?
+        var onFocus: (() -> Void)?
         var onPasteLines: (([String]) -> Void)?
         var appliedCaret: UUID?
         var isUpdating = false
@@ -128,6 +132,10 @@ struct LineEditor: UIViewRepresentable {
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
             onText?(textView.text)
+        }
+
+        func textViewDidBeginEditing(_ textView: UITextView) {
+            onFocus?()
         }
 
         func textViewDidChangeSelection(_ textView: UITextView) {
