@@ -301,9 +301,14 @@ pub enum SyncStatus {
     },
     /// The relay was reachable and the round applied what it could, but some pages failed:
     /// not "Offline" (the network is up), and not plain "Synced" either (§12.6).
+    ///
+    /// `blocked` counts pages that hold another device's changes which cannot apply yet,
+    /// because changes they depend on never reached this relay (§12.3 step 3, §2.3.7).
+    /// They are kept, not dropped, and apply when the sender sends the missing ones.
     Partial {
         failed: usize,
         queued: usize,
+        blocked: usize,
     },
     /// The relay was not reached, or answered with a transport failure: everything is
     /// still queued locally (§12.6).
@@ -324,8 +329,13 @@ impl SyncStatus {
         // A count, not the rows: this runs on the UI thread on every backoff round with no
         // network, and payloads can be large (rule 10).
         let queued = || store.outbox_count().unwrap_or(0);
+        // Read from the store, not the report: a later round that moves nothing must not
+        // turn a page that still waits back into "Synced".
+        let blocked = || store.waiting_count().unwrap_or(0);
         match r {
-            Ok(r) if r.failed.is_empty() => SyncStatus::Synced { at_ms: store.now() },
+            Ok(r) if r.failed.is_empty() && blocked() == 0 => {
+                SyncStatus::Synced { at_ms: store.now() }
+            }
             Ok(r) => {
                 let failed = r
                     .failed
@@ -336,6 +346,7 @@ impl SyncStatus {
                 SyncStatus::Partial {
                     failed,
                     queued: queued(),
+                    blocked: blocked(),
                 }
             }
             Err(SyncError::Unauthorized) => SyncStatus::NeedsAuth,
@@ -795,7 +806,11 @@ impl SyncEngine {
                 _ => None,
             };
             if let Some(space) = covered {
-                if store.page_exists(&page)? {
+                // A snapshot never holds changes that wait for missing ones, and the relay
+                // drops every row it covers: compacting here would delete the only relay
+                // copy of the other device's changes (§2.3.7, rule 5). The page is
+                // compacted by a device that has them all, or once they apply.
+                if store.page_exists(&page)? && !store.has_waiting(&page)? {
                     let full = store.export_since(&page, &Frontier::default())?;
                     self.pending_snapshots.push(QueuedSnapshot {
                         page,

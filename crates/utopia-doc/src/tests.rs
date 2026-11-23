@@ -443,3 +443,75 @@ fn incremental_cache_matches_rebuild_under_dense_inserts() {
         assert_eq!(doc.state().block(id).unwrap().position, b.position, "{id}");
     }
 }
+
+fn insert(id: &str, after: Option<&str>, text: &str) -> Command {
+    Command::InsertBlock {
+        id: BlockId::from(id),
+        parent: None,
+        after: after.map(BlockId::from),
+        text: text.into(),
+        kind: BlockKind::Bullet,
+    }
+}
+
+/// The relay holds a sender's later changes but not the earlier ones they build on (a
+/// device that first pushed to another graph id). `(first, later)` are the two updates.
+fn gap() -> (Vec<u8>, Vec<u8>) {
+    let mut sender = LoroPageDoc::new(page(), 7);
+    sender.apply(&insert("one", None, "first"), 0).unwrap();
+    let first = sender.export_since(&Frontier::default()).unwrap();
+    let mid = sender.frontier();
+    sender
+        .apply(&insert("two", Some("one"), "second"), 0)
+        .unwrap();
+    let later = sender.export_since(&mid).unwrap();
+    (first, later)
+}
+
+/// §12.3 step 3, §2.3.7: an update whose predecessors never arrived applies nothing, and
+/// the doc says so instead of reporting a clean import.
+#[test]
+fn ac_12_3_import_keeps_changes_that_wait_for_a_missing_change() {
+    let (_, later) = gap();
+    let mut receiver = LoroPageDoc::new(page(), 9);
+    assert!(!receiver.import(&later).unwrap(), "nothing applies yet");
+    assert!(receiver.state().blocks.is_empty());
+    let waiting = receiver.waiting().unwrap().expect("the update waits");
+    let ranges = waiting_ranges(&waiting).unwrap();
+    assert_eq!(ranges.len(), 1, "{ranges:?}");
+    assert_eq!(ranges[0].peer, 7);
+    assert!(ranges[0].start > 0, "it waits for counters below its start");
+}
+
+/// The waiting bytes are the only copy: a snapshot does not hold them, so they must
+/// survive a reload through the sidecar, and apply when the missing change arrives.
+#[test]
+fn ac_12_3_waiting_changes_survive_a_snapshot_reload_and_apply_later() {
+    let (first, later) = gap();
+    let mut receiver = LoroPageDoc::new(page(), 9);
+    receiver.import(&later).unwrap();
+    let snap = receiver.snapshot().unwrap();
+    let sidecar = receiver.waiting().unwrap().expect("the update waits");
+
+    let mut reopened = LoroPageDoc::from_snapshot(page(), &snap, 9).unwrap();
+    assert!(
+        reopened.waiting().unwrap().is_none(),
+        "a snapshot drops them"
+    );
+    reopened.import(&sidecar).unwrap();
+    assert!(reopened.waiting().unwrap().is_some());
+
+    assert!(reopened.import(&first).unwrap());
+    assert!(
+        reopened.waiting().unwrap().is_none(),
+        "nothing waits any more"
+    );
+    let texts: Vec<_> = reopened
+        .state()
+        .blocks
+        .values()
+        .map(|b| b.text.clone())
+        .collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(texts.contains(&"second".to_string()));
+}

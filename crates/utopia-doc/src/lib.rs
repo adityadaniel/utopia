@@ -66,6 +66,38 @@ impl Frontier {
     }
 }
 
+/// One peer's changes that wait for earlier changes of a page (§12.3 step 3): counters
+/// `start..end` are held, and they need that peer's changes before `start` (and whatever
+/// those depend on) to apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WaitingRange {
+    pub peer: u64,
+    pub start: u64,
+    pub end: u64,
+}
+
+/// The peers and counters in bytes from [`PageDoc::waiting`], for diagnostics. It reads
+/// the blob's header only, so it costs nothing like an import.
+pub fn waiting_ranges(bytes: &[u8]) -> Result<Vec<WaitingRange>> {
+    let meta = LoroDoc::decode_import_blob_meta(bytes, false)
+        .map_err(|e| DocError::Corrupt(e.to_string()))?;
+    let mut out: Vec<WaitingRange> = meta
+        .partial_end_vv
+        .iter()
+        .map(|(peer, end)| WaitingRange {
+            peer: *peer,
+            start: meta
+                .partial_start_vv
+                .get(peer)
+                .map_or(0, |c| (*c).max(0) as u64),
+            end: (*end).max(0) as u64,
+        })
+        .filter(|r| r.end > r.start)
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
@@ -88,7 +120,17 @@ pub trait PageDoc: Sized {
     fn frontier(&self) -> Frontier;
     fn export_since(&self, f: &Frontier) -> Result<Vec<u8>>;
     /// Idempotent. Returns whether anything new was applied.
+    ///
+    /// Remote changes whose causal predecessors this doc does not have are kept, not
+    /// applied: [`PageDoc::waiting`] exports them so the caller can store them durably
+    /// (§12.3 step 3, §2.3.7). They apply on the import that brings the missing changes.
     fn import(&mut self, bytes: &[u8]) -> Result<bool>;
+    /// Remote changes this doc received but cannot apply yet, because changes they depend
+    /// on never arrived; `None` when nothing waits. The bytes go back in with
+    /// [`PageDoc::import`] and stay waiting until the missing changes come. Snapshots and
+    /// [`PageDoc::export_since`] never contain them, so a caller that keeps only a snapshot
+    /// loses them (§2.3.7).
+    fn waiting(&self) -> Result<Option<Vec<u8>>>;
     /// Commands are the only mutation path.
     fn apply(&mut self, cmd: &Command, now: i64) -> Result<DocDelta>;
     fn state(&self) -> &PageState;
@@ -629,6 +671,12 @@ impl PageDoc for LoroPageDoc {
 
     fn export_since(&self, f: &Frontier) -> Result<Vec<u8>> {
         self.export_updates(&f.to_vv()?)
+    }
+
+    fn waiting(&self) -> Result<Option<Vec<u8>>> {
+        self.doc
+            .export_pending_updates()
+            .map_err(|e| DocError::Crdt(e.to_string()))
     }
 
     fn import(&mut self, bytes: &[u8]) -> Result<bool> {

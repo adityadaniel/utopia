@@ -14,6 +14,10 @@ enum SyncState: Equatable, Sendable {
     case offline(queued: UInt32)
     case needsAuth
     case unsupported(version: UInt32)
+    /// Pages that hold another device's changes which cannot apply yet, because that device
+    /// has not sent this relay the earlier changes they build on. They are kept, not lost
+    /// (§12.6, §2.3.7), so this is not "Synced" and not "Sync failed".
+    case blocked(pages: UInt32)
     case failed(String)
 
     var text: String {
@@ -26,6 +30,10 @@ enum SyncState: Equatable, Sendable {
         case .needsAuth: "Sign-in required"
         case let .unsupported(version):
             version > 0 ? "Update the app (relay v\(version))" : "Update the app"
+        case let .blocked(pages):
+            pages == 1
+                ? "1 page waits for changes from another device"
+                : "\(pages) pages wait for changes from another device"
         case let .failed(message): message
         }
     }
@@ -40,6 +48,7 @@ enum SyncState: Equatable, Sendable {
         case let .offline(queued): queued == 0 ? "Offline" : "Offline · \(queued)"
         case .needsAuth: "Sign in"
         case .unsupported: "Update app"
+        case let .blocked(pages): "Waiting · \(pages)"
         case .failed: "Sync failed"
         }
     }
@@ -487,9 +496,14 @@ final class AppModel {
             guard let outcome else { return }
             guard let self else { return }
             switch outcome {
-            case .synced, .partial(_, _):
+            case .synced:
                 self.syncState = .synced
                 // A remote copy replaces the draft for the day, so read it again.
+                self.today = try? await core.today()
+            case let .partial(summary, _, blocked):
+                // A round that applied most pages still changed today's note, but it is
+                // not "Synced": a failed page or a page that waits must show (§12.6).
+                self.syncState = Self.partialState(failed: summary.failed, blocked: blocked)
                 self.today = try? await core.today()
             case let .offline(queued):
                 self.syncState = .offline(queued: queued)
@@ -527,6 +541,14 @@ final class AppModel {
     }
 
     // MARK: - Errors
+
+    /// The header state for a round that applied but left pages failed or waiting.
+    static func partialState(failed: UInt32, blocked: UInt32) -> SyncState {
+        if failed > 0 {
+            return .failed(failed == 1 ? "1 page could not sync" : "\(failed) pages could not sync")
+        }
+        return blocked > 0 ? .blocked(pages: blocked) : .synced
+    }
 
     static func describe(_ error: any Error) -> String {
         if let ffi = error as? FfiError {

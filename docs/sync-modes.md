@@ -114,6 +114,13 @@ hosted relay in §12.7 item 1 does not exist yet.
 - **Clear failure reports.** The relay gives HTTP status codes, so the app can show
   "needs auth", "offline" or "unsupported version" (§12.6). A refused token goes back to
   one retry each 60 s and recovers without a restart (`sync-runner-round.md`).
+- **Changes that wait are kept and shown.** A device can push its first changes to one
+  destination and its later ones to another (for example, a mistyped graph id). The later
+  changes depend on the first ones, so the other devices cannot apply them. They keep them
+  in `page_pending` (schema v11), apply them when the missing changes arrive, and never
+  compact that page on the relay. The status says "N pages wait for changes from another
+  device", not "Synced", and `utopia sync --json` lists them in `blocked_pages` (§12.6,
+  §2.3.7). To heal the page, the sending device must send what the relay lacks.
 - **Quota.** The relay limits the storage for each graph (default 1024 MB).
 
 **Cons**

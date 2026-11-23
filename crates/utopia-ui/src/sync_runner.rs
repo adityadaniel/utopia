@@ -455,16 +455,34 @@ pub fn status_text(status: Option<&SyncStatus>, now_ms: i64) -> (String, bool) {
             };
             (format!("Synced {ago}"), false)
         }
-        Some(SyncStatus::Partial { failed, queued }) => {
-            let pages = if *failed == 1 { "page" } else { "pages" };
-            if *queued == 0 {
-                (format!("● Synced — {failed} {pages} could not sync"), true)
-            } else {
-                (
-                    format!("● {failed} {pages} could not sync — {queued} changes queued"),
-                    true,
-                )
+        Some(SyncStatus::Partial {
+            failed,
+            queued,
+            blocked,
+        }) => {
+            let pages = |n: usize| if n == 1 { "page" } else { "pages" };
+            let mut parts = Vec::new();
+            if *failed > 0 {
+                parts.push(format!("{failed} {} could not sync", pages(*failed)));
             }
+            // §12.6: another device's changes are held, not lost; they wait for changes
+            // that device has not sent to this relay.
+            if *blocked > 0 {
+                let verb = if *blocked == 1 { "waits" } else { "wait" };
+                parts.push(format!(
+                    "{blocked} {} {verb} for changes from another device",
+                    pages(*blocked)
+                ));
+            }
+            if *queued > 0 {
+                parts.push(format!("{queued} changes queued"));
+            }
+            let lead = if *queued == 0 {
+                "● Synced — "
+            } else {
+                "● "
+            };
+            (format!("{lead}{}", parts.join(" — ")), true)
         }
         Some(SyncStatus::Offline { queued }) => {
             (format!("● Offline — {queued} changes queued"), true)
@@ -640,6 +658,7 @@ mod tests {
         runner.last = Some(SyncStatus::Partial {
             failed: 1,
             queued: 0,
+            blocked: 0,
         });
         assert_eq!(sync_dot(Some(&runner)), SyncDot::Error);
         runner.last = Some(SyncStatus::LocalError {
@@ -666,6 +685,7 @@ mod tests {
             Some(&SyncStatus::Partial {
                 failed: 1,
                 queued: 0,
+                blocked: 0,
             }),
             0,
         );
@@ -675,10 +695,22 @@ mod tests {
             Some(&SyncStatus::Partial {
                 failed: 2,
                 queued: 5,
+                blocked: 0,
             }),
             0,
         );
         assert_eq!(s, "● 2 pages could not sync — 5 changes queued");
+        // §12.6, §2.3.7: changes held for another device are their own warning.
+        let (s, warn) = status_text(
+            Some(&SyncStatus::Partial {
+                failed: 0,
+                queued: 0,
+                blocked: 1,
+            }),
+            0,
+        );
+        assert_eq!(s, "● Synced — 1 page waits for changes from another device");
+        assert!(warn);
         // §12.6: a round that dies in the store is not the relay being offline.
         let local = SyncStatus::LocalError {
             message: "database: no such table: sync_state".into(),

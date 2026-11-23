@@ -27,6 +27,9 @@ mod schema;
 mod sync_destination;
 pub use sync_destination::Destination;
 mod tasks;
+mod waiting;
+pub use utopia_doc::WaitingRange;
+pub use waiting::WaitingPage;
 mod writer;
 
 use std::collections::{HashMap, HashSet};
@@ -924,7 +927,12 @@ impl Store {
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 rows
             };
-            let doc = LoroPageDoc::load(page.clone(), &snap, &updates, self.peer)?;
+            let mut doc = LoroPageDoc::load(page.clone(), &snap, &updates, self.peer)?;
+            // The changes that wait for another device's earlier ones are not in any
+            // snapshot; without this they would be gone after a restart (§2.3.7).
+            if let Some(waiting) = self.waiting_payload(page)? {
+                doc.import(&waiting)?;
+            }
             let durable = doc.frontier();
             self.docs.insert(
                 page.clone(),

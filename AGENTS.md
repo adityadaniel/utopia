@@ -378,8 +378,9 @@ down instead.
     (`utopia_api::handle` / `Store` methods), so undo, references and sync behave identically.
 14. **Schema changes are migrations** (`schema.rs`, `PRAGMA user_version`), never edits to an
     existing version: graphs on disk must keep opening (§14.4). Check FK-heavy changes against
-    `xtask bench`: SQLite cannot use partial indexes for foreign-key checks. Current: v10
-   (v6 `attr`, v7 `attachment`, v8 `tombstone`, v9 attachment `state`, v10 `block_todo` index).
+    `xtask bench`: SQLite cannot use partial indexes for foreign-key checks. Current: v11
+   (v6 `attr`, v7 `attachment`, v8 `tombstone`, v9 attachment `state`, v10 `block_todo` index,
+   v11 `page_pending`: remote changes that wait for another device's earlier ones).
 
 ## Conventions
 
