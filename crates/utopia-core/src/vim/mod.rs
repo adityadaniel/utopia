@@ -10,6 +10,7 @@
 //! they were given, so the caller may slice with it (rule 11: no panic on user data).
 
 pub mod motion;
+pub mod operator;
 pub mod parse;
 pub mod textobj;
 

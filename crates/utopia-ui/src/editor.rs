@@ -663,6 +663,9 @@ impl BlockEditor {
         // it belongs to (machine issue 4).
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        // The session is over, so whatever Insert run it had open is over too (VM-12):
+        // closing it before the reset means the run's steps stay one undo step.
+        self.close_insert_run(cx);
         // The edit is over, so the next one starts in Normal with nothing pending (VM-4,
         // VM-13). `begin` deliberately does not do this: see `vim`.
         self.vim.reset();
@@ -737,6 +740,7 @@ impl BlockEditor {
     fn detach(&mut self, cx: &mut Context<Self>) {
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        self.close_insert_run(cx);
         self.vim.reset();
         cx.emit(EditorEvent::Blurred);
         cx.notify();
@@ -989,8 +993,9 @@ impl BlockEditor {
         }
         self.commit_block(true, cx);
         // VM-13: the keyboard went somewhere else, so the Insert run ends here — it is one
-        // undo step from `i` to this point — but the mode is not cleared wholesale: Normal
-        // stays Normal, so a half-typed `2d` is not silently dropped under the user.
+        // undo step from `i` to this point (VM-12) — but the mode is not cleared wholesale:
+        // Normal stays Normal, so a half-typed `2d` is not silently dropped under the user.
+        self.close_insert_run(cx);
         self.vim.leave_insert();
         // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
         // above may also have rewritten the text it was offering completions for (an
@@ -1861,7 +1866,10 @@ impl BlockEditor {
     /// otherwise coalesce with it. `caret` is where the caret ends up, after the
     /// insertion when `None`. Nothing happens while the input method owns the buffer
     /// (§13.5).
-    fn discrete_edit(
+    ///
+    /// Vim's charwise operators go through here too (2B): the seals on both sides are what
+    /// make one command one undo step.
+    pub(crate) fn discrete_edit(
         &mut self,
         range: std::ops::Range<usize>,
         new: &str,
@@ -2247,6 +2255,30 @@ impl BlockEditor {
         self.end(cx);
     }
 
+    /// Open the Insert undo run (VM-12; PRD §9.1.1, the FR-2.12 note): every edit from
+    /// here to [`BlockEditor::close_insert_run`] folds into one undo step. It is opened
+    /// *before* the delete of a `c` command and before the split of `o`, so the command
+    /// and the typing after it undo together. Idempotent: the `i` that follows a `c` is the
+    /// same run.
+    pub(crate) fn begin_insert_run(&mut self, cx: &mut Context<Self>) {
+        if self.vim.insert_run {
+            return;
+        }
+        self.vim.insert_run = true;
+        self.app.update(cx, |app, _| app.store.begin_undo_run());
+    }
+
+    /// Close the Insert run and fold what it holds into one undo step (VM-12). Every path
+    /// that ends Insert — Escape, a blur, a click, the end of the session — comes through
+    /// here, and always after its last commit, so the committed text is inside the run.
+    pub(crate) fn close_insert_run(&mut self, cx: &mut Context<Self>) {
+        if !self.vim.insert_run {
+            return;
+        }
+        self.vim.insert_run = false;
+        self.app.update(cx, |app, _| app.store.end_undo_run());
+    }
+
     /// Escape in Vim's Insert mode (VM-13): the first rung of the ladder. The block commits
     /// and the editor stays on it in Normal, with the cursor one grapheme left so it rests
     /// on the character just typed, as Vim's does. A second Escape is the plain `Escape`
@@ -2259,6 +2291,9 @@ impl BlockEditor {
             return;
         }
         self.commit(cx);
+        // The run closes after the commit, so the text the composition committed is inside
+        // it: from `i` to this Escape is one undo step (VM-12).
+        self.close_insert_run(cx);
         self.vim.leave_insert();
         // The menu is Insert's, and Normal mode must not keep one open: Escape closes it
         // here rather than waiting for a call to `refresh_autocomplete` that may never
@@ -2321,8 +2356,9 @@ impl BlockEditor {
         }
         let ix = self.field.index_at(e.position);
         // VM-4: a click is an entry into the block, and a block in edit is in Normal mode,
-        // so a click out of Insert closes the Insert run the way Escape does.
+        // so a click out of Insert closes the Insert run (VM-12) the way Escape does.
         if crate::appearance::vim(cx) {
+            self.close_insert_run(cx);
             self.vim.leave_insert();
         }
         if e.click_count >= 2 {

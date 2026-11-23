@@ -1226,6 +1226,23 @@ impl Store {
         self.undo.seal();
     }
 
+    /// Open a Vim Insert run (VM-12): every group until [`Store::end_undo_run`] folds into
+    /// one undo step, so a `c` command's delete and the text typed after it undo together
+    /// (PRD §9.1.1, the FR-2.12 note). Opening twice changes nothing.
+    pub fn begin_undo_run(&mut self) {
+        self.undo.begin_run();
+    }
+
+    /// Close the Insert run and fold its groups into one undo step.
+    pub fn end_undo_run(&mut self) {
+        self.undo.end_run();
+    }
+
+    /// Whether an Insert run is open (tests and the editor's bookkeeping).
+    pub fn in_undo_run(&self) -> bool {
+        self.undo.in_run()
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo.can_undo()
     }

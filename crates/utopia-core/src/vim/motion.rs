@@ -159,10 +159,22 @@ pub fn clamp_normal(text: &str, offset: usize) -> usize {
 }
 
 /// Start of the next word, or of the next run of punctuation (Vim's `w`).
+///
+/// The value is clamped to the Normal cursor's resting place (the line's last grapheme),
+/// because that is where a motion puts the block cursor. An operator needs the unclamped
+/// one instead: see [`word_forward_raw`].
 pub fn word_forward(text: &str, offset: usize, big: bool) -> usize {
+    clamp_normal(text, word_forward_raw(text, offset, big))
+}
+
+/// Start of the next word before the Normal clamp: one past the text when the words run
+/// out, or a line's first grapheme. `dw` takes the text up to it, and Vim's exclusive rule
+/// turns an end that reaches column 1 back into the previous line's end, so the operator
+/// needs the end the motion *wanted*, not the one the cursor would rest on.
+pub(crate) fn word_forward_raw(text: &str, offset: usize, big: bool) -> usize {
     let start = snap(text, offset);
     let Some(class) = class_at(text, start, big) else {
-        return clamp_normal(text, start);
+        return text.len();
     };
     let mut i = start;
     // The run the cursor is in (a blank run too: `w` leaves the blanks behind it).
@@ -173,7 +185,7 @@ pub fn word_forward(text: &str, offset: usize, big: bool) -> usize {
     while is_blank(text, i) {
         i = next_grapheme(text, i);
     }
-    clamp_normal(text, i)
+    i
 }
 
 /// Start of the previous word, or of the previous run of punctuation (Vim's `b`).
