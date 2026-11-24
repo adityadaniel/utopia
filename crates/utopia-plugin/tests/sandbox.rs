@@ -1,12 +1,8 @@
-//! Plugins run sandboxed WebAssembly against the automation API.
-
 use chrono::NaiveDate;
 use serde_json::json;
 use utopia_plugin::{Plugin, PluginError};
 use utopia_store::Store;
 
-/// A plugin directory from WAT source. `body` is the body of `utopia_run`; data
-/// segments are given as `(offset, bytes)`.
 fn plugin(perms: &[&str], data: &[(u32, &str)], body: &str) -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
     let segments: String = data
@@ -84,9 +80,6 @@ fn writes_through_the_api_and_answers_the_editor() {
     ));
 }
 
-/// MC-8: a plugin that declared only `read` cannot append an outline — the permission check
-/// reads the same `Op::kind()` the MCP bridge and the API do, so a new write variant cannot
-/// slip past it. With `write` the same request lands as one page of one block.
 #[test]
 fn mc_8_a_plugin_without_write_permission_cannot_append_an_outline() {
     let req = r#"{"op":"append_outline","title":"Sneaky","markdown":"- added by a plugin","create":true}"#;
@@ -118,7 +111,6 @@ fn mc_8_a_plugin_without_write_permission_cannot_append_an_outline() {
 #[test]
 fn permissions_gate_operations() {
     let write = r#"{"op":"capture","text":"sneaky"}"#;
-    // Returns the host's response as its output.
     let dir = plugin(
         &["read"],
         &[(0, write)],
@@ -130,7 +122,6 @@ fn permissions_gate_operations() {
     let err = r.output().unwrap().raw["error"].as_str().unwrap();
     assert!(err.contains("permission denied"), "{err}");
     assert!(s.search_blocks("sneaky", 5).unwrap().is_empty());
-    // Reads are allowed with "read".
     let today = s
         .open_daily(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap())
         .unwrap();
@@ -153,7 +144,6 @@ fn permissions_gate_operations() {
             .len(),
         1
     );
-    // No permissions at all: nothing.
     let dir = plugin(
         &[],
         &[(0, search)],
@@ -171,7 +161,6 @@ fn permissions_gate_operations() {
 #[test]
 fn runaway_plugins_are_stopped() {
     let mut s = store();
-    // An infinite loop runs out of fuel.
     let dir = plugin(&["read"], &[], "(loop $l (br $l)) (i64.const 0)");
     let e = Plugin::load(dir.path())
         .unwrap()
@@ -179,7 +168,6 @@ fn runaway_plugins_are_stopped() {
         .outcome
         .unwrap_err();
     assert!(e.to_string().to_lowercase().contains("fuel"), "{e}");
-    // Memory beyond the cap is refused (memory.grow returns -1), so this traps.
     let dir = plugin(
         &[],
         &[],
@@ -191,7 +179,6 @@ fn runaway_plugins_are_stopped() {
         .outcome
         .unwrap_err();
     assert!(matches!(e, PluginError::Run(_)), "{e}");
-    // Output pointing outside memory is an error, not a crash.
     let dir = plugin(&[], &[], "(i64.const 0x7fffffff00000010)");
     assert!(Plugin::load(dir.path())
         .unwrap()
@@ -219,7 +206,6 @@ fn manifests_are_checked() {
     )
     .unwrap();
     assert!(Plugin::load(dir.path()).is_err());
-    // A module importing anything else (say, WASI files) does not instantiate.
     let bad = tempfile::tempdir().unwrap();
     std::fs::write(
         bad.path().join("plugin.wat"),
@@ -241,7 +227,6 @@ fn manifests_are_checked() {
         .run(&mut s, "go", json!({}))
         .outcome
         .is_err());
-    // `load_all` reports each plugin directory, broken ones included.
     let root = tempfile::tempdir().unwrap();
     let good = plugin(&["read"], &[], "(i64.const 0)");
     std::fs::create_dir(root.path().join("a-good")).unwrap();
@@ -283,23 +268,14 @@ fn example_word_count_plugin() {
     }
 }
 
-/// §4.2 P2 (WASM plugin sandbox), rule 13: a host write commits inside the call, so every
-/// way a run can end — a trap, fuel exhaustion, output too large, output not JSON — must
-/// still report the pages it wrote and the log lines it printed. Before the run result
-/// carried host state, `changed` and `logs` were dropped on all of them, so the store had
-/// moved and no view was told (plugin run lifecycle issue 1).
 #[test]
 fn a_run_that_fails_still_reports_the_pages_it_wrote() {
     let req = r#"{"op":"capture","text":"committed then trapped"}"#;
     let log = "before the failure";
     let cases = [
-        // Trap.
         "(unreachable)".to_string(),
-        // Return something that is not JSON.
         packed(4096, "not json").to_string(),
-        // Claim an output larger than the message cap.
         format!("(i64.const {})", (1u64 << 32) | ((4 << 20) as u64 + 1)),
-        // Burn the whole fuel budget.
         "(loop $l (br $l)) (i64.const 0)".to_string(),
     ];
     for tail in cases {

@@ -3,7 +3,7 @@
 Utopia is a local-first, Roam-style outliner for the desktop, written in Rust with
 a GPUI front end, a SQLite store, and Loro CRDT documents. **`PRD.md` is the spec.**
 Read the section you are touching before changing behaviour, and cite requirement
-ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in tests and doc comments.
+ids (`FR-2.5`, `AC-4.6`, `§10.3.1`) in test names and ADRs (`docs/adr/`).
 
 ## Agents Protocol
 - “Make a note” => edit AGENTS.md (shortcut; not a blocker).
@@ -387,7 +387,7 @@ down instead.
     Network I/O never runs on the UI thread (`sync_runner.rs` exchanges on a background thread).
 11. **No panics on user data.** Unknown keymap actions, malformed text, missing blocks: log and
     degrade (e.g. "Missing block" chip). `unwrap()` is only acceptable on invariants that are
-    proven locally, with a comment.
+    proven locally; say which in an `expect("…")` message, not in a comment.
 12. **Blobs are content-addressed and verified (§10.3).** Attachments are written once under
     their SHA-256 and rejected on sync if the bytes don't hash to the name. Blocks reference them
     only through markup (`[name](blob:<sha256>)`, `![…]`, `{{pdf: …}}`, `{{highlight: …}}`).
@@ -419,7 +419,13 @@ down instead.
 - Tests live next to the code (`#[cfg(test)] mod tests`) for unit behaviour, and in
   `crates/*/tests/` for acceptance scripts. Name acceptance tests after the PRD id, e.g.
   `ac_4_6_merge_preserves_subtrees`. Prefer real SQLite (in-memory or tempfile) over mocks.
-- Keep comments sparse and about *why*; the PRD already explains *what*.
+- **No code comments** (`docs/adr/0001-no-code-comments.md`). The PRD says *what*; a non-obvious
+  *why* goes into a name, a type, a test or an ADR in `docs/adr/`, and a shortcut goes into the
+  `comment-excuse` tracking issue. Only `// SAFETY:` on an `unsafe` block is allowed. A ratchet
+  enforces it: `xtask/comment-baseline.txt` holds the comment lines each file may still have, and
+  `cargo test --workspace` fails when a file has more, or fewer without
+  `cargo run -p xtask -- comments --update`. `/delete-comment <path>`
+  (`.claude/skills/delete-comment/SKILL.md`) sweeps a crate and tightens the ratchet.
 
 ## Scope
 
@@ -608,6 +614,6 @@ PRD first (risk R8).
 
 - Before editing a crate, read its `lib.rs` module list and the PRD section it implements.
 - After any change: build, test, clippy, fmt (see above). Never leave the workspace not compiling.
-- When the PRD is ambiguous, pick the reading that preserves data and identity, note the choice in a
-  doc comment with the PRD section, and mention it in your summary.
+- When the PRD is ambiguous, pick the reading that preserves data and identity, note the choice in an
+  ADR (`docs/adr/`) with the PRD section, and mention it in your summary.
 - Do not commit, push, or create branches unless the user asks.

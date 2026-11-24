@@ -1,13 +1,3 @@
-//! Attachment markup (P2). Files live outside the graph file, content-addressed by
-//! SHA-256 (§10.3, §11.6); blocks point at them with ordinary Markdown links:
-//!
-//! - `![photo.png](blob:<sha256>)` — an image, previewed under the block
-//! - `[report.docx](blob:<sha256>)` — any file
-//! - `[paper.pdf](blob:<sha256>)` — a PDF (by name), opened in the viewer with
-//!   highlights; Roam's `{{pdf: blob:<sha256>}}` form is read too
-//!
-//! The markup is plain text, so it syncs, exports and survives in Markdown untouched.
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BlobKind {
     Image,
@@ -27,7 +17,6 @@ pub fn is_hash(s: &str) -> bool {
     s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// Every attachment a block's text points at, in order.
 pub fn blob_refs(text: &str) -> Vec<BlobRef> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -40,7 +29,6 @@ pub fn blob_refs(text: &str) -> Vec<BlobRef> {
             continue;
         }
         let after = hash_start + 64;
-        // `{{pdf: blob:H}}`
         let before = text[..at].trim_end();
         if before.ends_with("{{pdf:") && text[after..].trim_start().starts_with("}}") {
             let start = before.len() - "{{pdf:".len();
@@ -54,7 +42,6 @@ pub fn blob_refs(text: &str) -> Vec<BlobRef> {
             i = end;
             continue;
         }
-        // `[name](blob:H)` / `![name](blob:H)`
         if text[..at].ends_with("](") && text[after..].starts_with(')') {
             let close = at - 2;
             if let Some(open) = text[..close].rfind('[') {
@@ -80,7 +67,6 @@ pub fn blob_refs(text: &str) -> Vec<BlobRef> {
     out
 }
 
-/// Media type from the file name and the first bytes.
 pub fn sniff_mime(name: &str, bytes: &[u8]) -> &'static str {
     let magic: &[(&[u8], &str)] = &[
         (b"\x89PNG\r\n\x1a\n", "image/png"),
@@ -109,9 +95,7 @@ pub fn sniff_mime(name: &str, bytes: &[u8]) -> &'static str {
     }
 }
 
-/// The markup to insert for a newly attached file.
 pub fn markup(name: &str, hash: &str, mime: &str) -> String {
-    // Brackets in a file name would end the link text early.
     let name: String = name
         .chars()
         .map(|c| if matches!(c, '[' | ']') { '_' } else { c })
@@ -123,21 +107,14 @@ pub fn markup(name: &str, hash: &str, mime: &str) -> String {
     }
 }
 
-/// A PDF highlight (P2): one or more rectangles on one page (one per selected line of
-/// text, or a single area), in page-relative coordinates (`0..1`, origin top-left),
-/// written into the highlight's block as
-/// `{{highlight: blob:<sha256> <page> <x>,<y>,<w>,<h>[;<x>,<y>,<w>,<h>…]}}` (page is
-/// 1-based).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Highlight {
     pub hash: String,
-    /// 0-based page index.
     pub page: usize,
     pub rects: Vec<[f32; 4]>,
     pub range: std::ops::Range<usize>,
 }
 
-/// Rectangles a highlight may carry (a long selection over many lines).
 const MAX_HIGHLIGHT_RECTS: usize = 64;
 
 pub fn highlight_markup(hash: &str, page: usize, rects: &[[f32; 4]]) -> String {
@@ -158,7 +135,6 @@ pub fn highlight_markup(hash: &str, page: usize, rects: &[[f32; 4]]) -> String {
     )
 }
 
-/// Parse the inside of `{{…}}` as a highlight.
 pub fn parse_highlight(inner: &str) -> Option<(String, usize, Vec<[f32; 4]>)> {
     let body = inner.trim().strip_prefix("highlight:")?.trim();
     let mut parts = body.split_whitespace();
@@ -252,7 +228,6 @@ mod tests {
             (2, vec![[0.1, 0.25, 0.5, 0.05]])
         );
         assert_eq!(&t[h[0].range.clone()], m);
-        // A text selection over two lines.
         let two = [[0.1, 0.1, 0.8, 0.03], [0.1, 0.13, 0.4, 0.03]];
         let h = highlights(&highlight_markup(H, 0, &two));
         assert_eq!(h[0].rects, two.to_vec());
@@ -315,7 +290,6 @@ mod inline_tests {
             "the ! belongs to it"
         );
         assert!(matches!(&nodes[0], Inline::Text(s) if s == "x "));
-        // `![[x]]` is not an image.
         assert!(parse("![[x]]")
             .iter()
             .any(|n| matches!(n, Inline::PageRef { .. })));

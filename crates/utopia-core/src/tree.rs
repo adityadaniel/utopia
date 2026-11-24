@@ -1,9 +1,3 @@
-//! In-memory page tree (§6.1, §13.6) and the reference semantics of [`Command`].
-//!
-//! `PageState` is what views render and what planners read. [`PageState::apply`] is the
-//! CRDT-free definition of every command; the Loro implementation in `utopia-doc` is
-//! tested against it.
-
 use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
@@ -17,21 +11,16 @@ use crate::text::apply_edit;
 pub struct BlockNode {
     pub id: BlockId,
     pub parent: Option<BlockId>,
-    /// All children in order, including tombstoned and moved ones.
     pub children: Vec<BlockId>,
     pub text: String,
     pub kind: BlockKind,
     pub checked: bool,
-    /// Fractional sibling position supplied by the document layer; empty in pure models.
     pub position: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
     pub moved_to: Option<PageId>,
-    /// Derived: belongs to this page (not moved away, nor under a moved ancestor).
     pub present: bool,
-    /// Derived: present and visible. A tombstoned block with a live descendant is
-    /// "revived" so content is never hidden (§12.4).
     pub live: bool,
 }
 
@@ -39,10 +28,8 @@ pub struct BlockNode {
 pub struct PageState {
     pub page_id: PageId,
     pub meta: PageMeta,
-    /// All root blocks in order, including hidden ones.
     pub roots: Vec<BlockId>,
     pub blocks: HashMap<BlockId, BlockNode>,
-    /// Bumped on every applied command; views use it to skip redundant work.
     pub version: u64,
 }
 
@@ -129,7 +116,6 @@ impl PageState {
         self.ancestors(id).len()
     }
 
-    /// Ancestors of `id`, root first, excluding `id`.
     pub fn ancestors(&self, id: &BlockId) -> Vec<BlockId> {
         let mut out = Vec::new();
         let mut cur = self.parent_of(id);
@@ -137,7 +123,7 @@ impl PageState {
         while let Some(p) = cur {
             guard += 1;
             if guard > self.blocks.len() {
-                break; // corrupted cycle; invariants are checked elsewhere
+                break;
             }
             cur = self.parent_of(&p);
             out.push(p);
@@ -146,12 +132,10 @@ impl PageState {
         out
     }
 
-    /// Whether `a` is a strict ancestor of `b`.
     pub fn is_ancestor(&self, a: &BlockId, b: &BlockId) -> bool {
         self.ancestors(b).iter().any(|x| x == a)
     }
 
-    /// `id` and its descendants in pre-order.
     pub fn subtree(&self, id: &BlockId, live_only: bool) -> Vec<BlockId> {
         let mut out = Vec::new();
         let mut stack = vec![id.clone()];
@@ -169,13 +153,10 @@ impl PageState {
         out
     }
 
-    /// Live blocks in document order with depth (relative to the page root).
     pub fn live_preorder(&self) -> Vec<(BlockId, usize)> {
         self.visible_rows(None, &|_| false)
     }
 
-    /// Rows to render: live blocks under `zoom` (or the page), skipping children of
-    /// collapsed blocks. Depth is relative to the zoom root's children (0).
     pub fn visible_rows(
         &self,
         zoom: Option<&BlockId>,
@@ -215,9 +196,6 @@ impl PageState {
                     .any(|c| self.blocks.get(c).is_some_and(|c| c.live)))
     }
 
-    /// Recompute `present`/`live` for `id`'s subtree, then `live` up its ancestor chain.
-    /// O(subtree + depth × siblings), used after inserts and moves so a keystroke-sized
-    /// edit never walks the whole page.
     fn refresh_liveness_at(&mut self, id: &BlockId) {
         let order = self.subtree(id, false);
         for b in &order {
@@ -246,7 +224,6 @@ impl PageState {
         }
     }
 
-    /// Recompute `present`/`live` for every node. O(n).
     pub fn recompute_liveness(&mut self) {
         fn visit(
             st: &mut HashMap<BlockId, BlockNode>,
@@ -326,7 +303,6 @@ impl PageState {
             .ok_or_else(|| DomainError::BlockNotFound(id.clone()))
     }
 
-    /// Reference semantics of every command.
     pub fn apply(&mut self, cmd: &Command, now: i64) -> Result<DocDelta, DomainError> {
         let mut delta = DocDelta::default();
         let mut local_liveness = false;
@@ -462,8 +438,6 @@ impl PageState {
         Ok(delta)
     }
 
-    /// Order-and-content projection used to compare states independent of positions and
-    /// timestamps (convergence and undo tests).
     pub fn canonical(&self) -> Vec<String> {
         let mut out = vec![format!(
             "meta|{}|{:?}|{:?}|{:?}|{:?}|{:?}",
@@ -581,7 +555,6 @@ mod tests {
         )
         .unwrap();
         assert!(!st.is_live(&"a".into()));
-        // A concurrent child arrives under the deleted parent.
         ins(&mut st, "c", Some("a"), None, "");
         assert!(st.is_live(&"a".into()), "parent revived");
         assert!(!st.is_live(&"b".into()));

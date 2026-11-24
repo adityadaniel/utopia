@@ -566,22 +566,36 @@ pub fn snapshots_compact_the_log_and_bootstrap_new_devices(relay: &dyn RelayUnde
     let (mut a, mut ca) = device(relay, &graph);
     let p = a.create_page("Long").unwrap();
     let blk = write(&mut a, &p, "");
+    let mut uncompacted = None;
     for i in 0..220 {
         a.set_block_text(&p, &blk, &format!("rev {i}"), None, None)
             .unwrap();
         if i % 20 == 0 {
             ca.sync_once(&mut a).unwrap();
         }
+        if i == 100 {
+            uncompacted = Some(manifest_page(ca.transport_mut(), &p));
+        }
     }
+    let uncompacted = uncompacted.expect("the loop reads the manifest at i == 100");
+    assert_eq!(
+        uncompacted.snapshot_seq, 0,
+        "no snapshot yet, so the whole log is its tail: {uncompacted:?}"
+    );
     ca.sync_once(&mut a).unwrap();
     ca.sync_once(&mut a).unwrap();
     // What a client sees: a snapshot, and `tail_bytes` (the bytes left in the log, not in
     // the snapshot) small.
     let entry = manifest_page(ca.transport_mut(), &p);
     assert!(entry.snapshot_seq > 0, "{entry:?}");
+    let bytes_per_row = uncompacted.tail_bytes as f64 / uncompacted.head_seq as f64;
+    let whole_log_bytes = bytes_per_row * entry.head_seq as f64;
     assert!(
-        entry.tail_bytes < 2048,
-        "the covered log rows are truncated: {entry:?}"
+        (entry.tail_bytes as f64) < whole_log_bytes / 4.0,
+        "the covered log rows are truncated: {} tail bytes against {whole_log_bytes:.0} for \
+         the whole log at {bytes_per_row:.0} bytes a row, measured in this run so the edit \
+         timing cancels out: {entry:?}",
+        entry.tail_bytes
     );
     if let Some(rows) = relay.log_rows(&graph, p.as_str()) {
         assert!(rows < 50, "log truncated: {rows} rows");

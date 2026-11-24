@@ -17,7 +17,7 @@ INSTALL_DIR ?= /Applications
 SCRATCH ?= $(CURDIR)/target/scratch
 
 .DEFAULT_GOAL := help
-.PHONY: help run dev check build test clippy fmt fmt-check bench relay-check sync-fuzz app zip install doctor clean-debug
+.PHONY: help run dev check build test clippy fmt fmt-check comments bench relay-check sync-fuzz app zip install doctor clean-debug
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -45,6 +45,9 @@ fmt: ## Format the code
 
 fmt-check: ## Fail if the code is not formatted
 	$(CARGO) fmt --all -- --check
+
+comments: ## Comment ratchet (ADR 0001); ARGS=--update tightens it, ARGS="--list <path>" lists
+	$(CARGO) run -q -p xtask -- comments $(ARGS)
 
 # The same steps, in the same order, as .github/workflows/relay.yml. Needs Node and
 # `npm ci` in relay-cloudflare once; runs wrangler dev --local only, never an account.

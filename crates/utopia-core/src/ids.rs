@@ -1,14 +1,10 @@
-//! Identity rules (PRD §10.3).
-
 use std::fmt;
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Namespace for pages created from a title: `uuidv5(NS_PAGE, "title:" + title_key)`.
 pub const NS_PAGE: Uuid = Uuid::from_u128(0x7f3c_1a52_9d4e_4b0a_8c61_2e5f_0b9d_a101);
-/// Namespace for daily pages: `uuidv5(NS_DAILY, "daily:" + YYYY-MM-DD)`.
 pub const NS_DAILY: Uuid = Uuid::from_u128(0x7f3c_1a52_9d4e_4b0a_8c61_2e5f_0b9d_a102);
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -20,9 +16,6 @@ pub struct PageId(pub String);
 pub struct BlockId(pub String);
 
 impl PageId {
-    /// Deterministic id for a page created from a title key. A duplicate-prevention
-    /// heuristic, not an invariant: callers must fall back to [`PageId::fresh`] when this
-    /// id is tombstoned (§10.3).
     pub fn for_title_key(title_key: &str) -> Self {
         PageId(Uuid::new_v5(&NS_PAGE, format!("title:{title_key}").as_bytes()).to_string())
     }
@@ -47,7 +40,6 @@ impl PageId {
 }
 
 impl BlockId {
-    /// FR-2.1: every block gets a globally unique ULID at creation.
     pub fn new() -> Self {
         BlockId(ulid::Ulid::new().to_string())
     }
@@ -56,14 +48,12 @@ impl BlockId {
         &self.0
     }
 
-    /// Milliseconds encoded in the ULID, if this id is a ULID.
     pub fn timestamp_ms(&self) -> Option<i64> {
         ulid::Ulid::from_string(&self.0)
             .ok()
             .map(|u| u.timestamp_ms() as i64)
     }
 
-    /// Shape check for `((uid))` targets: ULIDs and Roam-style short uids.
     pub fn is_valid_ref(s: &str) -> bool {
         (1..=64).contains(&s.len())
             && s.bytes()

@@ -1,7 +1,3 @@
-//! Daily-page dates (PRD §5, §10.3.1). Identity is always ISO `YYYY-MM-DD`; a
-//! [`DateFormat`] is only a rendering. Parsing refuses to guess: ambiguous numeric
-//! forms such as `11/6/26` never resolve to a date (§5.5).
-
 use chrono::{Datelike, NaiveDate, Weekday};
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +27,6 @@ const WEEKDAYS: [&str; 7] = [
     "Sunday",
 ];
 
-/// Month-name forms that are always accepted, independent of the graph setting.
 const BUILTIN_FORMATS: &[&str] = &[
     "MMMM do, yyyy",
     "MMMM d, yyyy",
@@ -68,8 +63,6 @@ enum Piece {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DateFormat {
     pattern: String,
-    /// Formats this graph used before. Links typed under an earlier setting keep
-    /// resolving after the format changes (AC-1.8: "no link breaks").
     #[serde(default)]
     previous: Vec<String>,
 }
@@ -88,7 +81,6 @@ impl DateFormat {
         }
     }
 
-    /// Switch to `pattern`, remembering the current pattern as a previous one.
     pub fn changed_to(&self, pattern: &str) -> Self {
         let mut previous = self.previous.clone();
         previous.push(self.pattern.clone());
@@ -123,8 +115,6 @@ impl DateFormat {
         render(&self.pieces(), date)
     }
 
-    /// A format is unambiguous when it carries year, month and day, and the month is a
-    /// name or the numeric order is year-first (§5.5).
     pub fn is_unambiguous(&self) -> bool {
         let pieces = self.pieces();
         let toks: Vec<Tok> = pieces
@@ -157,8 +147,6 @@ impl DateFormat {
     }
 }
 
-/// `parse_unambiguous_date` from §10.3.1: ISO-8601, the built-in month-name forms, and
-/// the graph's configured format when that format is unambiguous.
 pub fn parse_unambiguous_date(s: &str, graph_format: &DateFormat) -> Option<NaiveDate> {
     let s = s.trim();
     if let Some(d) = parse_iso(s) {
@@ -182,17 +170,6 @@ pub fn parse_unambiguous_date(s: &str, graph_format: &DateFormat) -> Option<Naiv
         .find_map(|f| f.parse(s))
 }
 
-/// A relative date phrase, as people type it into a link: `today`, `yesterday`,
-/// `tomorrow`, `day after tomorrow`, `next week`, `last month`, `next sunday`,
-/// `last fri`, `in 3 days`, `2 weeks ago`. Case and spacing don't matter.
-///
-/// `next <weekday>` is the first such day after today and `last <weekday>` the most
-/// recent one before it. A bare weekday (`Monday`) is not a date: it is too likely to
-/// be a page title.
-///
-/// This is never used by the resolver: what "tomorrow" means changes every day, so a
-/// stored link to it could not be rebuilt (§10.3.1). The editor replaces the phrase
-/// with the day's title as it is typed instead.
 pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
     let lower = phrase.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
@@ -213,7 +190,6 @@ pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
             })
             .and_then(|i| Weekday::try_from(i as u8).ok())
     };
-    // `n` units after (sign 1) or before (sign -1) today.
     let offset = |n: &str, unit: &str, sign: i64| -> Option<NaiveDate> {
         let n: i64 = match n {
             "a" | "an" | "one" => 1,
@@ -256,10 +232,6 @@ pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
     }
 }
 
-/// Replace relative date links (`[[tomorrow]]`, `#[[next friday]]`) with links to that
-/// day's page, as titled by `format`. A link the caret is inside is left alone (still
-/// being typed), as is one whose phrase names an existing page or alias (`exists`), so
-/// a graph with a page called "Today" keeps its links. Returns the new text and caret.
 pub fn expand_relative_date_links(
     text: &str,
     caret: usize,
@@ -270,10 +242,6 @@ pub fn expand_relative_date_links(
     expand_links(text, caret, true, today, format, exists)
 }
 
-/// [`expand_relative_date_links`] for a block that is being finished (blur, Enter,
-/// Escape): the link the caret is in is done too, so it is expanded like the rest and the
-/// caret moves to just after it. Only an idle commit, while the user may still be typing
-/// the phrase, leaves that link alone.
 pub fn finish_relative_date_links(
     text: &str,
     caret: usize,
@@ -429,9 +397,6 @@ fn weekday_name(w: Weekday) -> &'static str {
     WEEKDAYS[w.num_days_from_monday() as usize]
 }
 
-/// The weekday's full English name ("Thursday") for `date`, for captions above a day
-/// (DN-2). Display only: a day's identity is its ISO `daily_date` (§10.3), never its
-/// weekday.
 pub fn weekday_name_of(date: NaiveDate) -> &'static str {
     weekday_name(date.weekday())
 }
@@ -445,7 +410,6 @@ fn take_digits(s: &str, min: usize, max: usize) -> Option<(u32, &str)> {
 }
 
 fn take_name<'a>(s: &'a str, names: &[&str], abbr: bool) -> Option<(usize, &'a str)> {
-    // Longest match first so "May" vs "Mar" etc. are unambiguous.
     for (i, name) in names.iter().enumerate() {
         let cand = if abbr { &name[..3] } else { name };
         if s.len() >= cand.len()
@@ -465,8 +429,6 @@ fn parse_with(pieces: &[Piece], input: &str) -> Option<NaiveDate> {
     for p in pieces {
         match p {
             Piece::Lit(l) => {
-                // Whitespace in literals matches any run of whitespace (including none
-                // only if the literal is pure whitespace and the input has none).
                 let l_trim = l.trim();
                 if l.chars().any(char::is_whitespace) {
                     let before = rest;
@@ -559,7 +521,6 @@ mod tests {
 
     #[test]
     fn relative_phrases() {
-        // Tuesday, November 3rd, 2026.
         let t = d(2026, 11, 3);
         let r = |p: &str| relative_date(p, t);
         assert_eq!(r("Today"), Some(t));
@@ -610,18 +571,14 @@ mod tests {
             "call [[November 2nd, 2026]] and #[[November 8th, 2026]]"
         );
         assert_eq!(caret, out.len());
-        // Still typing inside the link: untouched.
         let text = "see [[tomorrow]]";
         assert_eq!(expand_relative_date_links(text, 10, t, &f, none), None);
-        // Caret before the link stays put.
         let (out, caret) = expand_relative_date_links(text, 2, t, &f, none).unwrap();
         assert_eq!((out.as_str(), caret), ("see [[November 4th, 2026]]", 2));
-        // A real page called "Today" keeps its links.
         assert_eq!(
             expand_relative_date_links("[[Today]]", 9, t, &f, |p| p == "Today"),
             None
         );
-        // Not links, or not relative: nothing to do.
         for text in [
             "tomorrow",
             "`[[tomorrow]]`",
@@ -636,8 +593,6 @@ mod tests {
         }
     }
 
-    /// Finishing the block finishes the link the caret is in (a wrapped or auto-closed
-    /// `[[tomorrow|]]`); the caret lands after the new link.
     #[test]
     fn finishing_expands_the_link_at_the_caret() {
         let t = d(2026, 11, 3);
@@ -650,7 +605,6 @@ mod tests {
             "see [[November 4th, 2026]] then [[November 2nd, 2026]]"
         );
         assert_eq!(&out[..caret], "see [[November 4th, 2026]]");
-        // Elsewhere it behaves like the idle expansion.
         let (out, caret) = finish_relative_date_links("[[today]] x", 11, t, &f, none).unwrap();
         assert_eq!((out.as_str(), caret), ("[[November 3rd, 2026]] x", 24));
         assert_eq!(
@@ -673,7 +627,6 @@ mod tests {
         );
     }
 
-    /// DN-2: the weekday caption is a rendering of the date, in English, Monday first.
     #[test]
     fn weekday_names_follow_the_calendar() {
         assert_eq!(weekday_name_of(d(2026, 11, 2)), "Monday");

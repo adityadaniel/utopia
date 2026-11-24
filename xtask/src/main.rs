@@ -1,7 +1,4 @@
-//! `cargo run -p xtask --release -- bench`: measure the PRD performance budgets (§15.1 and
-//! the timed acceptance criteria) on PRD-scale fixtures, print a table, and exit non-zero
-//! if any budget is missed. Run in release mode; debug timings are meaningless.
-
+mod comments;
 mod icon;
 
 use std::path::{Path, PathBuf};
@@ -84,7 +81,6 @@ fn today() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 11, 2).expect("valid date")
 }
 
-/// Insert `texts` as a flat list of root blocks after the page's last root.
 fn insert_flat(
     s: &mut Store,
     page: &PageId,
@@ -124,8 +120,6 @@ struct Fixture {
     sample_block: (PageId, BlockId),
 }
 
-/// 100 pages × 1,000 blocks (100k blocks), 2,000 of them referencing [[Mindfulness]] and
-/// 37 of those also [[Books]] (AC-3.6), plus a 5,000-block page (AC-2.1).
 fn build(s: &mut Store) -> Result<Fixture> {
     let mindfulness = s.create_page("Mindfulness")?;
     let books = s.create_page("Books")?;
@@ -175,7 +169,6 @@ fn rss_kb(pid: u32) -> Result<f64> {
     Ok(String::from_utf8_lossy(&out.stdout).trim().parse::<f64>()?)
 }
 
-/// Child process: open the graph, load three pages, report resident memory (§15.1).
 fn rss_probe(db: &Path) -> Result<()> {
     let mut s = Store::open(db)?;
     let pages: Vec<PageId> = s
@@ -234,7 +227,6 @@ async fn axum_serve(listener: tokio::net::TcpListener, app: utopia_syncd::Router
     let _ = utopia_syncd::serve(listener, app).await;
 }
 
-/// Launch the release app with `UTOPIA_PROBE` and parse its measurements.
 fn probe(graph: &Path, config: &Path) -> Result<(f64, f64, f64)> {
     let exe = std::env::current_exe()?.with_file_name("utopia");
     if !exe.exists() {
@@ -282,7 +274,6 @@ fn bench(ui: bool) -> Result<()> {
         s.set_today(Some(today()));
         let (f, d) = time(|| build(&mut s));
         fx = f?;
-        // The app opens today's journal page; give it a realistic 1,000 blocks.
         let (journal, _) = s.open_daily(chrono::Local::now().date_naive())?;
         insert_flat(
             &mut s,
@@ -295,7 +286,6 @@ fn bench(ui: bool) -> Result<()> {
             d.as_secs_f64()
         );
 
-        // AC-3.1 / §15.1 backlinks, AC-3.6 co-reference filter.
         let (refs, d) = time(|| s.linked_references(&fx.mindfulness, &RefQuery::default()));
         if refs?.shown() != 2000 {
             bail!("expected 2,000 backlinks");
@@ -315,7 +305,6 @@ fn bench(ui: bool) -> Result<()> {
             d,
         );
 
-        // Full-text search over 100k blocks.
         let mut times = Vec::new();
         for q in ["topic 42", "ordinary words", "note 77777", "mindfulness"] {
             let (_, d) = time(|| s.search_blocks(q, 20));
@@ -327,7 +316,6 @@ fn bench(ui: bool) -> Result<()> {
             percentile(times, 0.95),
         );
 
-        // AC-3.5: editing a block in a 100k graph updates its backlinks (commit included).
         let (page, block) = fx.sample_block.clone();
         let mut times = Vec::new();
         for i in 0..20 {
@@ -350,7 +338,6 @@ fn bench(ui: bool) -> Result<()> {
             percentile(times, 0.5),
         );
 
-        // Keystroke path in debounced mode (the store's share of keystroke→paint).
         s.set_debounced(true)?;
         let target = fx.big_ids[2500].clone();
         let mut text = String::new();
@@ -373,7 +360,6 @@ fn bench(ui: bool) -> Result<()> {
         );
         s.set_debounced(false)?;
 
-        // AC-2.4: indent a block carrying 300 descendants.
         let parent = fx.big_ids[999].clone();
         let kids: Vec<BlockId> = fx.big_ids[1000..1300].to_vec();
         let cmds = kids
@@ -400,7 +386,6 @@ fn bench(ui: bool) -> Result<()> {
         res?;
         r.ms("Indent a block with 300 descendants (AC-2.4)", 20.0, d);
 
-        // AC-2.5: paste 500 lines of nested Markdown as one undo group.
         let paste_page = s.create_page("Paste target")?;
         let first = s.ensure_first_block(&paste_page)?;
         let md: String = (0..500)
@@ -415,8 +400,6 @@ fn bench(ui: bool) -> Result<()> {
         res?;
         r.ms("Paste 500 Markdown lines (AC-2.5)", 400.0, d);
 
-        // AC-2.5, MC-8: the same outline through the assistant path — `Op::AppendOutline`,
-        // which an `append_blocks` tool call becomes. One commit and one undo step.
         let mcp_page = s.create_page("MCP append target")?;
         let md: String = (0..500)
             .map(|i| format!("{}- appended {i}\n", "  ".repeat(i % 4)))
@@ -441,13 +424,10 @@ fn bench(ui: bool) -> Result<()> {
         }
         r.ms("Append 500 Markdown lines (AC-2.5, MC-8)", 400.0, d);
 
-        // AC-4.7: rename onto an existing title merges 1,000 blocks.
         let a = s.create_page("Apple Watch")?;
         let b = s.create_page("applewatch")?;
         insert_flat(&mut s, &b, (0..1000).map(|i| format!("watch note {i}")))?;
         s.sync_index()?;
-        // §13.3: the merge is applied to the in-memory shards (and visible, undoable) when
-        // rename returns; the SQLite commit follows on the writer thread.
         let (res, applied) = time(|| s.rename_page(&b, "apple watch"));
         res?;
         let (res, durable) = time(|| s.sync_index());
@@ -460,14 +440,12 @@ fn bench(ui: bool) -> Result<()> {
             30.0,
             applied,
         );
-        // Not a PRD budget: a guard so the background commit stays well under a second.
         r.ms(
             "  … then durable on the writer thread (async guard)",
             250.0,
             durable,
         );
 
-        // AC-1.4: backfill 30 days; a day is written by its first character (FR-1.2).
         let (res, d) = time(|| -> Result<()> {
             for i in 0..30 {
                 let page = s.draft_daily(today() - chrono::Days::new(40 + i))?;
@@ -480,7 +458,6 @@ fn bench(ui: bool) -> Result<()> {
         res?;
         r.ms("Backfill 30 journal days (AC-1.4)", 300.0, d);
 
-        // G4: full export.
         let out = dir.path().join("export");
         let (res, d) = time(|| -> Result<()> {
             s.export_markdown(&out)?;
@@ -494,7 +471,6 @@ fn bench(ui: bool) -> Result<()> {
     let size_mb = std::fs::metadata(&path)?.len() as f64 / (1 << 20) as f64;
     r.value("DB size, 100k blocks", 150.0, "MB", size_mb);
 
-    // AC-2.1 / §15.1: open the 5k-block page in a fresh process state (cold shard load).
     let mut s = Store::open(&path)?;
     let (res, d) = time(|| -> Result<usize> {
         let st = s.page_state(&fx.big)?;
@@ -510,7 +486,6 @@ fn bench(ui: bool) -> Result<()> {
     r.ms("Open a 5,000-block page, warm (AC-2.1)", 50.0, d);
     drop(s);
 
-    // §15.1 hot start → caret in today's note (data path; window paint not included).
     let (res, d) = time(|| -> Result<()> {
         let mut s = Store::open(&path)?;
         s.set_today(Some(today()));
@@ -520,10 +495,6 @@ fn bench(ui: bool) -> Result<()> {
     res?;
     r.ms("Start → today's first block ready (data path)", 800.0, d);
 
-    // MC-14 (PRD §13.8, design §2.3): one headless assistant call, which is what `utopia
-    // mcp` does while the app is closed: read the access file, take the owner lock, open
-    // the store, run one `search` through `utopia_api::handle`, flush, close. The store is
-    // opened for each of the samples, as it is for each call.
     let mcp_config = dir.path().join("mcp-config");
     utopia_api::Access {
         level: utopia_api::Level::Read,
@@ -555,7 +526,6 @@ fn bench(ui: bool) -> Result<()> {
         samples[samples.len() / 2],
     );
 
-    // §15.1 memory: a separate process with three open pages.
     let exe = std::env::current_exe()?;
     let out = std::process::Command::new(exe)
         .arg("rss-probe")
@@ -575,8 +545,6 @@ fn bench(ui: bool) -> Result<()> {
     sync_round_trip(&mut r)?;
 
     if ui {
-        // A real window: first frame and keystroke → full render/layout/paint (§15.1,
-        // AC-2.2). Window present and display refresh (vsync) are not included.
         let config = dir.path().join("probe-config");
         let (first_launch, _, _) = probe(&path, &config)?;
         println!(
@@ -607,8 +575,6 @@ fn bench(ui: bool) -> Result<()> {
     Ok(())
 }
 
-/// `Info.plist` for the app bundle. `CFBundleURLTypes` claims the `utopia://` scheme so
-/// links from other apps reach `on_open_urls` (P2 automation).
 fn info_plist(version: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -638,7 +604,6 @@ fn info_plist(version: &str) -> String {
     )
 }
 
-/// Build the app and lay out `target/Utopia.app`.
 fn bundle(debug: bool) -> Result<()> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
     let mut build = std::process::Command::new(env!("CARGO"));
@@ -678,10 +643,6 @@ fn run(cmd: &mut std::process::Command) -> Result<()> {
     Ok(())
 }
 
-/// The mobile pipeline (PRD §14): build the UniFFI core, generate Swift bindings, run the
-/// Swift check against the real core, build the SwiftUI shell for macOS, and type-check
-/// it against the iOS Simulator SDK. `--ios` also links the app for the simulator
-/// (needs `rustup target add aarch64-apple-ios-sim`).
 fn mobile(ios: bool) -> Result<()> {
     use std::process::Command;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -713,7 +674,6 @@ fn mobile(ios: bool) -> Result<()> {
         "--out-dir",
         gen.to_str().unwrap(),
     ]))?;
-    // Kotlin too: the same surface for an Android shell (compiling it needs kotlinc).
     run(Command::new(cargo).current_dir(&root).args([
         "run",
         "-q",
@@ -743,8 +703,6 @@ fn mobile(ios: bool) -> Result<()> {
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|e| e == "swift"))
         .collect();
-    // The app is iOS only (ios-prd §5: no iPad, no landscape) and is written for the latest
-    // iOS, so it type-checks and builds against that SDK in Swift 6 language mode.
     let ios_target = "arm64-apple-ios27.0-simulator";
     let swiftc = |sdk: &str| {
         let mut c = Command::new("xcrun");
@@ -764,7 +722,6 @@ fn mobile(ios: bool) -> Result<()> {
             "SystemConfiguration",
         ]);
     };
-    // 1. The bindings against the real core.
     let check = out.join("check");
     let mut c = swiftc("macosx");
     c.arg(root.join("mobile/ios/Check/main.swift"))
@@ -773,7 +730,6 @@ fn mobile(ios: bool) -> Result<()> {
     link(&mut c, &lib);
     run(&mut c)?;
     run(&mut Command::new(&check))?;
-    // 2. The app against the iOS SDK.
     let mut c = swiftc("iphonesimulator");
     c.args(["-parse-as-library", "-typecheck", "-target", ios_target])
         .args(&app_sources);
@@ -785,7 +741,6 @@ fn mobile(ios: bool) -> Result<()> {
     if !ios {
         return Ok(());
     }
-    // 3. The iOS Simulator app.
     let target = "aarch64-apple-ios-sim";
     let installed = Command::new("rustup")
         .args(["target", "list", "--installed"])
@@ -833,14 +788,8 @@ fn mobile(ios: bool) -> Result<()> {
     Ok(())
 }
 
-/// `(depth, kind, text)` rows describing a mock page's block tree.
 type MockRows = &'static [(usize, BlockKind, &'static str)];
 
-/// Insert `(depth, kind, text)` rows as a block tree under the page root.
-///
-/// `stack[d]` is the last block inserted at depth `d`, which is both the parent for depth
-/// `d + 1` and the `after` sibling for the next block at depth `d`. Truncating on insert
-/// drops the previous subtree, so coming back up a level starts a fresh child list.
 fn insert_tree(
     s: &mut Store,
     page: &PageId,
@@ -849,8 +798,6 @@ fn insert_tree(
     insert_tree_after(s, page, rows, None)
 }
 
-/// [`insert_tree`] with the sibling a top-level row comes behind, so several calls append in
-/// order instead of each putting its first row at the front of the page.
 fn insert_tree_after(
     s: &mut Store,
     page: &PageId,
@@ -893,9 +840,6 @@ fn insert_tree_after(
     Ok(ids)
 }
 
-/// The scratch graph for the iPhone app's checks (docs/ios-prd.md §6): the four pages the
-/// acceptance criteria name, and a day log with a done and an open to-do, a nested entry and
-/// links. Seeded through the store, never typed, so a screenshot reads the same each run.
 fn seed_phone_graph(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Quote, Todo};
     let mut s = Store::open(path)?;
@@ -941,8 +885,6 @@ fn seed_phone_graph(path: &Path) -> Result<()> {
             (1, Quote, "Ship small, ship often"),
         ],
     )?;
-    // One entry per call, each behind the one before: the day log's time column comes from the
-    // block id (a ULID), so the entries of one seed carry the seed's clock.
     let entries: [&[(usize, BlockKind, &str)]; 4] = [
         &[
             (0, Bullet, "Planning with [[Dana]]"),
@@ -963,7 +905,6 @@ fn seed_phone_graph(path: &Path) -> Result<()> {
         after = entry.first().cloned();
         ids.extend(entry);
     }
-    // One to-do is already done, so the day log shows both states of the box (AC-5.1).
     let pay_rent = ids
         .iter()
         .find(|id| {
@@ -984,10 +925,6 @@ fn seed_phone_graph(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The Tasks view's shots (PRD §9.2.2): the help graph, plus to-dos whose date links make
-/// one overdue and one due today (TK-5), and one more page with open work, so the view
-/// shows every kind of row. Kept apart from `seed_help_graph` so the Help tour's own
-/// screenshots do not change.
 fn seed_tasks_graph(path: &Path) -> Result<()> {
     use BlockKind::{Heading, Todo};
     seed_help_graph(path)?;
@@ -1004,7 +941,6 @@ fn seed_tasks_graph(path: &Path) -> Result<()> {
         &yesterday,
         &[(0, Todo, venue.as_str()), (0, Todo, invoice.as_str())],
     )?;
-    // Commit as the editor does, so each date link writes its day (FR-1.10) and resolves.
     for id in &dated {
         s.commit_block(&yesterday, id)?;
     }
@@ -1023,9 +959,6 @@ fn seed_tasks_graph(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The mock graph behind the Help screenshots: a small project, a person, and a few days
-/// of notes that link them, so backlinks, attributes and the graph view all have something
-/// real to show.
 fn seed_help_graph(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Heading, Quote, Todo};
     let mut s = Store::open(path)?;
@@ -1055,23 +988,16 @@ fn seed_help_graph(path: &Path) -> Result<()> {
                 "The beta date depends on [[Ana Lovelace]]'s review",
             ),
             (1, Quote, "Ship the small thing that works."),
-            // A property lower in the outline stays a normal bullet (§3.8 rule 3).
             (0, Bullet, "priority:: high"),
-            // A nested block that starts collapsed, to show the ring and the caret.
             (0, Bullet, "Open questions for the beta"),
             (1, Bullet, "Do we invite by hand or by form?"),
             (1, Todo, "Ask [[Ana Lovelace]] about the form"),
         ],
     )?;
 
-    // The alias lives in the properties bar's aliases row (§3.8). It must not collide with
-    // a hashtag's key, or `#atlas` would resolve to the project page instead of a tag.
     s.add_alias(&atlas, "the board")?;
-    // Blockless pages referenced only by `#atlas` / `#beta`: the sidebar's TAGS section
-    // (§3.2) lists tag-only pages, not unresolved hashtags.
     s.create_page("atlas")?;
     s.create_page("beta")?;
-    // A done to-do (muted, struck through, checked box) and a collapsed parent.
     s.set_block_kind(&atlas, &atlas_ids[6], BlockKind::Todo, true)?;
     s.set_collapsed(&atlas_ids[12], true)?;
 
@@ -1097,12 +1023,10 @@ fn seed_help_graph(path: &Path) -> Result<()> {
                 Bullet,
                 "The merge is the interesting part, not the transport",
             ),
-            // An unlinked mention, so Ana's Unlinked references has something to find.
             (0, Bullet, "Ana Lovelace keeps the migration notes"),
         ],
     )?;
 
-    // A few days of notes, newest last so the feed reads naturally.
     let days: &[(i64, MockRows)] = &[
         (
             4,
@@ -1140,8 +1064,6 @@ fn seed_help_graph(path: &Path) -> Result<()> {
         insert_tree(&mut s, &page, rows)?;
     }
 
-    // A short page with no linked references but an unlinked mention ("the import plan"), so
-    // the Unlinked references row sits high enough to open without scrolling the panel.
     let import = s.create_page("Import plan")?;
     insert_tree(
         &mut s,
@@ -1149,7 +1071,6 @@ fn seed_help_graph(path: &Path) -> Result<()> {
         &[(0, Bullet, "The old import path stays readable")],
     )?;
 
-    // A resolved date link (dates are pages, §3.1) a few days out.
     let target = today + chrono::Duration::days(11);
     let link = s.date_format().format(target);
     let today_page = s.ensure_daily_page(today)?;
@@ -1171,9 +1092,6 @@ fn seed_help_graph(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Seed a scratch graph for the page-view screenshots (PG-1 … PG-5): a project page with
-/// attributes, an alias, headings, a done and an open to-do, a collapsed parent, a quote
-/// and two code blocks (one that names its language).
 fn seed_page_view(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Code, Heading, Quote, Todo};
     let mut s = Store::open(path)?;
@@ -1203,7 +1121,6 @@ fn seed_page_view(path: &Path) -> Result<()> {
             ),
         ],
     )?;
-    // A done to-do, an alias for the toolbar and a collapsed parent to show its arrow.
     s.set_block_kind(&page, &ids[5], Todo, true)?;
     s.add_alias(&page, "the board")?;
     s.set_collapsed(&ids[13], true)?;
@@ -1211,13 +1128,6 @@ fn seed_page_view(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A scratch graph for the Daily Notes feed screenshots (DN-1 to DN-3): a long today so
-/// the pinned date can be caught mid-scroll, a written yesterday, empty days to fold and an
-/// older day with notes. Never seed into a real graph.
-/// `seed-panes <graph> [depth]`: the help graph plus what stacked panes need to be looked at
-/// (DESIGN.md §4.3): a chain of eight pages that link onward, one of them long, and
-/// today's note linking into the chain. With a depth, the first `depth` chain pages are
-/// saved as the open stack (`local_state` `pane_stack`, SP-8), so a launch shows them.
 fn seed_panes_graph(path: &Path, depth: usize) -> Result<()> {
     use BlockKind::{Bullet, Heading, Todo};
     seed_help_graph(path)?;
@@ -1247,7 +1157,6 @@ fn seed_panes_graph(path: &Path, depth: usize) -> Result<()> {
             (1, Todo, format!("Summarise {name} in one line")),
         ];
         if i == 2 {
-            // A long page: enough rows to scroll well past one screen.
             for n in 1..=80 {
                 rows.push((1, Bullet, format!("Card {n}: one fact worth keeping")));
             }
@@ -1272,7 +1181,6 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
     use BlockKind::{Bullet, Heading, Quote, Todo};
     let mut s = Store::open(path)?;
     let today = chrono::Local::now().date_naive();
-    // Date links use the graph's own title format, so they resolve to the daily pages.
     let title = |d: NaiveDate| s.date_format().format(d);
     let today_t = title(today);
     let yesterday_t = title(today - chrono::Duration::days(1));
@@ -1292,7 +1200,6 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
             (1, Bullet, "A beta for twenty testers, invited by hand"),
             (1, Bullet, "Import from the old format"),
             (1, Todo, "Draft the release notes"),
-            // A page (not a day) linking today: a plain linked reference with children.
             (0, Bullet, &kickoff),
             (1, Bullet, "Room for twenty, with a screen"),
             (1, Todo, "Send the invite to the testers"),
@@ -1316,7 +1223,6 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
         &[(0, Bullet, "A list of what is worth finishing")],
     )?;
 
-    // Today, long enough to scroll: the heading has to leave the top of the column.
     let page = s.ensure_daily_page(today)?;
     insert_tree(
         &mut s,
@@ -1390,13 +1296,11 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
                 "Fade everything that is not a neighbour on hover",
             ),
             (0, Todo, "Reply to the testers' thread"),
-            // Plain-text mention: an unlinked reference on Ana Lovelace's page (FR-3.11).
             (0, Bullet, "Lunch with Ana Lovelace, no agenda"),
             (0, Bullet, "Good day."),
         ],
     )?;
 
-    // Yesterday: written, so it stays open (DN-1).
     let page = s.ensure_daily_page(today - chrono::Duration::days(1))?;
     insert_tree(
         &mut s,
@@ -1406,12 +1310,10 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
             (1, Bullet, "Old files have to keep opening, no exceptions"),
             (0, Todo, "Ask [[Ana Lovelace]] to review it"),
             (0, Todo, "Book the room for the beta kickoff"),
-            // Another day linking today: a "Scheduled for this day" reference.
             (0, Bullet, &moved),
         ],
     )?;
 
-    // An older day with notes, below the two empty days the feed folds (DN-1).
     let page = s.ensure_daily_page(today - chrono::Duration::days(4))?;
     insert_tree(
         &mut s,
@@ -1429,9 +1331,6 @@ fn seed_daily_feed(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The demo graph for the Linked References verification shots: the Help graph plus a
-/// reference block with more children than the inline limit, and unlinked mentions of
-/// "Ana Lovelace", so the shots exercise LR-4 and LR-5 on real content.
 fn seed_refs_graph(path: &Path) -> Result<()> {
     if path.exists() {
         std::fs::remove_file(path)?;
@@ -1466,8 +1365,6 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
             ..Default::default()
         },
     )?;
-    // An unlinked mention that follows a link, so the highlight has to be mapped through
-    // the stripped markup (the verification shot for the mention renderer).
     let plan = outline::append_block(s.page_state(&day)?, None);
     let id = s
         .execute_plan(&day, plan, None)?
@@ -1481,7 +1378,6 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
         None,
     )?;
     s.commit_block(&day, &id)?;
-    // Link yesterday, so the feed shows a day with a Linked References section of its own.
     let yesterday = today - chrono::Duration::days(1);
     let link = s.date_format().format(yesterday);
     let plan = outline::append_block(s.page_state(&day)?, None);
@@ -1517,8 +1413,6 @@ fn seed_refs_graph(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// A built app, a seeded mock graph and an empty config dir under `target/<name>`, ready
-/// for a `UTOPIA_SHOT_SCRIPT` run (help and README screenshots).
 struct ShotApp {
     root: PathBuf,
     scratch: PathBuf,
@@ -1527,9 +1421,6 @@ struct ShotApp {
     bin: PathBuf,
 }
 
-/// Build the app, seed `target/<name>/Demo.utopia` with [`seed_help_graph`] and place the
-/// binary under a bundle-shaped path. The config dir is empty, so the app shows its
-/// defaults (font, density, keys).
 fn shot_app(name: &str) -> Result<ShotApp> {
     use std::process::Command as Proc;
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1551,12 +1442,9 @@ fn shot_app(name: &str) -> Result<ShotApp> {
     std::fs::create_dir_all(&config)?;
     let graph = scratch.join("Demo.utopia");
     seed_help_graph(&graph)?;
-    // Settings → Assistants names the binary that runs, so it must not show `target/debug`.
-    // A copy under a bundle shape reads like the install the owner has.
     let bundle = scratch.join("Utopia.app/Contents/MacOS");
     std::fs::create_dir_all(&bundle)?;
     let bin = bundle.join("utopia");
-    // The target dir can be shared through CARGO_TARGET_DIR (this repo's worktrees use one).
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .map(|p| if p.is_absolute() { p } else { root.join(p) })
@@ -1576,7 +1464,6 @@ fn shot_app(name: &str) -> Result<ShotApp> {
     })
 }
 
-/// Run the app once over `script` (steps joined by `; `), light theme.
 fn run_shot_script(app: &ShotApp, script: &str) -> Result<()> {
     let status = std::process::Command::new(&app.bin)
         .current_dir(&app.root)
@@ -1590,7 +1477,6 @@ fn run_shot_script(app: &ShotApp, script: &str) -> Result<()> {
     Ok(())
 }
 
-/// Shrink a capture so its longer side is `max` px, in place, and say by how much.
 fn downscale(p: &Path, max: u32) -> Result<()> {
     anyhow::ensure!(p.exists(), "{} was not captured", p.display());
     let before = std::fs::metadata(p)?.len();
@@ -1614,22 +1500,13 @@ fn downscale(p: &Path, max: u32) -> Result<()> {
     Ok(())
 }
 
-/// Regenerate the README screenshots and demo GIF in `docs/images`.
-///
-/// The same mock graph and scenes as the Help screenshots, at 1400 px, plus Settings on its
-/// Keybindings tab. The GIF is a second run that types a `[[link]]` into today's note,
-/// opens the linked page and shows the new block under Linked References; each step is a
-/// `shot`, and ffmpeg turns the frames into a 960 px GIF.
 fn readme_shots() -> Result<()> {
     let app = shot_app("readme-shots")?;
     let out = app.root.join("docs/images");
     std::fs::create_dir_all(&out)?;
     let png = |name: &str| out.join(format!("{name}.png")).display().to_string();
     let stills = [
-        // The first frame after a fresh build waits for the Metal shaders (~1 s).
         "wait 1500".to_string(),
-        // The real pointer may rest over the window and paint a hover; park it on the
-        // empty top bar (a synthetic move, so it stays until the mouse really moves).
         PARK_POINTER.to_string(),
         "keys escape".to_string(),
         "wait 400".to_string(),
@@ -1639,7 +1516,6 @@ fn readme_shots() -> Result<()> {
         "type atlas".to_string(),
         "wait 500".to_string(),
         format!("shot {}", png("quick-jump")),
-        // "atlas" ranks the #atlas tag first; the outline shot is the project page.
         "keys escape".to_string(),
         "wait 300".to_string(),
         "keys cmd-k".to_string(),
@@ -1692,7 +1568,6 @@ fn readme_shots() -> Result<()> {
         downscale(&out.join(format!("{name}.png")), 1400)?;
     }
 
-    // The GIF, on a fresh graph so the typing lands in the same note every run.
     std::fs::remove_file(&app.graph)?;
     for side in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(app.graph.with_extension(format!("utopia{side}")));
@@ -1742,7 +1617,6 @@ fn readme_shots() -> Result<()> {
     Ok(())
 }
 
-/// The steps of the README GIF: each `frame` is a `shot` into `dir`, numbered in order.
 struct GifScript {
     dir: PathBuf,
     steps: Vec<String>,
@@ -1754,8 +1628,6 @@ impl GifScript {
         self.steps.extend(steps.iter().map(|s| s.to_string()));
     }
 
-    /// `hold` frames of the same picture: the GIF has one frame rate, so a pause is
-    /// several copies.
     fn frame(&mut self, hold: usize) {
         for _ in 0..hold {
             let f = self.dir.join(format!("f{:03}.png", self.n));
@@ -1764,22 +1636,16 @@ impl GifScript {
         }
     }
 
-    /// Type each chunk and capture it at once, while the caret is steady after the key.
     fn typed(&mut self, chunks: &[&str]) {
         for c in chunks {
-            // `type` keeps everything after the one space that ends the verb, so a
-            // chunk's leading space is typed as it is.
             self.steps.push(format!("type {c}"));
             self.frame(1);
         }
     }
 }
 
-/// Where the shot scripts park the pointer: the empty middle of the main window's top bar.
 const PARK_POINTER: &str = "hover 760 28";
 
-/// The keys that put the caret in a new, empty block after the last of today's six
-/// blocks in the help graph (`seed_help_graph`), in the feed.
 fn open_today_new_block(steps: &mut Vec<String>) {
     steps.extend(
         [
@@ -1794,14 +1660,6 @@ fn open_today_new_block(steps: &mut Vec<String>) {
     );
 }
 
-/// Regenerate the screenshots embedded in Settings → Help.
-///
-/// Builds the app, seeds a mock graph, then drives the real window with
-/// `UTOPIA_SHOT_SCRIPT` and captures it. The app captures its own window, so this needs no
-/// Screen Recording permission. `target last` drives the Settings window, which is a second
-/// window; it is captured at the Assistants tab, whose client entries name the path of the
-/// running binary, so the app is started from a bundle-shaped copy rather than
-/// `target/debug/utopia`.
 fn help_shots() -> Result<()> {
     let ShotApp {
         root,
@@ -1813,11 +1671,8 @@ fn help_shots() -> Result<()> {
     let out = root.join("crates/utopia-ui/assets/help");
     std::fs::create_dir_all(&out)?;
     let png = |name: &str| out.join(format!("{name}.png")).display().to_string();
-    // One run, several captures: each `wait` gives the UI time to settle before `shot`.
     let script = [
         "wait 900".to_string(),
-        // Leave the block: a focused block shows its raw `[[markup]]`, and Help should
-        // show what reading a note actually looks like.
         "keys escape".to_string(),
         "wait 400".to_string(),
         format!("shot {}", png("daily-notes")),
@@ -1846,9 +1701,6 @@ fn help_shots() -> Result<()> {
         "keys cmd-shift-g".to_string(),
         "wait 1200".to_string(),
         format!("shot {}", png("graph")),
-        // Settings → Assistants, for the topic that documents it. A click only lands on a
-        // frame that was painted, hence the throwaway capture before it; the Assistants row
-        // is the fifth of the tab list, at this point in an 1100 × 760 window.
         "keys cmd-,".to_string(),
         "wait 1500".to_string(),
         "target last".to_string(),
@@ -1871,7 +1723,6 @@ fn help_shots() -> Result<()> {
         &script,
     )?;
 
-    // Downscale so the binary does not carry full-resolution Retina captures.
     for name in [
         "daily-notes",
         "quick-jump",
@@ -1891,6 +1742,7 @@ fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("bench") => bench(args.iter().any(|a| a == "--ui")),
+        Some("comments") => comments::run(&args[1..]),
         Some("profile-merge") => {
             let dir = tempfile::tempdir()?;
             let mut s = Store::open(dir.path().join("p.utopia"))?;
@@ -1933,7 +1785,7 @@ fn main() -> Result<()> {
         ),
         _ => {
             println!(
-                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- readme-shots       (regenerate docs/images for the README)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)
+                "usage: cargo run -p xtask --release -- bench [--ui]\n       cargo run -p xtask -- comments [--update|--list|--strip <path…>|--total]   (comment ratchet, ADR 0001)\n       cargo run -p xtask -- bundle [--debug]   (target/Utopia.app, registers utopia://)\n       cargo run -p xtask -- mobile [--ios]     (Swift bindings, checks, iOS shell)\n       cargo run -p xtask -- help-shots         (regenerate Settings -> Help screenshots)\n       cargo run -p xtask -- readme-shots       (regenerate docs/images for the README)\n       cargo run -p xtask -- seed-refs <graph>  (demo graph for the reference screenshots)\n       cargo run -p xtask -- seed-daily <graph>  (a scratch graph for the Daily Notes shots)\n       cargo run -p xtask -- seed-tasks <graph>  (the help graph plus dated to-dos, Tasks shots)
        cargo run -p xtask -- seed-phone <graph>  (the scratch graph for the iPhone app)\n       cargo run -p xtask -- seed-page-view <file.utopia>   (scratch graph for page-view shots)\n       cargo run -p xtask -- seed-panes <graph> [depth]  (stacked panes shots, SP-8)\n       cargo run -p xtask --release -- profile-merge   (loop for sampling with `sample`)"
             );
             Ok(())

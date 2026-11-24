@@ -1,9 +1,3 @@
-//! Markdown-subset inline grammar (PRD Appendix B) and reference extraction (§7.2).
-//!
-//! Block bodies are plain source text. This module turns that text into an inline tree
-//! for rendering and into [`RefSpan`]s for the index. All ranges are byte offsets into
-//! the source. Unclosed delimiters are literal text (rule 3); `code` is opaque (rule 4).
-
 use std::ops::Range;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -55,8 +49,6 @@ pub enum Inline {
         url: String,
         range: Range<usize>,
     },
-    /// `{{embed: ((uid))}}` (or `{{[[embed]]: ((uid))}}`): a block rendered in full, always
-    /// expanded (P1 block embeds). Same edge as a block ref.
     Embed {
         uid: String,
         range: Range<usize>,
@@ -64,9 +56,6 @@ pub enum Inline {
 }
 
 impl Inline {
-    /// The node's byte range in the source. `Text` carries none: it is the whole gap
-    /// between its neighbours' ranges (or its parent's inner bounds), and it is the source
-    /// verbatim except where a backslash escaped the next character.
     pub fn range(&self) -> Option<&Range<usize>> {
         match self {
             Inline::Text(_) => None,
@@ -83,19 +72,14 @@ impl Inline {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefKind {
-    /// `[[Title]]`
     Page,
-    /// `#tag` or `#[[Title]]` — the same edge as a page ref (FR-2.15), kept distinct
-    /// only so renderers can style it.
     Tag,
-    /// `((uid))`
     Block,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefSpan {
     pub kind: RefKind,
-    /// Page title as typed (trimmed) or block uid.
     pub target: String,
     pub range: Range<usize>,
 }
@@ -129,7 +113,6 @@ fn find_str(s: &str, from: usize, end: usize, pat: &str) -> Option<usize> {
     s[from..end].find(pat).map(|j| from + j)
 }
 
-/// Parse a block body into inline nodes.
 pub fn parse(src: &str) -> Vec<Inline> {
     parse_range(src, 0, src.len(), &[])
 }
@@ -175,7 +158,6 @@ fn parse_range(s: &str, start: usize, end: usize, active: &[Mark]) -> Vec<Inline
                     continue;
                 }
             }
-            // Unclosed or disallowed nesting: the delimiter is literal text.
             let dl = mark.delimiter().len();
             buf.push_str(&s[i..i + dl]);
             i += dl;
@@ -189,8 +171,6 @@ fn parse_range(s: &str, start: usize, end: usize, active: &[Mark]) -> Vec<Inline
     out
 }
 
-/// Atomic constructs: code, page refs, tags, block refs, links. These never contain
-/// emphasis and are skipped wholesale when searching for a closing delimiter.
 fn atom_at(s: &str, i: usize, end: usize) -> Option<(Inline, usize)> {
     let rest = &s[i..end];
     let b = s.as_bytes();
@@ -205,7 +185,6 @@ fn atom_at(s: &str, i: usize, end: usize) -> Option<(Inline, usize)> {
                 close + 1,
             ))
         }
-        // `![alt](url)`: a Markdown image (attachments use `blob:` urls); one link atom.
         b'!' if rest.starts_with("![") && !rest.starts_with("![[") => {
             let (link, next) = atom_at(s, i + 1, end)?;
             match link {
@@ -253,8 +232,6 @@ fn atom_at(s: &str, i: usize, end: usize) -> Option<(Inline, usize)> {
         b'{' if rest.starts_with("{{") => {
             let close = find_str(s, i + 2, end, "}}")?;
             let inner = s[i + 2..close].trim();
-            // Attachment widgets read as links: `{{pdf: blob:H}}` opens the PDF,
-            // `{{highlight: …}}` opens it at the highlighted page (P2).
             if let Some(hash) = inner
                 .strip_prefix("pdf:")
                 .map(str::trim)
@@ -358,8 +335,6 @@ fn atom_at(s: &str, i: usize, end: usize) -> Option<(Inline, usize)> {
     }
 }
 
-/// Title inside `[[...]]`, starting after the opening brackets. Returns the trimmed
-/// title and the offset just past `]]`.
 fn bracket_title(s: &str, from: usize, end: usize) -> Option<(String, usize)> {
     let close = find_str(s, from, end, "]]")?;
     let raw = &s[from..close];
@@ -382,7 +357,6 @@ fn mark_at(s: &str, i: usize, end: usize) -> Option<Mark> {
     } else if rest.starts_with("^^") {
         Some(Mark::Highlight)
     } else if rest.starts_with('_') {
-        // Intraword underscores (snake_case) are not emphasis.
         let before_ok = prev_char(s, i).is_none_or(|c| !c.is_alphanumeric());
         let after_ok = s[i + 1..end]
             .chars()
@@ -394,11 +368,6 @@ fn mark_at(s: &str, i: usize, end: usize) -> Option<Mark> {
     }
 }
 
-/// Where a bare `http://` / `https://` URL starting at `i` ends (Appendix B `bare_url`,
-/// after GFM's extended autolinks): at the next whitespace, `<` or `>`, less trailing
-/// punctuation and any `)` or `]` that closes nothing inside it, so "(see https://x.y)."
-/// links only `https://x.y`. A URL is opaque like code (rule 4): a `#` or `_` in it is
-/// never a tag or emphasis, so `/#section` adds no edge and `a_b_c` is not italic.
 fn bare_url_end(s: &str, i: usize, end: usize) -> Option<usize> {
     if prev_char(s, i).is_some_and(|c| c.is_alphanumeric()) {
         return None;
@@ -427,8 +396,6 @@ fn bare_url_end(s: &str, i: usize, end: usize) -> Option<usize> {
     (url.len() > scheme.len()).then_some(i + url.len())
 }
 
-/// Whether a link leaves the app: anything but an attachment, a PDF page or a
-/// `utopia://` deep link (FR-4.10), which all open inside Utopia.
 pub fn is_external_url(url: &str) -> bool {
     !["blob:", "pdfpage:", "utopia:"].iter().any(|p| {
         url.get(..p.len())
@@ -469,7 +436,6 @@ fn find_close(s: &str, from: usize, end: usize, mark: Mark) -> Option<usize> {
     None
 }
 
-/// Every reference in a block body, in source order (§7.2 `parse`).
 pub fn extract_refs(src: &str) -> Vec<RefSpan> {
     let mut out = Vec::new();
     collect_refs(&parse(src), &mut out);
@@ -500,8 +466,6 @@ fn collect_refs(nodes: &[Inline], out: &mut Vec<RefSpan>) {
     }
 }
 
-/// Plain-text rendering (markup removed, refs shown by title/uid). Used for previews,
-/// breadcrumbs and search snippets.
 pub fn plain_text(src: &str) -> String {
     fn walk(nodes: &[Inline], out: &mut String) {
         for n in nodes {
@@ -528,8 +492,6 @@ pub fn plain_text(src: &str) -> String {
     out
 }
 
-/// `Key:: value` at the start of a block (P1 attributes, W7). Returns the key and the
-/// byte range of the value.
 pub fn attribute(src: &str) -> Option<(String, Range<usize>)> {
     let line_end = src.find('\n').unwrap_or(src.len());
     let sep = src[..line_end].find("::")?;
@@ -544,7 +506,6 @@ pub fn attribute(src: &str) -> Option<(String, Range<usize>)> {
     Some((key.to_string(), start..src.len()))
 }
 
-/// Byte ranges covered by references, code and links, where mentions never count.
 fn atom_ranges(nodes: &[Inline], out: &mut Vec<Range<usize>>) {
     for n in nodes {
         match n {
@@ -560,8 +521,6 @@ fn atom_ranges(nodes: &[Inline], out: &mut Vec<Range<usize>>) {
     }
 }
 
-/// Unlinked mentions of `title` (FR-3.9): case-insensitive, whole-word, outside any
-/// reference, code span or link. Byte ranges into `src`.
 pub fn find_mentions(src: &str, title: &str) -> Vec<Range<usize>> {
     let want: String = title.trim().to_lowercase();
     let n = title.trim().chars().count();
@@ -593,9 +552,7 @@ pub fn find_mentions(src: &str, title: &str) -> Vec<Range<usize>> {
     out
 }
 
-/// One word after a bare tag, for the longest-match rule: a run of tag characters.
 fn words_after(s: &str, mut i: usize, max: usize) -> Vec<usize> {
-    // Returns end offsets of successive words separated by single spaces.
     let mut ends = Vec::new();
     while ends.len() < max {
         if !s[i..].starts_with(' ') {
@@ -618,9 +575,6 @@ fn words_after(s: &str, mut i: usize, max: usize) -> Vec<usize> {
 
 const MAX_TAG_WORDS: usize = 6;
 
-/// Commit-time hashtag longest-match (§6.5): a bare `#Word` followed by more words that
-/// together match a **live page title** becomes `#[[Word more words]]`. Only brackets are
-/// added; the characters the user typed are preserved. Returns `None` if nothing changes.
 pub fn heal_tags(src: &str, is_live_title: impl Fn(&str) -> bool) -> Option<String> {
     let mut edits: Vec<(Range<usize>, String)> = Vec::new();
     for r in extract_refs(src) {
@@ -646,9 +600,6 @@ pub fn heal_tags(src: &str, is_live_title: impl Fn(&str) -> bool) -> Option<Stri
     Some(out)
 }
 
-/// The "Tag the whole phrase" affordance (AC-2.8): for the bare tag at `tag_start`,
-/// the range covering the tag and the following words up to punctuation, and its
-/// canonical `#[[...]]` replacement. `None` if the tag is not followed by words.
 pub fn whole_phrase_tag(src: &str, tag_start: usize) -> Option<(Range<usize>, String)> {
     let r = extract_refs(src)
         .into_iter()
@@ -661,8 +612,6 @@ pub fn whole_phrase_tag(src: &str, tag_start: usize) -> Option<(Range<usize>, St
     Some((tag_start..end, format!("#[[{phrase}]]")))
 }
 
-/// Canonical text inserted by autocomplete for a page: `[[Title]]`, or for tags
-/// `#Title` when single-token and `#[[Title]]` otherwise (FR-2.15, AC-2.10).
 pub fn page_link_text(title: &str, as_tag: bool) -> String {
     if as_tag {
         if !title.is_empty() && title.chars().all(is_tag_char) {
@@ -675,9 +624,6 @@ pub fn page_link_text(title: &str, as_tag: bool) -> String {
     }
 }
 
-/// Rewrite every page-like reference whose target satisfies `matches` to `[[new_title]]`
-/// (or the tag form, preserving the reference's kind). Used by "rewrite references to new
-/// title" (FR-3.6) and unresolved-intent redirects (FR-4.14).
 pub fn rewrite_page_refs(
     src: &str,
     matches: impl Fn(&str) -> bool,
@@ -695,7 +641,6 @@ pub fn rewrite_page_refs(
     changed.then_some(out)
 }
 
-/// "Convert to plain text" for an unresolved intent (FR-4.14).
 pub fn unlink_page_refs(src: &str, matches: impl Fn(&str) -> bool) -> Option<String> {
     let mut out = src.to_string();
     let mut changed = false;
@@ -782,7 +727,6 @@ mod tests {
                 },
             ]
         );
-        // AC-2.9: unclosed renders literally.
         assert_eq!(parse("**bold"), vec![Inline::Text("**bold".into())]);
         assert_eq!(
             parse("snake_case_name"),
@@ -807,7 +751,6 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
-        // Refs inside emphasis are still refs; delimiters inside refs don't close.
         assert_eq!(
             refs("**met [[A**B]]**"),
             vec![(RefKind::Page, "A**B".into())]
@@ -833,7 +776,6 @@ mod tests {
             heal_tags("I like #Modern Religion.", live).as_deref(),
             Some("I like #[[Modern Religion]].")
         );
-        // No such page: the tag ends at the space, nothing rewritten.
         assert_eq!(heal_tags("#modern society", live), None);
         assert_eq!(heal_tags("#2 pencils", live), None);
         assert_eq!(
@@ -925,7 +867,6 @@ mod tests {
         out
     }
 
-    /// Appendix B `bare_url`: a pasted `https://…` is a link without `[text](url)`.
     #[test]
     fn a_bare_url_is_a_link() {
         let t = "read https://example.com/a?b=1 later";
@@ -943,15 +884,12 @@ mod tests {
         );
         assert_eq!(urls("HTTP://X.Y"), ["HTTP://X.Y"]);
         assert_eq!(urls("http://x.y"), ["http://x.y"]);
-        // Not a URL: no host, another scheme, or inside a word or code.
         for t in ["https://", "ftp://x.y", "xhttps://x.y", "`https://x.y`"] {
             assert_eq!(urls(t), Vec::<String>::new(), "{t}");
         }
-        // A Markdown link's url is not linked twice.
         assert_eq!(urls("[site](https://x.y)"), ["https://x.y"]);
     }
 
-    /// Sentence punctuation after a URL, and a bracket that closes around it, stay text.
     #[test]
     fn a_bare_url_leaves_trailing_punctuation_out() {
         assert_eq!(urls("see https://x.y."), ["https://x.y"]);
@@ -972,8 +910,6 @@ mod tests {
         assert_eq!(urls("<https://x.y>"), ["https://x.y"]);
     }
 
-    /// A URL is opaque (rule 4): its `#fragment` is no tag and its underscores no italics,
-    /// so commit-time healing never rewrites a URL into `#[[…]]`.
     #[test]
     fn a_bare_url_holds_no_tags_or_emphasis() {
         let t = "https://x.y/#intro and https://x.y/a_b_c_ #real";

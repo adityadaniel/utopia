@@ -1,15 +1,5 @@
-//! v1 wire format (§12.3). Payloads are opaque bytes (CRDT updates, later ciphertext),
-//! base64 in JSON. Request bodies may be zstd-compressed (`Content-Encoding: zstd`).
-//!
-//! Endpoints (all under `/v1/graphs/{gid}`, `Authorization: Bearer <token>`):
-//! - `GET manifest` → [`Manifest`] (`ETag: "<rev>"`, 304 on `If-None-Match`)
-//! - `POST pages/{pid}/updates` [`PushRequest`] → [`PushResponse`] (dedupe by change id)
-//! - `GET pages/{pid}/updates?since=<seq>` → [`PullResponse`]
-//! - `POST pages/{pid}/snapshot` [`SnapshotRequest`] → 204 (truncates covered log rows)
-
 use serde::{Deserialize, Serialize};
 
-/// Bumped on any incompatible change to the shard or wire format (§12.6, §14.4).
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -28,17 +18,12 @@ pub struct Manifest {
     pub rev: u64,
     pub protocol_version: u32,
     pub pages: Vec<ManifestPage>,
-    /// Opaque id of the relay store that produced this manifest. A relay whose database
-    /// was wiped gets a new one, so a client never mistakes a restarted sequence for the
-    /// one it already pulled. Additive: relays that predate the field send nothing, and
-    /// clients that predate it ignore it (§12.6, §14.4).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub instance: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateIn {
-    /// Globally unique change id; the relay dedupes on it.
     pub id: String,
     pub client_seq: i64,
     pub frontier: String,
@@ -67,8 +52,6 @@ pub struct UpdateOut {
     pub payload: Vec<u8>,
 }
 
-/// Incremental updates, optionally preceded by a snapshot when the requested range was
-/// truncated (the server judged a snapshot cheaper).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PullResponse {
     #[serde(default, skip_serializing_if = "Option::is_none", with = "b64_opt")]
@@ -77,7 +60,6 @@ pub struct PullResponse {
     pub head_seq: u64,
 }
 
-/// Client-driven compaction (§11.7): a full snapshot covering `covers_seq`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotRequest {
     pub covers_seq: u64,

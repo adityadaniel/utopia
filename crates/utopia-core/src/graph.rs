@@ -1,10 +1,3 @@
-//! Force-directed layout for the graph view (P2, §16 "Graph view — force-directed").
-//!
-//! Fruchterman–Reingold with a cooling schedule. Deterministic: the same graph and seed
-//! give the same picture, so the view does not reshuffle on every open. Positions are
-//! returned in the unit square centered on the origin (`-1.0..=1.0` on both axes).
-
-/// A tiny deterministic generator (SplitMix64); layout quality does not need more.
 struct Rng(u64);
 
 impl Rng {
@@ -18,8 +11,6 @@ impl Rng {
     }
 }
 
-/// Lay out `n` nodes joined by undirected `edges` (pairs of node indices; self-loops and
-/// out-of-range pairs are ignored).
 pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) -> Vec<(f32, f32)> {
     if n == 0 {
         return Vec::new();
@@ -28,7 +19,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
         return vec![(0.0, 0.0)];
     }
     let mut rng = Rng(seed);
-    // Start on a jittered circle: stable and free of coincident points.
     let mut pos: Vec<(f32, f32)> = (0..n)
         .map(|i| {
             let a = i as f32 / n as f32 * std::f32::consts::TAU;
@@ -41,7 +31,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
         .copied()
         .filter(|&(a, b)| a != b && a < n && b < n)
         .collect();
-    // Ideal edge length for a unit-area frame.
     let k = (4.0 / n as f32).sqrt();
     let k2 = k * k;
     let mut temp = 0.2f32;
@@ -49,7 +38,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
     let mut disp = vec![(0.0f32, 0.0f32); n];
     for _ in 0..iterations {
         disp.iter_mut().for_each(|d| *d = (0.0, 0.0));
-        // Repulsion between every pair.
         for i in 0..n {
             for j in (i + 1)..n {
                 let dx = pos[i].0 - pos[j].0;
@@ -62,7 +50,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
                 disp[j].1 -= dy * f;
             }
         }
-        // Attraction along edges.
         for &(a, b) in &edges {
             let dx = pos[a].0 - pos[b].0;
             let dy = pos[a].1 - pos[b].1;
@@ -73,7 +60,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
             disp[b].0 += dx * f;
             disp[b].1 += dy * f;
         }
-        // Gentle gravity keeps disconnected pieces on screen.
         for (p, d) in pos.iter().zip(disp.iter_mut()) {
             d.0 -= p.0 * 0.5;
             d.1 -= p.1 * 0.5;
@@ -90,7 +76,6 @@ pub fn layout(n: usize, edges: &[(usize, usize)], iterations: usize, seed: u64) 
     pos
 }
 
-/// Scale and center into `-1..=1`, keeping the aspect ratio.
 fn normalize(pos: &mut [(f32, f32)]) {
     let (mut x0, mut y0, mut x1, mut y1) = (f32::MAX, f32::MAX, f32::MIN, f32::MIN);
     for p in pos.iter() {
@@ -117,8 +102,6 @@ mod tests {
 
     #[test]
     fn linked_nodes_cluster() {
-        // Two triangles joined by nothing: members sit closer to each other than to the
-        // other triangle.
         let edges = [(0, 1), (1, 2), (2, 0), (3, 4), (4, 5), (5, 3)];
         let p = layout(6, &edges, 300, 7);
         let within = dist(p[0], p[1]).max(dist(p[1], p[2])).max(dist(p[3], p[4]));
@@ -136,7 +119,6 @@ mod tests {
             assert!(x.is_finite() && y.is_finite());
             assert!(x.abs() <= 1.0001 && y.abs() <= 1.0001);
         }
-        // The hub ends up near the middle of its star.
         let (hx, hy) = a[0];
         assert!(hx.abs() < 0.35 && hy.abs() < 0.35, "hub at {hx},{hy}");
         assert!(layout(0, &[], 10, 1).is_empty());

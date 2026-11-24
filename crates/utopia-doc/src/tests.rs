@@ -1,7 +1,6 @@
 use super::*;
 use utopia_core::command::TextEdit;
 
-/// Small deterministic PRNG so the fuzz tests are reproducible without extra deps.
 pub(crate) struct Rng(u64);
 
 impl Rng {
@@ -30,7 +29,6 @@ impl Rng {
 
 const WORDS: &[&str] = &["alpha ", "β ", "日本 ", "🎉", "[[Link]] ", "#tag ", "x"];
 
-/// A random command that is valid against `st`.
 pub(crate) fn random_command(st: &PageState, rng: &mut Rng, n: &mut u64) -> Command {
     let all: Vec<BlockId> = st
         .blocks
@@ -171,8 +169,6 @@ fn loro_matches_reference_semantics() {
                 model.canonical(),
                 "seed {seed} step {step}: {cmd:?}"
             );
-            // The incrementally maintained cache equals a full rebuild from the CRDT,
-            // including order, positions and liveness.
             let rebuilt = doc.rebuilt_state();
             assert_eq!(
                 doc.state().canonical(),
@@ -188,7 +184,6 @@ fn loro_matches_reference_semantics() {
                 );
             }
         }
-        // Liveness must agree too.
         for (id, b) in &model.blocks {
             assert_eq!(doc.state().block(id).map(|x| x.live), Some(b.live));
         }
@@ -211,8 +206,6 @@ fn inverses_restore_state_in_loro() {
             history.push((before, inv));
         }
     }
-    // AC-2.3 in miniature: undo everything and land on the empty page, byte-identical
-    // canonical projection at every step.
     while let Some((before, inv)) = history.pop() {
         for c in &inv {
             doc.apply(c, 1000).unwrap();
@@ -281,7 +274,6 @@ fn two_peer_convergence_fuzz() {
                 b.state().canonical(),
                 "seed {seed} round {round}"
             );
-            // Importing the same updates again is a no-op (idempotent import).
             let again = a.export_since(&Frontier::default()).unwrap();
             assert!(!b.import(&again).unwrap());
         }
@@ -405,7 +397,6 @@ fn frontier_round_trips() {
 
 #[test]
 fn incremental_cache_matches_rebuild_under_dense_inserts() {
-    // Many inserts at the same spot force Loro to rearrange sibling indexes.
     let mut doc = LoroPageDoc::new(page(), 1);
     let first = BlockId::from("first");
     doc.apply(
@@ -454,8 +445,6 @@ fn insert(id: &str, after: Option<&str>, text: &str) -> Command {
     }
 }
 
-/// The relay holds a sender's later changes but not the earlier ones they build on (a
-/// device that first pushed to another graph id). `(first, later)` are the two updates.
 fn gap() -> (Vec<u8>, Vec<u8>) {
     let mut sender = LoroPageDoc::new(page(), 7);
     sender.apply(&insert("one", None, "first"), 0).unwrap();
@@ -468,8 +457,6 @@ fn gap() -> (Vec<u8>, Vec<u8>) {
     (first, later)
 }
 
-/// §12.3 step 3, §2.3.7: an update whose predecessors never arrived applies nothing, and
-/// the doc says so instead of reporting a clean import.
 #[test]
 fn ac_12_3_import_keeps_changes_that_wait_for_a_missing_change() {
     let (_, later) = gap();
@@ -483,8 +470,6 @@ fn ac_12_3_import_keeps_changes_that_wait_for_a_missing_change() {
     assert!(ranges[0].start > 0, "it waits for counters below its start");
 }
 
-/// The waiting bytes are the only copy: a snapshot does not hold them, so they must
-/// survive a reload through the sidecar, and apply when the missing change arrives.
 #[test]
 fn ac_12_3_waiting_changes_survive_a_snapshot_reload_and_apply_later() {
     let (first, later) = gap();
@@ -516,8 +501,6 @@ fn ac_12_3_waiting_changes_survive_a_snapshot_reload_and_apply_later() {
     assert!(texts.contains(&"second".to_string()));
 }
 
-/// §12.3 step 4: a destination that holds only the later change has less than the sender,
-/// because the change waits; one that holds both has everything.
 #[test]
 fn ac_12_3_a_destination_holding_only_waiting_changes_has_less() {
     let (first, later) = gap();
@@ -533,8 +516,6 @@ fn ac_12_3_a_destination_holding_only_waiting_changes_has_less() {
     assert!(!Frontier::default().has_more_than(&whole).unwrap());
 }
 
-/// §12.6 diagnostics: a copy that holds only the later change reports it as waiting and
-/// does not count it in its version; with both, nothing waits.
 #[test]
 fn ac_12_6_copy_state_names_changes_that_wait() {
     let (first, later) = gap();
