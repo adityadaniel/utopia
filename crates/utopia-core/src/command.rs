@@ -1,7 +1,3 @@
-//! The mutation vocabulary (PRD §13.2). These primitives are the only way page content
-//! changes; every one is invertible against the state it is applied to, which is how
-//! undo works (FR-2.12) without depending on CRDT internals.
-
 use std::ops::Range;
 
 use chrono::NaiveDate;
@@ -23,7 +19,6 @@ pub enum BlockKind {
 }
 
 impl BlockKind {
-    /// Value of the `block.block_type` column.
     pub fn type_str(self) -> &'static str {
         match self {
             BlockKind::Bullet => "bullet",
@@ -70,25 +65,17 @@ impl PageKind {
     }
 }
 
-/// Synced page-level metadata, stored in the page's own shard (so aliases and merge
-/// tombstones replicate as ordinary updates, §8.6 step 6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PageMeta {
-    /// Display title. For daily pages this is ignored: the title is a rendering of
-    /// `daily_date` (FR-1.4, FR-1.11).
     pub title: String,
     pub kind: PageKind,
     pub daily_date: Option<NaiveDate>,
     pub created_at: i64,
     pub deleted_at: Option<i64>,
-    /// Set when this page was merged away (§8.6); live blocks that later arrive here are
-    /// re-merged into this page.
     pub merged_into: Option<PageId>,
-    /// Previous titles and merged titles, as typed. Keys are derived at index time.
     pub aliases: Vec<String>,
 }
 
-/// A partial update of [`PageMeta`]; `None` leaves the field untouched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PageMetaPatch {
     pub title: Option<String>,
@@ -128,7 +115,6 @@ impl PageMetaPatch {
         }
     }
 
-    /// The patch that restores `m`'s current values for every field this patch touches.
     pub fn inverse_against(&self, m: &PageMeta) -> PageMetaPatch {
         PageMetaPatch {
             title: self.title.as_ref().map(|_| m.title.clone()),
@@ -142,8 +128,6 @@ impl PageMetaPatch {
     }
 }
 
-/// Aliases as a set keyed by `title_key`: first spelling wins, sorted by key, and the
-/// page's current title is never its own alias (§10.4 invariant 8).
 pub fn canonical_aliases(title: &str, aliases: &[String]) -> Vec<String> {
     let title_key = crate::title::normalize_title(title);
     let mut seen = std::collections::BTreeMap::new();
@@ -158,7 +142,6 @@ pub fn canonical_aliases(title: &str, aliases: &[String]) -> Vec<String> {
     seen.into_values().collect()
 }
 
-/// Replace `range` (byte offsets into the current NFC text) with `insert`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextEdit {
     pub range: Range<usize>,
@@ -167,8 +150,6 @@ pub struct TextEdit {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Command {
-    /// Create a block under `parent` (None = page root) directly after sibling `after`
-    /// (None = first child).
     InsertBlock {
         id: BlockId,
         parent: Option<BlockId>,
@@ -176,8 +157,6 @@ pub enum Command {
         text: String,
         kind: BlockKind,
     },
-    /// Remove a block (and its subtree) from the document entirely. Only used to invert
-    /// `InsertBlock`; user deletes are [`Command::SetDeleted`] tombstones (§6.5).
     PurgeBlock {
         id: BlockId,
     },
@@ -195,13 +174,10 @@ pub enum Command {
         kind: BlockKind,
         checked: bool,
     },
-    /// Tombstone (`Some(ts)`) or restore (`None`) the listed blocks.
     SetDeleted {
         ids: Vec<BlockId>,
         deleted_at: Option<i64>,
     },
-    /// Mark blocks as having moved to another page's shard during a merge (§8.6 step 1).
-    /// Moved blocks are invisible in this page's state; `None` reverses the move.
     SetMoved {
         ids: Vec<BlockId>,
         to: Option<PageId>,
@@ -210,7 +186,6 @@ pub enum Command {
 }
 
 impl Command {
-    /// Commands that, applied in order to the state *after* `self`, restore `before`.
     pub fn invert(&self, before: &PageState) -> Result<Vec<Command>, DomainError> {
         let node = |id: &BlockId| {
             before
@@ -330,15 +305,12 @@ impl Command {
     }
 }
 
-/// What a command changed, so views re-render only affected rows (§13.6).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DocDelta {
     pub changed: Vec<BlockId>,
     pub inserted: Vec<BlockId>,
     pub removed: Vec<BlockId>,
     pub meta_changed: bool,
-    /// Tree shape or visibility changed (insert/move/delete); depth and liveness of
-    /// other rows may be affected, so projections diff the whole page.
     pub structural: bool,
 }
 
@@ -351,7 +323,6 @@ impl DocDelta {
         self.structural |= other.structural;
     }
 
-    /// Every block id whose projection row may need rewriting.
     pub fn touched(&self) -> Vec<BlockId> {
         let mut v: Vec<BlockId> = self
             .changed

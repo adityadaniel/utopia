@@ -1,6 +1,3 @@
-//! Text helpers shared by the editor and the store (§10.5): grapheme-aware cursor
-//! movement, minimal edit diffs, NFC normalization, and mark toggling (Cmd+B/I/E).
-
 use std::ops::Range;
 
 use unicode_normalization::UnicodeNormalization;
@@ -26,7 +23,6 @@ pub fn next_grapheme(s: &str, offset: usize) -> usize {
         .map_or(s.len(), |g| offset + g.len())
 }
 
-/// Start of the word at or before `offset` (Alt+Left / double-click).
 pub fn prev_word_start(s: &str, offset: usize) -> usize {
     let mut last = 0;
     for (i, w) in s.split_word_bound_indices() {
@@ -40,7 +36,6 @@ pub fn prev_word_start(s: &str, offset: usize) -> usize {
     last
 }
 
-/// End of the word at or after `offset` (Alt+Right / double-click).
 pub fn next_word_end(s: &str, offset: usize) -> usize {
     for (i, w) in s.split_word_bound_indices() {
         let end = i + w.len();
@@ -51,14 +46,6 @@ pub fn next_word_end(s: &str, offset: usize) -> usize {
     s.len()
 }
 
-/// Ctrl+T (Emacs `transpose-chars`, Cocoa `transpose:`): swap the two graphemes either
-/// side of `caret` and step past them.
-///
-/// With nothing after the caret on its paragraph (the text ends there, or a newline
-/// follows) the two graphemes *before* it swap instead and the caret stays, as TextEdit
-/// does. Nothing swaps across a line break (at the start of a paragraph there is no pair).
-/// Returns the edit as `(range, replacement, caret after)` so callers apply it
-/// through their usual replace path, or `None` when there is no pair to swap.
 pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usize)> {
     let caret = floor_char_boundary(text, caret.min(text.len()));
     let at_end = text[caret..].chars().next().is_none_or(|c| c == '\n');
@@ -72,7 +59,6 @@ pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usiz
             next_grapheme(text, caret),
         )
     };
-    // A line break never swaps: that would carry a character onto the other line.
     if left == mid || mid == right || &text[left..mid] == "\n" || &text[mid..right] == "\n" {
         return None;
     }
@@ -80,7 +66,6 @@ pub fn transpose(text: &str, caret: usize) -> Option<(Range<usize>, String, usiz
     Some((left..right, swapped, right))
 }
 
-/// The word range containing `offset`, for double-click selection.
 pub fn word_range_at(s: &str, offset: usize) -> Range<usize> {
     for (i, w) in s.split_word_bound_indices() {
         if offset >= i && offset < i + w.len() {
@@ -90,7 +75,6 @@ pub fn word_range_at(s: &str, offset: usize) -> Range<usize> {
     s.len()..s.len()
 }
 
-/// Clamp `offset` down to the nearest char boundary.
 pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
     let mut o = offset.min(s.len());
     while !s.is_char_boundary(o) {
@@ -99,8 +83,6 @@ pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
     o
 }
 
-/// Minimal single-range edit turning `old` into `new` (common prefix/suffix trim),
-/// always on char boundaries.
 pub fn diff(old: &str, new: &str) -> Option<TextEdit> {
     if old == new {
         return None;
@@ -127,15 +109,6 @@ pub fn diff(old: &str, new: &str) -> Option<TextEdit> {
     })
 }
 
-/// Where a caret at byte `caret` of `old` belongs in `new` (§6.5): the text changed under
-/// an editor (a commit's rewrite, an undo, a sync), and the caret stays with the text it
-/// was in. Computed from the two texts alone, through their single-range [`diff`], so
-/// there is no caret position to keep in step with the store between edits.
-///
-/// A caret before the change does not move; one after it moves by the change in length.
-/// One inside the replaced text keeps its place in that text when the replacement still
-/// holds it (`#Modern Religion` healed to `#[[Modern Religion]]`), and otherwise goes to
-/// the end of the replacement: nothing it was next to is left.
 pub fn carry_caret(old: &str, new: &str, caret: usize) -> usize {
     let Some(edit) = diff(old, new) else {
         return floor_char_boundary(new, caret);
@@ -154,7 +127,6 @@ pub fn carry_caret(old: &str, new: &str, caret: usize) -> usize {
     floor_char_boundary(new, carried)
 }
 
-/// Apply `edit` to `s`, validating bounds and char boundaries.
 pub fn apply_edit(s: &str, edit: &TextEdit) -> Option<String> {
     let Range { start, end } = edit.range.clone();
     if start > end || end > s.len() || !s.is_char_boundary(start) || !s.is_char_boundary(end) {
@@ -167,9 +139,6 @@ pub fn apply_edit(s: &str, edit: &TextEdit) -> Option<String> {
     Some(out)
 }
 
-/// Wrap/unwrap the selection with `delim` (FR-2.16, §9.1 Cmd+B/I/E). With an empty
-/// selection, an unclosed opener before the caret is closed (AC-2.9); otherwise an empty
-/// pair is inserted with the caret inside. Returns the new text and selection.
 pub fn toggle_mark(text: &str, sel: Range<usize>, delim: &str) -> (String, Range<usize>) {
     let dl = delim.len();
     if sel.start == sel.end {
@@ -186,7 +155,6 @@ pub fn toggle_mark(text: &str, sel: Range<usize>, delim: &str) -> (String, Range
         return (out, caret + dl..caret + dl);
     }
     let selected = &text[sel.clone()];
-    // Selection includes the delimiters.
     if selected.len() >= 2 * dl && selected.starts_with(delim) && selected.ends_with(delim) {
         let inner = &selected[dl..selected.len() - dl];
         let mut out = String::new();
@@ -195,7 +163,6 @@ pub fn toggle_mark(text: &str, sel: Range<usize>, delim: &str) -> (String, Range
         out.push_str(&text[sel.end..]);
         return (out, sel.start..sel.start + inner.len());
     }
-    // Delimiters sit just outside the selection.
     if sel.start >= dl && text[..sel.start].ends_with(delim) && text[sel.end..].starts_with(delim) {
         let mut out = String::new();
         out.push_str(&text[..sel.start - dl]);
@@ -212,9 +179,6 @@ pub fn toggle_mark(text: &str, sel: Range<usize>, delim: &str) -> (String, Range
     (out, sel.start + dl..sel.end + dl)
 }
 
-/// The closing bracket for a typed opening one. Only brackets wrap a selection or pair
-/// as you type: `**`/`_`/`` ` `` have Cmd+B/I/E (FR-2.16), and a quote, `*` or `_` is as
-/// often an apostrophe or a bullet as a delimiter, so those type as themselves.
 pub fn closing_bracket(open: &str) -> Option<&'static str> {
     match open {
         "(" => Some(")"),
@@ -224,9 +188,6 @@ pub fn closing_bracket(open: &str) -> Option<&'static str> {
     }
 }
 
-/// Typing an opening bracket over a non-empty selection surrounds it instead of replacing
-/// it, and keeps the original text selected inside the new brackets, so typing `[` twice
-/// over `word` gives `[[word]]`. `None` when `open` is not a bracket or nothing is selected.
 pub fn wrap_selection(text: &str, sel: Range<usize>, open: &str) -> Option<(String, Range<usize>)> {
     let close = closing_bracket(open)?;
     if sel.start >= sel.end
@@ -245,14 +206,6 @@ pub fn wrap_selection(text: &str, sel: Range<usize>, open: &str) -> Option<(Stri
     Some((out, sel.start + open.len()..sel.end + open.len()))
 }
 
-/// What typing `typed` at an empty selection does to the brackets around the caret:
-/// - an opening bracket inserts the pair with the caret between (`(|)`), unless the caret
-///   sits directly before a word character, where a lone opener is what is meant (`(foo`);
-/// - a closing bracket that is already the next character is stepped over, so typing the
-///   pair by hand still gives `()` and not `())`.
-///
-/// Returns the new text and caret, or `None` for an ordinary keystroke. Quotes,
-/// backticks, `*` and `_` are not paired, matching [`closing_bracket`].
 pub fn auto_pair(text: &str, caret: usize, typed: &str) -> Option<(String, usize)> {
     if caret > text.len() || !text.is_char_boundary(caret) {
         return None;
@@ -273,8 +226,6 @@ pub fn auto_pair(text: &str, caret: usize, typed: &str) -> Option<(String, usize
     Some((out, caret + typed.len()))
 }
 
-/// Backspace inside an empty pair (`(|)`, `[|]`, `{|}`) deletes both brackets: the range
-/// to remove, or `None` for an ordinary backspace.
 pub fn empty_pair_at(text: &str, caret: usize) -> Option<Range<usize>> {
     let before = text.get(..caret)?;
     let after = text.get(caret..)?;
@@ -318,32 +269,24 @@ mod tests {
         assert!(diff("same", "same").is_none());
     }
 
-    /// §6.5: the caret stays with its text when the block changes under the editor.
     #[test]
     fn carry_caret_stays_with_its_text() {
-        // Text put in before the caret (a sync, a healed tag) moves it right.
         let (old, new) = ("hello world", ">> hello world");
         assert_eq!(&new[carry_caret(old, new, 6)..], "world");
         let (old, new) = ("#Modern Religion x", "#[[Modern Religion]] x");
         assert_eq!(&new[carry_caret(old, new, 16)..], " x");
-        // Text taken out before the caret (NFC, an undo) moves it left.
         let (old, new) = ("cafe\u{301} au lait", "caf\u{e9} au lait");
         assert_eq!(&new[carry_caret(old, new, 10)..], "lait");
-        // A change after the caret leaves it alone.
         assert_eq!(carry_caret("hello world", "hello world!", 3), 3);
-        // The end of the block stays the end; a caret before `a` stays before `a`.
         assert_eq!(carry_caret("abc", "abc!", 3), 4);
         assert_eq!(carry_caret("abc", ">abc", 0), 1);
         assert_eq!(carry_caret("abc def", "abc", 0), 0);
-        // Inside text that the replacement still holds: the same place in it.
         let (old, new) = ("#Modern Religion x", "#[[Modern Religion]] x");
         assert_eq!(&new[carry_caret(old, new, 8)..], "Religion]] x");
-        // Inside text that is gone: the end of what replaced it. Before it: no move.
         assert_eq!(carry_caret("abcdef", "aXf", 3), 2);
         assert_eq!(carry_caret("abc def", "abc", 6), 3);
         assert_eq!(carry_caret("[[Al]]", "ab日", 4), "ab日".len());
         assert_eq!(carry_caret("[[Al]]", "ab日", 0), 0);
-        // Never off a character boundary, and unchanged text is unchanged.
         assert_eq!(carry_caret("日本x", "日本y", 1), 0);
         assert_eq!(carry_caret("same", "same", 2), 2);
     }
@@ -386,7 +329,6 @@ mod tests {
         let (t, sel) = wrap_selection("see 日本語 now", 4..13, "[").unwrap();
         assert_eq!(t, "see [日本語] now");
         assert_eq!(&t[sel.clone()], "日本語");
-        // Again on the still-selected text: the Roam page-link idiom.
         let (t, sel) = wrap_selection(&t, sel, "[").unwrap();
         assert_eq!(t, "see [[日本語]] now");
         assert_eq!(&t[sel], "日本語");
@@ -395,7 +337,6 @@ mod tests {
         assert_eq!(t, "a(👩‍👩‍👧)b");
         assert_eq!(&t[sel], "👩‍👩‍👧");
         assert_eq!(wrap_selection("x", 0..1, "{").unwrap().0, "{x}");
-        // Nothing selected, or not a bracket: an ordinary keystroke.
         assert!(wrap_selection("x", 1..1, "[").is_none());
         for ch in ["\"", "'", "`", "*", "_", ")", "]", "x"] {
             assert!(wrap_selection("word", 0..4, ch).is_none(), "{ch}");
@@ -411,14 +352,11 @@ mod tests {
         assert_eq!(auto_pair("", 0, "("), Some(("()".into(), 1)));
         assert_eq!(auto_pair("a ", 2, "["), Some(("a []".into(), 3)));
         assert_eq!(auto_pair("x}", 1, "{"), Some(("x{}}".into(), 2)));
-        // `[[` is two pairs, caret in the middle.
         let (t, c) = auto_pair("[]", 1, "[").unwrap();
         assert_eq!((t.as_str(), c), ("[[]]", 2));
-        // The closer already there is stepped over, not doubled.
         assert_eq!(auto_pair("()", 1, ")"), Some(("()".into(), 2)));
         assert_eq!(auto_pair("[[a]]", 3, "]"), Some(("[[a]]".into(), 4)));
         assert_eq!(auto_pair("a", 1, ")"), None, "nothing to step over");
-        // Before a word character an opener is just an opener.
         assert_eq!(auto_pair("foo", 0, "("), None);
         assert_eq!(auto_pair("日本", 0, "["), None);
         assert_eq!(auto_pair("_x", 0, "{"), None);
@@ -440,8 +378,6 @@ mod tests {
         assert_eq!(empty_pair_at("日()", 4), Some(3..5));
     }
 
-    /// Ctrl+T swaps the pair around the caret and moves past it; at a line end the two
-    /// before it swap instead, and a grapheme cluster is never split.
     #[test]
     fn transpose_swaps_graphemes() {
         let apply = |t: &str, c: usize| {
@@ -453,18 +389,12 @@ mod tests {
         };
         assert_eq!(apply("abcd", 1), Some(("bacd".into(), 2)));
         assert_eq!(apply("abcd", 3), Some(("abdc".into(), 4)));
-        // End of the text: the two before it, caret stays.
         assert_eq!(apply("abcd", 4), Some(("abdc".into(), 4)));
-        // End of a paragraph: same, and the newline stays where it was.
         assert_eq!(apply("ab\ncd", 2), Some(("ba\ncd".into(), 2)));
-        // Start of a paragraph: nothing before it on its line, so nothing moves across the
-        // line break.
         assert_eq!(apply("ab\ncd", 3), None);
-        // Nothing to do: empty, at the very start, one grapheme only.
         assert_eq!(apply("", 0), None);
         assert_eq!(apply("a", 0), None);
         assert_eq!(apply("a", 1), None);
-        // Multi-byte and a family emoji move as whole graphemes.
         assert_eq!(apply("a日", 4), Some(("日a".into(), 4)));
         assert_eq!(apply("日本", 3), Some(("本日".into(), 6)));
         let fam = "a👩‍👩‍👧b";

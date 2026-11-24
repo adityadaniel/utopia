@@ -1,32 +1,19 @@
-//! The app icon. `bundle` builds `Contents/Resources/AppIcon.icns` from one square
-//! picture, `crates/utopia-app/assets/icon.png`: to change the icon, replace that file.
-//!
-//! The picture is full-bleed artwork with square corners. macOS does not round an
-//! `.icns` itself, so the tile shape, its margin and its shadow are drawn here.
-
 use std::path::Path;
 
 use anyhow::{ensure, Context, Result};
 use image::imageops::{self, FilterType};
 use image::{GrayImage, Luma, Rgba, Rgba32FImage, RgbaImage};
 
-/// Apple's macOS icon grid: an 824 px tile centred on a 1024 px canvas. The margin holds
-/// the shadow and keeps the icon the same size as its neighbours in the Dock.
 const CANVAS: u32 = 1024;
 const TILE: u32 = 824;
 const INSET: u32 = (CANVAS - TILE) / 2;
 
-/// The tile is the superellipse `|x|^n + |y|^n <= 1`, which is close to the system's
-/// continuous corners; a rounded rectangle's corners look pinched next to it.
 const CORNER_EXPONENT: f32 = 5.0;
 
-/// The tile's shadow: its own shape, moved down and blurred. A paper-white icon has no
-/// edge on a light Dock without one.
 const SHADOW_DROP: u32 = 10;
 const SHADOW_BLUR: f32 = 10.0;
 const SHADOW_ALPHA: f32 = 0.3;
 
-/// Every file `iconutil` wants in an `.iconset`, with its side in pixels.
 const SIZES: [(u32, &str); 10] = [
     (16, "icon_16x16.png"),
     (32, "icon_16x16@2x.png"),
@@ -40,7 +27,6 @@ const SIZES: [(u32, &str); 10] = [
     (1024, "icon_512x512@2x.png"),
 ];
 
-/// How much of the tile's pixel `(x, y)` lies inside the shape, from 4 × 4 samples.
 fn coverage(x: u32, y: u32) -> f32 {
     const SAMPLES: u32 = 4;
     let unit = |pixel: u32, sample: u32| {
@@ -58,8 +44,6 @@ fn coverage(x: u32, y: u32) -> f32 {
     inside as f32 / (SAMPLES * SAMPLES) as f32
 }
 
-/// The 1024 px icon: the picture cut to the tile shape, over the tile's shadow, on a
-/// clear canvas. The picture is taken as opaque.
 fn master(art: &RgbaImage) -> RgbaImage {
     let tile = imageops::resize(art, TILE, TILE, FilterType::Lanczos3);
     let mut shape = GrayImage::new(CANVAS, CANVAS);
@@ -80,13 +64,11 @@ fn master(art: &RgbaImage) -> RgbaImage {
         if alpha <= 0.0 {
             return Rgba([0, 0, 0, 0]);
         }
-        // The shape is zero outside the tile, so a covered pixel is inside the picture.
         let colour = if tile_alpha > 0.0 {
             tile.get_pixel(x - INSET, y - INSET).0
         } else {
             [0; 4]
         };
-        // The shadow is black, so only the picture adds colour.
         let channel = |i: usize| (colour[i] as f32 * tile_alpha / alpha).round() as u8;
         Rgba([
             channel(0),
@@ -97,8 +79,6 @@ fn master(art: &RgbaImage) -> RgbaImage {
     })
 }
 
-/// The icon at a smaller size. Colours are multiplied by alpha while resizing: averaging
-/// the picture's edge with the clear pixels next to it would otherwise darken the rim.
 fn scaled(master: &RgbaImage, size: u32) -> RgbaImage {
     let mut premultiplied = Rgba32FImage::new(master.width(), master.height());
     for (x, y, p) in master.enumerate_pixels() {
@@ -118,7 +98,6 @@ fn scaled(master: &RgbaImage, size: u32) -> RgbaImage {
     })
 }
 
-/// Write `out` (an `.icns`) from the square picture at `source`. Needs macOS's `iconutil`.
 pub fn icns(source: &Path, out: &Path) -> Result<()> {
     let art = image::open(source)
         .with_context(|| format!("reading {}", source.display()))?
@@ -166,10 +145,8 @@ mod tests {
         assert_eq!((icon.width(), icon.height()), (CANVAS, CANVAS));
         let middle = CANVAS / 2;
         assert_eq!(icon.get_pixel(middle, middle).0, ART);
-        // The tile reaches its box at the middle of each side.
         assert_eq!(icon.get_pixel(middle, INSET + 1).0, ART);
         assert_eq!(icon.get_pixel(INSET + 1, middle).0, ART);
-        // The canvas corner, and the corner of the tile's box, which the shape cuts off.
         assert_eq!(icon.get_pixel(0, 0)[3], 0);
         assert_eq!(icon.get_pixel(INSET + 2, INSET + 2)[3], 0);
         assert_eq!(icon.get_pixel(INSET + TILE - 3, INSET + 2)[3], 0);
@@ -197,8 +174,6 @@ mod tests {
         let icon = scaled(&master(&white), 32);
         assert_eq!((icon.width(), icon.height()), (32, 32));
         assert_eq!(icon.get_pixel(16, 16).0, [255; 4]);
-        // Down the middle column from the top edge to the centre there is no shadow, so
-        // every pixel that shows at all is the picture's white, never a darkened mix.
         for y in 0..16 {
             let p = icon.get_pixel(16, y);
             if p[3] > 8 {

@@ -1,16 +1,3 @@
-//! The CRDT boundary (PRD §13.2): one Loro document per page ("shard").
-//!
-//! Layout of a shard:
-//! - map `page`: `title`, `kind`, `daily_date`, `created_at`, `deleted_at`,
-//!   `merged_into`, and a nested map `titles` (title_key → display) holding the current
-//!   title plus every alias. Concurrent renames therefore keep the losing title as an
-//!   alias (§12.4).
-//! - tree `blocks` (fractional index enabled): one node per block, whose meta map holds
-//!   `id` (ULID), `text` (LoroText), `kind`, `level`, `checked`, `deleted_at`,
-//!   `moved_to`, `created_at`, `updated_at`.
-//!
-//! Loro is deliberately confined to this crate so it can be swapped (§11.4).
-
 use std::collections::HashMap;
 
 use chrono::NaiveDate;
@@ -48,7 +35,6 @@ impl From<loro::LoroError> for DocError {
 
 pub type Result<T, E = DocError> = std::result::Result<T, E>;
 
-/// Opaque version identifier (encoded version vector, hex) — `page_doc.frontier`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct Frontier(pub String);
 
@@ -65,7 +51,6 @@ impl Frontier {
         VersionVector::decode(&bytes).map_err(DocError::from)
     }
 
-    /// Each peer and the number of its changes in this version, sorted, for diagnostics.
     pub fn peers(&self) -> Result<Vec<(u64, u64)>> {
         let mut out: Vec<(u64, u64)> = self
             .to_vv()?
@@ -76,8 +61,6 @@ impl Frontier {
         Ok(out)
     }
 
-    /// Whether this version holds a change `other` does not: what a sender asks of a
-    /// destination's copy before it decides to send more (§12.3 step 4, §12.7).
     pub fn has_more_than(&self, other: &Frontier) -> Result<bool> {
         let (mine, theirs) = (self.to_vv()?, other.to_vv()?);
         Ok(mine
@@ -86,17 +69,12 @@ impl Frontier {
     }
 }
 
-/// What a copy of a page (a destination's snapshot and updates) holds, for diagnostics
-/// (§12.6): the version its changes add up to, and the changes in it that wait for earlier
-/// ones the copy does not have. A non-empty `waiting` on a destination's copy means some
-/// device marked changes sent that never reached it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CopyState {
     pub version: Frontier,
     pub waiting: Vec<WaitingRange>,
 }
 
-/// Read a copy of a page without building it; see [`CopyState`].
 pub fn copy_state<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<CopyState> {
     let doc = LoroDoc::new();
     for b in blobs {
@@ -116,10 +94,6 @@ pub fn copy_state<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<CopyS
     })
 }
 
-/// The version that a destination's copy of a page adds up to (its snapshot, then its
-/// updates), without building the page (§12.3 step 4). Changes that wait for missing ones
-/// do not count: no device can apply them until the missing ones arrive, so a sender must
-/// treat them as absent.
 pub fn version_of<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<Frontier> {
     let doc = LoroDoc::new();
     for b in blobs {
@@ -129,9 +103,6 @@ pub fn version_of<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Result<Front
     Ok(Frontier::from_vv(&doc.oplog_vv()))
 }
 
-/// One peer's changes that wait for earlier changes of a page (§12.3 step 3): counters
-/// `start..end` are held, and they need that peer's changes before `start` (and whatever
-/// those depend on) to apply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct WaitingRange {
     pub peer: u64,
@@ -139,8 +110,6 @@ pub struct WaitingRange {
     pub end: u64,
 }
 
-/// The peers and counters in bytes from [`PageDoc::waiting`], for diagnostics. It reads
-/// the blob's header only, so it costs nothing like an import.
 pub fn waiting_ranges(bytes: &[u8]) -> Result<Vec<WaitingRange>> {
     let meta = LoroDoc::decode_import_blob_meta(bytes, false)
         .map_err(|e| DocError::Corrupt(e.to_string()))?;
@@ -175,26 +144,14 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// The narrow seam between the domain and the CRDT (§13.2).
 pub trait PageDoc: Sized {
     fn new(page_id: PageId, peer: u64) -> Self;
     fn from_snapshot(page_id: PageId, bytes: &[u8], peer: u64) -> Result<Self>;
     fn snapshot(&self) -> Result<Vec<u8>>;
     fn frontier(&self) -> Frontier;
     fn export_since(&self, f: &Frontier) -> Result<Vec<u8>>;
-    /// Idempotent. Returns whether anything new was applied.
-    ///
-    /// Remote changes whose causal predecessors this doc does not have are kept, not
-    /// applied: [`PageDoc::waiting`] exports them so the caller can store them durably
-    /// (§12.3 step 3, §2.3.7). They apply on the import that brings the missing changes.
     fn import(&mut self, bytes: &[u8]) -> Result<bool>;
-    /// Remote changes this doc received but cannot apply yet, because changes they depend
-    /// on never arrived; `None` when nothing waits. The bytes go back in with
-    /// [`PageDoc::import`] and stay waiting until the missing changes come. Snapshots and
-    /// [`PageDoc::export_since`] never contain them, so a caller that keeps only a snapshot
-    /// loses them (§2.3.7).
     fn waiting(&self) -> Result<Option<Vec<u8>>>;
-    /// Commands are the only mutation path.
     fn apply(&mut self, cmd: &Command, now: i64) -> Result<DocDelta>;
     fn state(&self) -> &PageState;
 }
@@ -252,7 +209,6 @@ impl LoroPageDoc {
     }
 
     fn titles_map(&self) -> Result<LoroMap> {
-        // Mergeable: two peers creating it concurrently converge on one map.
         Ok(self.page_map().ensure_mergeable_map(TITLES)?)
     }
 
@@ -268,7 +224,6 @@ impl LoroPageDoc {
         Ok(me)
     }
 
-    /// Open a shard from its snapshot plus any later local updates.
     pub fn load(page_id: PageId, snapshot: &[u8], updates: &[Vec<u8>], peer: u64) -> Result<Self> {
         let doc = LoroDoc::from_snapshot(snapshot).map_err(|e| DocError::Corrupt(e.to_string()))?;
         for u in updates {
@@ -330,11 +285,6 @@ impl LoroPageDoc {
         }
     }
 
-    /// Rebuild the cached [`PageState`] and id index from the Loro tree.
-    ///
-    /// Two live nodes can carry the same block id when two devices re-merge the same
-    /// block concurrently (§8.6). The node with the smallest `TreeID` wins
-    /// deterministically; the loser is hidden and its children are adopted by the winner.
     fn rebuild(&mut self) {
         let tree = self.tree();
         let mut order: Vec<(TreeID, Option<TreeID>)> = Vec::new();
@@ -383,8 +333,6 @@ impl LoroPageDoc {
                     text: text_of(meta).map(|t| t.to_string()).unwrap_or_default(),
                     kind: BlockKind::from_parts(&kind_s, level),
                     checked: bool_of(meta.get("checked")).unwrap_or(false),
-                    // '!' sorts below every fractional-index character, so appending the
-                    // id keeps index order while making positions unique per sibling list.
                     position: format!("{fi}!{id}"),
                     created_at,
                     updated_at: i64_of(meta.get("updated_at")).unwrap_or(created_at),
@@ -413,7 +361,6 @@ impl LoroPageDoc {
                 _ => roots.push(id.clone()),
             }
         }
-        // Parent pointers follow the children lists exactly.
         let mut parent_of: HashMap<BlockId, BlockId> = HashMap::new();
         for b in blocks.values() {
             for c in &b.children {
@@ -443,8 +390,6 @@ impl LoroPageDoc {
         ))
     }
 
-    /// Read back fractional positions after an insert/move. Loro may rearrange sibling
-    /// indexes when a new one does not fit; if a neighbour moved, refresh the whole list.
     fn refresh_positions(&mut self, cmd: &Command) {
         let id = match cmd {
             Command::InsertBlock { id, .. } | Command::MoveBlock { id, .. } => id,
@@ -482,7 +427,6 @@ impl LoroPageDoc {
         }
     }
 
-    /// The state as a full rebuild from the CRDT would produce it (tests, diagnostics).
     pub fn rebuilt_state(&self) -> PageState {
         let mut copy = Self {
             doc: self.doc.fork(),
@@ -760,9 +704,6 @@ impl PageDoc for LoroPageDoc {
         match result {
             Ok(delta) => {
                 if delta.structural {
-                    // Mirror the command on the cached tree (reference semantics, proven
-                    // equal to a CRDT rebuild by the fuzz tests) instead of rebuilding the
-                    // whole page: batches stay linear (AC-4.7, AC-2.5).
                     for id in &delta.removed {
                         self.index.remove(id);
                     }
@@ -776,7 +717,6 @@ impl PageDoc for LoroPageDoc {
                 Ok(delta)
             }
             Err(e) => {
-                // A failed command may have partially written; resync the cache.
                 self.rebuild();
                 Err(e)
             }

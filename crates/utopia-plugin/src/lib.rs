@@ -1,27 +1,3 @@
-//! Plugin runtime (P2, §16 "`roam/js`, Depot → WASM plugin sandbox").
-//!
-//! A plugin is a directory with a `plugin.json` manifest and a WebAssembly module
-//! (`.wasm`, or `.wat` text). It runs in an interpreter with no imports but the two
-//! below: no files, no network, no clock. Each run gets a fuel budget (instructions), a
-//! memory cap and a cap on host calls, so a buggy or hostile plugin can only fail.
-//!
-//! What a plugin can do to the graph is exactly the automation API ([`utopia_api::Op`]),
-//! filtered by the permissions its manifest declares (`"read"`, `"write"`).
-//!
-//! ## ABI
-//!
-//! The module exports `memory`, `utopia_alloc(len: i32) -> i32` and
-//! `utopia_run(ptr: i32, len: i32) -> i64`. Strings are UTF-8 JSON; an `i64` result
-//! packs `(ptr << 32) | len`. The host imports, module `"utopia"`:
-//!
-//! - `call(ptr: i32, len: i32) -> i64` — run an API operation, e.g.
-//!   `{"op":"search","q":"loops"}`; returns `{"ok": …}` or `{"error": "…"}`.
-//! - `log(ptr: i32, len: i32)` — a line for the plugin console.
-//!
-//! `utopia_run` receives `{"command", "page", "block", "text"}` (the command id and
-//! the block being edited) and returns `{"insert": "…"}` (text for the caret),
-//! `{"replace": "…"}` (new block text), `{"message": "…"}`, or `{}`.
-
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -30,13 +6,9 @@ use utopia_core::PageId;
 use utopia_store::Store;
 use wasmi::{Caller, Config, Engine, Linker, Module, StoreLimits, StoreLimitsBuilder};
 
-/// Instructions a single command may execute.
 pub const FUEL_PER_RUN: u64 = 50_000_000;
-/// Linear memory a plugin may grow to.
 pub const MEMORY_LIMIT: usize = 16 << 20;
-/// Host calls per run.
 pub const MAX_HOST_CALLS: usize = 1_000;
-/// Largest JSON message either way.
 const MAX_MESSAGE: usize = 4 << 20;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -53,10 +25,8 @@ pub struct Manifest {
     #[serde(default)]
     pub description: String,
     pub commands: Vec<Command>,
-    /// `"read"` and/or `"write"`.
     #[serde(default)]
     pub permissions: Vec<String>,
-    /// Module file, relative to the plugin directory.
     #[serde(default = "default_module")]
     pub module: String,
 }
@@ -79,7 +49,6 @@ impl Manifest {
 pub enum PluginError {
     Manifest(String),
     Module(String),
-    /// The plugin trapped, ran out of fuel or memory, or broke the ABI.
     Run(String),
 }
 
@@ -97,36 +66,23 @@ impl std::error::Error for PluginError {}
 
 pub type Result<T, E = PluginError> = std::result::Result<T, E>;
 
-/// What a command asked the editor to do.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct RunOutput {
     pub insert: Option<String>,
     pub replace: Option<String>,
     pub message: Option<String>,
-    /// The plugin's whole JSON output.
     pub raw: Value,
 }
 
-/// One run's result, whether it succeeded or not.
-///
-/// Host state travels with the outcome: a plugin can commit writes through the API and
-/// then trap, run out of fuel, or return something unusable, so the pages it touched and
-/// the lines it logged must reach the caller on both paths (`docs/state-machines/`
-/// `plugin-run-lifecycle.md`, issue 1; rule 13 makes the write and its notice one thing).
 #[derive(Debug)]
 pub struct RunResult {
-    /// The plugin's answer, or why it stopped.
     pub outcome: Result<RunOutput, PluginError>,
-    /// Pages its host writes committed, in the order the writes ran.
     pub changed: Vec<PageId>,
-    /// Lines the plugin logged, up to the first point that failed.
     pub logs: Vec<String>,
-    /// Instructions consumed.
     pub fuel_used: u64,
 }
 
 impl RunResult {
-    /// A run that never reached the module, so nothing changed and nothing was logged.
     fn not_started(e: PluginError) -> Self {
         Self {
             outcome: Err(e),
@@ -136,7 +92,6 @@ impl RunResult {
         }
     }
 
-    /// The plugin's answer, if it finished within its limits.
     pub fn output(&self) -> Option<&RunOutput> {
         self.outcome.as_ref().ok()
     }
@@ -149,8 +104,6 @@ pub struct Plugin {
     module: Module,
 }
 
-/// Per-run host state. `store` points at the caller's `&mut Store`, which outlives the
-/// run (see [`Plugin::run`]); nothing keeps it afterwards.
 struct Host {
     store: *mut Store,
     manifest: Manifest,
@@ -188,7 +141,6 @@ fn read_mem(caller: &Caller<'_, Host>, ptr: i32, len: i32) -> Result<Vec<u8>, wa
     .ok_or_else(|| wasmi::Error::new("pointer out of bounds"))
 }
 
-/// Copy bytes into plugin memory through its allocator.
 fn write_back(caller: &mut Caller<'_, Host>, bytes: &[u8]) -> Result<i64, wasmi::Error> {
     let alloc = caller
         .get_export("utopia_alloc")
@@ -207,7 +159,6 @@ fn write_back(caller: &mut Caller<'_, Host>, bytes: &[u8]) -> Result<i64, wasmi:
     Ok(pack(ptr as u32, bytes.len() as u32))
 }
 
-/// Run one API request on behalf of a plugin, enforcing its permissions.
 fn host_request(host: &mut Host, request: &[u8]) -> Value {
     host.calls += 1;
     if host.calls > MAX_HOST_CALLS {
@@ -243,7 +194,6 @@ fn host_request(host: &mut Host, request: &[u8]) -> Value {
 }
 
 impl Plugin {
-    /// Load the plugin in `dir` (manifest + module). The module is validated now.
     pub fn load(dir: &Path) -> Result<Self> {
         let raw = std::fs::read(dir.join("plugin.json"))
             .map_err(|e| PluginError::Manifest(format!("{}: {e}", dir.display())))?;
@@ -252,7 +202,6 @@ impl Plugin {
         if manifest.commands.is_empty() {
             return Err(PluginError::Manifest("no commands".into()));
         }
-        // The module must stay inside the plugin directory.
         let rel = Path::new(&manifest.module);
         if rel.is_absolute() || rel.components().any(|c| c.as_os_str() == "..") {
             return Err(PluginError::Manifest(
@@ -281,10 +230,6 @@ impl Plugin {
         })
     }
 
-    /// Run a command. `input` is merged into `{"command": …}`.
-    ///
-    /// The result carries the host state of the run on both paths, so a module that
-    /// writes and then fails still names the pages it changed (see [`RunResult`]).
     pub fn run(&self, store: &mut Store, command: &str, input: Value) -> RunResult {
         if !self.manifest.commands.iter().any(|c| c.id == command) {
             return RunResult::not_started(PluginError::Run(format!("no command {command:?}")));
@@ -309,8 +254,6 @@ impl Plugin {
         if let Err(e) = link(&mut linker) {
             return RunResult::not_started(e);
         }
-        // From here on the module can run (a start function can call the host too), so
-        // both the success and the failure path report what it did.
         let outcome = self.execute(&mut linker, &mut wstore, command, input);
         let fuel_used = fuel_used(wstore.get_fuel().ok());
         let host = wstore.into_data();
@@ -322,9 +265,6 @@ impl Plugin {
         }
     }
 
-    /// Instantiate the module, hand it the input and unpack its answer. Every failure from
-    /// here on is reported next to the host state, because the module may already have
-    /// committed writes through `call`.
     fn execute(
         &self,
         linker: &mut Linker<Host>,
@@ -387,14 +327,10 @@ impl Plugin {
     }
 }
 
-/// Instructions a run consumed. `Store::get_fuel` cannot fail while metering is on
-/// (`Config::consume_fuel`), but if it ever did, the honest answer is "unknown" (0), not
-/// the whole budget: that reads as "this plugin ran out of fuel" (issue 3).
 fn fuel_used(left: Option<u64>) -> u64 {
     left.map_or(0, |left| FUEL_PER_RUN - left)
 }
 
-/// The two host imports a plugin may use (`call`, `log`).
 fn link(linker: &mut Linker<Host>) -> Result<()> {
     linker
         .func_wrap(
@@ -425,7 +361,6 @@ fn link(linker: &mut Linker<Host>) -> Result<()> {
     Ok(())
 }
 
-/// Every plugin directory under `root` (`<config>/plugins`), loaded or with its error.
 pub fn load_all(root: &Path) -> Vec<(PathBuf, Result<Plugin>)> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -445,8 +380,6 @@ pub fn load_all(root: &Path) -> Vec<(PathBuf, Result<Plugin>)> {
 mod tests {
     use super::*;
 
-    /// Issue 3: an unreadable fuel counter reported the whole budget as spent. Nothing is
-    /// known about the run, so report nothing.
     #[test]
     fn unknown_fuel_is_not_a_whole_budget() {
         assert_eq!(fuel_used(None), 0, "unknown is not \"all of it\"");

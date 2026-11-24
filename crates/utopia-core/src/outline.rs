@@ -1,8 +1,3 @@
-//! Outliner operations (PRD §6.3, Appendix C) planned as primitive [`Command`]s.
-//!
-//! Planners read a [`PageState`] and return the commands to apply plus where the caret
-//! should land. They never mutate state, so a whole plan becomes one undo step.
-
 use crate::command::{BlockKind, Command};
 use crate::error::DomainError;
 use crate::ids::BlockId;
@@ -10,7 +5,6 @@ use crate::markdown::parse_outline;
 use crate::text::{diff, floor_char_boundary};
 use crate::tree::PageState;
 
-/// Maximum depth accepted for drag-and-drop (FR-2.9).
 pub const MAX_DROP_DEPTH: usize = 12;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,9 +34,6 @@ fn node<'a>(st: &'a PageState, id: &BlockId) -> Result<&'a crate::tree::BlockNod
         .ok_or_else(|| DomainError::BlockNotFound(id.clone()))
 }
 
-/// Enter (FR-2.2, §9.1): split at the caret. The tail moves to a new block below; it is
-/// the first child when the block has expanded children, otherwise the next sibling. At
-/// offset 0 of a non-empty block a new empty block is created above instead.
 pub fn split_block(
     st: &PageState,
     id: &BlockId,
@@ -91,7 +82,6 @@ pub fn split_block(
     Ok(Plan { cmds, focus: None }.focus(&new_id, 0))
 }
 
-/// Cmd+Enter: a new empty block directly above.
 pub fn insert_above(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     let n = node(st, id)?;
     let new_id = BlockId::new();
@@ -108,7 +98,6 @@ pub fn insert_above(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     .focus(&new_id, 0))
 }
 
-/// Append a new empty block at the end of the page (or of `parent`).
 pub fn append_block(st: &PageState, parent: Option<&BlockId>) -> Plan {
     let new_id = BlockId::new();
     Plan {
@@ -124,7 +113,6 @@ pub fn append_block(st: &PageState, parent: Option<&BlockId>) -> Plan {
     .focus(&new_id, 0)
 }
 
-/// Tab (FR-2.4): become the last child of the previous sibling, carrying the subtree.
 pub fn indent(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     node(st, id)?;
     let prev = st
@@ -140,7 +128,6 @@ pub fn indent(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     })
 }
 
-/// Shift+Tab (FR-2.4): become the next sibling of the parent.
 pub fn outdent(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     let n = node(st, id)?;
     let parent = n
@@ -157,8 +144,6 @@ pub fn outdent(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     })
 }
 
-/// Backspace at offset 0 (FR-2.5): merge into the previous visible block — text appended,
-/// children re-parented, block tombstoned. On the first visible block it outdents.
 pub fn merge_into_previous(
     st: &PageState,
     id: &BlockId,
@@ -220,7 +205,6 @@ pub fn merge_into_previous(
     Ok(Plan { cmds, focus: None }.focus(&prev, prev_len))
 }
 
-/// Cmd+Shift+↑ (FR-2.6). At the top edge the block becomes its parent's previous sibling.
 pub fn move_up(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     let n = node(st, id)?;
     let cmd = match st.prev_sibling(id, true) {
@@ -244,7 +228,6 @@ pub fn move_up(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     })
 }
 
-/// Cmd+Shift+↓ (FR-2.6). At the bottom edge the block becomes its parent's next sibling.
 pub fn move_down(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     let n = node(st, id)?;
     let cmd = match st.next_sibling(id, true) {
@@ -268,7 +251,6 @@ pub fn move_down(st: &PageState, id: &BlockId) -> Result<Plan, DomainError> {
     })
 }
 
-/// Cmd+Shift+Backspace: tombstone the block and its live subtree (§6.5).
 pub fn delete_subtree(st: &PageState, id: &BlockId, now: i64) -> Result<Plan, DomainError> {
     node(st, id)?;
     let ids = st.subtree(id, true);
@@ -301,7 +283,6 @@ pub fn delete_subtree(st: &PageState, id: &BlockId, now: i64) -> Result<Plan, Do
     })
 }
 
-/// Replace a block's text with `new_text` as one minimal edit.
 pub fn set_text(st: &PageState, id: &BlockId, new_text: &str) -> Result<Plan, DomainError> {
     let n = node(st, id)?;
     let edit = diff(&n.text, new_text).ok_or(DomainError::NoOp)?;
@@ -314,8 +295,6 @@ pub fn set_text(st: &PageState, id: &BlockId, new_text: &str) -> Result<Plan, Do
     })
 }
 
-/// Drag-and-drop (FR-2.9): rejects drops into the block's own subtree and drops that
-/// would push any descendant deeper than [`MAX_DROP_DEPTH`].
 pub fn move_to(
     st: &PageState,
     id: &BlockId,
@@ -353,9 +332,6 @@ pub fn move_to(
     })
 }
 
-/// Paste (FR-2.10). A single line is inserted at the caret. Multi-line text becomes one
-/// block per line with relative indentation preserved, placed after the current block (or
-/// filling it, when it is empty and childless).
 pub fn paste(
     st: &PageState,
     id: &BlockId,
@@ -418,14 +394,6 @@ pub fn paste(
     Ok(Plan { cmds, focus: None }.focus(&focus.block, focus.offset))
 }
 
-/// Append an indented outline (PRD §13.8 MC-8 `append_blocks`): the blocks go last, under
-/// `parent` or at the end of the page, and nothing already on the page moves. `anchor` is an
-/// empty block that takes the outline's first line (the fresh page whose only block is empty,
-/// which `AppendBlock` fills the same way; `parent` is then ignored, since the anchor brings
-/// its own); `None` inserts a new empty block at the end first.
-///
-/// FR-2.9 caps depth at [`MAX_DROP_DEPTH`], the same ceiling [`move_to`] enforces: an outline
-/// that would go past it is refused instead of being clamped.
 pub fn append_outline(
     st: &PageState,
     parent: Option<&BlockId>,
@@ -439,10 +407,6 @@ pub fn append_outline(
     append_outline_kinds(st, parent, anchor, &items)
 }
 
-/// [`append_outline`] with one kind for each line, so a caller can append to-dos (the
-/// phone's draft, ios-prd §4.5; PRD §13.8 MC-8). A reused `anchor` — the empty first block
-/// of a fresh page — takes the first line's kind, so a day's placeholder block becomes the
-/// to-do rather than staying a bullet.
 pub fn append_outline_kinds(
     st: &PageState,
     parent: Option<&BlockId>,
@@ -502,18 +466,12 @@ pub fn append_outline_kinds(
     })
 }
 
-/// Whether an outline of `(depth, text)` items would pass [`MAX_DROP_DEPTH`] when its first
-/// level sits at `base` — the depth of the page's top level (0) or one past the parent it is
-/// appended under (FR-2.9). `parse_outline` numbers the first level 0.
 pub fn too_deep(items: &[(usize, String)], base: usize) -> bool {
     items
         .iter()
         .any(|(depth, _)| base + depth >= MAX_DROP_DEPTH)
 }
 
-/// The commands that put `items` after `anchor`, whose parent is `anchor_parent`: a depth-0
-/// item is a sibling of the anchor, a deeper one a child of the item before it. Returns where
-/// the caret lands, or `None` when there was nothing to insert (FR-2.10 `paste`, MC-8).
 fn insert_after(
     st: &PageState,
     anchor: &BlockId,
@@ -521,21 +479,16 @@ fn insert_after(
     items: &[(usize, String, BlockKind)],
 ) -> (Vec<Command>, Option<Focus>) {
     let mut cmds = Vec::new();
-    // last[d]: the most recent block at depth d; parents[d]: its parent.
     let mut last: Vec<BlockId> = vec![anchor.clone()];
     let mut parents: Vec<Option<BlockId>> = vec![anchor_parent];
-    // Children of a freshly inserted block always start empty, so `after` for the first
-    // child is None; for a pre-existing anchor it is its last child.
     let mut first_child_after: Option<Option<BlockId>> = Some(st.last_child(Some(anchor), false));
     let mut focus = None;
     for (depth, text, kind) in items {
         let d = (*depth).min(last.len());
         let new_id = BlockId::new();
         let (parent, after) = if d < last.len() {
-            // Sibling of last[d].
             (parents[d].clone(), Some(last[d].clone()))
         } else {
-            // First child of last[d-1].
             let after = if last[d - 1] == *anchor {
                 first_child_after.take().flatten()
             } else {
@@ -608,7 +561,6 @@ mod tests {
     #[test]
     fn enter_splits_and_places() {
         let (mut st, ids) = page_with(&[("hello world", 0), ("child", 1)]);
-        // Caret mid-block with expanded children: tail becomes first child.
         let plan = split_block(&st, &ids[0], 5, false).unwrap();
         apply(&mut st, &plan);
         assert_eq!(
@@ -619,7 +571,6 @@ mod tests {
                 ("child".into(), 1)
             ]
         );
-        // Caret at 0 of non-empty block: empty block above, focus stays.
         let plan = split_block(&st, &ids[0], 0, false).unwrap();
         assert_eq!(plan.focus.as_ref().unwrap().block, ids[0]);
         apply(&mut st, &plan);
@@ -683,7 +634,6 @@ mod tests {
             vec![("ab".into(), 0), ("b1".into(), 1), ("c".into(), 0)]
         );
         assert_eq!(st.block(&ids[1]).unwrap().deleted_at, Some(99));
-        // First child merging into its parent keeps its children in place.
         let (mut st, ids) = page_with(&[("p", 0), ("x", 1), ("x1", 2), ("y", 1)]);
         {
             let p = merge_into_previous(&st, &ids[1], None, &|_| false, 1).unwrap();
@@ -693,7 +643,6 @@ mod tests {
             rows(&st),
             vec![("px".into(), 0), ("x1".into(), 1), ("y".into(), 1)]
         );
-        // First block at root: nothing to do.
         assert_eq!(
             merge_into_previous(&st, &ids[0], None, &|_| false, 1),
             Err(DomainError::NoOp)
@@ -737,7 +686,6 @@ mod tests {
             move_to(&st, &ids[0], Some(&ids[1]), None),
             Err(DomainError::CycleDetected(_))
         ));
-        // A 12-level chain (depths 0..=11) plus a separate leaf.
         let mut lines: Vec<(String, usize)> = (0..12).map(|d| (format!("d{d}"), d)).collect();
         lines.push(("leaf".into(), 0));
         let lines_ref: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
@@ -763,7 +711,6 @@ mod tests {
                 ("four".into(), 0)
             ]
         );
-        // Pasting after a non-empty block inserts siblings after it.
         let (mut st, ids) = page_with(&[("keep", 0)]);
         let plan = paste(&st, &ids[0], 4..4, "x\n  y\nz").unwrap();
         apply(&mut st, &plan);
@@ -776,13 +723,11 @@ mod tests {
                 ("z".into(), 0)
             ]
         );
-        // Single line goes inline at the caret.
         let plan = paste(&st, &ids[0], 2..2, "--").unwrap();
         apply(&mut st, &plan);
         assert_eq!(st.block(&ids[0]).unwrap().text, "ke--ep");
     }
 
-    /// The depth `n` outline `parse_outline` would give `- d0` … indented one level per line.
     fn chain(n: usize) -> Vec<(usize, String)> {
         (0..n).map(|d| (d, format!("d{d}"))).collect()
     }
@@ -804,8 +749,6 @@ mod tests {
         (st, root)
     }
 
-    /// MC-8: an appended outline goes last, at the nesting it was written with, after the
-    /// page's own blocks and their children.
     #[test]
     fn mc_8_append_outline_goes_last_and_keeps_nesting() {
         let (mut st, ids) = page_with(&[("keep", 0), ("kid", 1)]);
@@ -825,8 +768,6 @@ mod tests {
         );
         assert_eq!(st.block(&last).unwrap().text, "three");
 
-        // Under a parent the whole outline goes last under that block, before the page's
-        // later blocks.
         let plan = append_outline(
             &st,
             Some(&ids[0]),
@@ -849,8 +790,6 @@ mod tests {
         );
     }
 
-    /// MC-8: the empty first block of a fresh page takes the outline's first line instead of
-    /// leaving a blank block above it, as `AppendBlock` fills it.
     #[test]
     fn mc_8_an_anchor_block_takes_the_first_line() {
         let (mut st, root) = empty_page();
@@ -869,8 +808,6 @@ mod tests {
         );
     }
 
-    /// MC-8, FR-2.9: an outline that would go past [`MAX_DROP_DEPTH`] is refused, not
-    /// clamped, and the ceiling counts from the parent it is appended under.
     #[test]
     fn mc_8_an_outline_past_twelve_levels_is_refused() {
         let (st, ids) = page_with(&[("root", 0)]);

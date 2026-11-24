@@ -1,14 +1,9 @@
-//! Outline ⇄ Markdown (FR-2.10, FR-2.11, G4 export). Block bodies are already markdown
-//! subset text, so export only adds list structure.
-
 use crate::command::BlockKind;
 use crate::ids::BlockId;
 use crate::tree::PageState;
 
 const INDENT: &str = "  ";
 
-/// Parse pasted text into `(depth, text)` items: one block per non-empty line, list
-/// markers stripped, relative indentation preserved (tabs count as 4 spaces).
 pub fn parse_outline(src: &str) -> Vec<(usize, String)> {
     let mut out = Vec::new();
     let mut widths: Vec<usize> = Vec::new();
@@ -72,7 +67,6 @@ fn push_block(st: &PageState, id: &BlockId, depth: usize, out: &mut String) {
     }
 }
 
-/// Nested Markdown list for the live subtrees rooted at `roots`.
 pub fn blocks_to_markdown(st: &PageState, roots: &[BlockId]) -> String {
     let mut out = String::new();
     for r in roots {
@@ -87,12 +81,10 @@ pub fn blocks_to_markdown(st: &PageState, roots: &[BlockId]) -> String {
     out
 }
 
-/// Copy/cut of a subtree (FR-2.11).
 pub fn subtree_to_markdown(st: &PageState, id: &BlockId) -> String {
     blocks_to_markdown(st, std::slice::from_ref(id))
 }
 
-/// A whole page as Markdown with its title as a heading.
 pub fn page_to_markdown(st: &PageState, title: &str) -> String {
     format!("# {title}\n\n{}", blocks_to_markdown(st, &st.live_roots()))
 }
@@ -104,7 +96,6 @@ fn xml_escape(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// OPML 2.0 outline for pages (§4.1 export, v1.1): `(title, state)` pairs.
 pub fn pages_to_opml(pages: &[(String, &PageState)]) -> String {
     fn outline(st: &PageState, id: &BlockId, depth: usize, out: &mut String) {
         let Some(b) = st.block(id) else { return };
@@ -162,7 +153,6 @@ mod tests {
 
     #[test]
     fn dedent_to_unseen_width_clamps() {
-        // Width 1 never opened a level; it closes back to the nearest shallower one.
         let items = parse_outline("a\n    b\n  c\nd");
         assert_eq!(items[1].0, 1);
         assert_eq!(items[2].0, 1);

@@ -1,18 +1,3 @@
-//! Query blocks (P2, §16 "Query blocks — filtered views, SQL-backed").
-//!
-//! A block whose text is `{{query: …}}` (or Roam's `{{[[query]]: …}}`) renders the blocks
-//! that match its expression. The expression syntax is Roam's, so imported graphs keep
-//! working:
-//!
-//! - `[[Page]]`, `#tag`, `#[[tag]]` — the block, an ancestor, or its page references it
-//! - `{and: a b …}`, `{or: a b …}`, `{not: a}` — set algebra
-//! - `{between: [[date]] [[date]]}` — on, or referencing, a daily page in the range
-//! - `{attr: key value}` / `{attr: key}` — `key:: value` attributes (value optional)
-//! - `"text"` — full-text match
-//! - `[[TODO]]` / `[[DONE]]` — unchecked / checked todo blocks
-//!
-//! Several terms at the top level mean `and`.
-
 use std::fmt;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,8 +40,6 @@ impl fmt::Display for Expr {
     }
 }
 
-/// The query expression of a query block, if `text` is one. `Some(Err)` means the block
-/// is a query block with a syntax error, which the UI shows instead of results.
 pub fn query_block(text: &str) -> Option<Result<Expr, String>> {
     let t = text.trim();
     let inner = t.strip_prefix("{{")?.strip_suffix("}}")?.trim_start();
@@ -66,7 +49,6 @@ pub fn query_block(text: &str) -> Option<Result<Expr, String>> {
     Some(parse(body))
 }
 
-/// Parse a query expression.
 pub fn parse(src: &str) -> Result<Expr, String> {
     let mut p = Parser { s: src, i: 0 };
     let mut terms = Vec::new();
@@ -194,7 +176,6 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// `[[…]]` with nested brackets balanced.
     fn bracketed(&mut self) -> Result<String, String> {
         let r = self.rest();
         let mut depth = 0usize;

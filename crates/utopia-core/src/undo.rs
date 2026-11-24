@@ -1,11 +1,3 @@
-//! Undo/redo (FR-2.12). Each group stores the forward commands and their inverses per
-//! page, so undo and redo are ordinary command applications (and therefore sync like any
-//! other edit). Consecutive text edits to the same block within 500 ms coalesce.
-//!
-//! The stack is global rather than per page: a merge (§8.6) or an edit made through a
-//! transclusion (AC-4.2) touches several pages, and a single linear history guarantees
-//! every inverse is applied to exactly the state it was computed against.
-
 use crate::command::Command;
 use crate::ids::{BlockId, PageId};
 
@@ -16,7 +8,6 @@ const LIMIT: usize = 1000;
 pub struct UndoStep {
     pub page: PageId,
     pub forward: Vec<Command>,
-    /// Applied in order to undo this step.
     pub inverse: Vec<Command>,
 }
 
@@ -27,28 +18,21 @@ pub struct Caret {
     pub offset: usize,
 }
 
-/// Whether the newest group is still open for coalescing (FR-2.12).
-///
-/// The time a group opened lives only in [`Coalesce::Open`], so "sealed, but at a time" —
-/// a combination that decided nothing — cannot be constructed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Coalesce {
-    /// The next text edit starts its own group.
     #[default]
     Sealed,
-    /// A text edit of `block` at most [`COALESCE_MS`] after `at_ms` joins this group.
-    Open { block: BlockId, at_ms: i64 },
+    Open {
+        block: BlockId,
+        at_ms: i64,
+    },
 }
 
 impl Coalesce {
-    /// Open for a text edit of `block` made at `at_ms`.
     pub fn open(block: BlockId, at_ms: i64) -> Self {
         Coalesce::Open { block, at_ms }
     }
 
-    /// Whether a group in this state may merge into `top`: only two open states for the same
-    /// block, at most [`COALESCE_MS`] apart. A clock that went backwards (`at_ms` before the
-    /// top's) starts a new group instead of merging edits that are not adjacent in time.
     fn joins(&self, top: &Coalesce) -> bool {
         match (self, top) {
             (
@@ -66,7 +50,6 @@ impl Coalesce {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UndoGroup {
     pub steps: Vec<UndoStep>,
-    /// Whether the next edit may join this group; only a plain text edit ever opens it.
     pub coalesce: Coalesce,
     pub caret_before: Option<Caret>,
     pub caret_after: Option<Caret>,
@@ -100,7 +83,6 @@ impl UndoGroup {
     }
 }
 
-/// The direction of one history transition: a Cmd+Z or a Cmd+Shift+Z.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Direction {
     Undo,
@@ -118,7 +100,6 @@ impl UndoStack {
         Self::default()
     }
 
-    /// Record a freshly performed group. Clears redo.
     pub fn push(&mut self, mut group: UndoGroup) {
         if group.is_empty() {
             return;
@@ -138,19 +119,12 @@ impl UndoStack {
         }
     }
 
-    /// Stop the current group from absorbing further edits (e.g. on blur or navigation).
     pub fn seal(&mut self) {
         if let Some(top) = self.undo.last_mut() {
             top.coalesce = Coalesce::Sealed;
         }
     }
 
-    /// Take the group `dir` applies out of the history.
-    ///
-    /// From here the caller owns it and must hand it back: [`UndoStack::finish`] when the
-    /// commands were applied, [`UndoStack::abort`] when they were not. That is what makes
-    /// a group that sits in neither stack — history that vanished because something after
-    /// the pop failed — impossible to produce.
     pub fn begin(&mut self, dir: Direction) -> Option<UndoGroup> {
         match dir {
             Direction::Undo => self.undo.pop(),
@@ -158,8 +132,6 @@ impl UndoStack {
         }
     }
 
-    /// The transition happened: the group is now the other stack's top. It never coalesces,
-    /// because applying a group ends the run of text edits it belonged to.
     pub fn finish(&mut self, dir: Direction, mut group: UndoGroup) {
         group.coalesce = Coalesce::Sealed;
         match dir {
@@ -168,8 +140,6 @@ impl UndoStack {
         }
     }
 
-    /// The transition did not happen: the group goes back where it came from, unchanged —
-    /// its coalescing state included, so a failed Cmd+Z does not split a run of keystrokes.
     pub fn abort(&mut self, dir: Direction, group: UndoGroup) {
         match dir {
             Direction::Undo => self.undo.push(group),
@@ -266,7 +236,6 @@ mod tests {
         s.abort(Direction::Undo, g);
         assert_eq!(s.len(), 1);
         assert!(!s.can_redo());
-        // Still open for coalescing: a failed undo is not an edit boundary.
         s.push(text_group("a", 100));
         assert_eq!(s.len(), 1, "the run of keystrokes is unchanged");
     }
