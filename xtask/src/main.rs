@@ -777,6 +777,29 @@ fn mobile(ios: bool) -> Result<()> {
         root.join("mobile/ios/UtopiaMobile/Info.plist"),
         app.join("Info.plist"),
     )?;
+    let icon_keys = "AppIcon-Info.plist";
+    run(Command::new("xcrun")
+        .args(["actool", "--compile"])
+        .arg(&app)
+        .args([
+            "--platform",
+            "iphonesimulator",
+            "--minimum-deployment-target",
+            "27.0",
+            "--target-device",
+            "iphone",
+            "--app-icon",
+            "AppIcon",
+            "--output-format",
+            "human-readable-text",
+            "--output-partial-info-plist",
+        ])
+        .arg(out.join(icon_keys))
+        .arg(root.join("mobile/ios/UtopiaMobile/Assets.xcassets")))?;
+    run(Command::new("/usr/libexec/PlistBuddy")
+        .current_dir(&out)
+        .args(["-c", &format!("Merge {icon_keys}")])
+        .arg(app.join("Info.plist")))?;
     run(Command::new("codesign")
         .args(["--force", "--sign", "-"])
         .arg(&app))?;
