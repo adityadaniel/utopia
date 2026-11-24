@@ -212,7 +212,9 @@ Info.plist claims the `utopia://` scheme (registering it with LaunchServices hap
 bundle is opened, so don't open it on a user's machine without asking). Its icon is built
 from one square picture, `crates/utopia-app/assets/icon.png` (full-bleed, at least 1024 px):
 `xtask/src/icon.rs` cuts it to the macOS tile shape, adds the shadow and writes
-`Contents/Resources/AppIcon.icns` with `iconutil`. To change the icon, replace that file. An
+`Contents/Resources/AppIcon.icns` with `iconutil`. To change the icon, replace that file. The
+iPhone app's icon is a link to the same file (`mobile/ios/AGENTS.md`), and iOS needs it at
+1024 × 1024 px with no alpha channel. An
 app run with `cargo run` has no bundle, so it shows the generic icon in the Dock.
 
 Plugins (P2): directories under `<config>/plugins/<name>/` with `plugin.json` + a `.wasm`/`.wat`

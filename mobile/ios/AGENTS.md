@@ -17,6 +17,7 @@ change, and write its id in tests and comments. A change to §4 goes through the
 | `UtopiaMobile/CoreClient.swift` | The one place that calls the generated bindings. It runs each call off the main actor. |
 | `UtopiaMobile/Draft.swift` | The draft outline in the compose box, and its rules (§4.5). |
 | `UtopiaMobile/Storage.swift` | Paths, relay settings (`UserDefaults`) and secrets (Keychain). |
+| `UtopiaMobile/Assets.xcassets` | The asset catalog. It holds only the app icon, `AppIcon`. |
 | `Check/main.swift` | A Swift program that runs the bindings against the real core on macOS. |
 | `project.yml`, `Makefile`, `scripts/build-core.sh` | The XcodeGen spec, the everyday tasks, and the Rust build phase. |
 | `crates/utopia-ffi` | The core the app calls (UniFFI). New calls go here, not in Swift. |
@@ -55,6 +56,11 @@ make clean                # remove the project, Generated/ and target/xcode
 - The script runs cargo in a clean environment (`env -i`), because Xcode's `SDKROOT` breaks
   the build scripts that cargo runs on the Mac.
 - Signing is automatic with team `9H8AZ8D28D` and bundle id `app.utopia.mobile`.
+- The app icon is the Mac app's picture. `AppIcon.appiconset/icon.png` is a symbolic link to
+  `crates/utopia-app/assets/icon.png` (1024 px, full-bleed, no alpha), so one file is the
+  icon of both apps. iOS cuts the corners. `ASSETCATALOG_COMPILER_APPICON_NAME` in
+  `project.yml` names the set, and Xcode writes the `CFBundleIcons` keys; do not add them to
+  `Info.plist` by hand.
 - Apple silicon only: there is no x86_64 simulator slice.
 
 **Without Xcode.** `xtask mobile` is the scripted check that CI and agents use:
@@ -68,7 +74,8 @@ cargo run -p xtask -- seed-phone target/phone/g.utopia   # the scratch graph the
 ```
 
 - `xtask mobile --ios` compiles every `.swift` file in `UtopiaMobile/` with `swiftc`, links
-  `libutopia_ffi.a` and signs the bundle ad hoc. Install it with
+  `libutopia_ffi.a`, compiles the asset catalog with `actool` (the app icon) and signs the
+  bundle ad hoc. Install it with
   `xcrun simctl install <udid> target/mobile/UtopiaMobile.app`.
 - The app opens `Documents/graph.utopia` in its container. To use a seeded graph, copy it
   there (`xcrun simctl get_app_container <udid> app.utopia.mobile data`) while the app is
