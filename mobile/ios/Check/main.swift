@@ -11,6 +11,13 @@ func check(_ cond: Bool, _ what: String) {
     print("ok: \(what)")
 }
 
+let matchingEdit = LineEdit(start: 0, removed: 0, replacement: "X")
+check(matchingEdit.matches("Xabc", oldText: "abc"), "a matching edit is accepted")
+check(!matchingEdit.matches("Zabc", oldText: "abc"), "a stale edit is rejected")
+check(
+    LineEdit(start: 5, removed: 0, replacement: "x").applied(to: "abc") == nil,
+    "an edit past the end of the line is rejected"
+)
 let dir = FileManager.default.temporaryDirectory.appendingPathComponent("utopia-check-\(getpid())")
 try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 let path = dir.appendingPathComponent("m.utopia").path
@@ -39,17 +46,17 @@ let matches = try g.titleSuggestions(text: "Lunch with dana", accepted: [], limi
 check(matches.count == 1 && matches[0].title == "Dana", "a title in a line is suggested")
 let stored = try g.textWithLinks(
     text: "Lunch with dana",
-    links: [AcceptedLink(title: matches[0].title, start: matches[0].start, end: matches[0].end, day: nil, words: nil)]
+    links: [AcceptedLink(title: matches[0].title, start: matches[0].start, end: matches[0].end, day: nil, words: nil, typed: false)]
 )
 check(stored == "Lunch with [[Dana]]", "an accepted link is written in the page's spelling")
 let stale = try g.textWithLinks(
     text: "Lunch with Dan",
-    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil)]
+    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil, typed: false)]
 )
 check(stale == "Lunch with Dan", "a changed word is plain text")
 let parts = try g.draftParts(
     text: "Lunch with dana",
-    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil)]
+    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil, typed: false)]
 )
 check(parts.contains { $0.kind == .page }, "a draft line draws its link")
 
@@ -63,7 +70,8 @@ let dateLink = AcceptedLink(
     start: dates[0].start,
     end: dates[0].end,
     day: dates[0].day,
-    words: dates[0].words
+    words: dates[0].words,
+    typed: false
 )
 let dateText = try g.textWithLinks(text: "call Ana tomorrow", links: [dateLink])
 check(dateText == "call Ana [[November 4th, 2026]]", "an accepted date is written as its day's title")
@@ -82,7 +90,8 @@ let staleDate = try g.textWithLinks(
             start: dates[0].start,
             end: dates[0].end,
             day: "2026-11-04",
-            words: "tomorrow"
+            words: "tomorrow",
+            typed: false
         )
     ]
 )
@@ -122,6 +131,101 @@ check(
 check(try g.dateSuggestions(text: "26", accepted: [], limit: 6).isEmpty, "a bare number is no date")
 check(try g.dateSuggestions(text: "may", accepted: [], limit: 6).isEmpty, "a bare month is no date")
 check(try g.dateSuggestions(text: "in May. 5 of us", accepted: [], limit: 6).isEmpty, "punctuation does not join a date")
+
+let absorbed = try g.absorbTypedLinks(text: "see [[dana]] today", links: [], caret: nil)
+check(absorbed.text == "see dana today", "a pasted [[Title]] loses its brackets (AC-4.14)")
+check(
+    absorbed.links.count == 1 && absorbed.links[0].title == "dana",
+    "the typed link is accepted (AC-4.14)"
+)
+check(absorbed.links[0].start == 4 && absorbed.links[0].end == 8, "the typed link covers its words")
+check(
+    try g.textWithLinks(text: absorbed.text, links: absorbed.links) == "see [[dana]] today",
+    "Send writes the typed link exactly as typed"
+)
+check(
+    try g.draftParts(text: absorbed.text, links: absorbed.links).contains { $0.kind == .page },
+    "the typed link draws in the link colour"
+)
+let fresh = try g.absorbTypedLinks(text: "[[Fresh Page]]", links: [], caret: nil)
+check(fresh.text == "Fresh Page" && fresh.links.count == 1, "a link to a new page loses its brackets")
+check(try g.findPage(title: "Fresh Page") == nil, "the page is not made before Send (AC-4.6)")
+check(
+    try g.textWithLinks(text: fresh.text, links: fresh.links) == "[[Fresh Page]]",
+    "Send writes the link that makes the page"
+)
+let incomplete = try g.absorbTypedLinks(text: "[[Utopia", links: [], caret: nil)
+check(incomplete.text == "[[Utopia" && incomplete.links.isEmpty, "an incomplete [[ stays as typed")
+let relative = try g.absorbTypedLinks(text: "call [[tomorrow]]", links: [], caret: nil)
+check(relative.links[0].day == "2026-11-11", "a relative date in brackets is a date link (AC-4.12)")
+check(
+    try g.textWithLinks(text: relative.text, links: relative.links)
+        == "call [[November 11th, 2026]]",
+    "a relative date link is written as its day's title"
+)
+let iso = try g.absorbTypedLinks(text: "[[2026-11-26]]", links: [], caret: nil)
+check(
+    try g.textWithLinks(text: iso.text, links: iso.links) == "[[2026-11-26]]",
+    "an ISO date in brackets stays exactly as typed (AC-4.14)"
+)
+let typedLink = try g.absorbTypedLinks(text: "[[Utopia]] sync", links: [], caret: nil)
+let rebasedTyped = try g.rebaseLinks(
+    textBefore: "Utopia sync",
+    editStart: 0,
+    editRemovedLen: 0,
+    replacement: "Plan ",
+    links: typedLink.links
+)
+check(
+    try g.textWithLinks(text: "Plan Utopia sync", links: rebasedTyped)
+        == "Plan [[Utopia]] sync",
+    "an edit before a typed link shifts its range (AC-4.14)"
+)
+let typo = try g.absorbTypedLinks(text: "[[Utopai]]", links: [], caret: nil)
+let fixed = try g.rebaseLinks(
+    textBefore: "Utopai",
+    editStart: 4,
+    editRemovedLen: 2,
+    replacement: "ia",
+    links: typo.links
+)
+check(
+    try g.textWithLinks(text: "Utopia", links: fixed) == "[[Utopia]]",
+    "a typo fix inside a typed link keeps it verbatim (AC-4.14)"
+)
+
+let grownLink = AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil, typed: false)
+check(
+    try g.draftParts(text: "Lunch with dana today", links: [grownLink])
+        .contains { $0.kind == .page },
+    "a chip link stays coloured when the line grows after it (AC-4.1)"
+)
+check(
+    try g.textWithLinks(text: "Lunch with dana today", links: [grownLink])
+        == "Lunch with [[Dana]] today",
+    "and Send writes the same link"
+)
+
+let pickerLink = AcceptedLink(title: "Dana", start: 4, end: 8, day: nil, words: nil, typed: false)
+check(
+    try g.draftParts(text: "Ask Dana ", links: [pickerLink]).contains { $0.kind == .page },
+    "a page from the picker draws as a link (AC-4.5)"
+)
+check(
+    try g.textWithLinks(text: "Ask Dana ", links: [pickerLink]) == "Ask [[Dana]] ",
+    "a page from the picker is written as a link (AC-4.5)"
+)
+let pickerDay = AcceptedLink(title: "November 22nd, 2026", start: 5, end: 24, day: nil, words: nil, typed: false)
+check(
+    try g.draftParts(text: "Call November 22nd, 2026 ", links: [pickerDay])
+        .contains { $0.kind == .page },
+    "a day from the picker draws as a link (AC-4.9)"
+)
+check(
+    try g.textWithLinks(text: "Call November 22nd, 2026 ", links: [pickerDay])
+        == "Call [[November 22nd, 2026]] ",
+    "a day from the picker is written as its link (AC-4.9)"
+)
 try g.setToday(date: "2026-11-02")
 
 // A tick is one command (AC-5.3), and a day's entries carry their time (K10, §4.4).

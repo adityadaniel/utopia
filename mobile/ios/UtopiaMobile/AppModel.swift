@@ -103,6 +103,10 @@ final class AppModel {
     private var settings = SyncSettings.load()
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+    private var composingLines: Set<UUID> = []
+    private var caretOffsets: [UUID: Int] = [:]
+    private var rebaseTasks: [UUID: Task<Void, Never>] = [:]
+    private var rebaseGeneration = 0
 
     var hasSuggestions: Bool { !suggestions.isEmpty || !dateSuggestions.isEmpty }
 
@@ -197,6 +201,7 @@ final class AppModel {
             }
             for line in draft.lines where !line.text.isEmpty {
                 refreshParts(for: line)
+                absorbTypedLinks(in: line.id)
             }
         } catch {
             errorMessage = Self.describe(error)
@@ -252,31 +257,41 @@ final class AppModel {
         refreshSuggestions()
     }
 
-    func setText(_ text: String, edit: LineEdit? = nil, for id: UUID) {
-        guard let index = draft.index(of: id) else { return }
-        let old = draft.lines[index].text
-        let links = draft.lines[index].links
-        draft.lines[index].text = text
-        if Array(old.utf16) != Array(text.utf16) {
-            let change: LineEdit
-            if let edit, edit.matches(text, oldText: old) {
-                change = edit
-            } else {
-                change = Self.fallbackEdit(old, text)
-            }
-            draft.lines[index].links = rebaseLinks(
-                textBefore: old,
-                editStart: UInt32(max(0, change.start)),
-                editRemovedLen: UInt32(max(0, change.removed)),
-                replacement: change.replacement,
-                links: links.map(\.accepted)
-            ).map(DraftLink.init(accepted:))
+    func caretMoved(in id: UUID, at offset: Int) {
+        caretOffsets[id] = offset
+        if activeLine != id {
+            focusLine(id, at: nil)
         }
-        draft.lines[index].dropStaleLinks()
+    }
+
+    func setText(_ text: String, composing: Bool = false, edit: LineEdit? = nil, for id: UUID) {
+        guard let index = draft.index(of: id) else { return }
+        let oldText = draft.lines[index].text
+        draft.lines[index].text = text
         draft.applyDepthRule()
+        if composing {
+            composingLines.insert(id)
+        } else {
+            composingLines.remove(id)
+        }
         DraftStore.save(draft)
-        refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        guard oldText != text else { return }
+        let change: LineEdit
+        if let edit, edit.matches(text, oldText: oldText) {
+            change = edit
+        } else if let fallback = fallbackEdit(oldText, text, caret: caretOffsets[id]) {
+            change = fallback
+        } else {
+            return
+        }
+        rebaseLinks(
+            in: id,
+            oldText: oldText,
+            edit: change,
+            newText: text,
+            absorbAfter: !composing
+        )
     }
 
     private static func fallbackEdit(_ old: String, _ new: String) -> LineEdit {
@@ -325,15 +340,22 @@ final class AppModel {
         guard !inserted.isEmpty else { return }
         if base.isEmpty {
             draft.lines.remove(at: index)
+            composingLines.remove(base.id)
+            rebaseTasks[base.id] = nil
             draft.lines.insert(contentsOf: inserted, at: index)
         } else {
             draft.lines.insert(contentsOf: inserted, at: index + 1)
         }
         draft.applyDepthRule()
+        for line in inserted {
+            guard let at = draft.index(of: line.id) else { continue }
+            draft.lines[at].dropStaleLinks()
+            refreshParts(for: draft.lines[at])
+            absorbTypedLinks(in: line.id)
+        }
         DraftStore.save(draft)
         let last = inserted.last
         if let last, let at = draft.index(of: last.id) {
-            draft.lines[at].dropStaleLinks()
             focusLine(last.id, at: draft.lines[at].text.utf16.count)
         }
     }
@@ -342,6 +364,8 @@ final class AppModel {
     func deleteEmptyLine(_ id: UUID) {
         guard let index = draft.index(of: id) else { return }
         guard let target = draft.deleteEmptyLine(at: index) else { return }
+        composingLines.remove(id)
+        rebaseTasks[id] = nil
         DraftStore.save(draft)
         focusLine(target.id, at: target.caretAtEnd ? endOf(target.id) : nil)
     }
@@ -452,7 +476,7 @@ final class AppModel {
     func insertLink(title: String) {
         guard let index = activeIndex else { return }
         let line = draft.lines[index]
-        let caret = min(caretRequest?.line == line.id ? caretRequest?.offset ?? line.text.utf16.count : line.text.utf16.count, line.text.utf16.count)
+        let caret = min(caretOffsets[line.id] ?? line.text.utf16.count, line.text.utf16.count)
         let text = line.text
         let at = text.utf16.index(text.utf16.startIndex, offsetBy: caret)
         var updated = text
@@ -469,7 +493,6 @@ final class AppModel {
             DraftLink(title: title, start: caret, end: caret + title.utf16.count)
         )
         DraftStore.save(draft)
-        refreshParts(for: draft.lines[index])
         picker = nil
         focusLine(line.id, at: caret + title.utf16.count + 1)
     }
@@ -495,6 +518,13 @@ final class AppModel {
         guard let core, canSend else { return }
         sending = true
         defer { sending = false }
+        while true {
+            let generation = rebaseGeneration
+            for task in rebaseTasks.values {
+                await task.value
+            }
+            if generation == rebaseGeneration { break }
+        }
         // Each line's links are written as `[[Title]]` by the core (C1, AC-4.1).
         var stored: [UUID: String] = [:]
         do {
@@ -507,6 +537,8 @@ final class AppModel {
             today = appended
             lastSentEntry = appended.entries.last?.id
             draft = Draft()
+            composingLines.removeAll()
+            rebaseTasks.removeAll()
             DraftStore.save(draft)
             lineParts = [:]
             suggestions = []
@@ -608,6 +640,113 @@ final class AppModel {
             else { return }
             self.lineParts[id] = parts
             self.dropStaleDateLinks(in: id, parts: parts)
+        }
+    }
+
+    private func rebaseLinks(
+        in id: UUID,
+        oldText: String,
+        edit: LineEdit,
+        newText: String,
+        added: DraftLink? = nil,
+        absorbAfter: Bool
+    ) {
+        guard let core else { return }
+        let previous = rebaseTasks[id]
+        rebaseGeneration += 1
+        let task = Task { [weak self] in
+            _ = await previous?.value
+            guard let self, let startAt = self.draft.index(of: id) else { return }
+            let links = self.draft.lines[startAt].links
+            guard let rebased = try? await core.rebaseLinks(
+                oldText,
+                edit: edit,
+                links: links.map(\.accepted)
+            ) else { return }
+            guard let at = self.draft.index(of: id), self.draft.lines[at].links == links else {
+                return
+            }
+            var next = rebased.map { DraftLink($0) }
+            if let added {
+                next.removeAll { link in
+                    link.start < added.end && added.start < link.end
+                }
+                next.append(added)
+            }
+            let moved = links.count != next.count || zip(links, next).contains { old, new in
+                old.start != new.start || old.end != new.end || old.day != new.day
+            }
+            if moved {
+                self.lineParts[id] = nil
+            }
+            self.draft.lines[at].links = next
+            DraftStore.save(self.draft)
+            self.refreshParts(for: self.draft.lines[at])
+            self.refreshSuggestions()
+            if absorbAfter, self.draft.lines[at].text == newText {
+                self.absorbTypedLinks(in: id)
+            }
+        }
+        rebaseTasks[id] = task
+    }
+
+    private func fallbackEdit(_ oldText: String, _ newText: String, caret: Int?) -> LineEdit? {
+        let oldChars = Array(oldText)
+        let newChars = Array(newText)
+        let newLength = newText.utf16.count
+        let anchor = min(max(caret ?? newLength, 0), newLength)
+        let maxSuffix = max(0, newLength - anchor)
+        var suffix = 0
+        var suffixLength = 0
+        while suffix < oldChars.count && suffix < newChars.count {
+            let character = oldChars[oldChars.count - 1 - suffix]
+            guard character == newChars[newChars.count - 1 - suffix] else { break }
+            let length = String(character).utf16.count
+            guard suffixLength + length <= maxSuffix else { break }
+            suffix += 1
+            suffixLength += length
+        }
+        let shortest = min(oldChars.count, newChars.count) - suffix
+        var prefix = 0
+        while prefix < shortest && oldChars[prefix] == newChars[prefix] {
+            prefix += 1
+        }
+        let start = oldChars[..<prefix].reduce(0) { $0 + String($1).utf16.count }
+        let removed = oldChars[prefix..<(oldChars.count - suffix)]
+            .reduce(0) { $0 + String($1).utf16.count }
+        let replacement = String(newChars[prefix..<(newChars.count - suffix)])
+        return LineEdit(start: start, removed: removed, replacement: replacement)
+    }
+
+    private func absorbTypedLinks(in id: UUID) {
+        guard let core, let index = draft.index(of: id) else { return }
+        let text = draft.lines[index].text
+        guard text.contains("]]") else { return }
+        let links = draft.lines[index].links
+        let caret = caretOffsets[id].map { UInt32(max(0, $0)) }
+        Task { [weak self] in
+            guard let absorbed = try? await core.absorbTypedLinks(
+                text,
+                links: links.map(\.accepted),
+                caret: caret
+            ), absorbed.text != text
+            else { return }
+            guard let self, !self.composingLines.contains(id),
+                  let at = self.draft.index(of: id),
+                  self.draft.lines[at].text == text, self.draft.lines[at].links == links
+            else { return }
+            self.lineParts[id] = nil
+            self.draft.lines[at].text = absorbed.text
+            self.draft.lines[at].links = absorbed.links.map { DraftLink($0) }
+            self.draft.lines[at].dropStaleLinks()
+            let unchangedCaret = self.caretOffsets[id].map { UInt32(max(0, $0)) } == caret
+            if self.activeLine == id, let newCaret = absorbed.caret, unchangedCaret {
+                self.caretOffsets[id] = Int(newCaret)
+                self.caretRequest = CaretRequest(line: id, offset: Int(newCaret))
+            }
+            DraftStore.save(self.draft)
+            self.refreshParts(for: self.draft.lines[at])
+            self.refreshSuggestions()
         }
     }
 

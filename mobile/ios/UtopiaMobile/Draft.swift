@@ -12,6 +12,7 @@ struct DraftLink: Codable, Equatable, Sendable {
     var end: Int
     var day: String? = nil
     var words: String? = nil
+    var typed: Bool? = nil
 }
 
 struct DraftLine: Identifiable, Codable, Equatable, Sendable {

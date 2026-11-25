@@ -19,7 +19,7 @@ struct LineEditor: UIViewRepresentable {
     let caret: CaretRequest?
     let size: CGFloat
 
-    let onText: (String, LineEdit?) -> Void
+    let onText: (String, Bool, LineEdit?) -> Void
     let onReturn: () -> Void
     let onDeleteAtStart: () -> Void
     let onPicker: () -> Void
@@ -151,7 +151,7 @@ struct LineEditor: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var onText: ((String, LineEdit?) -> Void)?
+        var onText: ((String, Bool, LineEdit?) -> Void)?
         var onReturn: (() -> Void)?
         var onDeleteAtStart: (() -> Void)?
         var onPicker: (() -> Void)?
@@ -167,7 +167,8 @@ struct LineEditor: UIViewRepresentable {
             guard !isUpdating else { return }
             let edit = pendingEdit
             pendingEdit = nil
-            onText?(textView.text, edit)
+            onCaret?(textView.selectedRange.location)
+            onText?(textView.text, textView.markedTextRange != nil, edit)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -199,7 +200,10 @@ struct LineEditor: UIViewRepresentable {
                     // The first bracket is taken away too, so the typed characters are gone
                     // (AC-4.7); the model is told, because this change is not a keystroke.
                     textView.text = ns.replacingCharacters(in: NSRange(location: range.location - 1, length: 1), with: "")
-                    onText?(textView.text, LineEdit(start: range.location - 1, removed: 1, replacement: ""))
+                    let caret = max(0, range.location - 1)
+                    textView.selectedRange = NSRange(location: caret, length: 0)
+                    onCaret?(caret)
+                    onText?(textView.text, false, LineEdit(start: range.location - 1, removed: 1, replacement: ""))
                     onPicker?()
                     return false
                 }
