@@ -37,7 +37,7 @@ fn main() {
                 args[0],
                 cli::for_program(cli::USAGE, PROGRAM)
             );
-            2
+            64
         }
     };
     std::process::exit(code);

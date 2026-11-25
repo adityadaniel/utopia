@@ -2,10 +2,9 @@ use std::process::Command;
 
 use utopia_store::Store;
 
-fn ut() -> Command {
+fn ut(config: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_ut"));
-    let dir = std::env::temp_dir().join(format!("ut-test-config-{}", std::process::id()));
-    cmd.env("UTOPIA_CONFIG_DIR", dir)
+    cmd.env("UTOPIA_CONFIG_DIR", config)
         .env("UTOPIA_SYNC_KEYCHAIN_PREFIX", "ut-test")
         .env_remove("UTOPIA_GRAPH")
         .env_remove("UTOPIA_SYNC_URL");
@@ -14,14 +13,15 @@ fn ut() -> Command {
 
 #[test]
 fn help_names_ut_and_leaves_out_the_window() {
+    let cfg = tempfile::tempdir().unwrap();
     for args in [&[][..], &["--help"][..]] {
-        let out = ut().args(args).output().unwrap();
+        let out = ut(cfg.path()).args(args).output().unwrap();
         assert!(out.status.success());
         let text = String::from_utf8(out.stdout).unwrap();
         assert!(text.contains("  ut sync --graph <file.utopia>"), "{text}");
         assert!(!text.contains("open the desktop app"), "{text}");
     }
-    let out = ut().args(["sync", "--help"]).output().unwrap();
+    let out = ut(cfg.path()).args(["sync", "--help"]).output().unwrap();
     assert!(out.status.success());
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("ut sync setup"), "{text}");
@@ -30,6 +30,7 @@ fn help_names_ut_and_leaves_out_the_window() {
 
 #[test]
 fn doctor_and_export_run_with_no_app() {
+    let cfg = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let graph = dir.path().join("g.utopia");
     {
@@ -38,14 +39,14 @@ fn doctor_and_export_run_with_no_app() {
         s.set_block_text(&p, &b, "hello [[World]]", None, None)
             .unwrap();
     }
-    let out = ut().arg("doctor").arg(&graph).output().unwrap();
+    let out = ut(cfg.path()).arg("doctor").arg(&graph).output().unwrap();
     assert!(
         out.status.success(),
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
     let export = dir.path().join("out");
-    let out = ut()
+    let out = ut(cfg.path())
         .arg("export")
         .arg(&graph)
         .arg(&export)
@@ -64,11 +65,16 @@ fn doctor_and_export_run_with_no_app() {
 
 #[test]
 fn a_command_for_the_window_is_refused() {
-    let out = ut().arg("utopia://page/Inbox").output().unwrap();
-    assert_eq!(out.status.code(), Some(2));
+    let cfg = tempfile::tempdir().unwrap();
+    let out = ut(cfg.path()).arg("utopia://page/Inbox").output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(64),
+        "EX_USAGE, not a sync exit code"
+    );
     let err = String::from_utf8(out.stderr).unwrap();
     assert!(err.contains("needs the desktop app"), "{err}");
-    let out = ut().arg("doctor").output().unwrap();
+    let out = ut(cfg.path()).arg("doctor").output().unwrap();
     assert_eq!(
         out.status.code(),
         Some(1),

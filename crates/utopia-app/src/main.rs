@@ -1,5 +1,5 @@
-//! Utopia desktop app (§13.1 `utopia-app`): window, menus, keymap, onboarding, and the
-//! headless `doctor` / `export` commands.
+//! Utopia desktop app (§13.1 `utopia-app`): window, menus, keymap and onboarding; its
+//! headless commands are `utopia-cli`'s, shared with the standalone `ut` binary.
 
 mod api_launch;
 mod assistants;

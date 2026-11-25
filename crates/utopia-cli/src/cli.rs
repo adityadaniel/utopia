@@ -61,9 +61,23 @@ window, `utopia sync setup` writes the same per-graph settings Settings → Sync
 `utopia sync` runs one sync. The token and E2E passphrase come from stdin (no echo on a
 terminal, or --token-stdin / --passphrase-stdin) and are stored only in the macOS keychain
 (services \"utopia-sync\" and \"utopia-sync-passphrase\"), or on Linux in
-<config>/credentials.json, readable only by you (0600); they are never arguments or output. `utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E passphrase or
-queued changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app
-or serve-api already syncs it). `utopia sync --help` has the details.";
+<config>/credentials.json, readable only by you (0600); they are never arguments or output.
+`utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E passphrase or queued
+changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app or
+serve-api already syncs it). `utopia sync --help` has the details.";
+
+pub const COMMANDS: [&str; 10] = [
+    "doctor",
+    "export",
+    "import-roam",
+    "capture",
+    "serve-api",
+    "mcp",
+    "sync",
+    "encrypt",
+    "decrypt",
+    "help",
+];
 
 pub fn for_program(text: &str, program: &str) -> String {
     if program == "utopia" {
@@ -79,10 +93,18 @@ pub fn for_program(text: &str, program: &str) -> String {
         let indent = line.len() - line.trim_start().len();
         let (lead, rest) = line.split_at(indent);
         out.push_str(lead);
-        let rest = rest
+        let mut rest = rest
             .strip_prefix("utopia ")
             .map_or_else(|| rest.to_string(), |r| format!("{program} {r}"));
-        out.push_str(&rest.replace("`utopia ", &format!("`{program} ")));
+        for command in COMMANDS {
+            for before in ["`", " ", "("] {
+                rest = rest.replace(
+                    &format!("{before}utopia {command}"),
+                    &format!("{before}{program} {command}"),
+                );
+            }
+        }
+        out.push_str(&rest);
     }
     out
 }
