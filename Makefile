@@ -5,7 +5,7 @@ SHELL := /bin/bash
 # without a shell, so exporting PATH is not enough).
 CARGO ?= $(shell command -v cargo 2>/dev/null || echo $(HOME)/.cargo/bin/cargo)
 # Ask xcode-select where Xcode is: a version bump renames the bundle.
-export DEVELOPER_DIR ?= $(shell xcode-select -p)
+export DEVELOPER_DIR ?= $(shell xcode-select -p 2>/dev/null)
 # Disk is tight here: incremental caches grow fast with GPUI (see AGENTS.md).
 export CARGO_INCREMENTAL ?= 0
 

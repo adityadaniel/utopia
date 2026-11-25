@@ -30,8 +30,9 @@ passphrase at all; only `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` on every 
   resolved as the app resolves it on Linux (`UTOPIA_CONFIG_DIR`, `$XDG_CONFIG_HOME/utopia`,
   `~/.config/utopia`). `Keychain` uses it on Linux only; macOS keeps the Keychain and other
   platforms keep their behaviour.
-  - The directory is made `0700` (an existing one is tightened) and the file is written
-    `0600`.
+  - The directory is made `0700` (an existing one is tightened, including one that
+    `UTOPIA_CONFIG_DIR` points at, so point it at a directory for Utopia alone; a shared
+    directory the user does not own makes `sync setup` fail) and the file is written `0600`.
   - The file is opened once and its mode checked on that handle, so the check and the read
     see the same file.
   - A file that group or others can read is refused, with a message that names the path and

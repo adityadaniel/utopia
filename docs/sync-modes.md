@@ -368,7 +368,7 @@ that must sync before anyone logs in, and keep the plist readable by you alone.
 
 `UTOPIA_SYNC_URL`, `UTOPIA_SYNC_FOLDER`, `UTOPIA_LAN_SERVE` and `UTOPIA_SYNC_GRAPH`
 override the saved transport for a run (setup and config refuse to save while one is set),
-and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the Keychain credentials without
+and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the stored credentials without
 being saved.
 
 **Without the app: `ut`.** `cargo build --release -p utopia-cli` builds `ut`, the same
@@ -388,6 +388,7 @@ Description=Utopia sync for notes.utopia
 [Service]
 ExecStart=%h/.local/bin/ut sync --continuous --graph %h/notes.utopia
 Restart=on-failure
+RestartPreventExitStatus=2 3
 
 [Install]
 WantedBy=default.target

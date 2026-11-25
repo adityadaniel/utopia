@@ -320,7 +320,7 @@ captures.
 
 ## Opening a PR
 
-CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS for every PR that
+CI (`.github/workflows/ci.yml`) runs fmt, build, test and clippy on macOS (and builds, tests and runs `ut` on Linux) for every PR that
 changes more than documentation; it is the floor, not the evidence. A PR is reviewable when its description carries:
 
 - **What changed and why**, citing the PRD ids the change implements.
@@ -516,6 +516,10 @@ Implemented:
   shell (§14.3 scope).
 
 Known limits (pick these up deliberately, don't paper over them):
+- `ut` on Linux (ADR 0014): `credentials.json` is read, changed and replaced with no lock, so
+  two `sync setup` runs for different graphs at once can lose one credential; there is no Linux
+  store for `UTOPIA_DB_PASSPHRASE`; `sync launchd-plist` is macOS-only (docs/sync-modes.md has a
+  systemd unit); `ut --help` keeps the app's column width, so descriptions shift 4 columns.
 - Keystroke→frame in `bench --ui` measures input handling + full render/layout/paint; it does
   not include GPU present or waiting for the display refresh.
 - Settings → Sync: `prepare_sync_destination` exports every shard on the UI thread when the

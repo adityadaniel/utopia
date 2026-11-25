@@ -131,7 +131,7 @@ Every `utopia <command>` above works as `ut <command>`; only opening the window 
 as the app does. Linux has no Keychain, so there they go in `credentials.json` in the config
 directory (`$UTOPIA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/utopia`, else `~/.config/utopia`), a
 file only you can read (mode 0600); `ut` refuses the file if others can read it. `UTOPIA_SYNC_TOKEN` and `UTOPIA_SYNC_PASSPHRASE` still override
-both for one run.
+both for one run. `ut` exits 64 for a command it does not know.
 
 ## Keyboard essentials
 
