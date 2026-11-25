@@ -2,13 +2,17 @@
 
 | Field | Value |
 |---|---|
-| Document version | 0.3, typed date links |
-| Date | 2026-11-25 (0.2: 2026-11-21; 0.1: 2026-11-18) |
+| Document version | 0.4, typed links |
+| Date | 2026-11-25 (0.3: 2026-11-25; 0.2: 2026-11-21; 0.1: 2026-11-18) |
 | Owner | Aditya Daniel |
 | Source of behaviour | `~/Developer/utopia/PRD.md` (§2.3, §4, §5, §6, §10, §12, §14), `DESIGN.md`, `docs/sync-modes.md`, `mobile/ios/UtopiaMobile`, `crates/utopia-ffi` at `main` `aa42d2e` |
 
 The existing PRD stays the spec for the data model, the resolver, sync and every `FR-`/`AC-`
 id. This document covers the iPhone app only. New ids start with `IO-`.
+
+**What changed in 0.4.** A complete `[[Title]]` typed, pasted or filled in by autocorrect
+is an accepted link in the compose box: the brackets are removed, the title shows in `link`
+colour, and the Send writes `[[Title]]` back exactly as typed (§4.6, AC-4.14).
 
 **What changed in 0.3.** Words in the compose box that name a day now get a date chip like a
 page-title chip: a tap links the day the reader saw, and the Send writes its title (§4.6,
@@ -198,7 +202,8 @@ this radius is a new token; `DESIGN.md` stops at 13.
   (`bullet`), or a 16 pt empty to-do box when the line is a to-do.
 - Indent: 20 pt for each level of depth, before the mark.
 - Text: 16/22 pt, `ink`. A line is at least 44 pt high and wraps; it does not scroll
-  sideways. An accepted link shows in `link` colour (§4.6).
+  sideways. An accepted link shows in `link` colour (§4.6), whether a chip, a picker or a
+  complete `[[Title]]` typed or pasted made it (AC-4.14).
 - Empty first line: "Add to today" in `muted`. An empty later line: "Next line", or
   "Next to-do" when the line is a to-do.
 - The lines area shows about three lines (138 pt), then scrolls inside the box. When a
@@ -317,6 +322,23 @@ visible above it.
 - "Close", or a second tap on the Link control, closes the panel with no change.
 - Typing `[[` or `#` in a line opens the same picker, and the typed characters are
   removed (AC-4.7).
+
+**Typed links.** A complete `[[Title]]` that arrives in one change, from a paste,
+autocorrect or dictation, becomes an accepted link to that page: the brackets are removed,
+the title shows in `link` colour, and the Send writes `[[Title]]` back exactly as the
+reader typed it, including its case, an alias and date-looking text such as
+`[[2026-11-26]]`. A title that has no page yet becomes a link that creates the page on Send,
+as the picker's Create row does (AC-4.6). A relative date inside the brackets (`[[tomorrow]]`,
+`[[next friday]]`, `[[2 weeks ago]]`) becomes a date link whose words stay as typed and
+whose Send writes the day's title, as an accepted date chip does (AC-4.12). A `[[` that is
+not closed yet stays as typed. Only `[[…]]` is absorbed: `#tag` and `#[[Multi Word]]`
+pasted into a line stay as raw text.
+
+An edit before a typed link shifts it. An edit inside its words keeps it a link, follows
+the edited words, and writes the new words as a typed `[[…]]`; a typed relative-date link
+that is edited this way becomes a typed page link rather than a date. An edit that covers
+the link or crosses either edge drops the link. Which text a typed link covers comes from
+the core (C1, AC-4.14).
 
 **Day picker.** The Date control opens a panel in the same place with the rows "Today",
 "Tomorrow" and "Pick a date…" (the system date picker). A tap inserts the title of that
@@ -497,6 +519,18 @@ removed.)*
   Typing `26` or `may` alone, or `11/6/26`, shows no date chip. A draft with an accepted
   date that is sent after midnight, or a week later, still writes the day the chip was
   tapped for while its words are unchanged; only editing those words drops the link.
+- AC-4.14: Paste `[[Utopia]]` into a draft line. The brackets are removed, `Utopia`
+  shows in the link colour, and Send writes `[[Utopia]]` exactly as typed. Paste
+  `[[Fresh Page]]` where no page exists: it shows as a link, and the page exists after Send
+  and not before. `[[utopia]]`, `[[UT]]` (an alias) and `[[2026-11-26]]` are written back
+  exactly as typed; `[[tomorrow]]` is written as the day's title. A `[[` that is not closed
+  stays as typed, and `#tag` or `#[[Multi Word]]` stays raw text.
+
+  Type `Plan ` before `[[Utopia]]`: Send writes `Plan [[Utopia]]`. Correct a typo inside
+  `[[Utopai]]`: Send writes the corrected `[[Utopia]]`. Replace the whole line, or edit
+  across the link's edge: the link is gone. Edit a typed `[[next friday]]` inside its
+  words: it becomes a typed page link and Send writes the new words as `[[…]]`, not the
+  day's title.
 
 **IO-5 To-dos.**
 - AC-5.1: Tap To-do, type `Pay rent`, Send. The block is a to-do that is not done, and

@@ -139,13 +139,12 @@ Read these before you write Swift:
 - The day log shows equal times for seeded blocks: a block's creation time is its ULID's
   timestamp, so a seed cannot fake it.
 - Open review findings for the first build (Send and typing at the same time, a kill during
-  Send, the first Send in two commits, link ranges after edits, and others) are listed in
-  the pull request that added the app.
-- Editing text before or after a link moves its stored range with the single edit the
-  text view reports (`rebase_links`; the common prefix and suffix are only the fallback
-  when no edit is reported). An edit that replaces the whole words drops the link; an
-  edit inside them keeps a date link only while the words still match in any letter case.
-  A picker insert rebases the older links before it appends the new one.
+  Send, the first Send in two commits, and others) are listed in the pull request that
+  added the app.
+- An edit that touches a chip, picker or date link drops that link; an edit elsewhere on
+  the line shifts it. A typed `[[Title]]` link follows an edit inside its words and is
+  written verbatim again; a typed relative-date link becomes a typed page link when edited
+  that way. An edit that covers a typed link or crosses either edge drops it.
 - A date link whose graph date format is ambiguous (`MM/dd/yyyy`) is displayed with the
   formatted title but sent as the ISO date, because the formatted title does not resolve
   back to the chosen day.
