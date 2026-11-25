@@ -94,6 +94,7 @@ final class AppModel {
 
     /// The chips for the active line (§4.6), and the line they belong to.
     private(set) var suggestions: [TitleMatch] = []
+    private(set) var dateSuggestions: [DateMatch] = []
     private(set) var suggestionLine: UUID?
     /// The drawn pieces of each draft line: plain runs and accepted links (C1, AC-4.1).
     private(set) var lineParts: [UUID: [TextPart]] = [:]
@@ -102,6 +103,8 @@ final class AppModel {
     private var settings = SyncSettings.load()
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+
+    var hasSuggestions: Bool { !suggestions.isEmpty || !dateSuggestions.isEmpty }
 
     var isConfigured: Bool { core != nil }
     var canSync: Bool { settings.isConfigured }
@@ -191,6 +194,9 @@ final class AppModel {
                 if let last = draft.lines.last {
                     focusLine(last.id, at: last.text.utf16.count)
                 }
+            }
+            for line in draft.lines where !line.text.isEmpty {
+                refreshParts(for: line)
             }
         } catch {
             errorMessage = Self.describe(error)
@@ -349,6 +355,7 @@ final class AppModel {
         suggestionTask?.cancel()
         guard let index = activeIndex else {
             suggestions = []
+            dateSuggestions = []
             suggestionLine = nil
             return
         }
@@ -356,13 +363,16 @@ final class AppModel {
         suggestionLine = line.id
         guard let core, !line.text.isEmpty else {
             suggestions = []
+            dateSuggestions = []
             return
         }
         let links = line.links.map(\.accepted)
         suggestionTask = Task { [weak self] in
-            let found = (try? await core.titleSuggestions(line.text, accepted: links)) ?? []
+            let foundTitles = (try? await core.titleSuggestions(line.text, accepted: links)) ?? []
+            let foundDates = (try? await core.dateSuggestions(line.text, accepted: links)) ?? []
             guard !Task.isCancelled, let self, self.activeLine == line.id else { return }
-            self.suggestions = found
+            self.suggestions = foundTitles
+            self.dateSuggestions = foundDates
         }
     }
 
@@ -371,6 +381,22 @@ final class AppModel {
         guard let index = activeIndex else { return }
         draft.lines[index].links.append(
             DraftLink(title: match.title, start: Int(match.start), end: Int(match.end))
+        )
+        DraftStore.save(draft)
+        refreshParts(for: draft.lines[index])
+        refreshSuggestions()
+    }
+
+    func acceptDate(_ match: DateMatch) {
+        guard let index = activeIndex else { return }
+        draft.lines[index].links.append(
+            DraftLink(
+                title: match.title,
+                start: Int(match.start),
+                end: Int(match.end),
+                day: match.day,
+                words: match.words
+            )
         )
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
@@ -444,6 +470,7 @@ final class AppModel {
             DraftStore.save(draft)
             lineParts = [:]
             suggestions = []
+            dateSuggestions = []
             focusLine(draft.lines.first?.id, at: 0)
             await refresh()
         } catch {
@@ -531,13 +558,31 @@ final class AppModel {
     private func refreshParts(for line: DraftLine) {
         guard let core else { return }
         let text = line.text
-        let links = line.links.map(\.accepted)
+        let links = line.links
+        let accepted = links.map(\.accepted)
         let id = line.id
         Task { [weak self] in
-            let parts = (try? await core.draftParts(text, links: links)) ?? []
-            guard let self, self.draft.index(of: id).map({ self.draft.lines[$0].text }) == text else { return }
+            guard let parts = try? await core.draftParts(text, links: accepted) else { return }
+            guard let self, let at = self.draft.index(of: id),
+                  self.draft.lines[at].text == text, self.draft.lines[at].links == links
+            else { return }
             self.lineParts[id] = parts
+            self.dropStaleDateLinks(in: id, parts: parts)
         }
+    }
+
+    private func dropStaleDateLinks(in id: UUID, parts: [TextPart]) {
+        guard let index = draft.index(of: id) else { return }
+        let before = draft.lines[index].links.count
+        draft.lines[index].links.removeAll { link in
+            guard link.day != nil else { return false }
+            return !parts.contains {
+                $0.kind == .date && Int($0.start) == link.start && Int($0.end) == link.end
+            }
+        }
+        guard draft.lines[index].links.count != before else { return }
+        DraftStore.save(draft)
+        refreshSuggestions()
     }
 
     // MARK: - Errors

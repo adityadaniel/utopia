@@ -217,8 +217,6 @@ struct ComposeBox: View {
     }
 }
 
-/// The chips above the box: one for each title the core found in the active line (§4.6).
-/// A tap accepts the link and leaves the words as they are (AC-4.1, AC-4.4).
 struct SuggestionRow: View {
     @Environment(AppModel.self) private var model
 
@@ -229,34 +227,39 @@ struct SuggestionRow: View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(model.suggestions, id: \.pageId) { match in
-                    Button {
-                        model.acceptSuggestion(match)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "link")
-                                .font(.system(size: iconSize))
-                                .foregroundStyle(Tokens.ink3)
-                            Text("Link \(Text(match.title).bold())")
-                                .font(.system(size: textSize))
-                                .foregroundStyle(Tokens.ink)
-                        }
-                        .padding(.horizontal, 12)
-                        .frame(height: 44)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Tokens.paper)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Link \(match.title)")
+                    chip(match.title) { model.acceptSuggestion(match) }
+                }
+                ForEach(model.dateSuggestions, id: \.start) { match in
+                    chip(match.title, words: match.words) { model.acceptDate(match) }
                 }
             }
             .padding(.horizontal, 2)
         }
         .scrollIndicators(.hidden)
+    }
+
+    private func chip(_ title: String, words: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "link")
+                    .font(.system(size: iconSize))
+                    .foregroundStyle(Tokens.ink3)
+                Text("Link \(Text(title).bold())")
+                    .font(.system(size: textSize))
+                    .foregroundStyle(Tokens.ink)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Tokens.paper)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Tokens.lineStrong, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(words.map { "Link \(title), \($0)" } ?? "Link \(title)")
     }
 }

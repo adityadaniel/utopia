@@ -93,7 +93,7 @@ struct TodayScreen: View {
                     .padding(.top, 6)
             }
             VStack(spacing: 8) {
-                if !model.suggestions.isEmpty && model.picker == nil {
+                if model.hasSuggestions && model.picker == nil {
                     SuggestionRow()
                 }
                 ComposeBox()
