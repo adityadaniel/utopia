@@ -1,11 +1,3 @@
-//! Whether the loopback automation API starts with a graph, on which address and at which
-//! assistant access level (PRD §13.8 MC-1, MC-2; docs/mcp-design.md §2.4, §5).
-//!
-//! The API starts when `UTOPIA_API` is set (as before) or when the graph's access file says
-//! `read` or `write`. The level always comes from the access file: `UTOPIA_API` opens the
-//! socket for scripts but cannot raise what `/v1/op` permits (MC-1). With the level Off and
-//! no `UTOPIA_API`, there is no server and no socket.
-
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;

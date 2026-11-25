@@ -7,7 +7,7 @@ mod hotkey;
 mod shot;
 mod sync_setup;
 
-use utopia_cli::{cli, mcp, paths, sync_cli, sync_target};
+use utopia_cli::{cli, mcp, paths, sync_target};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -856,64 +856,10 @@ fn run_app(graph: Option<PathBuf>) -> anyhow::Result<()> {
 fn main() -> anyhow::Result<()> {
     START.get_or_init(Instant::now);
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(code) = utopia_cli::dispatch(&args) {
+        std::process::exit(code?);
+    }
     match args.first().map(String::as_str) {
-        Some("doctor") => {
-            let Some(graph) = args.get(1) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            let rebuild = args.iter().any(|a| a == "--rebuild");
-            let ok = cli::doctor(graph.as_ref(), rebuild)?;
-            std::process::exit(if ok { 0 } else { 1 });
-        }
-        Some("export") => {
-            let (Some(graph), Some(dir)) = (args.get(1), args.get(2)) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            cli::export(graph.as_ref(), dir.as_ref())
-        }
-        Some("import-roam") => {
-            let (Some(graph), Some(file)) = (args.get(1), args.get(2)) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            cli::import_roam(graph.as_ref(), file.as_ref())
-        }
-        Some("capture") => {
-            let text = args[1..].join(" ");
-            let graph = paths::resolve_graph(None, &paths::config_dir(), &paths::graphs_dir())
-                .ok_or_else(|| anyhow::anyhow!("no graph found; set UTOPIA_GRAPH"))?;
-            cli::capture(&graph, &paths::config_dir(), &text)
-        }
-        Some("encrypt") => {
-            let Some(graph) = args.get(1) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            cli::encrypt(graph.as_ref())
-        }
-        Some("decrypt") => {
-            let Some(graph) = args.get(1) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            cli::decrypt(graph.as_ref())
-        }
-        Some("serve-api") => {
-            let Some(graph) = args.get(1) else {
-                anyhow::bail!("{}", cli::USAGE);
-            };
-            // `--sync` is the alias of the primary `utopia sync --continuous`: the same
-            // long-running owner, with rounds as well as the API. The optional address
-            // comes before or after the flag and is kept in both forms.
-            let addr = args[2..]
-                .iter()
-                .find(|a| a.as_str() != "--sync")
-                .map_or("127.0.0.1:0", String::as_str);
-            if args.iter().any(|a| a == "--sync") {
-                let code = sync_cli::continuous(graph.as_ref(), &paths::config_dir(), addr)?;
-                std::process::exit(code);
-            }
-            cli::serve_api(graph.as_ref(), addr, &paths::config_dir())
-        }
-        Some("mcp") => mcp::run(&args[1..]),
-        Some("sync") => std::process::exit(sync_cli::run(&args[1..])?),
         Some(url) if url.starts_with("utopia://") => {
             PENDING_URLS
                 .lock()

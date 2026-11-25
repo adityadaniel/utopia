@@ -65,6 +65,28 @@ output. `utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E pa
 queued changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app
 or serve-api already syncs it). `utopia sync --help` has the details.";
 
+pub fn for_program(text: &str, program: &str) -> String {
+    if program == "utopia" {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if line.contains("open the desktop app")
+            || line.trim_start().starts_with("utopia utopia://")
+        {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let (lead, rest) = line.split_at(indent);
+        out.push_str(lead);
+        let rest = rest
+            .strip_prefix("utopia ")
+            .map_or_else(|| rest.to_string(), |r| format!("{program} {r}"));
+        out.push_str(&rest.replace("`utopia ", &format!("`{program} ")));
+    }
+    out
+}
+
 /// What a process that cannot become the graph's owner says (MC-4), in the window and on
 /// stderr.
 pub const ALREADY_OPEN: &str = "This graph is already open in Utopia";
@@ -355,6 +377,36 @@ pub fn serve_api(graph: &Path, addr: &str, config: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_for_a_binary_with_no_window() {
+        assert_eq!(
+            for_program(USAGE, "utopia"),
+            USAGE,
+            "the app keeps its text"
+        );
+        let ut = for_program(USAGE, "ut");
+        assert!(!ut.contains("open the desktop app"), "{ut}");
+        assert!(!ut.contains("utopia://"), "{ut}");
+        assert!(ut.contains("\n  ut doctor <file.utopia>"), "{ut}");
+        assert!(
+            ut.contains("\n  ut sync --graph <file.utopia> [--json]"),
+            "{ut}"
+        );
+        assert!(ut.contains("`ut sync --continuous`"), "{ut}");
+        assert!(
+            !ut.contains("  utopia "),
+            "no command keeps the app's name: {ut}"
+        );
+        assert!(ut.contains("<file.utopia>"), "file names are not commands");
+        assert_eq!(
+            for_program(
+                "unknown option \"-x\".\n\nusage:\n  utopia sync --graph <f>",
+                "ut"
+            ),
+            "unknown option \"-x\".\n\nusage:\n  ut sync --graph <f>"
+        );
+    }
 
     #[test]
     fn doctor_and_export_on_a_real_file() {
