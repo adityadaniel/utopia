@@ -34,19 +34,21 @@ impl FileSecrets {
     }
 
     fn read(&self) -> Result<Table, String> {
-        let meta = match std::fs::metadata(&self.path) {
-            Ok(meta) => meta,
+        let unreadable = || "Could not read the sync credentials file.".to_string();
+        let mut file = match std::fs::File::open(&self.path) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Table::new()),
-            Err(_) => return Err("Could not read the sync credentials file.".into()),
+            Err(_) => return Err(unreadable()),
         };
+        let meta = file.metadata().map_err(|_| unreadable())?;
         if meta.permissions().mode() & 0o077 != 0 {
             return Err(format!(
                 "The sync credentials file {} can be read by other users; run `chmod 600` on it.",
                 self.path.display()
             ));
         }
-        let text = std::fs::read_to_string(&self.path)
-            .map_err(|_| "Could not read the sync credentials file.".to_string())?;
+        let mut text = String::new();
+        std::io::Read::read_to_string(&mut file, &mut text).map_err(|_| unreadable())?;
         serde_json::from_str(&text)
             .map_err(|_| "The sync credentials file is not valid JSON.".to_string())
     }
@@ -59,12 +61,22 @@ impl FileSecrets {
             .mode(0o700)
             .create(dir)
             .map_err(|_| failed())?;
+        let dir_mode = std::fs::metadata(dir)
+            .map_err(|_| failed())?
+            .permissions()
+            .mode();
+        if dir_mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(dir_mode & 0o700))
+                .map_err(|_| failed())?;
+        }
         let text = serde_json::to_string_pretty(table).map_err(|_| failed())?;
         let mut tmp = tempfile::NamedTempFile::new_in(dir).map_err(|_| failed())?;
         std::io::Write::write_all(&mut tmp, text.as_bytes()).map_err(|_| failed())?;
         tmp.as_file().sync_all().map_err(|_| failed())?;
         tmp.persist(&self.path).map_err(|_| failed())?;
-        Ok(())
+        std::fs::File::open(dir)
+            .and_then(|d| d.sync_all())
+            .map_err(|_| failed())
     }
 }
 
@@ -93,6 +105,20 @@ mod tests {
 
     fn mode(path: &Path) -> u32 {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[test]
+    fn an_existing_config_directory_is_made_private() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config");
+        std::fs::create_dir(&config).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(config.join("other.json"), "{}").unwrap();
+        FileSecrets::new(config.join("credentials.json"))
+            .set("utopia-sync", "notes", "tok")
+            .unwrap();
+        assert_eq!(mode(&config), 0o700);
+        assert!(config.join("other.json").is_file());
     }
 
     #[test]
