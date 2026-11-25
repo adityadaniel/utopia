@@ -378,8 +378,23 @@ are the Keychain items above. On Linux, which has no Keychain (and a server usua
 Service), `sync setup` writes them to `<config>/credentials.json` (`~/.config/utopia` unless
 `UTOPIA_CONFIG_DIR` or `XDG_CONFIG_HOME` says otherwise): one JSON object keyed by service and
 graph id, the directory `0700` and the file `0600`, replaced whole on each write. A file
-others can read is refused, not used. `sync launchd-plist` is macOS-only; on Linux run
-`ut sync --continuous --graph …` from a systemd user unit or similar.
+others can read is refused, not used. `sync launchd-plist` is macOS-only; on Linux run the
+daemon from a systemd user unit, for example `~/.config/systemd/user/utopia-sync.service`:
+
+```ini
+[Unit]
+Description=Utopia sync for notes.utopia
+
+[Service]
+ExecStart=%h/.local/bin/ut sync --continuous --graph %h/notes.utopia
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+then `systemctl --user enable --now utopia-sync` (and `loginctl enable-linger $USER` so it
+runs while you are logged out). It reads the secrets from `credentials.json` like `ut sync`.
 
 ## Debugging sync
 

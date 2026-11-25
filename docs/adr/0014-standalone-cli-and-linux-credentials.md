@@ -30,11 +30,15 @@ passphrase at all; only `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` on every 
   resolved as the app resolves it on Linux (`UTOPIA_CONFIG_DIR`, `$XDG_CONFIG_HOME/utopia`,
   `~/.config/utopia`). `Keychain` uses it on Linux only; macOS keeps the Keychain and other
   platforms keep their behaviour.
-  - The directory is created `0700` and the file is written `0600`.
+  - The directory is made `0700` (an existing one is tightened) and the file is written
+    `0600`.
+  - The file is opened once and its mode checked on that handle, so the check and the read
+    see the same file.
   - A file that group or others can read is refused, with a message that names the path and
     `chmod 600`, so a credential never stays readable by mistake.
   - Each write goes to a new `0600` file in the same directory and is renamed over the old
-    one, so a crash leaves the old file or the new one, never half of one.
+    one, and the directory is synced after the rename, so a crash leaves the old file or the
+    new one, never half of one.
   - A damaged file is an error, not an empty store, so a write never replaces credentials it
     could not read.
   - Errors are fixed messages and never quote a value (§15.6).
@@ -44,6 +48,14 @@ passphrase at all; only `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` on every 
 - A server needs only `ut` and the graph file. The secret is as safe as the user's account on
   that machine: root and the user can read it, as with an SSH key. A Secret Service store can
   be added later behind the same `Secrets` trait when a Linux desktop needs it.
+- A write reads, changes and replaces the whole file with no lock, so two `sync setup` runs
+  for different graphs at the same instant can lose one graph's credential (the owner lock is
+  per graph). Run setup again for that graph; `std::fs::File::lock` needs Rust 1.89, above this
+  workspace's 1.85.
+- `FileSecrets::in_config_dir` repeats the Linux branch of `utopia_cli::paths::config_dir`,
+  because `utopia-sync` sits below `utopia-cli`. A change to one must change the other.
+- `ut` exits 64 (`EX_USAGE`) for a command it does not know, so it never looks like a `sync`
+  exit code.
 - `sync launchd-plist` stays macOS-only; on Linux, `ut sync --continuous` runs under a
   systemd user unit or similar, which this repository does not ship.
 - The encryption-at-rest passphrase (`UTOPIA_DB_PASSPHRASE`, Keychain `utopia-db`) has no

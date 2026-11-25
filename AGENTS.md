@@ -243,7 +243,9 @@ Sync (§12; secrets never go into the graph file, §15.6):
   Writes use a same-directory temporary file and atomic rename. Missing means Off; malformed
   or unsupported settings mean Off with a visible notice. They never enter the CRDT.
 - Secret fields are masked; blank retains the saved value. Tokens and E2E passphrases use
-  macOS Keychain services `utopia-sync` / `utopia-sync-passphrase`, account = graph id.
+  macOS Keychain services `utopia-sync` / `utopia-sync-passphrase`, account = graph id; on Linux
+  (the standalone `ut`) the same service/account pairs in `<config>/credentials.json`, mode 0600
+  (`utopia_sync::setup::file_secrets`, ADR 0014).
   Tests use the `Secrets` trait's in-memory double. For scripted verification set
   `UTOPIA_SYNC_KEYCHAIN_PREFIX` to a scratch namespace; it prefixes both service names.
 - `sync_state` records the stable graph id (initially the graph filename), destination identity,

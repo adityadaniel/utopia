@@ -118,8 +118,8 @@ has the agent/`launchd` workflow, and `utopia sync --help` has every option.
 it onto a server, Linux included, and sync or serve a graph with no desktop app:
 
 ```bash
-cargo build --release -p utopia-cli      # target/release/ut
-cp target/release/ut ~/.local/bin/       # or anywhere on your PATH
+make install-ut                          # builds target/release/ut, copies it to ~/.local/bin
+make install-ut PREFIX=/usr/local        # or /usr/local/bin (may need sudo)
 
 ut sync setup --graph ~/notes.utopia --mode relay --url https://relay.example --graph-id notes
 ut sync --graph ~/notes.utopia
@@ -128,9 +128,9 @@ ut sync --continuous --graph ~/notes.utopia   # keep syncing; serves the API for
 
 Every `utopia <command>` above works as `ut <command>`; only opening the window and
 `utopia://` links need the app. On macOS `ut` keeps the token and passphrase in the Keychain,
-as the app does. Linux has no Keychain, so there they go in `~/.config/utopia/credentials.json`
-(or `$UTOPIA_CONFIG_DIR/credentials.json`), a file only you can read (mode 0600); `ut` refuses
-the file if others can read it. `UTOPIA_SYNC_TOKEN` and `UTOPIA_SYNC_PASSPHRASE` still override
+as the app does. Linux has no Keychain, so there they go in `credentials.json` in the config
+directory (`$UTOPIA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/utopia`, else `~/.config/utopia`), a
+file only you can read (mode 0600); `ut` refuses the file if others can read it. `UTOPIA_SYNC_TOKEN` and `UTOPIA_SYNC_PASSPHRASE` still override
 both for one run.
 
 ## Keyboard essentials
