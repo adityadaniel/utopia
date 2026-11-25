@@ -232,6 +232,172 @@ pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatePhrase {
+    pub range: std::ops::Range<usize>,
+    pub date: NaiveDate,
+}
+
+const MAX_DATE_PHRASE_WORDS: usize = 4;
+
+fn month_index(token: &str) -> Option<u32> {
+    let token = token.to_lowercase();
+    if token.chars().count() < 3 {
+        return None;
+    }
+    MONTHS
+        .iter()
+        .position(|name| name.to_lowercase().starts_with(&token))
+        .map(|i| i as u32 + 1)
+}
+
+fn weekday_named(token: &str) -> Option<Weekday> {
+    let token = token.to_lowercase();
+    WEEKDAYS
+        .iter()
+        .position(|name| name.to_lowercase() == token)
+        .and_then(|i| Weekday::try_from(i as u8).ok())
+}
+
+fn day_number(token: &str) -> Option<u32> {
+    let token = token.to_lowercase();
+    let (digits, suffix) = ["st", "nd", "rd", "th"]
+        .iter()
+        .find_map(|suffix| {
+            token
+                .strip_suffix(suffix)
+                .map(|digits| (digits, Some(*suffix)))
+        })
+        .unwrap_or((token.as_str(), None));
+    if digits.is_empty() || digits.len() > 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let day = digits
+        .parse::<u32>()
+        .ok()
+        .filter(|d| (1..=31).contains(d))?;
+    if suffix.is_some_and(|suffix| suffix != ordinal_suffix(day)) {
+        return None;
+    }
+    Some(day)
+}
+
+fn year_number(token: &str) -> Option<i32> {
+    if token.len() == 4 && token.bytes().all(|b| b.is_ascii_digit()) {
+        token.parse().ok().filter(|y| (1000..=9999).contains(y))
+    } else {
+        None
+    }
+}
+
+fn month_then_day(month: &str, day: &str, year: i32) -> Option<NaiveDate> {
+    NaiveDate::from_ymd_opt(year, month_index(month)?, day_number(day)?)
+}
+
+fn absolute_tokens(phrase: &str) -> Option<Vec<&str>> {
+    let mut tokens = Vec::new();
+    let mut i = 0;
+    while i < phrase.len() {
+        let start = i;
+        while let Some(c) = phrase[i..].chars().next() {
+            if !c.is_alphanumeric() {
+                break;
+            }
+            i += c.len_utf8();
+        }
+        if i == start {
+            return None;
+        }
+        tokens.push(&phrase[start..i]);
+        if i == phrase.len() {
+            break;
+        }
+        let gap = i;
+        while let Some(c) = phrase[i..].chars().next() {
+            if !c.is_whitespace() {
+                break;
+            }
+            i += c.len_utf8();
+        }
+        if i < phrase.len() && phrase[i..].starts_with(',') {
+            if tokens.len() != 2 {
+                return None;
+            }
+            i += 1;
+            let after_comma = i;
+            while let Some(c) = phrase[i..].chars().next() {
+                if !c.is_whitespace() {
+                    break;
+                }
+                i += c.len_utf8();
+            }
+            if i == after_comma {
+                return None;
+            }
+        }
+        if i == gap || i >= phrase.len() {
+            return None;
+        }
+    }
+    Some(tokens)
+}
+
+fn absolute_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
+    if let Some(d) = parse_iso(phrase) {
+        return Some(d);
+    }
+    let tokens = absolute_tokens(phrase)?;
+    let year = today.year();
+    match tokens.as_slice() {
+        [a, b] => month_then_day(a, b, year).or_else(|| month_then_day(b, a, year)),
+        [a, b, c] => {
+            year_number(c).and_then(|y| month_then_day(a, b, y).or_else(|| month_then_day(b, a, y)))
+        }
+        _ => None,
+    }
+}
+
+pub fn date_phrase(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
+    let phrase = phrase.trim();
+    if phrase.is_empty() {
+        return None;
+    }
+    if let Some(d) = relative_date(phrase, today) {
+        return Some(d);
+    }
+    if let Some(target) = weekday_named(phrase) {
+        let ahead = (i64::from(target.num_days_from_monday())
+            - i64::from(today.weekday().num_days_from_monday()))
+        .rem_euclid(7);
+        return today.checked_add_signed(chrono::Duration::days(ahead));
+    }
+    absolute_date(phrase, today)
+}
+
+pub fn find_date_phrases(text: &str, today: NaiveDate) -> Vec<DatePhrase> {
+    let words = crate::text::word_ranges(text);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < words.len() {
+        let mut found = None;
+        for take in (1..=MAX_DATE_PHRASE_WORDS.min(words.len() - i)).rev() {
+            let range = words[i].start..words[i + take - 1].end;
+            if let Some(date) = date_phrase(&text[range.clone()], today) {
+                found = Some((range, date, take));
+                break;
+            }
+        }
+        match found {
+            Some((range, date, take)) => {
+                out.push(DatePhrase { range, date });
+                i += take;
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
 pub fn expand_relative_date_links(
     text: &str,
     caret: usize,
@@ -591,6 +757,102 @@ mod tests {
                 "{text:?}"
             );
         }
+    }
+
+    #[test]
+    fn ac_4_12_the_phrases_a_phone_offers() {
+        let t = d(2026, 11, 3);
+        let yes = [
+            ("today", t),
+            ("Tomorrow", d(2026, 11, 4)),
+            ("yesterday", d(2026, 11, 2)),
+            ("friday", d(2026, 11, 6)),
+            ("Tuesday", t),
+            ("next friday", d(2026, 11, 6)),
+            ("last sunday", d(2026, 11, 1)),
+            ("in 3 days", d(2026, 11, 6)),
+            ("2 weeks ago", d(2026, 10, 20)),
+            ("Nov 26", d(2026, 11, 26)),
+            ("26 November", d(2026, 11, 26)),
+            ("November 26th", d(2026, 11, 26)),
+            ("nov 26th", d(2026, 11, 26)),
+            ("Nov 26, 2027", d(2027, 11, 26)),
+            ("26 sep 2027", d(2027, 9, 26)),
+            ("2026-11-26", d(2026, 11, 26)),
+            ("Nov 21st", d(2026, 11, 21)),
+            ("Nov 22nd", d(2026, 11, 22)),
+            ("Nov 23rd", d(2026, 11, 23)),
+            ("Nov 11th", d(2026, 11, 11)),
+            ("Nov 12th", d(2026, 11, 12)),
+            ("Nov 13th", d(2026, 11, 13)),
+        ];
+        for (phrase, day) in yes {
+            assert_eq!(date_phrase(phrase, t), Some(day), "{phrase:?}");
+        }
+        for no in [
+            "26",
+            "may",
+            "march",
+            "sun",
+            "sat",
+            "monday 26",
+            "11/6/26",
+            "Nov",
+            "2026",
+            "in 3 parsecs",
+            "Nov 32",
+            "26 November 26",
+            "May. 5",
+            "may_5",
+            "Nov, 26",
+            "Nov. 26",
+            "26nd",
+            "1th",
+            "11st",
+            "22th",
+            "26th of November",
+        ] {
+            assert_eq!(date_phrase(no, t), None, "{no:?}");
+        }
+    }
+
+    #[test]
+    fn ac_4_12_phrases_are_found_whole_in_a_line() {
+        let t = d(2026, 11, 3);
+        let found = find_date_phrases("call Ana next friday, then 2 weeks ago", t);
+        let seen: Vec<(String, String)> = found
+            .iter()
+            .map(|p| {
+                (
+                    "call Ana next friday, then 2 weeks ago"[p.range.clone()].to_string(),
+                    p.date.to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![
+                ("next friday".to_string(), "2026-11-06".to_string()),
+                ("2 weeks ago".to_string(), "2026-10-20".to_string()),
+            ]
+        );
+        assert!(find_date_phrases("the 26th of it", t).is_empty());
+        assert!(find_date_phrases("26", t).is_empty());
+        assert!(find_date_phrases("a sunny day", t).is_empty());
+        assert!(find_date_phrases("in May. 5 of us", t).is_empty());
+        assert!(find_date_phrases("may_5", t).is_empty());
+        let one = find_date_phrases("Ship November 26th to Ana", t);
+        assert_eq!(one.len(), 1);
+        assert_eq!(
+            &"Ship November 26th to Ana"[one[0].range.clone()],
+            "November 26th"
+        );
+        let year = find_date_phrases("due 26 November 2027, no later", t);
+        assert_eq!(year.len(), 1);
+        assert_eq!(
+            &"due 26 November 2027, no later"[year[0].range.clone()],
+            "26 November 2027"
+        );
     }
 
     #[test]

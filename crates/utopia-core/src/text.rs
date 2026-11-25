@@ -83,6 +83,45 @@ pub fn floor_char_boundary(s: &str, offset: usize) -> usize {
     o
 }
 
+pub fn word_ranges(s: &str) -> Vec<Range<usize>> {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '\'';
+    let trim_end = |start: usize, mut end: usize| {
+        while end > start {
+            let Some(last) = s[start..end].chars().next_back() else {
+                break;
+            };
+            if last != '\'' && last != '-' {
+                break;
+            }
+            end -= last.len_utf8();
+        }
+        end
+    };
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        match (is_word(c), start) {
+            (true, None) => start = Some(i),
+            (true, Some(_)) => {}
+            (false, Some(a)) => {
+                let end = trim_end(a, i);
+                if end > a {
+                    out.push(a..end);
+                }
+                start = None;
+            }
+            (false, None) => {}
+        }
+    }
+    if let Some(a) = start {
+        let end = trim_end(a, s.len());
+        if end > a {
+            out.push(a..end);
+        }
+    }
+    out
+}
+
 pub fn diff(old: &str, new: &str) -> Option<TextEdit> {
     if old == new {
         return None;
