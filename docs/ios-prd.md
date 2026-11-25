@@ -2,13 +2,17 @@
 
 | Field | Value |
 |---|---|
-| Document version | 0.2, design direction decided |
-| Date | 2026-11-21 (0.1: 2026-11-18) |
+| Document version | 0.3, typed date links |
+| Date | 2026-11-25 (0.2: 2026-11-21; 0.1: 2026-11-18) |
 | Owner | Aditya Daniel |
-| Source of behaviour | `~/Developer/utopia/PRD.md` (§2.3, §4, §5, §6, §10, §12, §14), `DESIGN.md`, `docs/sync-modes.md`, `mobile/ios/UtopiaMobile`, `crates/utopia-ffi` at `main` `bc7f6fd` |
+| Source of behaviour | `~/Developer/utopia/PRD.md` (§2.3, §4, §5, §6, §10, §12, §14), `DESIGN.md`, `docs/sync-modes.md`, `mobile/ios/UtopiaMobile`, `crates/utopia-ffi` at `main` `aa42d2e` |
 
 The existing PRD stays the spec for the data model, the resolver, sync and every `FR-`/`AC-`
 id. This document covers the iPhone app only. New ids start with `IO-`.
+
+**What changed in 0.3.** Words in the compose box that name a day now get a date chip like a
+page-title chip: a tap links the day the reader saw, and the Send writes its title (§4.6,
+AC-4.12, AC-4.13, ADR 0013). The Date control stays.
 
 **What changed in 0.2.** The owner tried four interactive prototypes and chose direction A
 in a changed form: the outline is written in the compose box, the phone only adds to
@@ -272,6 +276,25 @@ sideways when there are many chips.
 - Which titles match a text comes from the core (C1, C3). The app does not search titles
   with its own rules.
 
+**Date suggestions.** When the words of the active line name a day, the same row offers a
+chip "Link **November 26th, 2026**" with that day's title, next to any title chips. The
+forms are `today`, `tomorrow`, `yesterday`, `friday`, `next friday`, `in 3 days`,
+`2 weeks ago`, `Nov 26`, `26 November`, `November 26th` and `2026-11-26`, in any letter
+case and as a whole word or phrase. A month and day with no year mean that day in the
+current year (ADR 0013).
+
+- A date chip works as a title chip does: a tap accepts the link for that line, the words
+  stay as typed and show in `link` colour, the chip goes away, and the caret and keyboard
+  do not move. On Send the words are written as `[[November 26th, 2026]]`, the day's title.
+- The day is fixed when the chip is tapped, so the link means the day the reader saw. The
+  typed words are stored with the link; it stays while the range still holds those same
+  words (in any letter case) and the range sits on word boundaries. It is never dropped by
+  time, a launch or a refresh, only when the reader edits those words.
+- A bare number (`26`), a bare month name (`may`, `march`), a bare short weekday (`sun`,
+  `sat`) and a numeric date (`11/6/26`, §7) are not date chips.
+- Which words are a date and which day they mean comes from the core (C1, C3); the app
+  never parses a date. The Date control still inserts a day from its picker.
+
 **Link picker.** The Link control puts a panel in the place of the keyboard, with the
 same height, a `well` fill and a 1 pt `line` rule above it. The compose box stays
 visible above it.
@@ -463,6 +486,14 @@ removed.)*
   matching title: the chip row goes away.
 - AC-4.11: Accept "Dana", then change the word to `Dan`. The word is plain text again and
   the stored text after Send has no link.
+- AC-4.12: With today on November 3rd, type `call Ana tomorrow`. A chip "Link November
+  4th, 2026" shows next to any title chips. Tap it: `tomorrow` stays as typed and shows in
+  the link colour, and the chip goes away. Send: the stored text is `call Ana [[November
+  4th, 2026]]`. On the Mac, the block is under "Scheduled for this day" on November 4th.
+- AC-4.13: Accept `friday`, then change the word to `Sat`. The word is plain text again.
+  Typing `26` or `may` alone, or `11/6/26`, shows no date chip. A draft with an accepted
+  date that is sent after midnight, or a week later, still writes the day the chip was
+  tapped for while its words are unchanged; only editing those words drops the link.
 
 **IO-5 To-dos.**
 - AC-5.1: Tap To-do, type `Pay rent`, Send. The block is a to-do that is not done, and
@@ -529,7 +560,8 @@ The tick of a to-do is in IO-5.)*
 - **A suggestion matches a common word** (a page titled "On"). Titles of one or two
   characters are not suggested. The Link control still finds them.
 - **A typed date that is ambiguous** (`11/6/26`). Never linked as a date (existing PRD
-  §5.5).
+  §5.5). A month and day without a year (`Nov 26`) mean that day in the current year, even
+  when it has already passed (ADR 0013).
 - **A new title that differs from an existing one only by case or spacing.** It links to
   the existing page. No second page is made.
 - **Widget tapped while the graph is locked** (encrypted at rest). The unlock screen
@@ -539,8 +571,8 @@ The tick of a to-do is in IO-5.)*
 - **A day with 5,000 blocks.** It opens and scrolls. Only visible rows are drawn.
 - **A very long line** (2,000 characters). It wraps; the lines area scrolls.
 - **The system keyboard's dictation or autocorrect** changes a word inside an accepted
-  link. The link is kept if the title still matches; otherwise it becomes plain text, and
-  the colour shows that.
+  link. The link is kept if the words still name it (the title, or the day), otherwise it
+  becomes plain text, and the colour shows that.
 - **Low Power Mode or no background time.** Sync waits for the next open. The queued
   count is shown.
 - **A to-do is ticked on the phone and its text is changed on the Mac, both offline.**

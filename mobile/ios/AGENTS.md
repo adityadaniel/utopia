@@ -141,3 +141,6 @@ Read these before you write Swift:
 - Open review findings for the first build (Send and typing at the same time, a kill during
   Send, the first Send in two commits, link ranges after edits, and others) are listed in
   the pull request that added the app.
+- Editing text before a date link moves the line's characters but not the stored range, so
+  the date link is dropped (title links are drawn plain); link ranges do not follow edits
+  yet.
