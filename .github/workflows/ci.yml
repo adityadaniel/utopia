@@ -32,8 +32,8 @@ env:
 
 jobs:
   check:
-    # macOS only: the app links AppKit, PDFKit and the macOS keychain, and utopia-store
-    # builds SQLCipher. There is no Linux target to check against.
+    # The whole workspace on macOS: the app links AppKit, PDFKit and the macOS keychain, and
+    # utopia-store builds SQLCipher. Only the standalone `ut` is checked on Linux (linux-cli).
     name: build, test, clippy, fmt
     runs-on: macos-15
     timeout-minutes: 60
@@ -102,8 +102,10 @@ jobs:
 
       - name: No GPUI in ut
         run: |
-          ! cargo tree --locked -p utopia-cli -e normal | grep -q gpui \
-            || { echo "::error::utopia-cli depends on gpui"; exit 1; }
+          tree=$(cargo tree --locked -p utopia-cli -e normal)
+          if grep -q gpui <<<"$tree"; then
+            echo "::error::utopia-cli depends on gpui"; exit 1
+          fi
 
       - name: cargo build
         run: cargo build --locked -p utopia-cli
@@ -124,9 +126,11 @@ jobs:
             --graph-id ci --token-stdin --passphrase-stdin
           test "$(stat -c %a "$UTOPIA_CONFIG_DIR/credentials.json")" = 600
           test "$(stat -c %a "$UTOPIA_CONFIG_DIR")" = 700
-          target/debug/ut sync status --graph "$RUNNER_TEMP/g.utopia" | grep -q "token stored, passphrase stored"
+          status=$(target/debug/ut sync status --graph "$RUNNER_TEMP/g.utopia")
+          grep -q "token stored, passphrase stored" <<<"$status"
           target/debug/ut sync --graph "$RUNNER_TEMP/g.utopia"
           chmod 644 "$UTOPIA_CONFIG_DIR/credentials.json"
-          if target/debug/ut sync --graph "$RUNNER_TEMP/g.utopia"; then
-            echo "::error::ut used a credentials file that others can read"; exit 1
-          fi
+          code=0
+          target/debug/ut sync --graph "$RUNNER_TEMP/g.utopia" 2>"$RUNNER_TEMP/err" || code=$?
+          test "$code" = 1
+          grep -q "chmod 600" "$RUNNER_TEMP/err"
