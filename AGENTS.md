@@ -107,7 +107,9 @@ both env vars at a scratch folder when trying the app so you never touch the use
 an unknown value means the default, logged; it is written atomically and keeps keys it does
 not know.
 
-Headless commands (`cargo run -p utopia-app -- <cmd>`): `doctor <file> [--rebuild]` checks
+Headless commands (`cargo run -p utopia-app -- <cmd>`, or the standalone `ut` from
+`cargo run -p utopia-cli -- <cmd>`; both go through `utopia_cli::dispatch`, so add a command
+there, never in one binary only): `doctor <file> [--rebuild]` checks
 the §10.4 invariants (exit 1 on problems); `export <file> <dir>` writes Markdown (attachments in
 `blobs/`), `graph.json` and `graph.opml`; `import-roam <file> <roam.json>` imports a Roam export;
 `capture <text…>` appends to today's note (when another process owns the graph and runs the
@@ -346,13 +348,14 @@ deliberately does not run it: a shared runner's timings say nothing about the §
 | `crates/utopia-mcp` | MCP server on stdio for assistant clients (PRD §13.8): the JSON-RPC wire for the two protocol eras, the tool catalog, the outline format with its id marker, the `Direct` headless backend, the `Remote` backend for the open app's API, the rule that picks one for each call, and the setup text for each client. No `gpui`, no async runtime | `utopia-api`, `utopia-store`, `utopia-core` |
 | `crates/utopia-plugin` | WASM plugin sandbox (wasmi: fuel, memory cap, permissioned API calls) | `utopia-api`, `utopia-store`, `wasmi` |
 | `crates/utopia-ui` | GPUI components: block editor (IME via `EntityInputHandler`), outline view, chips, panels, sidebar, background sync runner, graph view, PDF viewer (PDFKit on macOS), Settings window (keybinding editor, shortcut sheet, Assistants tab, Help tour) | `utopia-core`, `utopia-store`, `utopia-sync`, `utopia-plugin`, `utopia-api`, `utopia-mcp`, `gpui` |
-| `crates/utopia-app` | Binary: window, keymap, actions, app assembly, CLI subcommands, startup probe, screenshot scripts, API/link inbox, unlock screen | everything above |
+| `crates/utopia-app` | Binary: window, keymap, actions, app assembly, startup probe, screenshot scripts, API/link inbox, unlock screen; runs the CLI subcommands through `utopia-cli` | everything above |
+| `crates/utopia-cli` | The headless commands (`doctor`, `export`, `capture`, `serve-api`, `mcp`, `sync`, …) and `dispatch`, shared by the app and the standalone `ut` binary. **No GPUI**, so `ut` builds on a server | `utopia-api`, `utopia-mcp`, `utopia-store`, `utopia-sync`, `utopia-syncd` |
 | `crates/utopia-ffi` | Mobile core: UniFFI surface over the store and sync (§14) | `utopia-store`, `utopia-sync`, `uniffi` |
 | `mobile/ios` | SwiftUI shell (`UtopiaMobile`) and the Swift binding check | the generated bindings |
 | `xtask` | Dev tasks: `bench` (budgets), `profile-merge`, `bundle`, `mobile`, `help-shots`, `readme-shots` | anything |
 
 Dependency direction is one-way: `app → ui → (plugin → api) → store → doc → core`;
-`app → mcp → api`; `ffi → sync → store`. If you find yourself importing upward, move the type
+`app → cli → (mcp → api, sync → store)`; `ffi → sync → store`. If you find yourself importing upward, move the type
 down instead.
 
 ## Architecture rules (do not break these)

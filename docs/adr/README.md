@@ -18,6 +18,7 @@ is where the "why" lives. Cite an ADR from a test name, a commit or a PR, not fr
 | [0010](0010-wire-format-v1.md) | Sync wire format v1 |
 | [0011](0011-plugin-sandbox.md) | WASM plugin sandbox and its run result |
 | [0012](0012-dev-tooling.md) | Benchmarks, screenshots, the icon and the mobile check |
+| [0014](0014-standalone-cli-and-linux-credentials.md) | A standalone `ut` binary, and sync credentials in a file on Linux |
 
 To add one: copy the shape of an existing file (Status, Context, Decision, Consequences),
 take the next number, and add a row here.

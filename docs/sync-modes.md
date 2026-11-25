@@ -371,6 +371,16 @@ override the saved transport for a run (setup and config refuse to save while on
 and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the Keychain credentials without
 being saved.
 
+**Without the app: `ut`.** `cargo build --release -p utopia-cli` builds `ut`, the same
+commands (`ut sync setup`, `ut sync`, `ut sync --continuous`, `ut mcp`, …) with no window
+toolkit, so it runs on a machine that has no Utopia app, Linux included. On macOS its secrets
+are the Keychain items above. On Linux, which has no Keychain (and a server usually no Secret
+Service), `sync setup` writes them to `<config>/credentials.json` (`~/.config/utopia` unless
+`UTOPIA_CONFIG_DIR` or `XDG_CONFIG_HOME` says otherwise): one JSON object keyed by service and
+graph id, the directory `0700` and the file `0600`, replaced whole on each write. A file
+others can read is refused, not used. `sync launchd-plist` is macOS-only; on Linux run
+`ut sync --continuous --graph …` from a systemd user unit or similar.
+
 ## Debugging sync
 
 When a device does not show what another device wrote, work through these steps in order.
