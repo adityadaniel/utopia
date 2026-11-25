@@ -38,8 +38,8 @@ usage:
                     [--folder <path>] [--graph-id <id>] [--token-stdin] [--passphrase-stdin]
         one-time headless setup: write this graph's sync settings (the same file Settings →
         Sync uses), its graph id and, when given, the relay token and E2E passphrase to the
-        Keychain (on Linux, the credentials file). Creates an empty graph when --graph does not exist, so the first
-        `utopia sync` pulls everything.
+        Keychain (on Linux, the credentials file). Creates an empty graph when --graph does
+        not exist, so the first `utopia sync` pulls everything.
   utopia sync --graph <file.utopia> [--json]
         run sync rounds until nothing is left to push or pull, then exit
   utopia sync --continuous --graph <file.utopia>
