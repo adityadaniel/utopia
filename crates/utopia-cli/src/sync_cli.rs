@@ -1,14 +1,14 @@
 //! `utopia sync …` (§12): headless setup, one-shot sync, status and configuration.
 //!
-//! This is the no-window equivalent of Settings → Sync, for an agent or a launchd job on a
-//! Mac that never opens Utopia. Three rules shape it:
+//! This is the no-window equivalent of Settings → Sync, for an agent, a launchd job, or a
+//! machine with no app (`ut`, Linux included). Three rules shape it:
 //!
 //! - **One settings format.** The saved preferences are `utopia_sync::setup::Preferences`
 //!   in the same per-graph file Settings → Sync writes (`paths::sync_config`), and the
 //!   transport comes from `crate::sync_target`, the builder the window uses too.
 //! - **Secrets never become arguments, files or output** (§15.6). They are read from a
 //!   terminal without echo, or as `--token-stdin` / `--passphrase-stdin` lines, and go to
-//!   the macOS Keychain through the `Secrets` trait (tests use its in-memory double).
+//!   the platform store through the `Secrets` trait (tests use its in-memory double).
 //! - **One writer** (MC-4). `setup`, `config` and `sync` take the owner lock; `status` only
 //!   looks at whether it is held. A graph the open app owns is synced by the app, and the
 //!   command says so with [`EXIT_OWNED`] instead of writing.
@@ -38,7 +38,7 @@ usage:
                     [--folder <path>] [--graph-id <id>] [--token-stdin] [--passphrase-stdin]
         one-time headless setup: write this graph's sync settings (the same file Settings →
         Sync uses), its graph id and, when given, the relay token and E2E passphrase to the
-        Keychain. Creates an empty graph when --graph does not exist, so the first
+        Keychain (on Linux, the credentials file). Creates an empty graph when --graph does not exist, so the first
         `utopia sync` pulls everything.
   utopia sync --graph <file.utopia> [--json]
         run sync rounds until nothing is left to push or pull, then exit
@@ -81,7 +81,7 @@ utopia-sync-passphrase), or on Linux in <config>/credentials.json, a file only y
 
 environment: UTOPIA_SYNC_URL, UTOPIA_SYNC_FOLDER, UTOPIA_LAN_SERVE and UTOPIA_SYNC_GRAPH
 override the saved transport for a run; setup and config refuse to save while they are set.
-UTOPIA_SYNC_TOKEN and UTOPIA_SYNC_PASSPHRASE override the Keychain credentials without
+UTOPIA_SYNC_TOKEN and UTOPIA_SYNC_PASSPHRASE override the stored credentials without
 being saved.
 
 exit codes: 0 synced (or the command succeeded); 1 bad arguments, an unreachable target, a

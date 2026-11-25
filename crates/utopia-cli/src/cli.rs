@@ -56,7 +56,7 @@ SHA-256 of the canonical graph path). POST /v1/op runs one op at the access leve
 routes do not follow it.
 
 sync (optional): set UTOPIA_SYNC_URL=<relay origin>, and optionally UTOPIA_SYNC_GRAPH=<id>
-and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\"). Without a
+and UTOPIA_SYNC_TOKEN=<token> (or the stored credential, see below). Without a
 window, `utopia sync setup` writes the same per-graph settings Settings → Sync uses, and
 `utopia sync` runs one sync. The token and E2E passphrase come from stdin (no echo on a
 terminal, or --token-stdin / --passphrase-stdin) and are stored only in the macOS keychain
