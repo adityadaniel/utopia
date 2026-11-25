@@ -76,7 +76,8 @@ order, so a script cannot reach a graph its author did not name. The token and p
 are read from stdin without echo on a terminal, or as one line each with --token-stdin /
 --passphrase-stdin (token first when both are given). They are never arguments, settings
 fields or output, and are stored only in the macOS Keychain (services utopia-sync and
-utopia-sync-passphrase).
+utopia-sync-passphrase), or on Linux in <config>/credentials.json, a file only you can read
+(mode 0600; one that others can read is refused).
 
 environment: UTOPIA_SYNC_URL, UTOPIA_SYNC_FOLDER, UTOPIA_LAN_SERVE and UTOPIA_SYNC_GRAPH
 override the saved transport for a run; setup and config refuse to save while they are set.
