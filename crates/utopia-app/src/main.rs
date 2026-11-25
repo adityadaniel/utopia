@@ -3,14 +3,11 @@
 
 mod api_launch;
 mod assistants;
-mod cli;
 mod hotkey;
-mod mcp;
-mod paths;
 mod shot;
-mod sync_cli;
 mod sync_setup;
-mod sync_target;
+
+use utopia_cli::{cli, mcp, paths, sync_cli, sync_target};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};

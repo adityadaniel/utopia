@@ -121,7 +121,7 @@ pub fn open_owned(graph: &Path) -> Result<Owned> {
 /// Read a passphrase from the terminal without echoing it. The caller decides when to
 /// prompt (a terminal) and what the prompt says; `utopia sync setup` uses it for its
 /// token and passphrase too.
-pub(crate) fn prompt_secret(prompt: &str) -> Result<String> {
+pub fn prompt_secret(prompt: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{prompt}");
     std::io::stderr().flush()?;

@@ -16,6 +16,7 @@ gpui.workspace = true
 libc.workspace = true
 serde_json.workspace = true
 utopia-api.workspace = true
+utopia-cli.workspace = true
 utopia-core.workspace = true
 utopia-mcp.workspace = true
 utopia-store.workspace = true
