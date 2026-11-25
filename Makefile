@@ -14,10 +14,11 @@ ARCH := $(shell uname -m)
 APP := target/Utopia.app
 ZIP := target/Utopia-$(VERSION)-$(ARCH).zip
 INSTALL_DIR ?= /Applications
+PREFIX ?= $(HOME)/.local
 SCRATCH ?= $(CURDIR)/target/scratch
 
 .DEFAULT_GOAL := help
-.PHONY: help run dev check build test clippy fmt fmt-check comments bench relay-check sync-fuzz app zip install doctor clean-debug
+.PHONY: help run dev check build test clippy fmt fmt-check comments bench relay-check sync-fuzz app zip install install-ut doctor clean-debug
 
 help: ## List the targets
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "} {printf "  %-12s %s\n", $$1, $$2}'
@@ -74,6 +75,12 @@ zip: app ## target/Utopia-<version>-<arch>.zip, to copy to another Mac
 	rm -f "$(ZIP)"
 	ditto -c -k --keepParent "$(APP)" "$(ZIP)"
 	@echo "$(ZIP)"
+
+install-ut: ## Build the standalone `ut` CLI and copy it to PREFIX/bin (default ~/.local)
+	$(CARGO) build --release -p utopia-cli
+	install -d "$(PREFIX)/bin"
+	install -m 0755 target/release/ut "$(PREFIX)/bin/ut"
+	@echo "Installed $(PREFIX)/bin/ut"
 
 install: app ## Copy Utopia.app into INSTALL_DIR (default /Applications)
 	rm -rf "$(INSTALL_DIR)/Utopia.app"
