@@ -55,9 +55,8 @@ const CONTENT_WIDTH: f32 = 720.;
 /// The tab list down the left side, as System Settings has it (ST-5).
 const RAIL_WIDTH: f32 = 220.;
 /// The children a key list draws before its first category card: the toolbar, the filter
-/// field, and the two rows of the Modal editing card (its header and its switch).
-/// `ScrollHandle::scroll_to_item` counts them, so a clash link can bring the card that holds
-/// the other row into view (ST-3).
+/// field and the Modal editing card. `ScrollHandle::scroll_to_item` counts them, so a clash
+/// link can bring the card that holds the other row into view (ST-3).
 const KEY_LIST_LEADING: usize = 4;
 /// Screenshots are shown at a fixed size. gpui derives an image's aspect ratio from the
 /// decoded bytes, but that lands a frame after layout, so a width alone leaves the element
@@ -687,8 +686,6 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Settings → Keybindings: turn modal editing on or off (VM-1, a local preference like
-    /// the Appearance switches, so every window follows at once).
     fn toggle_vim(&mut self, cx: &mut Context<Self>) {
         let on = !appearance::vim(cx);
         self.status = appearance::set_vim(cx, on, &self.config_dir)
@@ -1256,8 +1253,6 @@ impl SettingsView {
             )
             .child(self.render_search(cx).mt_3());
 
-        // Modal editing is not a shortcut to bind but the mode the shortcut list is read in,
-        // so its switch sits above the list (VM-1, DESIGN.md §4.9).
         let vim = appearance::vim(cx);
         list = list.child(card_top(&th, "Modal editing").mt_4());
         list = list.child(appearance_row(

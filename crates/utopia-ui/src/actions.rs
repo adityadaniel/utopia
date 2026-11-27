@@ -126,8 +126,6 @@ pub const EDITOR_CONTEXT: &str = "BlockEditor";
 /// Added to the editor's context while an autocomplete menu with suggestions is open.
 pub const AUTOCOMPLETE_CONTEXT: &str = "autocomplete";
 pub const INPUT_CONTEXT: &str = "LineInput";
-/// Vim mode (VM-3): one identifier for each state, added beside [`EDITOR_CONTEXT`] while
-/// Vim is on, so a binding can answer in one state and nowhere else.
 pub const VIM_NORMAL_CONTEXT: &str = "VimNormal";
 pub const VIM_INSERT_CONTEXT: &str = "VimInsert";
 pub const VIM_VISUAL_CONTEXT: &str = "VimVisual";
@@ -799,9 +797,6 @@ pub const CATALOG: &[ActionDoc] = &[
         context: TEXT,
         help: "Close the open menu or panel, or leave the block.",
     },
-    // Listed after Escape: for the same keys at the same depth gpui prefers the later
-    // binding, and this one is the narrower context (`BlockEditor && VimInsert`), so Escape
-    // leaves Insert first and only a second one leaves the block (VM-13).
     ActionDoc {
         action: "VimNormalMode",
         label: "Vim: Normal Mode",
@@ -932,8 +927,6 @@ pub const CATALOG: &[ActionDoc] = &[
         action: "ToggleVimMode",
         label: "Vim Mode",
         category: Category::Application,
-        // No default key (VM-1): it is bound only when the user gives it one. A test
-        // asserts every other catalog default resolves to a binding.
         keys: "",
         context: None,
         help: "Turn modal editing on or off (VM-1).",
@@ -1673,8 +1666,6 @@ mod tests {
     #[test]
     fn every_catalog_binding_resolves() {
         for d in CATALOG {
-            // VM-1: the Vim toggle has no default key, so it resolves to nothing until the
-            // user binds it, and `install` skips it without a word.
             if d.keys.is_empty() {
                 continue;
             }

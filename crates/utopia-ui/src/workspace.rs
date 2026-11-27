@@ -414,9 +414,6 @@ impl Workspace {
                     if matches!(e, EditorEvent::Blurred) && editor.read(cx).target().is_none() {
                         window.focus(&this.focus);
                     }
-                    // Task 1F: the mode label is the one thing a Normal-mode keystroke
-                    // changes, and `VimChanged` is the only event that redraws it. Every
-                    // other editor event leaves the window alone (architecture rule 10).
                     if matches!(e, EditorEvent::VimChanged) {
                         cx.notify();
                     }
@@ -490,10 +487,6 @@ impl Workspace {
         {
             // DESIGN.md §3.3: the page menu is transient. An interceptor sees Escape before
             // the keymap, so closing the menu does not also end the block edit behind it.
-            //
-            // The Vim branch lives in this same closure on purpose: gpui calls every
-            // interceptor even after one stops propagation, so a second one would act on
-            // the same Escape (Task 1D.1).
             let handle = window.window_handle();
             let me = cx.entity().downgrade();
             subs.push(cx.intercept_keystrokes(move |ev, window, cx| {
@@ -521,8 +514,6 @@ impl Workspace {
                     return;
                 }
                 let Some(key) = crate::vim::key_from_keystroke(&ev.keystroke) else {
-                    // Tab, Shift-Tab, Cmd chords and Alt chords without a character must
-                    // still reach the keymap.
                     return;
                 };
                 let claimed = me
@@ -532,12 +523,6 @@ impl Workspace {
                         }
                         let editor = this.editor.clone();
                         if editor.read(cx).target().is_some() {
-                            // A block is in edit: Normal or Visual, on this window's focused
-                            // editor, with no input method composition owning the buffer.
-                            // The main column's content is deliberately not tested here:
-                            // one editor serves the sidebar's pages too, and a page stays
-                            // editable there while the main pane shows the graph, the
-                            // tasks view or a PDF (F1).
                             let focused = editor.read(cx).focus_handle(cx).is_focused(window);
                             let state = editor.read(cx).vim().mode;
                             if !focused
@@ -549,10 +534,6 @@ impl Workspace {
                             editor.update(cx, |e, cx| e.vim_key(key, window, cx));
                             return true;
                         }
-                        // Rest: a Normal key wakes the resume point (Task 1D.6). It belongs
-                        // to the main column — only a page there, and only the workspace's
-                        // own handle focused — so a key meant for a palette, a sidebar row
-                        // or the graph never reopens the editor.
                         if !matches!(&this.content, MainContent::Page)
                             || !this.focus.is_focused(window)
                         {
@@ -570,16 +551,10 @@ impl Workspace {
                             None => false,
                         };
                         if !woken {
-                            // The resume point names a block that is no longer there (a
-                            // sync or an assistant tombstoned it, a rename merged it
-                            // away). Drop it and start from the page's first block, so the
-                            // waking key is not eaten and the editor is not stuck (F5).
                             editor.update(cx, |e, _| e.vim_mut().resume = None);
                             view.update(cx, |v, cx| v.focus_first(window, cx));
                         }
                         if editor.read(cx).target().is_none() {
-                            // Nothing could be opened (no page, no block to make): the key
-                            // is not ours to swallow.
                             return false;
                         }
                         editor.update(cx, |e, cx| e.vim_key(key, window, cx));
@@ -1554,9 +1529,6 @@ impl Workspace {
         self.stack.iter().position(|v| v == view)
     }
 
-    /// The page view with this entity id: one of the stack's, or a sidebar pane's. A resume
-    /// point records the view that hosted the edit, and the same editor serves both, so the
-    /// wake-up has to find the view by id rather than assume the main pane (F5).
     fn view_by_id(&self, id: EntityId) -> Option<Entity<PageView>> {
         self.stack
             .iter()
@@ -1657,9 +1629,6 @@ impl Workspace {
         self.set_mode(next, window, cx);
     }
 
-    /// The Vim Mode toggle (VM-1). Modal editing is a local preference, so it goes through
-    /// the same path as the Settings switches and every window follows at once. Settings has
-    /// its own config dir; the main window writes through the one `install` kept.
     fn toggle_vim_mode(&mut self, _: &ToggleVimMode, _: &mut Window, cx: &mut Context<Self>) {
         let on = !crate::appearance::vim(cx);
         let dir = crate::appearance::config_dir(cx);
@@ -1843,8 +1812,6 @@ impl Workspace {
             .collect()
     }
 
-    /// The view of pane `i` in the right sidebar, for tests and for anything that has to
-    /// reach a sidebar page without a pointer (`stack_view` is its main-pane pair).
     pub fn sidebar_view(&self, i: usize) -> Option<Entity<PageView>> {
         self.panes.get(i).map(|p| p.view.clone())
     }
@@ -4507,11 +4474,6 @@ impl Workspace {
         .into_any_element()
     }
 
-    /// Vim's mode (task 1F, VM-3): the mode name in upper case, a space, and the keys the
-    /// parser is still waiting for ("NORMAL", "NORMAL 2d"). Mono `--ink-3`, at the right
-    /// end of the top bar, left of the view-mode control; shown only while Vim is on. It
-    /// redraws on [`EditorEvent::VimChanged`] and nothing else, so no other keystroke
-    /// repaints the window (architecture rule 10).
     fn vim_mode_label(
         &self,
         th: &crate::theme::Theme,
@@ -4538,8 +4500,6 @@ impl Workspace {
         )
     }
 
-    /// A mode's name as the label shows it: Vim's own words, in the upper case a mono
-    /// label uses (§2.2).
     fn mode_name(mode: crate::vim::Mode) -> &'static str {
         match mode {
             crate::vim::Mode::Normal => "NORMAL",

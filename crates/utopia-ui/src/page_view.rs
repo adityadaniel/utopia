@@ -1448,9 +1448,6 @@ impl PageView {
         self.interest = Interest::ThisPage;
     }
 
-    /// Focus the first or last visible block of `page` (`gg` / `G`). `focus_first` is the
-    /// model, but the page is the one the cursor's block is on, not the view's: in the
-    /// Daily Notes feed that is the day, and no other day's row is considered.
     fn focus_edge(
         &mut self,
         page: &PageId,
@@ -1472,8 +1469,6 @@ impl PageView {
         let Some(block) = block else {
             return;
         };
-        // `gg` starts at the block's first grapheme; `G` puts the caret at its end, where
-        // the last line's insertion point is.
         let caret = first.then_some(0);
         self.edit(page.clone(), block, caret, None, window, cx);
     }
@@ -2583,8 +2578,6 @@ impl PageView {
                 );
             }
             EditorEvent::Navigate { up, x, count } => {
-                // Vim's count: the editor walked the wrapped lines inside the block and
-                // hands over what is left as whole blocks.
                 let count = (*count).max(1);
                 if self.is_property_block(&t.block) {
                     let props = self.property_blocks();
@@ -2637,8 +2630,6 @@ impl PageView {
                     return;
                 };
                 if *up && p < count {
-                    // Up past the first body block: whatever is left carries into the
-                    // properties bar, as one step does without a count.
                     let remaining = count - p;
                     let props = self.property_blocks();
                     if let Some(last) = props.get(props.len().saturating_sub(remaining)).cloned() {
@@ -2647,10 +2638,6 @@ impl PageView {
                         self.edit_property_at(last, Some(len), Some(Goal::LastLine(x)), window, cx);
                         return;
                     }
-                    // No properties bar to spend the rest of the count on, so it clamps at
-                    // the first body row, the way a downward count clamps at the last one
-                    // (F8). Before, the bar branch returned unconditionally and `9k` on a
-                    // short page moved nothing at all.
                 }
                 let target = if *up {
                     p.saturating_sub(count)
@@ -2658,7 +2645,6 @@ impl PageView {
                     p.saturating_add(count).min(rows.len().saturating_sub(1))
                 };
                 if target == p {
-                    // Already at the edge: a count never moves past the last block.
                     return;
                 }
                 if let Some(r) = rows.get(target).map(|(_, r)| (*r).clone()) {
@@ -2672,9 +2658,6 @@ impl PageView {
                     self.edit(r.page, r.block, Some(caret), Some(goal), window, cx);
                 }
             }
-            // `gg` / `G`: the first or last visible block of the page the cursor is on.
-            // In the Daily Notes feed that is the day (rows carry their own page), and in a
-            // zoom the rows are already only the zoomed subtree.
             EditorEvent::GoEdge { first } => {
                 self.focus_edge(&t.page, *first, window, cx);
             }
@@ -2798,8 +2781,6 @@ impl PageView {
                     self.edit(t.page.clone(), f, None, None, window, cx);
                 }
             }
-            // `VimChanged` is the mode label's signal, which the workspace draws; nothing
-            // in the page depends on it (1F).
             EditorEvent::Restore(_)
             | EditorEvent::Blurred
             | EditorEvent::Switched { .. }
@@ -2820,9 +2801,6 @@ impl PageView {
     }
 
     /// Put the caret back where an undo/redo says, if that block can be shown here.
-    /// Returns whether the editor ended up on `caret`'s block: a block that is gone
-    /// (deleted, merged, a remote copy that replaced it) leaves it where it was, and the
-    /// caller has to decide what to do instead (F5).
     pub fn restore_caret(
         &mut self,
         caret: &Caret,
@@ -3444,9 +3422,6 @@ impl PageView {
                         let (Ok(i) | Err(i)) = ix;
                         let caret = (prefix + rendered.source_offset(i)).min(end);
                         cx.stop_propagation();
-                        // VM-4 (F2): a click into a rendered row is a block entry, so it
-                        // starts in Normal with nothing pending, even though the editor
-                        // keeps its mode across `begin` for `j`/`k` and `o`/`O`.
                         this.editor.update(cx, |e, cx| e.vim_click_entry(cx));
                         this.edit(
                             r.page.clone(),

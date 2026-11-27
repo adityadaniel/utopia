@@ -1,13 +1,3 @@
-//! Vim mode under the real workspace (docs/vim-mode-plan.md §1G): VM-1 to VM-7, VM-13
-//! and VM-14, plus the seeded random session of rule 11.
-//!
-//! The harness is the one in `tests/workspace.rs`, copied: a real store, a real window and
-//! the real [`Workspace`], with Vim turned on before the window is built the way a launch
-//! reads `settings.json`. Every assertion is on store state, `Store::undo_depth`, the
-//! editor's mode, or its target and cursor. None is on a missing `debug_bounds`: GPUI's
-//! test frames never clear debug bounds, so "it stopped being drawn" is not observable
-//! that way (AGENTS.md).
-
 use chrono::NaiveDate;
 use gpui::{
     px, AppContext as _, Entity, EntityInputHandler as _, Modifiers, TestAppContext,
@@ -29,9 +19,6 @@ fn today() -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()
 }
 
-/// A workspace on an in-memory graph with the Daily Notes feed open. `seed` writes the
-/// graph through the store before the window exists, so the first frame already shows it
-/// (a scripted keystroke would race the UI and read worse in a screenshot).
 fn setup_seeded(
     cx: &mut TestAppContext,
     vim: bool,
@@ -41,8 +28,6 @@ fn setup_seeded(
         cx.set_global(Theme::light());
         install_keymap(cx, None);
         if vim {
-            // VM-1: the preference is `settings.json`'s and is read at launch. The empty
-            // directory keeps it in memory, so a test never writes a real config dir.
             utopia_ui::appearance::set_vim(cx, true, std::path::Path::new("")).unwrap();
         }
     });
@@ -64,12 +49,10 @@ fn setup(
     setup_seeded(cx, vim, |_| {})
 }
 
-/// Today's page as shown: live once written, a draft before that (FR-1.2).
 fn today_page(app: &Entity<AppState>, cx: &mut VisualTestContext) -> PageId {
     app.update(cx, |app, _| app.store.draft_daily(today()).unwrap())
 }
 
-/// Live rows of a page as `(text, depth)`.
 fn rows(app: &Entity<AppState>, page: &PageId, cx: &mut VisualTestContext) -> Vec<(String, usize)> {
     app.update(cx, |app, _| {
         let st = app.store.page_state(page).unwrap();
@@ -96,7 +79,6 @@ fn undo_depth(app: &Entity<AppState>, cx: &mut VisualTestContext) -> usize {
     app.update(cx, |app, _| app.store.undo_depth())
 }
 
-/// Today's page with one root block per entry, written through the store.
 fn seed_roots(store: &mut Store, texts: &[&str]) -> (PageId, Vec<BlockId>) {
     let (page, first) = store.open_daily(today()).unwrap();
     store
@@ -126,8 +108,6 @@ fn seed_roots(store: &mut Store, texts: &[&str]) -> (PageId, Vec<BlockId>) {
     (page, ids)
 }
 
-/// A named page with one root block per entry, written through the store (a sidebar page,
-/// which cannot be the launch view).
 fn seed_page(store: &mut Store, title: &str, texts: &[&str]) -> (PageId, Vec<BlockId>) {
     let page = store.create_page(title).unwrap();
     let mut ids = Vec::new();
@@ -173,14 +153,12 @@ fn field_text(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> String {
     ws.update(cx, |w, cx| w.editor().read(cx).field_text().to_string())
 }
 
-/// The block the caret is in, if the editor is editing one.
 fn target_block(ws: &Entity<Workspace>, cx: &mut VisualTestContext) -> Option<BlockId> {
     ws.update(cx, |w, cx| {
         w.editor().read(cx).target().map(|t| t.block.clone())
     })
 }
 
-/// Where the input method's composition is, in UTF-16 offsets: `Some` while one is live.
 fn marked(
     editor: &Entity<BlockEditor>,
     cx: &mut VisualTestContext,
@@ -188,8 +166,6 @@ fn marked(
     editor.update_in(cx, |e, window, cx| e.marked_text_range(window, cx))
 }
 
-/// VM-2: with Vim off nothing about typing changed — a letter lands in the block and the
-/// caret keys still move it, so the interceptor is not quietly eating keystrokes.
 #[gpui::test]
 fn vm_2_with_vim_off_a_letter_still_types(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup(cx, false);
@@ -207,8 +183,6 @@ fn vm_2_with_vim_off_a_letter_still_types(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-4: a block in edit is in Normal at entry. It is Normal at launch, and it is Normal
-/// again when a click enters it.
 #[gpui::test]
 fn vm_4_a_block_in_edit_starts_in_normal_mode(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -223,12 +197,10 @@ fn vm_4_a_block_in_edit_starts_in_normal_mode(cx: &mut TestAppContext) {
     );
     assert_eq!(mode(&ws, cx), Mode::Normal, "VM-4: at launch");
 
-    // Escape in Normal ends the edit; the row is drawn as text again.
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     assert_eq!(target_block(&ws, cx), None, "the edit ended");
 
-    // `debug_bounds` takes a `&'static str`; leaking one test-built selector is fine.
     let selector: &'static str = Box::leak(format!("text-{}", block.0).into_boxed_str());
     let text = cx
         .debug_bounds(selector)
@@ -239,9 +211,6 @@ fn vm_4_a_block_in_edit_starts_in_normal_mode(cx: &mut TestAppContext) {
     assert_eq!(mode(&ws, cx), Mode::Normal, "VM-4: after a click");
 }
 
-/// VM-5: in Normal no key puts a character in the block. Motions, a count and a
-/// repeat-find are all keys the grammar knows, and none of them writes: the text and the
-/// undo stack are untouched.
 #[gpui::test]
 fn vm_5_normal_mode_types_nothing(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -273,8 +242,6 @@ fn vm_5_normal_mode_types_nothing(cx: &mut TestAppContext) {
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// VM-5: a key the grammar does not know does nothing at all — no text, no cursor move,
-/// no pending count left over, no undo step.
 #[gpui::test]
 fn vm_5_an_unknown_normal_key_does_nothing(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -282,7 +249,6 @@ fn vm_5_an_unknown_normal_key_does_nothing(cx: &mut TestAppContext) {
     });
     let page = today_page(&app, cx);
     let block = live_blocks(&app, &page, cx)[0].clone();
-    // Somewhere not at either end, so a stray motion would show.
     cx.simulate_keystrokes("0 w");
     let before = rows(&app, &page, cx);
     let at = cursor(&ws, cx);
@@ -303,10 +269,6 @@ fn vm_5_an_unknown_normal_key_does_nothing(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-3: `i`, `a`, `I` and `A` each enter Insert, and a letter typed after each lands in
-/// the block at the offset the command chose. Regression: a build moved the caret and
-/// left the mode in Normal, so the letter went to the parser and vanished.
-// The requirement's own name spells the keys, so it is not snake case.
 #[allow(non_snake_case)]
 #[gpui::test]
 fn vm_3_i_a_I_and_A_each_enter_insert_mode(cx: &mut TestAppContext) {
@@ -316,7 +278,6 @@ fn vm_3_i_a_I_and_A_each_enter_insert_mode(cx: &mut TestAppContext) {
     let page = today_page(&app, cx);
 
     for (keys, at) in [("i", 'i'), ("a", 'a'), ("I", 'I'), ("A", 'A')] {
-        // Normal, with the cursor parked at 0 and the block committed.
         cx.simulate_keystrokes("escape 0");
         cx.run_until_parked();
         assert_eq!(mode(&ws, cx), Mode::Normal, "{keys}: start from Normal");
@@ -339,7 +300,6 @@ fn vm_3_i_a_I_and_A_each_enter_insert_mode(cx: &mut TestAppContext) {
         );
         assert_eq!(cursor(&ws, cx), expect, "`{keys}` puts the caret here");
 
-        // The letter must land in the block, at the caret the command left.
         cx.simulate_input("X");
         cx.run_until_parked();
         let mut want = before.clone();
@@ -358,9 +318,6 @@ fn vm_3_i_a_I_and_A_each_enter_insert_mode(cx: &mut TestAppContext) {
     }
 }
 
-/// VM-6: charwise motions stay inside the block that owns the caret. `w` at the end of the
-/// block rests on the last character; it neither leaves the block nor moves the caret past
-/// the text the Normal cursor may sit on.
 #[gpui::test]
 fn vm_6_w_at_the_end_of_a_block_stays_in_the_block(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -401,8 +358,6 @@ fn vm_6_w_at_the_end_of_a_block_stays_in_the_block(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-7: `j` runs out of wrapped lines and crosses into the next block, and `k` comes
-/// back. The mode comes with it, so the next key is still a Normal key.
 #[gpui::test]
 fn vm_7_j_crosses_into_the_next_block(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -438,9 +393,6 @@ fn vm_7_j_crosses_into_the_next_block(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-13: Escape is a ladder. The first rung leaves Insert for Normal on the same block,
-/// the second ends the edit and remembers where the caret rested, and a Normal key then
-/// wakes the cursor at that offset. Waking is not an edit, so the undo stack is unchanged.
 #[gpui::test]
 fn vm_13_escape_ladder_ends_at_rest_and_a_key_wakes_it(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -449,7 +401,6 @@ fn vm_13_escape_ladder_ends_at_rest_and_a_key_wakes_it(cx: &mut TestAppContext) 
     let page = today_page(&app, cx);
     let block = live_blocks(&app, &page, cx)[0].clone();
 
-    // Rung one: out of Insert, the block committed, the caret on the same row.
     cx.simulate_keystrokes("A");
     cx.simulate_input(" gamma");
     cx.simulate_keystrokes("escape");
@@ -466,13 +417,10 @@ fn vm_13_escape_ladder_ends_at_rest_and_a_key_wakes_it(cx: &mut TestAppContext) 
         "and keeps the block"
     );
 
-    // Park the caret mid-block, where the wake must bring it back to.
     cx.simulate_keystrokes("0 w");
     let resume_at = cursor(&ws, cx);
     assert_eq!(resume_at, 6, "on `beta`, not at an end");
 
-    // Rung two: out of the edit, at rest, with the place remembered — including the view
-    // that hosted it, because the same editor serves the sidebar's pages (F5).
     let host = ws.update(cx, |w, cx| {
         w.editor()
             .read(cx)
@@ -504,8 +452,6 @@ fn vm_13_escape_ladder_ends_at_rest_and_a_key_wakes_it(cx: &mut TestAppContext) 
     let depth = undo_depth(&app, cx);
     let before = rows(&app, &page, cx);
 
-    // A Normal key wakes the cursor where it was. `@` is unknown to the grammar, so it
-    // moves nothing and the offset it woke at is still there to read.
     cx.simulate_keystrokes("@");
     cx.run_until_parked();
     assert_eq!(
@@ -523,8 +469,6 @@ fn vm_13_escape_ladder_ends_at_rest_and_a_key_wakes_it(cx: &mut TestAppContext) 
     assert_eq!(undo_depth(&app, cx), depth, "and leaves no undo step");
 }
 
-/// VM-1: Vim owns characters, not the whole keyboard. Tab still indents and a Cmd chord
-/// still reaches the keymap while a block is in Normal mode.
 #[gpui::test]
 fn vm_1_tab_and_cmd_chords_still_reach_the_keymap(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -555,8 +499,6 @@ fn vm_1_tab_and_cmd_chords_still_reach_the_keymap(cx: &mut TestAppContext) {
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// VM-14: in Insert the input method behaves as it does with Vim off (§13.5). Escape with
-/// a live composition neither leaves Insert nor commits the provisional glyphs.
 #[gpui::test]
 fn vm_14_marked_text_in_insert_survives_escape(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -594,9 +536,6 @@ fn vm_14_marked_text_in_insert_survives_escape(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-14: Normal takes no marked text. Offering a composition neither changes the buffer
-/// nor starts one, so the composition flag stays off and the platform has nothing to
-/// update.
 #[gpui::test]
 fn vm_14_normal_takes_no_marked_text(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -623,8 +562,6 @@ fn vm_14_normal_takes_no_marked_text(cx: &mut TestAppContext) {
     assert_eq!(rows(&app, &page, cx)[0].0, "ab");
 }
 
-/// VM-14: committed text that arrives in Normal is a key. It goes to the parser — `3` is a
-/// count there — and never into the block.
 #[gpui::test]
 fn vm_14_committed_text_in_normal_reaches_the_parser_not_the_block(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -649,9 +586,6 @@ fn vm_14_committed_text_in_normal_reaches_the_parser_not_the_block(cx: &mut Test
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// VM-14 (§13.5): the caret and the buffer belong to the input method while it composes.
-/// A click cannot move the caret under it, and the characters it composed are what the
-/// commit persists.
 #[gpui::test]
 fn vm_14_a_click_during_a_composition_keeps_the_composed_characters(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -667,7 +601,6 @@ fn vm_14_a_click_during_a_composition_keeps_the_composed_characters(cx: &mut Tes
     assert_eq!(field_text(&ws, cx), "abにほ");
     assert_eq!(cursor(&ws, cx), 8, "the caret is after the composed glyphs");
 
-    // A click at the left edge, which would put the caret at offset 0 if it were ours.
     let bounds = cx.debug_bounds("block-editor").expect("the editor");
     let mut at = bounds.origin;
     at.x += px(2.);
@@ -685,7 +618,6 @@ fn vm_14_a_click_during_a_composition_keeps_the_composed_characters(cx: &mut Tes
     assert_eq!(mode(&ws, cx), Mode::Insert);
     assert_eq!(rows(&app, &page, cx)[0].0, "ab", "nothing provisional");
 
-    // The input method commits; the characters survive the click.
     editor.update_in(cx, |e, window, cx| {
         e.replace_text_in_range(None, "にほ", window, cx)
     });
@@ -697,10 +629,6 @@ fn vm_14_a_click_during_a_composition_keeps_the_composed_characters(cx: &mut Tes
     );
 }
 
-/// VM-4 (F1): one editor serves the sidebar's pages, and a sidebar page stays editable
-/// while the main column shows something else. Normal keys must be intercepted there too:
-/// before, the main-content test ran first, so `enter` split the block and `backspace`
-/// edited text in a block that was in Normal mode.
 #[gpui::test]
 fn f1_normal_keys_reach_a_sidebar_block_while_the_main_pane_shows_the_graph(
     cx: &mut TestAppContext,
@@ -715,8 +643,6 @@ fn f1_normal_keys_reach_a_sidebar_block_while_the_main_pane_shows_the_graph(
         w.open(page.clone(), None, None, true, window, cx)
     });
     cx.run_until_parked();
-    // The main column leaves the page for the graph, which is the state the gate got
-    // wrong (F1).
     cx.simulate_keystrokes("cmd-shift-g");
     cx.run_until_parked();
 
@@ -733,8 +659,6 @@ fn f1_normal_keys_reach_a_sidebar_block_while_the_main_pane_shows_the_graph(
     assert_eq!(mode(&ws, cx), Mode::Normal);
     let before = rows(&app, &page, cx);
 
-    // Both are ordinary keymap keys and neither is in the Normal grammar, so in Normal
-    // they must do nothing at all.
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(
@@ -752,9 +676,6 @@ fn f1_normal_keys_reach_a_sidebar_block_while_the_main_pane_shows_the_graph(
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// VM-4 (F2): both rendered rows share one focus handle, so no focus-loss reset fires
-/// between them. A click into a different rendered block enters Normal; before, the mode
-/// stayed Insert and the next key typed a character into the block it landed on.
 #[gpui::test]
 fn f2_a_click_into_another_block_enters_normal_mode(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -770,7 +691,6 @@ fn f2_a_click_into_another_block_enters_normal_mode(cx: &mut TestAppContext) {
         "typing at the end of block one"
     );
 
-    // The second row is drawn as text, so its rendered bounds are there to click.
     let selector: &'static str = Box::leak(format!("text-{}", ids[1].0).into_boxed_str());
     let text = cx.debug_bounds(selector).expect("the second row");
     cx.simulate_click(text.center(), Modifiers::default());
@@ -786,7 +706,6 @@ fn f2_a_click_into_another_block_enters_normal_mode(cx: &mut TestAppContext) {
         "a click is a block entry, so it enters Normal (F2)"
     );
 
-    // A letter in Normal is a key the grammar does not know: it types nothing.
     cx.simulate_input("Q");
     cx.run_until_parked();
     assert_eq!(
@@ -796,8 +715,6 @@ fn f2_a_click_into_another_block_enters_normal_mode(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-3 (F3): the menu is Insert's. Escape closes it as it leaves Insert, so the
-/// `autocomplete` key context goes too and Tab indents instead of accepting a suggestion.
 #[gpui::test]
 fn f3_escape_from_insert_closes_the_autocomplete_menu(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -833,12 +750,8 @@ fn f3_escape_from_insert_closes_the_autocomplete_menu(cx: &mut TestAppContext) {
         "no menu captures keys in Normal (F3)"
     );
 
-    // Tab is the indent key again, not `AcceptCompletion`: the text still says what was
-    // typed, and no `[[Alphabet]]` link was written over the query.
     cx.simulate_keystrokes("tab");
     cx.run_until_parked();
-    // The commit normalises the half-typed link to `[[Al]]`; accepting the suggestion
-    // would have written `[[Alphabet]]` over the query instead.
     assert_eq!(
         rows(&app, &page, cx)[0].0,
         "[[Al]]",
@@ -846,15 +759,12 @@ fn f3_escape_from_insert_closes_the_autocomplete_menu(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-3 (F3, plan §5): entering Insert where the caret sits inside a trigger opens the
-/// menu, so `i` inside `[[Alp` offers the pages the text already asked for.
 #[gpui::test]
 fn f3_entering_insert_inside_a_trigger_opens_the_menu(cx: &mut TestAppContext) {
     let (_app, ws, cx) = setup_seeded(cx, true, |s| {
         seed_roots(s, &["[[Alp]]"]);
         s.create_page("Alphabet").unwrap();
     });
-    // Normal, with the caret after `Alp`, where the trigger already covers the text.
     cx.simulate_keystrokes("0 5 l");
     cx.run_until_parked();
     assert_eq!(cursor(&ws, cx), 5);
@@ -878,9 +788,6 @@ fn f3_entering_insert_inside_a_trigger_opens_the_menu(cx: &mut TestAppContext) {
     assert_eq!(menu.start, 0);
 }
 
-/// 1E.3 (F4): `G` enters the last block at its end, so the caret has to be clamped to the
-/// block cursor's resting place before a command acts on it. `i` then inserts on the
-/// block's last character, not after it.
 #[gpui::test]
 fn f4_g_enters_the_last_block_on_its_last_character(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -908,8 +815,6 @@ fn f4_g_enters_the_last_block_on_its_last_character(cx: &mut TestAppContext) {
     );
 }
 
-/// 1E.3 (F4): a click puts the caret in the block, so in Normal it lands on a grapheme and
-/// never past the last one of its line — a click to the right of the text included.
 #[gpui::test]
 fn f4_a_click_past_the_end_of_the_line_rests_on_its_last_character(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -936,9 +841,6 @@ fn f4_a_click_past_the_end_of_the_line_rests_on_its_last_character(cx: &mut Test
     assert_eq!(rows(&app, &page, cx)[0].0, "aXb");
 }
 
-/// 1E.3 (F4): `j` lands on an insertion point one wrapped line down. When that line is
-/// shorter than the caret's column, Normal's cursor steps back onto its last grapheme
-/// instead of resting after it.
 #[gpui::test]
 fn f4_a_vertical_move_rests_on_the_shorter_line(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -947,7 +849,6 @@ fn f4_a_vertical_move_rests_on_the_shorter_line(cx: &mut TestAppContext) {
     let page = today_page(&app, cx);
     assert_eq!(field_text(&ws, cx), "abcd\nx");
 
-    // `d` on the first line, then down a line: the caret's column is past the `x`.
     cx.simulate_keystrokes("0 3 l j");
     cx.run_until_parked();
     assert_eq!(
@@ -962,9 +863,6 @@ fn f4_a_vertical_move_rests_on_the_shorter_line(cx: &mut TestAppContext) {
     assert_eq!(rows(&app, &page, cx)[0].0, "abcd\nXx");
 }
 
-/// 1E.3 (F4): a click on a rendered row goes through block entry with the caret its text
-/// laid out, which at the right edge is one past the last character. Normal's cursor
-/// rests on a grapheme, so entry clamps it.
 #[gpui::test]
 fn f4_a_row_click_past_the_end_of_the_line_rests_on_its_last_character(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -972,13 +870,10 @@ fn f4_a_row_click_past_the_end_of_the_line_rests_on_its_last_character(cx: &mut 
     });
     let page = today_page(&app, cx);
     let ids = live_blocks(&app, &page, cx);
-    // At rest: the click opens the block from nothing, so no earlier edit is committed and
-    // the position it places is only ever seen by block entry.
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
     assert_eq!(target_block(&ws, cx), None);
 
-    // The second row is drawn as text: a click past its last character still lands in it.
     let selector: &'static str = Box::leak(format!("text-{}", ids[1].0).into_boxed_str());
     let text = cx.debug_bounds(selector).expect("the second row");
     let mut at = text.origin;
@@ -999,10 +894,6 @@ fn f4_a_row_click_past_the_end_of_the_line_rests_on_its_last_character(cx: &mut 
     assert_eq!(rows(&app, &page, cx)[1].0, "twXo");
 }
 
-/// 1E.3 (F4): `k` into the block above resolves its `Goal::LastLine` at the next paint,
-/// which aims for the column the caret came from. When the line it lands on is shorter,
-/// the position it resolves is one past the line's end; Normal's cursor steps back onto
-/// its last grapheme.
 #[gpui::test]
 fn f4_a_goal_resolved_at_paint_rests_on_a_short_last_line(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1011,7 +902,6 @@ fn f4_a_goal_resolved_at_paint_rests_on_a_short_last_line(cx: &mut TestAppContex
     let page = today_page(&app, cx);
     let ids = live_blocks(&app, &page, cx);
 
-    // The second block, at its last character: `k` then aims for that column above.
     cx.simulate_keystrokes("G");
     cx.run_until_parked();
     assert_eq!(target_block(&ws, cx), Some(ids[1].clone()));
@@ -1032,9 +922,6 @@ fn f4_a_goal_resolved_at_paint_rests_on_a_short_last_line(cx: &mut TestAppContex
     assert_eq!(rows(&app, &page, cx)[0].0, "abcd\nXx");
 }
 
-/// VM-7 (F8): an upward count larger than the rows above clamps at the first body block
-/// when there is no properties bar to spend the rest of it on. Before, it returned from
-/// the bar branch and nothing moved, while `9j` clamped at the other edge.
 #[gpui::test]
 fn f8_an_upward_count_past_the_first_block_stops_at_it(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1055,9 +942,6 @@ fn f8_an_upward_count_past_the_first_block_stops_at_it(cx: &mut TestAppContext) 
     );
 }
 
-/// VM-13 (F5): a resume point whose block is gone (a sync or an assistant tombstoned it)
-/// is dropped and the waking key falls back to the page's first block. Before, the key
-/// was eaten and no block entered edit, so the editor was stuck at rest.
 #[gpui::test]
 fn f5_a_dead_resume_point_wakes_the_first_block(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1066,7 +950,6 @@ fn f5_a_dead_resume_point_wakes_the_first_block(cx: &mut TestAppContext) {
     let page = today_page(&app, cx);
     let ids = live_blocks(&app, &page, cx);
 
-    // Rest on the second block, with its place remembered, then lose it to a remote write.
     cx.simulate_keystrokes("j escape escape");
     cx.run_until_parked();
     assert_eq!(target_block(&ws, cx), None, "at rest");
@@ -1103,8 +986,6 @@ fn f5_a_dead_resume_point_wakes_the_first_block(cx: &mut TestAppContext) {
     );
 }
 
-/// A deterministic xorshift64, so the random session is the same on every run and a
-/// failure can be reproduced key for key.
 struct Rng(u64);
 
 impl Rng {
@@ -1122,18 +1003,12 @@ impl Rng {
     }
 }
 
-/// The key pool for the random session. Each entry is a keystroke `simulate_keystrokes`
-/// parses. The mix is deliberate: the four insert entries are a ninth of the pool, so most
-/// keys are Normal-mode motions that write nothing and the session pushes far fewer undo
-/// groups than the stack's 1,000-group cap — a full undo must still reach the start.
 const KEYS: &[&str] = &[
-    // Entering Insert and leaving it.
     "i",
     "a",
     "A",
     "o",
     "escape",
-    // Motions, operators and prefixes: keys that write nothing.
     "h",
     "j",
     "k",
@@ -1156,10 +1031,6 @@ const KEYS: &[&str] = &[
     ".",
     ";",
     ",",
-    // Commands that write through the store, and counts to drive them. `u` is left out on
-    // purpose: an undo inside the session drops the redo groups, so the seeded graph would
-    // no longer be a state this history can reach and "undo back to the start" would stop
-    // meaning anything.
     "x",
     "X",
     "D",
@@ -1170,7 +1041,6 @@ const KEYS: &[&str] = &[
     "2",
     "5",
     "9",
-    // Named keys: caret moves, block splits and merges, the indent that reaches the keymap.
     "enter",
     "backspace",
     "left",
@@ -1179,7 +1049,6 @@ const KEYS: &[&str] = &[
     "down",
     "tab",
     "space",
-    // Ordinary letters: the case a Normal key must never type.
     "z",
     "q",
     "m",
@@ -1188,14 +1057,10 @@ const KEYS: &[&str] = &[
     "n",
 ];
 
-/// Rules 2, 5 and 11: a few thousand random keys against a small graph. Nothing panics,
-/// the projections still agree with the CRDT (`doctor`), and undoing everything brings the
-/// starting text back — the session lost no character it could not put back.
 #[gpui::test]
 fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup_seeded(cx, true, |s| {
         let (page, ids) = seed_roots(s, &["alpha beta gamma", "a [[Link]] and a #tag"]);
-        // One block with a child, so the session has a tree to walk into.
         let child = BlockId::new();
         s.execute(
             &page,
@@ -1215,7 +1080,6 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
     let depth0 = undo_depth(&app, cx);
     assert_eq!(start.len(), 3, "the start is the seeded graph: {start:?}");
 
-    // 3,000 keys from a fixed seed.
     let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
     let mut keys: Vec<&str> = Vec::with_capacity(3000);
     let mut digits = 0;
@@ -1225,8 +1089,6 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
         if digit {
             digits += 1;
             if digits > 2 {
-                // Two digits are a count of at most 99. Three would let a counted `u`
-                // run for thousands of undos; long counts are not this test's subject.
                 key = "h";
                 digits = 0;
             }
@@ -1235,12 +1097,10 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
         }
         keys.push(key);
     }
-    // Batches of 100: one paint per batch, not one per key.
     for batch in keys.chunks(100) {
         cx.simulate_keystrokes(&batch.join(" "));
     }
     cx.run_until_parked();
-    // Leave whatever mode the session ended in, so the pending text is committed.
     cx.simulate_keystrokes("escape escape");
     cx.run_until_parked();
 
@@ -1254,8 +1114,6 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
         "the session wrote something, or this test proves nothing"
     );
 
-    // Undo back to the start. It is reached part-way through the stack: the seeded graph
-    // is where the session began, not the empty graph the day was made from.
     let mut restored = false;
     for _ in 0..1000 {
         if rows(&app, &page, cx) == start {

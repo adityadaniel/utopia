@@ -1519,8 +1519,6 @@ mod appearance {
         }
     }
 
-    /// VM-1: Vim mode is off unless the user turns it on, and the Keybindings switch writes
-    /// that into `settings.json` so it survives a restart.
     #[gpui::test]
     fn vm_1_vim_mode_is_opt_in_and_the_switch_is_saved(cx: &mut TestAppContext) {
         let dir = tempfile::tempdir().unwrap();

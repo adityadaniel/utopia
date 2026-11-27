@@ -396,9 +396,6 @@ impl TextField {
 }
 
 /// Implemented by entities that own a [`TextField`].
-/// How the caret is drawn: the Insert bar or Vim Normal's block cursor (task 1E.1,
-/// DESIGN.md §3.1 "Editing, Vim Normal"). The block shape is steady — blinking belongs
-/// to the bar — and a host that answers [`CaretShape::Block`] is not painted a bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaretShape {
     Bar,
@@ -420,23 +417,14 @@ pub trait FieldHost: EntityInputHandler + 'static {
         true
     }
 
-    /// Whether the host takes marked text from the input method this frame. A modal host
-    /// answers `false` outside its insert mode (VM-14); `LineInput` keeps the default.
     fn accepts_marked_text(&self, _cx: &App) -> bool {
         true
     }
 
-    /// The shape the caret is drawn in (task 1E.1). A modal host answers
-    /// [`CaretShape::Block`] in its command mode, where the cursor sits *on* a grapheme;
-    /// `LineInput` keeps the default.
     fn caret_shape(&self, _cx: &App) -> CaretShape {
         CaretShape::Bar
     }
 
-    /// Put the cursor where this host's caret rests, after a position was resolved for it
-    /// at paint time (a [`Goal`]). A modal host keeps Vim's Normal cursor on a grapheme and
-    /// never past the last one of its line (1E.3); the default keeps the insertion point
-    /// it was given.
     fn clamp_cursor(&mut self, _cx: &App) {}
 }
 
@@ -624,8 +612,6 @@ macro_rules! impl_field_input_handler {
                 window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) {
-                // VM-14: a modal host in Normal takes no marked text, and neither the
-                // buffer nor `composition` may change when it refuses.
                 if !$crate::field::FieldHost::accepts_marked_text(self, cx) {
                     return;
                 }
@@ -718,18 +704,10 @@ impl<V: FieldHost> FieldElement<V> {
 
 pub struct Paint {
     selection: Vec<PaintQuad>,
-    /// The block cursor (task 1E.2). Painted with the selection quads, before the text,
-    /// so the character under it stays readable.
     block: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
 }
 
-/// The block cursor's quad: the grapheme the cursor rests on, up to the next one **on the
-/// same visual line** (task 1E.2). Where there is no next cell to fill — an empty block,
-/// a line break, a grapheme that wraps to the next line — [`VIM_CURSOR_MIN_WIDTH`] keeps
-/// it visible. `--selection` is the fill text must stay readable on, so no new colour is
-/// needed (DESIGN.md §3.1); the 1 px `--link` outline is what makes it read as a cursor
-/// over a selection.
 fn block_cursor(
     at: Point<Pixels>,
     f: &TextField,
@@ -809,9 +787,6 @@ impl<V: FieldHost> Element for FieldElement<V> {
                 (had_goal && f.goal.is_none(), had_goal)
             };
             if resolved {
-                // The goal landed on a line that is laid out now. A block in Vim's Normal
-                // rests on a grapheme, never past the last one of its line, so a goal
-                // resolved past a short line's end steps back onto it (1E.3, F4).
                 v.clamp_cursor(cx);
             }
             if had_goal && resolved {
@@ -893,10 +868,6 @@ impl<V: FieldHost> Element for FieldElement<V> {
                 }
             }
         }
-        // Vim Normal's cursor (tasks 1E.1, 1E.2): one quad over the grapheme, in place of
-        // the bar. It is steady — no `caret_visible` check — and it goes with the selection
-        // so the text is drawn over it. An empty block draws its hint instead of its text,
-        // so `caret` is the hint's first cell and the minimum width takes over.
         let shape = self.view.read(cx).caret_shape(cx);
         let block = match shape {
             CaretShape::Block => caret.map(|at| block_cursor(at, f, pos, lh, &th)),

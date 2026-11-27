@@ -1,6 +1,6 @@
 # Comment ratchet: comment lines each file may still hold (docs/adr/0001-no-code-comments.md).
 # A count may only go down. Regenerate with `cargo run -p xtask -- comments --update`.
-# total 10693
+# total 10692
 34 crates/utopia-api/src/access.rs
 25 crates/utopia-api/src/client.rs
 301 crates/utopia-api/src/lib.rs
@@ -99,7 +99,7 @@
 1 crates/utopia-ui/src/lib.rs
 50 crates/utopia-ui/src/line_input.rs
 3 crates/utopia-ui/src/motion.rs
-749 crates/utopia-ui/src/page_view.rs
+748 crates/utopia-ui/src/page_view.rs
 102 crates/utopia-ui/src/pane_stack.rs
 27 crates/utopia-ui/src/pdf.rs
 49 crates/utopia-ui/src/pdf_view.rs

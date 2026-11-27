@@ -1,8 +1,8 @@
 # Vim mode: Rest, Normal, Pending, Insert, Visual
 
 The mode machine of Vim mode (PRD §9.1.1, requirements VM-1 to VM-14). This file is the
-specification, from `docs/vim-mode-proposal.md` §2. The code does not exist yet: PR 1 to
-PR 5 of `docs/vim-mode-plan.md` build it.
+specification, from `docs/vim-mode-proposal.md` §2. PR 1 to PR 5 of `docs/vim-mode-plan.md`
+build it, and `docs/adr/0013-vim-mode.md` records the implementation choices.
 
 The machine sits on top of the block editor session (`block-editor-session.md`). Two existing
 machines nest inside it and do not change: the autocomplete menu

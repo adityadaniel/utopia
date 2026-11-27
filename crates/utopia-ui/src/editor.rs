@@ -41,14 +41,12 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
-    /// Up/Down ran out of block. `x` is the column to keep, in window coordinates, and
-    /// `count` is how many blocks are left to move in that direction (Vim's count).
+    /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
     Navigate {
         up: bool,
         x: Option<Pixels>,
         count: usize,
     },
-    /// `gg` / `G`: focus the first or last visible block of the cursor's page.
     GoEdge {
         first: bool,
     },
@@ -79,9 +77,6 @@ pub enum EditorEvent {
         from: BlockId,
     },
     Blurred,
-    /// The Vim mode or its pending keys changed (VM-3). Carries nothing: it is the signal
-    /// to redraw the mode label, and nothing else subscribes to it, so a Vim keystroke
-    /// does not re-render the window (rule 10).
     VimChanged,
 }
 
@@ -394,9 +389,6 @@ pub struct BlockEditor {
     focus: FocusHandle,
     session: EditorSession,
     ac: Autocomplete,
-    /// Vim mode (VM-3). It sits beside the session, not inside it, because it must survive
-    /// `begin`: that builds a fresh session for every block and `j`/`k` cross blocks
-    /// through it, so a mode reset there could never carry a count into the next block.
     vim: crate::vim::VimState,
     blink: Blink,
     /// The block, text length and selection the caret was last drawn for: a change in any
@@ -420,8 +412,6 @@ impl BlockEditor {
         self.field.composing()
     }
 
-    /// The Vim state (VM-3). Read by the workspace's interceptor and the mode label; the
-    /// editor is the only thing that writes it.
     pub fn vim(&self) -> &crate::vim::VimState {
         &self.vim
     }
@@ -448,13 +438,9 @@ impl FieldHost for BlockEditor {
         self.blink.visible()
     }
     fn accepts_marked_text(&self, cx: &gpui::App) -> bool {
-        // VM-14: Normal takes no marked text. Insert is today's editor, unchanged.
         !crate::appearance::vim(cx) || self.vim.mode == crate::vim::Mode::Insert
     }
     fn caret_shape(&self, cx: &gpui::App) -> crate::field::CaretShape {
-        // Task 1E.1, DESIGN.md §3.1 "Editing, Vim Normal": a block cursor in Normal and
-        // Visual, the bar everywhere else. The shape is steady; `sync_blink` stops the
-        // blink with it, so a command-mode block never flickers.
         let modal = crate::appearance::vim(cx)
             && matches!(
                 self.vim.mode,
@@ -467,8 +453,6 @@ impl FieldHost for BlockEditor {
         }
     }
     fn clamp_cursor(&mut self, cx: &gpui::App) {
-        // A goal resolved at paint lands on an insertion point; Normal's cursor rests on a
-        // grapheme (1E.3, F4).
         self.clamp_normal_cursor(cx);
     }
 }
@@ -516,8 +500,6 @@ impl BlockEditor {
     /// path that moves the caret can forget to show it.
     fn sync_blink(&mut self, cx: &mut Context<Self>) {
         let target = self.target().map(|t| t.block.clone());
-        // A block cursor is steady (task 1E.2): Normal and Visual never blink, so the
-        // timer is not even started there. Entering Insert starts it again.
         if target.is_none() || self.caret_shape(cx) == crate::field::CaretShape::Block {
             self.blink.disable();
             return;
@@ -630,18 +612,12 @@ impl BlockEditor {
             self.field.set_text(&text, caret.unwrap_or(text.len()));
             self.session = EditorSession::Editing(Editing::new(target));
             self.ac = Autocomplete::Closed;
-            // `self.vim` is deliberately left alone: entering a block is Normal mode, and
-            // the mode (with its pending count) is what `j`/`k` carry into the next block.
         } else if let Some(c) = caret {
             self.field.reset_caret_motion();
             self.field.move_to(c);
         }
         // Up/Down from the neighbouring block lands under the caret's x once laid out.
         self.field.goal = goal;
-        // Block entry is Normal until a command says otherwise (VM-4), so the caret it
-        // lands on is the block cursor's: on a grapheme, never past the last one of its
-        // line (1E.3, F4). `j`/`k`, `G` and a click all come through here; Insert is
-        // untouched because the shape is the bar.
         self.clamp_normal_cursor(cx);
         window.focus(&self.focus);
         cx.notify();
@@ -663,8 +639,6 @@ impl BlockEditor {
         // it belongs to (machine issue 4).
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
-        // The edit is over, so the next one starts in Normal with nothing pending (VM-4,
-        // VM-13). `begin` deliberately does not do this: see `vim`.
         self.vim.reset();
         if was_editing {
             cx.emit(EditorEvent::Blurred);
@@ -704,12 +678,6 @@ impl BlockEditor {
         self.clamp_normal_cursor(cx);
     }
 
-    /// Put the cursor where Vim's rests (task 1E.3): on a grapheme, never after the last
-    /// one of its line. An empty block keeps it at 0. Every path that can land the caret
-    /// anywhere calls this — a store change, an insert, an attachment, a plugin's rewrite,
-    /// block entry, a click, a goal resolved at paint — because each of them is written
-    /// without a line in mind. In Insert the shape is the bar, so there is nothing to
-    /// clamp and the caret may sit past the last character.
     pub(crate) fn clamp_normal_cursor(&mut self, cx: &gpui::App) {
         if self.caret_shape(cx) != crate::field::CaretShape::Block {
             return;
@@ -809,7 +777,6 @@ impl BlockEditor {
         if let Some(text) = insert {
             self.insert_text(&text, window, cx);
         }
-        // A plugin may have rewritten the block under a Normal-mode cursor (task 1E.3).
         self.clamp_normal_cursor(cx);
         cx.notify();
     }
@@ -823,8 +790,6 @@ impl BlockEditor {
         let start = sel.start.min(sel.end);
         self.field.replace(sel, text);
         self.field.move_to(start + text.len());
-        // The caret lands after the text just written, which in Normal mode is not a
-        // place it may rest (task 1E.3).
         self.clamp_normal_cursor(cx);
         self.after_edit(window, cx);
         cx.notify();
@@ -832,9 +797,7 @@ impl BlockEditor {
     }
 
     /// Copy files into the graph's blob store and insert their markup at the caret
-    /// (P2 attachments). Returns whether anything was inserted. A drop and the slash
-    /// command both land here, and both leave the caret through [`Self::insert_text`],
-    /// which puts a Normal-mode cursor back on a grapheme (task 1E.3).
+    /// (P2 attachments). Returns whether anything was inserted.
     pub fn attach_paths(
         &mut self,
         paths: &[std::path::PathBuf],
@@ -854,9 +817,6 @@ impl BlockEditor {
         !markup.is_empty() && self.insert_text(&markup.join(" "), window, cx)
     }
 
-    /// Committed typing outside Insert goes to the Vim parser and never touches the
-    /// buffer (VM-5); otherwise this is `typed_bracket`, unchanged.
-    ///
     /// Brackets typed at the caret (§13.5). Over a selection, `(`, `[` or `{` surrounds it
     /// and keeps it selected, so `[` twice turns `word` into `[[word]]` (Roam's link
     /// idiom). With no selection they pair (`(|)`) and a typed closer steps over the one
@@ -988,9 +948,6 @@ impl BlockEditor {
             self.accept_composition(cx);
         }
         self.commit_block(true, cx);
-        // VM-13: the keyboard went somewhere else, so the Insert run ends here — it is one
-        // undo step from `i` to this point — but the mode is not cleared wholesale: Normal
-        // stays Normal, so a half-typed `2d` is not silently dropped under the user.
         self.vim.leave_insert();
         // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
         // above may also have rewritten the text it was offering completions for (an
@@ -1092,8 +1049,6 @@ impl BlockEditor {
     /// complete at every letter, so committing on idle made a page for each pause
     /// (`#Apple` → "A", "Ap", "App", …). The idle commit waits until the caret leaves it.
     fn typing_link(&self, cx: &gpui::App) -> bool {
-        // Insert only: in Normal a caret can pass through `[[Alp` while moving, and the
-        // idle commit must not be held by a link being typed in some other mode.
         if crate::appearance::vim(cx) && self.vim.mode != crate::vim::Mode::Insert {
             return false;
         }
@@ -1226,8 +1181,6 @@ impl BlockEditor {
     }
 
     pub(crate) fn refresh_autocomplete(&mut self, cx: &mut Context<Self>) {
-        // The inline menu is Insert-only (VM-3): a motion in Normal must not open one over
-        // text the user is only travelling through.
         if crate::appearance::vim(cx) && self.vim.mode != crate::vim::Mode::Insert {
             self.ac = Autocomplete::Closed;
             return;
@@ -2247,23 +2200,12 @@ impl BlockEditor {
         self.end(cx);
     }
 
-    /// Escape in Vim's Insert mode (VM-13): the first rung of the ladder. The block commits
-    /// and the editor stays on it in Normal, with the cursor one grapheme left so it rests
-    /// on the character just typed, as Vim's does. A second Escape is the plain `Escape`
-    /// above, which no longer matches this narrower context and so ends the edit.
     fn vim_normal_mode(&mut self, _: &VimNormalMode, _: &mut Window, cx: &mut Context<Self>) {
         if self.field.composing() {
-            // §13.5: the buffer holds the input method's provisional glyphs. Committing or
-            // moving the caret now would run through text the store has never seen; the
-            // composition ends first and Escape is pressed again.
             return;
         }
         self.commit(cx);
         self.vim.leave_insert();
-        // The menu is Insert's, and Normal mode must not keep one open: Escape closes it
-        // here rather than waiting for a call to `refresh_autocomplete` that may never
-        // come, so the `autocomplete` key context goes with it and Tab indents again
-        // instead of accepting a suggestion (VM-3, F3).
         self.ac = Autocomplete::Closed;
         let to = {
             let text = &self.field.text;
@@ -2320,8 +2262,6 @@ impl BlockEditor {
             return;
         }
         let ix = self.field.index_at(e.position);
-        // VM-4: a click is an entry into the block, and a block in edit is in Normal mode,
-        // so a click out of Insert closes the Insert run the way Escape does.
         if crate::appearance::vim(cx) {
             self.vim.leave_insert();
         }
@@ -2333,10 +2273,6 @@ impl BlockEditor {
             self.field.select_to(ix);
         } else {
             self.field.move_to(ix);
-            // A click is a block entry, and a block in edit is in Normal (VM-4): the
-            // position it lands on is the block cursor's, on a grapheme and never past the
-            // last one of its line (1E.3, F4). A click that selects a range (double,
-            // Shift) keeps the insertion point it placed.
             self.clamp_normal_cursor(cx);
         }
         self.field.reset_caret_motion();
@@ -2498,8 +2434,6 @@ impl Render for BlockEditor {
         if self.ac.captures_keys() {
             key_context.add(AUTOCOMPLETE_CONTEXT);
         }
-        // One identifier for the Vim state (VM-3), so a binding can answer in one mode
-        // only: Escape splits at the keymap level rather than at the handler.
         if crate::appearance::vim(cx) {
             key_context.add(self.vim.mode.context());
         }

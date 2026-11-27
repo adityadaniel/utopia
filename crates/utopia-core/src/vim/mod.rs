@@ -1,24 +1,11 @@
-//! The Vim grammar (VM-3, VM-5, VM-6), pure and platform-free.
-//!
-//! This module is the only place the grammar lives: it takes [`Key`] values and offsets
-//! into a block's text and answers with [`Step`]s and byte offsets. It has no CRDT, no
-//! store and no UI dependency, so it cannot read or write a graph and cannot block a
-//! render (architecture rule 10). Mode, registers and pending keys are the UI's local
-//! state (rule 9); nothing here is persisted, synced or put in a shard.
-//!
-//! Every offset [`motion`] and [`textobj`] return is a grapheme boundary of the string
-//! they were given, so the caller may slice with it (rule 11: no panic on user data).
-
 pub mod motion;
 pub mod parse;
 pub mod textobj;
 
 pub use parse::Parser;
 
-/// One keystroke, as the UI layer classifies it before the keymap sees it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Key {
-    /// A printable character the platform reports, e.g. 'd', '$', 'G'.
     Char(char),
     Escape,
     Enter,
@@ -29,7 +16,6 @@ pub enum Key {
     Right,
     Up,
     Down,
-    /// Control plus a letter, lower-cased, e.g. Ctrl('r').
     Ctrl(char),
 }
 
@@ -37,29 +23,16 @@ pub enum Key {
 pub enum Motion {
     Left,
     Right,
-    /// Down or up one wrapped line, then into the next or previous block.
     Down,
     Up,
-    WordForward {
-        big: bool,
-    },
-    WordBack {
-        big: bool,
-    },
-    WordEnd {
-        big: bool,
-    },
+    WordForward { big: bool },
+    WordBack { big: bool },
+    WordEnd { big: bool },
     LineStart,
     LineFirstNonBlank,
     LineEnd,
-    Find {
-        ch: char,
-        till: bool,
-        back: bool,
-    },
-    RepeatFind {
-        reverse: bool,
-    },
+    Find { ch: char, till: bool, back: bool },
+    RepeatFind { reverse: bool },
     PageFirst,
     PageLast,
 }
@@ -75,13 +48,9 @@ pub enum Operator {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextObject {
-    /// `iw aw iW aW`
     Word { big: bool, around: bool },
-    /// `i( a( i[ a[ i{ a{`
     Bracket { open: char, around: bool },
-    /// `i" a" i' a'` and the backtick pair
     Quote { ch: char, around: bool },
-    /// `il al` (PR 4; [`textobj::range_of`] answers `None` for now)
     Ref { around: bool },
 }
 
@@ -104,7 +73,6 @@ pub enum Command {
         count: usize,
         register: Option<char>,
     },
-    /// i a I A o O s S C
     Insert(InsertAt),
     DeleteChar {
         back: bool,
@@ -149,23 +117,14 @@ pub enum InsertAt {
     ToLineEnd,
 }
 
-/// What the parser says after one key.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
-    /// More keys are needed. The string is what the mode label shows, e.g. "2d".
     Pending(String),
     Run(Command),
-    /// A key the grammar knows nothing about. The UI swallows it and shows nothing.
     Cancel,
-    /// The UI must give this keystroke to the keymap (Tab, a Cmd chord).
     Pass,
 }
 
-/// Every key the grammar knows, with the text Settings → Shortcuts shows.
-///
-/// `{char}` stands for the character the key takes (`f<c>`, `r<c>`). A unit test feeds
-/// each row to a fresh [`Parser`] and asserts it never ends in [`Step::Cancel`], so the
-/// help card cannot drift from the grammar.
 pub const REFERENCE: &[(&str, &str)] = &[
     ("h", "One character left"),
     ("j", "Down a wrapped line, then into the next block"),
@@ -247,8 +206,6 @@ pub const REFERENCE: &[(&str, &str)] = &[
 mod tests {
     use super::*;
 
-    /// The keys of a [`REFERENCE`] row as a [`Parser`] would see them. `Ctrl-r` is a
-    /// control chord; `{char}` is any character the key takes.
     fn keys_of(row: &str) -> Vec<Key> {
         let row = row.replace("{char}", ",");
         if let Some(rest) = row.strip_prefix("Ctrl-") {
@@ -257,8 +214,6 @@ mod tests {
         row.chars().map(Key::Char).collect()
     }
 
-    /// 1A.5: no row of the help card is a key the grammar rejects, and each row ends a
-    /// command (or waits for more keys), never `Cancel`.
     #[test]
     fn every_reference_row_parses() {
         for (keys, help) in REFERENCE {
@@ -277,7 +232,6 @@ mod tests {
         }
     }
 
-    /// The card is a set, not a list with repeats, and it names no key twice.
     #[test]
     fn reference_keys_are_unique() {
         for (i, (keys, _)) in REFERENCE.iter().enumerate() {
@@ -287,8 +241,6 @@ mod tests {
         }
     }
 
-    /// The reference covers every key the grammar accepts, so a new command cannot ship
-    /// undocumented.
     #[test]
     fn reference_covers_the_grammar() {
         let listed: Vec<&str> = REFERENCE.iter().map(|(keys, _)| *keys).collect();

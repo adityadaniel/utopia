@@ -2210,10 +2210,6 @@ fn page_top_bar_breadcrumb_and_actions(cx: &mut TestAppContext) {
     );
 }
 
-/// §1F (VM-3): with Vim on, the top bar carries the mode label in its right-hand group,
-/// left of the view-mode control, and in the bar's own bounds. With Vim off no label is
-/// drawn — checked on the window before it is turned on, because GPUI's test frames never
-/// clear debug bounds (AGENTS.md).
 #[gpui::test]
 fn vim_mode_label_sits_in_the_top_bar(cx: &mut TestAppContext) {
     let cx = setup(cx);

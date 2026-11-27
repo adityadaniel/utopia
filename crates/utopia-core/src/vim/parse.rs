@@ -1,65 +1,39 @@
-//! The Vim grammar as a state machine (VM-3, VM-5): one [`Key`] in, one [`Step`] out.
-//!
-//! The parser holds only pending keys — a count, a register, an operator, the `g` prefix
-//! and the argument a key is waiting for. It reads no store and allocates nothing beyond
-//! the label it hands back for the mode indicator (rule 10). The caller drops it with
-//! [`Parser::reset`] after a completed command and after this module's own cancel.
-
 use super::{Command, InsertAt, Key, Motion, Operator, Step, Target, TextObject};
 
-/// The largest count a command may carry. Vim's own counts are effectively unbounded, but
-/// every consumer here turns a count into a loop of real work: `99u` is 99 undos, each one
-/// a commit and a page rebuild. Saturating at `usize::MAX` therefore made a typed digit run
-/// a hang with no way out, which rule 11 does not allow on user input. A count above this
-/// clamps to it, so a long digit run is slow at worst and never unbounded.
 pub const MAX_COUNT: usize = 10_000;
 
-/// A key the parser is waiting for before it can finish a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Await {
-    /// `"` — the register name.
     Register,
-    /// `f` `t` `F` `T` — the character to search for.
     Find { till: bool, back: bool },
-    /// `r` — the character to write.
     Replace,
-    /// `i` or `a` after an operator — the text object.
     Object { around: bool },
 }
 
 #[derive(Default, Debug)]
 pub struct Parser {
-    /// The count typed before the operator, if any.
     count: Option<usize>,
-    /// The count typed after the operator, if any.
     count2: Option<usize>,
     register: Option<char>,
     op: Option<Operator>,
-    /// The pending prefix key; only `g` has one.
     prefix: Option<char>,
     awaiting: Option<Await>,
-    /// What has been typed so far, for the mode label.
     label: String,
-    /// The last `f` `t` `F` `T`, for `;` and `,`. Survives [`Parser::reset`].
     last_find: Option<(char, bool, bool)>,
 }
 
 impl Parser {
     pub fn feed(&mut self, key: Key) -> Step {
-        // 1. Escape drops everything pending; with nothing pending it leaves Normal (VM-13).
         if key == Key::Escape {
             let was_pending = self.is_pending();
             self.reset();
             return if was_pending {
-                // The cancel is silent: the label clears, no command runs.
                 Step::Pending(String::new())
             } else {
                 Step::Run(Command::LeaveNormal)
             };
         }
 
-        // `Key` is not `Copy`, and every branch below reads it, so take its character
-        // once.
         let ch = match &key {
             Key::Char(c) => Some(*c),
             _ => None,
@@ -69,13 +43,10 @@ impl Parser {
             _ => None,
         };
 
-        // 2. A key the parser is waiting for takes the next key as an argument. It comes
-        //    before the digits so that `f2` finds a `2` and does not start a count.
         if let Some(awaiting) = self.awaiting.take() {
             return self.awaited(awaiting, key);
         }
 
-        // 3. `g` is a prefix; `gg` is the only second key it has until PR 4.
         if let Some(prefix) = self.prefix.take() {
             if prefix == 'g' && key == Key::Char('g') {
                 let count = self.take_count();
@@ -85,7 +56,6 @@ impl Parser {
             return self.cancel();
         }
 
-        // 4. Digits build the count. A leading `0` is the LineStart motion, never a count.
         if let Some(c) = ch {
             if c.is_ascii_digit() && !(c == '0' && self.count_slot().is_none()) {
                 let digit = c.to_digit(10).unwrap_or(0) as usize;
@@ -101,21 +71,17 @@ impl Parser {
             }
         }
 
-        // 5. A key that takes a character argument: `f` `t` `F` `T` (also after an
-        //    operator, as in `df,`), `r`, and the register prefix `"`.
         if let Some(c) = ch {
             if let Some((till, back)) = find_kind(c) {
                 self.awaiting = Some(Await::Find { till, back });
                 self.push_label(c);
                 return Step::Pending(self.pending());
             }
-            // `r` is a command of its own only without an operator; `dr` is not a thing.
             if c == 'r' && self.op.is_none() {
                 self.awaiting = Some(Await::Replace);
                 self.push_label(c);
                 return Step::Pending(self.pending());
             }
-            // A register comes before the operator (`"_dd`), never after (`d"x`).
             if c == '"' && self.op.is_none() {
                 self.awaiting = Some(Await::Register);
                 self.push_label(c);
@@ -128,7 +94,6 @@ impl Parser {
             }
         }
 
-        // 6. An operator waits for a target.
         if let Some(op) = self.op {
             if let Some(c) = ch {
                 if operator_of(c) == Some(op) {
@@ -162,7 +127,6 @@ impl Parser {
             return self.cancel();
         }
 
-        // 7. With no operator pending, an operator key starts one.
         if let Some(c) = ch {
             if let Some(op) = operator_of(c) {
                 self.op = Some(op);
@@ -171,16 +135,11 @@ impl Parser {
             }
         }
 
-        // 8. A motion is a Move.
         if let Some(motion) = motion_of(&key) {
             let count = self.take_count();
             return self.finish(Step::Run(Command::Move { motion, count }));
         }
 
-        // 9. Everything else the grammar knows maps to its own command.
-        //
-        // The Delete key deletes the grapheme under the cursor, as `x` does (VM-5 keeps
-        // every key that is not a command out of the block's text).
         if key == Key::Delete {
             let count = self.take_count();
             let step = Command::DeleteChar { back: false, count };
@@ -234,13 +193,11 @@ impl Parser {
             'v' => Command::EnterVisual { line: false },
             'V' => Command::EnterVisual { line: true },
             '.' => Command::RepeatChange,
-            // 10. Anything else is not part of the grammar.
             _ => return self.cancel(),
         };
         self.finish(Step::Run(command))
     }
 
-    /// Drop every pending key. Escape and a completed command call this.
     pub fn reset(&mut self) {
         self.count = None;
         self.count2 = None;
@@ -251,17 +208,14 @@ impl Parser {
         self.label.clear();
     }
 
-    /// What the mode label shows after the mode name; "" when nothing is pending.
     pub fn pending(&self) -> String {
         self.label.clone()
     }
 
-    /// The last `f`/`t`/`F`/`T` target, for `;` and `,`.
     pub fn last_find(&self) -> Option<(char, bool, bool)> {
         self.last_find
     }
 
-    /// The key the parser is waiting for, if any.
     fn awaited(&mut self, awaiting: Await, key: Key) -> Step {
         match awaiting {
             Await::Register => {
@@ -336,7 +290,6 @@ impl Parser {
             || self.awaiting.is_some()
     }
 
-    /// The count slot the next digit belongs in: before the operator, or after it.
     fn count_slot(&mut self) -> &mut Option<usize> {
         if self.op.is_some() {
             &mut self.count2
@@ -349,9 +302,6 @@ impl Parser {
         self.count.take().unwrap_or(1)
     }
 
-    /// `2d3w` runs the operator over six words, so the two counts multiply. The product
-    /// clamps like each digit run does: `10000d10000w` is `MAX_COUNT` words, not a
-    /// hundred million (rule 11, F9).
     fn take_op_count(&mut self) -> usize {
         let before = self.count.take().unwrap_or(1);
         let after = self.count2.take().unwrap_or(1);
@@ -384,7 +334,6 @@ impl Parser {
     }
 }
 
-/// `f` `t` `F` `T` as `(till, back)`.
 fn find_kind(c: char) -> Option<(bool, bool)> {
     match c {
         'f' => Some((false, false)),
@@ -406,7 +355,6 @@ fn operator_of(c: char) -> Option<Operator> {
     }
 }
 
-/// The text object `c` names after `i` or `a`.
 fn text_object_of(c: char, around: bool) -> Option<TextObject> {
     match c {
         'w' => Some(TextObject::Word { big: false, around }),
@@ -415,15 +363,11 @@ fn text_object_of(c: char, around: bool) -> Option<TextObject> {
         '[' | ']' => Some(TextObject::Bracket { open: '[', around }),
         '{' | '}' => Some(TextObject::Bracket { open: '{', around }),
         '"' | '\'' | '`' => Some(TextObject::Quote { ch: c, around }),
-        // `il` and `al` need `inline::extract_refs` (PR 4): the grammar knows them, and
-        // `textobj::range_of` answers `None` until then.
         'l' => Some(TextObject::Ref { around }),
         _ => None,
     }
 }
 
-/// The motion a key is, on its own or as an operator's target. `f` `t` `F` `T` and `g`
-/// are not here: they need a second key, and the caller handles them first.
 fn motion_of(key: &Key) -> Option<Motion> {
     Some(match key {
         Key::Char('h') | Key::Left | Key::Backspace => Motion::Left,
@@ -450,7 +394,6 @@ fn motion_of(key: &Key) -> Option<Motion> {
 mod tests {
     use super::*;
 
-    /// Feed a key string, returning the last step.
     fn feed(keys: &str) -> Step {
         let mut parser = Parser::default();
         feed_with(&mut parser, keys)
@@ -491,7 +434,6 @@ mod tests {
         }
     }
 
-    /// 1A.6: key strings to commands.
     #[test]
     fn keys_to_commands() {
         let word = Motion::WordForward { big: false };
@@ -559,7 +501,6 @@ mod tests {
         );
     }
 
-    /// The insert family, the edits and the mode changes each map to their own command.
     #[test]
     fn the_rest_of_the_table() {
         for (keys, at) in [
@@ -619,7 +560,6 @@ mod tests {
         assert_eq!(run("<<"), operate(Operator::Outdent, Target::Line, 1, None));
     }
 
-    /// The named keys are motions in Normal, and `d` takes them as targets.
     #[test]
     fn named_keys_are_motions() {
         for (key, motion) in [
@@ -646,7 +586,6 @@ mod tests {
                 "{key:?}"
             );
         }
-        // The Delete key is Vim's `x`.
         let mut parser = Parser::default();
         assert_eq!(
             parser.feed(Key::Delete),
@@ -657,7 +596,6 @@ mod tests {
         );
     }
 
-    /// 1A.6: every unfinished prefix is `Pending`, and the label is what the mode shows.
     #[test]
     fn unfinished_prefixes_pend() {
         for (keys, label) in [
@@ -672,7 +610,6 @@ mod tests {
         ] {
             assert_eq!(feed(keys), Step::Pending(label.to_string()), "{keys}");
         }
-        // The label builds up and clears when the command completes.
         let mut parser = Parser::default();
         assert_eq!(parser.feed(Key::Char('2')), Step::Pending("2".into()));
         assert_eq!(parser.feed(Key::Char('d')), Step::Pending("2d".into()));
@@ -683,7 +620,6 @@ mod tests {
         assert_eq!(parser.pending(), "");
     }
 
-    /// 1A.6: every unknown continuation is `Cancel`, and nothing is left pending.
     #[test]
     fn unknown_keys_cancel() {
         for keys in ["dq", "gq", "\"q", "zz", "d\"", "g0", "1q", "ciq"] {
@@ -695,7 +631,6 @@ mod tests {
         assert_eq!(parser.pending(), "");
     }
 
-    /// 1A.6: `0` after a digit is a count; `0` alone is `LineStart`.
     #[test]
     fn zero_is_a_count_or_the_line_start() {
         assert_eq!(run("0"), move_(Motion::LineStart, 1));
@@ -708,11 +643,9 @@ mod tests {
             run("10dd"),
             operate(Operator::Delete, Target::Line, 10, None)
         );
-        // `20` is a count, so `d20` still waits for the motion it applies to.
         assert_eq!(feed("d20"), Step::Pending("d20".into()));
     }
 
-    /// Escape cancels what is pending and only leaves Normal when nothing was.
     #[test]
     fn escape_is_the_ladder() {
         let mut parser = Parser::default();
@@ -724,11 +657,9 @@ mod tests {
         let _ = parser.feed(Key::Char('2'));
         assert_eq!(parser.feed(Key::Escape), Step::Pending(String::new()));
         assert_eq!(parser.pending(), "");
-        // A second Escape from a clean parser leaves Normal.
         assert_eq!(parser.feed(Key::Escape), Step::Run(Command::LeaveNormal));
     }
 
-    /// `;` and `,` reuse the last find; the target outlives the command and a reset.
     #[test]
     fn the_last_find_is_remembered() {
         let mut parser = Parser::default();
@@ -753,7 +684,6 @@ mod tests {
         assert_eq!(parser.last_find(), Some((';', false, true)));
     }
 
-    /// `f` takes any character, including one an operator would use, and `df,` works.
     #[test]
     fn find_takes_its_character() {
         assert_eq!(
@@ -780,7 +710,6 @@ mod tests {
                 2
             )
         );
-        // A non-character after `f` cancels instead of awaiting for ever.
         let mut parser = Parser::default();
         let _ = parser.feed(Key::Char('f'));
         assert_eq!(parser.feed(Key::Escape), Step::Pending(String::new()));
@@ -788,21 +717,18 @@ mod tests {
         assert_eq!(parser.feed(Key::Left), Step::Cancel);
     }
 
-    /// A register is only the two PR 2 names; a register before an operator is kept.
     #[test]
     fn registers() {
         assert_eq!(
             run("\"+yy"),
             operate(Operator::Yank, Target::Line, 1, Some('+'))
         );
-        // `"_` is dropped by commands that carry no register, and the count still counts.
         assert_eq!(
             run("\"_2dd"),
             operate(Operator::Delete, Target::Line, 2, Some('_'))
         );
     }
 
-    /// The text objects the grammar knows, and the ones it does not.
     #[test]
     fn text_objects() {
         for (keys, object) in [
@@ -858,14 +784,11 @@ mod tests {
                 other => panic!("{keys} gave {other:?}"),
             }
         }
-        // `)` and `]` stand for the same pair as `(` and `[`.
         assert_eq!(run("di)"), run("di("));
         assert_eq!(run("da]"), run("da["));
         assert_eq!(feed("diz"), Step::Cancel);
     }
 
-    /// A digit run cannot overflow and cannot become unbounded work either: it clamps to
-    /// [`MAX_COUNT`]. Saturating at `usize::MAX` made `99…9u` a hang (rule 11).
     #[test]
     fn counts_clamp_instead_of_overflowing() {
         let huge = format!("{}w", "9".repeat(60));
@@ -889,10 +812,6 @@ mod tests {
     }
 }
 
-/// The character an awaited argument stands for. Space arrives as the named
-/// [`Key::Space`] (named keys are classified before printable characters), but as an
-/// argument it is the character it is: `f<Space>`, `t<Space>` and `r<Space>` all work
-/// (F10).
 fn char_argument(key: Key) -> Option<char> {
     match key {
         Key::Char(c) => Some(c),
@@ -914,9 +833,6 @@ mod count_cap_tests {
         last
     }
 
-    /// Rule 11: a typed digit run must not become unbounded work. Before the cap, the
-    /// count saturated at `usize::MAX` and `Command::Undo { count }` looped that many
-    /// times, each loop committing and rebuilding the page, which froze the app.
     #[test]
     fn a_long_digit_run_clamps_instead_of_saturating() {
         let Step::Run(Command::Undo { count }) = run("99999999999999999999u") else {
@@ -933,14 +849,12 @@ mod count_cap_tests {
         assert_eq!(count, 12);
     }
 
-    /// The cap applies to the product of the two counts as well (`2d3w` is 6 words).
     #[test]
     fn the_cap_holds_for_an_operator_count() {
         let Step::Run(Command::Operate { count, .. }) = run("9999d9999w") else {
             panic!("`9999d9999w` must be an operator command");
         };
         assert_eq!(count, MAX_COUNT, "the product clamps like each count does");
-        // Two counts below the cap still multiply.
         let Step::Run(Command::Operate { count, .. }) = run("2d3w") else {
             panic!("`2d3w` must be an operator command");
         };
@@ -961,8 +875,6 @@ mod argument_tests {
         last
     }
 
-    /// F10: Space is a named key, but it is also the character a find or a replace can
-    /// take. `0f<Space>` moves to the blank instead of cancelling.
     #[test]
     fn space_is_a_character_argument() {
         let find = |till, back| {
@@ -983,7 +895,6 @@ mod argument_tests {
             feed(&[Key::Char('r'), Key::Space]),
             Step::Run(Command::ReplaceChar(' '))
         );
-        // Space on its own is still the `Right` motion.
         assert_eq!(
             feed(&[Key::Space]),
             Step::Run(Command::Move {
@@ -991,7 +902,6 @@ mod argument_tests {
                 count: 1,
             })
         );
-        // A named key that is not a character still cancels an awaited one.
         assert_eq!(feed(&[Key::Char('f'), Key::Enter]), Step::Cancel);
     }
 }
