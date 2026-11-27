@@ -48,9 +48,12 @@ such day (roll to next year once it has passed), or ask. Only two can be a chip.
   picker insert, which keep the rule they had before. The check never consults the clock.
 - A link's UTF-16 range follows the single edit the text view reports (`rebase_links`,
   with the edit's UTF-16 start, removed length and replacement). When no edit is reported
-  (autocorrect, dictation), the app falls back to the common prefix and suffix of the old
-  and new line. An edit that replaces the whole words drops the link; an edit inside them
-  keeps a date link only while the words still match in any letter case.
+  (autocorrect, dictation), the app asks the core for the edit between the two lines
+  (`edit_between`), whose common prefix and suffix run over whole Unicode scalars, so an
+  edit never starts or ends inside a surrogate pair. A replacement inside or across the
+  link's words keeps a date link while the resulting words still match the stored words in
+  any letter case, including replacing the whole phrase (`next week` to `Next week`);
+  replacing them with other words drops it.
 - A title link with no page yet writes the typed words as the title; the Send makes the
   page.
 - One FFI call, `date_suggestions(text, accepted, limit)`, returns the title, the day, the

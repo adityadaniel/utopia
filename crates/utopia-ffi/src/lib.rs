@@ -177,9 +177,7 @@ fn rebase_links_in(
         let inside = if edit_removed_len == 0 {
             link.start < edit_start && edit_start < link.end
         } else {
-            link.start <= edit_start
-                && edit_end <= link.end
-                && !(edit_start == link.start && edit_end == link.end)
+            link.start <= edit_start && edit_end <= link.end
         };
         if !inside {
             continue;
@@ -198,6 +196,45 @@ fn rebase_links_in(
         out.push(AcceptedLink { end, ..link });
     }
     out
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TextEdit {
+    pub start: u32,
+    pub removed: u32,
+    pub replacement: String,
+}
+
+fn edit_between_in(old: &str, new: &str) -> TextEdit {
+    let before: Vec<char> = old.chars().collect();
+    let after: Vec<char> = new.chars().collect();
+    let mut prefix = 0;
+    while prefix < before.len() && prefix < after.len() && before[prefix] == after[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < before.len() - prefix
+        && suffix < after.len() - prefix
+        && before[before.len() - 1 - suffix] == after[after.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let start = before[..prefix].iter().map(|c| c.len_utf16() as u32).sum();
+    let removed = before[prefix..before.len() - suffix]
+        .iter()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    let replacement = after[prefix..after.len() - suffix].iter().collect();
+    TextEdit {
+        start,
+        removed,
+        replacement,
+    }
+}
+
+#[uniffi::export]
+pub fn edit_between(old: String, new: String) -> TextEdit {
+    edit_between_in(&old, &new)
 }
 
 #[uniffi::export]
@@ -2627,6 +2664,90 @@ mod tests {
         assert_eq!(
             g.text_with_links(after.into(), rebased).unwrap(),
             "cafe\u{301} [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_an_emoji_edit_before_a_date_keeps_it() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let before = "\u{1f600} next week";
+        let after = "\u{1f601} next week";
+        assert_eq!(
+            edit_between_in(before, after),
+            TextEdit {
+                start: 0,
+                removed: 2,
+                replacement: "\u{1f601}".into(),
+            }
+        );
+        let prefixed = edit_between_in("next week", "note: next week");
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                &"next week"[..1],
+                prefixed.replacement,
+                &"next week"[1..]
+            ),
+            "note: next week"
+        );
+        let found = g.date_suggestions(before.into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        assert_eq!((link.start, link.end), (3, 12));
+        let rebased = rebase_links(before.into(), 0, 2, "\u{1f601}".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (3, 12));
+        assert_eq!(
+            g.text_with_links(after.into(), rebased).unwrap(),
+            "\u{1f601} [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_replacing_the_whole_phrase_with_a_case_change_keeps_the_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let rebased = rebase_links("next week".into(), 0, 9, "Next week".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!(rebased[0].day.as_deref(), Some("2026-12-04"));
+        g.set_today(Some("2026-12-10".into())).unwrap();
+        assert_eq!(
+            g.text_with_links("Next week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_replacing_the_whole_phrase_with_other_words_drops_the_link() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let rebased = rebase_links("next week".into(), 0, 9, "last week".into(), vec![link]);
+        assert!(rebased.is_empty(), "{rebased:?}");
+        assert_eq!(
+            g.text_with_links("last week".into(), rebased).unwrap(),
+            "last week"
         );
     }
 

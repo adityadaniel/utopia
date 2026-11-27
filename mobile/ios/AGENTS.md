@@ -142,10 +142,12 @@ Read these before you write Swift:
   Send, the first Send in two commits, link ranges after edits, and others) are listed in
   the pull request that added the app.
 - Editing text before or after a link moves its stored range with the single edit the
-  text view reports (`rebase_links`; the common prefix and suffix are only the fallback
-  when no edit is reported). An edit that replaces the whole words drops the link; an
-  edit inside them keeps a date link only while the words still match in any letter case.
-  A picker insert rebases the older links before it appends the new one.
+  text view reports (`rebase_links`; when none is reported the core's `edit_between`
+  computes one on whole Unicode scalars, so it never splits a surrogate pair). A
+  replacement inside or across the words keeps a date link while the resulting words still
+  match the stored words in any letter case, including replacing the whole phrase;
+  replacing them with other words drops it. A picker insert rebases the older links before
+  it appends the new one.
 - A date link whose graph date format is ambiguous (`MM/dd/yyyy`) is displayed with the
   formatted title but sent as the ISO date, because the formatted title does not resolve
   back to the chosen day.

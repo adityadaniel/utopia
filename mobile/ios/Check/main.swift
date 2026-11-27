@@ -111,6 +111,33 @@ check(
     try g.textWithLinks(text: "Call Ana next week", links: rebased) == "Call Ana [[November 10th, 2026]]",
     "editing the prefix keeps the accepted day"
 )
+let emojiDate = AcceptedLink(
+    title: "December 4th, 2026",
+    start: 3,
+    end: 12,
+    day: "2026-12-04",
+    words: "next week"
+)
+let emojiEdit = editBetween(old: "\u{1F600} next week", new: "\u{1F601} next week")
+check(
+    emojiEdit.start == 0 && emojiEdit.removed == 2 && emojiEdit.replacement == "\u{1F601}",
+    "an emoji edit is one scalar-wide edit"
+)
+let emojiRebased = rebaseLinks(
+    textBefore: "\u{1F600} next week",
+    editStart: emojiEdit.start,
+    editRemovedLen: emojiEdit.removed,
+    replacement: emojiEdit.replacement,
+    links: [emojiDate]
+)
+check(
+    emojiRebased.count == 1 && emojiRebased[0].start == 3 && emojiRebased[0].end == 12,
+    "an emoji edit before an accepted date keeps its range"
+)
+check(
+    try g.textWithLinks(text: "\u{1F601} next week", links: emojiRebased) == "\u{1F601} [[December 4th, 2026]]",
+    "an emoji edit before an accepted date keeps the day"
+)
 check(
     try g.dateSuggestions(text: "`next week` and next week", accepted: [], limit: 6).map(\.words) == ["next week"],
     "a date inside inline code is no chip"

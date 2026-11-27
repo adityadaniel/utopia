@@ -280,19 +280,12 @@ final class AppModel {
     }
 
     private static func fallbackEdit(_ old: String, _ new: String) -> LineEdit {
-        let before = Array(old.utf16)
-        let after = Array(new.utf16)
-        var prefix = 0
-        while prefix < before.count && prefix < after.count && before[prefix] == after[prefix] {
-            prefix += 1
-        }
-        var suffix = 0
-        while suffix < before.count - prefix && suffix < after.count - prefix
-            && before[before.count - 1 - suffix] == after[after.count - 1 - suffix] {
-            suffix += 1
-        }
-        let replacement = String(decoding: after[prefix..<(after.count - suffix)], as: UTF16.self)
-        return LineEdit(start: prefix, removed: before.count - prefix - suffix, replacement: replacement)
+        let edit = editBetween(old: old, new: new)
+        return LineEdit(
+            start: Int(edit.start),
+            removed: Int(edit.removed),
+            replacement: edit.replacement
+        )
     }
 
     /// Rule 3: Return makes a new line below and puts the caret in it.

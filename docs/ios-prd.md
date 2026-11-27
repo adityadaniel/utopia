@@ -291,8 +291,9 @@ current year (ADR 0013).
 - The day is fixed when the chip is tapped, so the link means the day the reader saw. The
   typed words are stored with the link; it stays while the range still holds those same
   words (in any letter case) and the range sits on word boundaries. It is never dropped by
-  time, a launch or a refresh, only when the reader edits those words. An edit before or
-  after the words moves the range with them.
+  time, a launch or a refresh, only when the reader replaces those words with others. An
+  edit before or after the words moves the range with them, and replacing the whole
+  phrase with the same words in another letter case keeps the chosen day.
 - A bare number (`26`), a bare month name (`may`, `march`), a bare short weekday (`sun`,
   `sat`) and a numeric date (`11/6/26`, §7) are not date chips.
 - Which words are a date and which day they mean comes from the core (C1, C3); the app
