@@ -486,21 +486,6 @@ impl Store {
         Ok(())
     }
 
-    /// `dd` then `p` on another page (VM-10): restore the blocks a cut tombstoned and move
-    /// them into `dst` in one undo group, keeping every id, so a `((reference))` to any of
-    /// them still resolves. The same-page half of this is `outline::restore_after`, which is
-    /// one plan; this one has to touch two shards, so it is a store method.
-    ///
-    /// Every block in `blocks` must be a tombstone in `src`: a live block is not a cut, and
-    /// moving one is [`Store::move_block_to_page`]'s job. The tombstone is what the move
-    /// restores — the rows arrive in `dst` live, carrying their kind and done state.
-    ///
-    /// Two things make this different from a drag. Every refusal is decided **before** the
-    /// first command is applied: a group that fails half-way goes through
-    /// [`Store::drop_shard`], and a dropped shard takes the owner's unflushed typing with it,
-    /// so a `p` that cannot move must write nothing at all. And a block the destination
-    /// already has (a page keeps a moved block as `moved_to` history) is the way back: its
-    /// own row is restored and moved rather than copied under a new id.
     pub fn restore_and_move_to_page(
         &mut self,
         src: &PageId,
@@ -519,9 +504,6 @@ impl Store {
         for b in blocks {
             match s.block(b) {
                 None => return Err(StoreError::NotFound(format!("block {b}"))),
-                // A block a drag, a merge or a sync has already taken out of this page is
-                // not a cut here any more: its row belongs to the page it went to, and
-                // restoring it would leave a live block marked `moved_to` (F11).
                 Some(n) if n.moved_to.is_some() => {
                     return Err(utopia_core::DomainError::NoOp.into())
                 }
@@ -543,18 +525,12 @@ impl Store {
             d.block(p)
                 .ok_or_else(|| StoreError::NotFound(format!("block {p}")))?;
         }
-        // FR-2.9: the ceiling applies to a paste into another page exactly as it does to a
-        // drop, measured on the shape the blocks arrive with.
         let own = roots.first().map(|r| s.depth(r)).unwrap_or(0);
         let deepest = blocks.iter().map(|b| s.depth(b)).max().unwrap_or(own);
         let base = parent.map_or(0, |p| d.depth(p) + 1);
         if base + deepest.saturating_sub(own) >= outline::MAX_DROP_DEPTH {
             return Err(StoreError::Domain(utopia_core::DomainError::TooDeep));
         }
-        // Where each restored block hangs in `dst`: its own parent when that parent is coming
-        // too, else the nearest ancestor that is. A block the cut did not take (an earlier
-        // tombstone inside the subtree) stays behind, so its children are re-parented up
-        // rather than pointing at a block this page does not have.
         let mut dst_cmds: Vec<Command> = Vec::new();
         let mut after = after.cloned();
         for root in &roots {
@@ -577,11 +553,6 @@ impl Store {
                 let a = if &id == root {
                     after.clone()
                 } else {
-                    // The nearest previous sibling the cut is bringing too. A tombstone that
-                    // stays behind is not an anchor the destination has, and `InsertBlock`
-                    // with an anchor it cannot find puts the block first instead of after
-                    // its own sibling — which reversed every live child of a subtree that
-                    // held a tombstone between two of them (F1).
                     let mut prev = s.prev_sibling(&id, false);
                     while let Some(prev_id) = prev.clone() {
                         if blocks.contains(&prev_id) {
@@ -592,11 +563,6 @@ impl Store {
                     prev
                 };
                 if d.block(&id).is_some() {
-                    // The way back (F3): the destination still has this block's row from the
-                    // move that took it away, as `moved_to` history, and `InsertBlock`
-                    // refuses an id the shard already knows (`DomainError::NoOp`). Restoring
-                    // the row the page already owns is what keeps the id, and with it every
-                    // `((reference))` (VM-10).
                     if d.is_live(&id) {
                         return Err(StoreError::Invalid(format!(
                             "block {id} is already live on this page"
@@ -732,10 +698,6 @@ impl Store {
     // ---------------------------------------------------------------- quick capture
 
     /// Global quick capture (FR-2.19): append `text` to today's daily note and commit it.
-    ///
-    /// A capture is not part of an open Vim Insert run: it closes the run first, so the
-    /// text the owner was typing and the captured line are separate undo steps (VM-12,
-    /// F4). The editor opens its run again on its next edit.
     pub fn capture(&mut self, text: &str) -> Result<(PageId, BlockId)> {
         self.end_undo_run();
         let (page, first) = self.open_daily(self.today())?;

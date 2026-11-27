@@ -1,9 +1,3 @@
-//! Vim's linewise block commands against a real store (docs/vim-mode-plan.md §2C; VM-8,
-//! VM-10, VM-11). The UI drives these through `EditorEvent`s; here the planners and the
-//! store method are called directly, because the point is what the graph looks like
-//! afterwards: every id kept, every `((reference))` still resolving, one undo step per
-//! command, and `doctor` clean.
-
 use chrono::NaiveDate;
 use utopia_core::outline::{self, Plan};
 use utopia_core::{BlockId, BlockKind, Command, PageId};
@@ -13,8 +7,6 @@ fn date(y: i32, m: u32, d: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(y, m, d).unwrap()
 }
 
-/// A file-backed store, so every script runs through the writer thread. It is dropped
-/// (flushing and joining the writer) before its directory is removed.
 struct TestStore {
     store: Store,
     _dir: tempfile::TempDir,
@@ -44,7 +36,6 @@ fn run(s: &mut Store, page: &PageId, plan: Plan) -> Option<BlockId> {
     s.execute_plan(page, plan, None).unwrap().map(|f| f.block)
 }
 
-/// Append a block at the end of a page, type `text` and commit it.
 fn write(s: &mut Store, page: &PageId, text: &str) -> BlockId {
     let plan = outline::append_block(s.page_state(page).unwrap(), None);
     let id = run(s, page, plan).unwrap();
@@ -53,7 +44,6 @@ fn write(s: &mut Store, page: &PageId, text: &str) -> BlockId {
     id
 }
 
-/// Append a block under `parent`, before `after` (None = first child).
 fn write_under(
     s: &mut Store,
     page: &PageId,
@@ -86,7 +76,6 @@ fn text(s: &mut Store, page: &PageId, block: &BlockId) -> String {
         .clone()
 }
 
-/// Live rows of a page as `(text, depth)`.
 fn rows(s: &mut Store, page: &PageId) -> Vec<(String, usize)> {
     let st = s.page_state(page).unwrap();
     st.live_preorder()
@@ -95,7 +84,6 @@ fn rows(s: &mut Store, page: &PageId) -> Vec<(String, usize)> {
         .collect()
 }
 
-/// Every id a page's shard knows, live or tombstoned: rule 5 keeps the rows.
 fn all_ids(s: &mut Store, page: &PageId) -> Vec<BlockId> {
     let st = s.page_state(page).unwrap();
     let mut ids: Vec<BlockId> = st.blocks.keys().cloned().collect();
@@ -115,8 +103,6 @@ fn doctor_clean(s: &mut Store) {
     assert!(report.is_ok(), "rule 2: doctor is clean\n{report:?}");
 }
 
-/// VM-10, the headline: `dd` then `p` MOVES the blocks, so every id survives and a
-/// `((reference))` to one of them still resolves — which a copy with new ids would break.
 #[test]
 fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
     let mut s = store();
@@ -125,7 +111,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
     let a1 = write_under(&mut s, &src, Some(&a), "alpha child", BlockKind::Bullet);
     let b = write(&mut s, &src, "beta");
     write(&mut s, &src, "gamma");
-    // Someone refers to the block that is about to move.
     let other = s.create_page("Other").unwrap();
     write(&mut s, &other, &format!("see (({a1}))"));
     assert_eq!(s.block_backlinks(&a1).unwrap().len(), 1);
@@ -135,7 +120,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
     let before_ids = all_ids(&mut s, &src);
     let depth0 = s.undo_depth();
 
-    // `dd`: one plan, one undo step.
     let deleted_at = s.now();
     let plan = outline::delete_blocks(
         s.page_state(&src).unwrap(),
@@ -162,7 +146,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
     );
     assert!(deleted(&mut s, &src, &a1));
 
-    // `p` after `beta`: restore and move in ONE plan.
     let plan = outline::restore_after(s.page_state(&src).unwrap(), &cut, &b, false).unwrap();
     assert_eq!(run(&mut s, &src, plan), Some(a.clone()));
     assert_eq!(
@@ -180,7 +163,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
         "`p` is one undo step of its own"
     );
 
-    // The ids are the same ones, so nothing that pointed at them broke.
     let after_ids = all_ids(&mut s, &src);
     assert_eq!(
         before_ids, after_ids,
@@ -195,7 +177,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
         BlockRefStatus::Live { text, .. } if text == "alpha child"
     ));
     assert_eq!(text(&mut s, &src, &a), "alpha", "the text came with it");
-    // And one undo takes just the paste back, leaving the blocks tombstoned where they were.
     s.undo().unwrap();
     assert_eq!(
         rows(&mut s, &src),
@@ -205,11 +186,6 @@ fn vm_10_dd_then_p_keeps_every_block_id_and_the_reference() {
     doctor_clean(&mut s);
 }
 
-/// VM-10: `dd` then `p` on ANOTHER page restores and moves in one undo group, keeping the
-/// ids, so a `((reference))` written on the first page still resolves. The subtree has a
-/// tombstone between two live children, which is what Enter-then-Backspace leaves: the paste
-/// must still put the children back in order (F1), and `doctor` is clean in the moved state,
-/// not only after the undo.
 #[test]
 fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
     let mut s = store();
@@ -271,7 +247,6 @@ fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
         BlockRefStatus::Live { text, .. } if text == "alpha"
     ));
     assert_eq!(s.block_backlinks(&a).unwrap().len(), 1);
-    // The move is undoable as one step.
     s.undo().unwrap();
     assert_eq!(rows(&mut s, &dst), vec![("here".into(), 0)]);
     assert!(
@@ -281,8 +256,6 @@ fn vm_10_dd_then_p_on_another_page_keeps_every_block_id() {
     doctor_clean(&mut s);
 }
 
-/// VM-10: a live block is not a cut. The store refuses it rather than moving a block that
-/// another command owns (`Store::move_block_to_page` is the way to move a live one).
 #[test]
 fn vm_10_restore_and_move_refuses_a_live_block() {
     let mut s = store();
@@ -293,8 +266,6 @@ fn vm_10_restore_and_move_refuses_a_live_block() {
     assert!(err.is_err(), "a live block is a move, not a restore");
 }
 
-/// VM-8: `3dd` is ONE undo step and tombstones nine blocks when each root has two children
-/// — and they are tombstones, not purged rows (rule 5).
 #[test]
 fn vm_8_3dd_is_one_undo_step_and_never_hard_deletes() {
     let mut s = store();
@@ -339,7 +310,6 @@ fn vm_8_3dd_is_one_undo_step_and_never_hard_deletes() {
     doctor_clean(&mut s);
 }
 
-/// VM-10: a yank of a to-do, pasted, is still a to-do with its done state.
 #[test]
 fn vm_10_a_yanked_todo_is_still_a_todo() {
     let mut s = store();
@@ -366,8 +336,6 @@ fn vm_10_a_yanked_todo_is_still_a_todo() {
     doctor_clean(&mut s);
 }
 
-/// VM-8: `J` takes the next visible block's text, re-parents its children here and
-/// tombstones it — the joined block is never hard-deleted (rule 5).
 #[test]
 fn vm_8_join_next_tombstones_and_reparents() {
     let mut s = store();
@@ -405,8 +373,6 @@ fn vm_8_join_next_tombstones_and_reparents() {
     doctor_clean(&mut s);
 }
 
-/// The whole set of commands one after another, as a session would run them: the graph must
-/// stay self-consistent (rule 2) and every id must stay reachable (rule 5).
 #[test]
 fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     let mut s = store();
@@ -418,9 +384,6 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     let referrer = s.create_page("Referrer").unwrap();
     write(&mut s, &referrer, &format!("(({a1})) and (({b}))"));
     let ids_before = all_ids(&mut s, &page);
-    // Every column of the page's rows, not only text and depth: an undo that restored the
-    // text but moved a block, flipped its kind or dropped a tombstone would still compare
-    // equal on `(text, depth)` alone.
     let projection = |s: &mut Store| -> Vec<String> {
         let st = s.page_state(&page).unwrap();
         let mut out: Vec<String> = st
@@ -438,14 +401,12 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     };
     let start_projection = projection(&mut s);
 
-    // `yy` then `p`: a copy with new ids.
     let tree = outline::block_tree(s.page_state(&page).unwrap(), &a, 1).unwrap();
     let plan =
         outline::insert_tree_after(s.page_state(&page).unwrap(), &b, &tree, false, 1).unwrap();
     run(&mut s, &page, plan);
     doctor_clean(&mut s);
 
-    // `dd` then `p`: the same ids move.
     let cut = outline::block_ids(s.page_state(&page).unwrap(), &a, 1).unwrap();
     let now = s.now();
     let plan =
@@ -455,7 +416,6 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     run(&mut s, &page, plan);
     doctor_clean(&mut s);
 
-    // `J`, then `>>` and `<<`.
     let now = s.now();
     let plan =
         outline::join_next(s.page_state(&page).unwrap(), &c, 1, None, &|_| false, now).unwrap();
@@ -466,7 +426,6 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     run(&mut s, &page, plan);
     doctor_clean(&mut s);
 
-    // Everything that was there is still there, now that the moves are over.
     let ids_after = all_ids(&mut s, &page);
     for id in &ids_before {
         assert!(ids_after.contains(id), "id {id} left the graph");
@@ -476,7 +435,6 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
         1,
         "the reference to the moved block still resolves"
     );
-    // And undoing back to the start returns the page to where it started.
     let start = vec![
         ("a".to_string(), 0),
         ("a1".to_string(), 1),
@@ -508,8 +466,6 @@ fn vm_8_a_scripted_run_of_block_commands_leaves_doctor_clean() {
     doctor_clean(&mut s);
 }
 
-/// Append `text` as the last child of `parent` (or the last root), so a test can build
-/// children in the order it wants to assert on.
 fn write_last(s: &mut Store, page: &PageId, parent: Option<&BlockId>, text: &str) -> BlockId {
     let after = s.page_state(page).unwrap().last_child(parent, false);
     let id = BlockId::new();
@@ -528,8 +484,6 @@ fn write_last(s: &mut Store, page: &PageId, parent: Option<&BlockId>, text: &str
     id
 }
 
-/// `dd` in the store: the plan from `block_ids`/`delete_blocks`, run as one step. Returns the
-/// ids the cut took, which is what the register's `cut` holds.
 fn delete(s: &mut Store, page: &PageId, block: &BlockId) -> Vec<BlockId> {
     let cut = outline::block_ids(s.page_state(page).unwrap(), block, 1).unwrap();
     let now = s.now();
@@ -539,10 +493,6 @@ fn delete(s: &mut Store, page: &PageId, block: &BlockId) -> Vec<BlockId> {
     cut
 }
 
-/// VM-10, F1: a child that comes after a TOMBSTONE keeps its place across a cross-page
-/// paste. The cut is the live subtree, so the tombstone between two live children is not in
-/// it; anchoring the second child on that tombstone left `InsertBlock` with an anchor the
-/// destination does not have, and the child came back FIRST (c, a).
 #[test]
 fn vm_10_a_cross_page_paste_keeps_the_order_around_a_tombstone() {
     let mut s = store();
@@ -551,7 +501,6 @@ fn vm_10_a_cross_page_paste_keeps_the_order_around_a_tombstone() {
     let a = write_last(&mut s, &src, Some(&parent), "a");
     let b = write_last(&mut s, &src, Some(&parent), "b");
     let c = write_last(&mut s, &src, Some(&parent), "c");
-    // Enter then Backspace leaves exactly this: a tombstone between two live children.
     let now = s.now();
     s.execute(
         &src,
@@ -588,11 +537,6 @@ fn vm_10_a_cross_page_paste_keeps_the_order_around_a_tombstone() {
     doctor_clean(&mut s);
 }
 
-/// VM-10, F3: `dd` A on one page and `p` on another is a MOVE, and doing it back moves the
-/// same block again. The page a block left keeps its row as `moved_to` history, so
-/// `InsertBlock` refuses the id — the way back restores the destination's own row instead
-/// (F3), and the text typed on that page before the paste is still there, because the
-/// refusal path that used to drop the shard is never reached.
 #[test]
 fn vm_10_a_move_back_restores_the_destinations_own_row() {
     let mut s = store();
@@ -606,19 +550,16 @@ fn vm_10_a_move_back_restores_the_destinations_own_row() {
     s.sync_index().unwrap();
     s.flush().unwrap();
 
-    // `dd` A on Monday, `p` on Tuesday: the move, with the same id.
     let cut = delete(&mut s, &monday, &a);
     s.restore_and_move_to_page(&monday, &cut, &tuesday, None, Some(&here))
         .unwrap();
     assert_eq!(s.page_state(&tuesday).unwrap().parent_of(&a), None);
 
-    // `dd` A on Tuesday, and the owner types on Monday without a flush.
     let cut = delete(&mut s, &tuesday, &a);
     s.set_debounced(true).unwrap();
     s.set_block_text(&monday, &anchor, "beta and more", None, None)
         .unwrap();
 
-    // `p` on Monday: the way back, refused before it restores the destination's row (F3).
     let landed = s.restore_and_move_to_page(&tuesday, &cut, &monday, None, Some(&anchor));
     assert!(
         landed.is_ok(),
@@ -659,9 +600,6 @@ fn vm_10_a_move_back_restores_the_destinations_own_row() {
     doctor_clean(&mut s);
 }
 
-/// VM-10, F11: a cut block a drag has already taken out of the page is not restorable — its
-/// row went with its parent — so the store refuses, and the owner copies instead of
-/// resurrecting half of the subtree on the page it left.
 #[test]
 fn vm_10_a_cut_a_drag_took_away_is_refused() {
     let mut s = store();
@@ -693,10 +631,6 @@ fn vm_10_a_cut_a_drag_took_away_is_refused() {
     doctor_clean(&mut s);
 }
 
-/// VM-10, F11: a live block a sync put under a tombstoned one is inside the cut's subtree, so
-/// `p` on it cannot move the cut there (`MoveBlock` into its own subtree). The restore is
-/// refused as a whole, before the first command, so no shard is dropped and the typing on
-/// that page survives.
 #[test]
 fn vm_10_a_paste_under_a_cut_block_is_refused_and_drops_no_shard() {
     let mut s = store();
@@ -707,7 +641,6 @@ fn vm_10_a_paste_under_a_cut_block_is_refused_and_drops_no_shard() {
     s.flush().unwrap();
 
     let cut = delete(&mut s, &page, &a);
-    // What a sync can bring: a live child under the tombstone (§12.4).
     let arrived = write_last(&mut s, &page, Some(&a), "from another device");
     s.sync_index().unwrap();
     s.flush().unwrap();
@@ -736,13 +669,10 @@ fn vm_10_a_paste_under_a_cut_block_is_refused_and_drops_no_shard() {
     doctor_clean(&mut s);
 }
 
-/// VM-10, F3: a cut that would pass FR-2.9's ceiling is refused before anything is written —
-/// no shard is dropped, so the text typed on the page a moment before is still there.
 #[test]
 fn vm_10_a_cut_that_is_too_deep_writes_nothing_and_drops_no_shard() {
     let mut s = store();
     let src = s.create_page("Source").unwrap();
-    // A chain deep enough that pasting it under a deep block cannot fit.
     let mut chain: Vec<BlockId> = Vec::new();
     let mut parent: Option<BlockId> = None;
     for d in 0..outline::MAX_DROP_DEPTH {
@@ -752,8 +682,6 @@ fn vm_10_a_cut_that_is_too_deep_writes_nothing_and_drops_no_shard() {
     }
     let root = chain[0].clone();
     let dst = s.create_page("Destination").unwrap();
-    // A destination chain nearly as deep as the ceiling, so a subtree of eleven levels
-    // cannot fit under its last block.
     let mut dchain: Vec<BlockId> = Vec::new();
     let mut parent: Option<BlockId> = None;
     for d in 0..(outline::MAX_DROP_DEPTH - 1) {

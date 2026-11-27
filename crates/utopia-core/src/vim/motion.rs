@@ -126,10 +126,6 @@ pub fn word_forward(text: &str, offset: usize, big: bool) -> usize {
     clamp_normal(text, word_forward_raw(text, offset, big))
 }
 
-/// Start of the next word before the Normal clamp: one past the text when the words run
-/// out, or a line's first grapheme. `dw` takes the text up to it, and Vim's exclusive rule
-/// turns an end that reaches column 1 back into the previous line's end, so the operator
-/// needs the end the motion *wanted*, not the one the cursor would rest on.
 pub(crate) fn word_forward_raw(text: &str, offset: usize, big: bool) -> usize {
     let start = snap(text, offset);
     let Some(class) = class_at(text, start, big) else {

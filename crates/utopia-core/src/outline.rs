@@ -515,10 +515,6 @@ fn insert_after(
     (cmds, focus)
 }
 
-// --------------------------------------------- Vim's linewise block commands (VM-8, VM-10)
-
-/// One row of a yanked block tree (VM-10): what [`Command::InsertBlock`] cannot carry on its
-/// own — the depth relative to the yank's first row, and the done state of a to-do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeRow {
     pub depth: usize,
@@ -527,9 +523,6 @@ pub struct TreeRow {
     pub checked: bool,
 }
 
-/// The blocks a linewise command acts on (VM-8): `id` and its next `count - 1` live
-/// siblings. A count takes siblings, each with its own subtree, because a block's visible
-/// children are its own next rows; rows are not the unit.
 pub fn block_roots(
     st: &PageState,
     id: &BlockId,
@@ -548,14 +541,6 @@ pub fn block_roots(
     Ok(roots)
 }
 
-/// Every id a `dd` of `count` siblings tombstones: the roots' live subtrees, in preorder.
-/// The register's `cut` and [`delete_blocks`] both come from here, so a `p` restores exactly
-/// what the delete took. Tombstones are rows, not gone (rule 5), which is what makes the
-/// restore possible at all.
-///
-/// A *revived* tombstone — a deleted block kept visible by a live child (§12.4) — is part of
-/// the live subtree, so it goes and comes back with the rest; that is what
-/// [`delete_subtree`] already does, and undoing a `dd` restores the same state either way.
 pub fn block_ids(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<BlockId>, DomainError> {
     let mut ids = Vec::new();
     for r in block_roots(st, id, count)? {
@@ -564,7 +549,6 @@ pub fn block_ids(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<Block
     Ok(ids)
 }
 
-/// The rows a yank puts in the register (VM-10), depth relative to the first block.
 pub fn block_tree(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<TreeRow>, DomainError> {
     let mut rows = Vec::new();
     for r in block_roots(st, id, count)? {
@@ -582,15 +566,6 @@ pub fn block_tree(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<Tree
     Ok(rows)
 }
 
-/// `dd` (VM-8): this block and its next `count - 1` siblings, each with its subtree, as ONE
-/// plan — so `3dd` is one undo step, not three. [`Command::SetDeleted`] already takes a list.
-///
-/// The cursor goes to the NEXT visible block, as Vim's does; [`delete_subtree`], which
-/// Cmd+Shift+Backspace uses, puts it on the previous one. At the end of the page there is no
-/// next block, so it is the last one above. *Visible* is the point: a zoom shows one subtree
-/// and a collapsed block hides its children, so the next row must come from
-/// [`PageState::visible_rows`] or `dd` on the last row of a zoom would hand the caret to a
-/// block the view cannot show and end the session (F12).
 pub fn delete_blocks(
     st: &PageState,
     id: &BlockId,
@@ -604,10 +579,6 @@ pub fn delete_blocks(
         return Err(DomainError::NoOp);
     }
     let rows = st.visible_rows(zoom, collapsed);
-    // Where the caret goes: the nearest row below the delete in view, else the nearest one
-    // above. A block that is not a visible row at all (the zoom's own root, a stale focus)
-    // falls back to the whole page, so `dd` always leaves the caret somewhere it can be
-    // shown (F12).
     let find = |rows: &[(BlockId, usize)]| {
         let ix = rows.iter().position(|(r, _)| r == id)?;
         rows[ix..]
@@ -636,12 +607,6 @@ pub fn delete_blocks(
     })
 }
 
-/// `J` (VM-8): join the next visible block into this one with a space. Its children re-parent
-/// to this block and it is tombstoned, never hard-deleted (rule 5). A count joins that many
-/// blocks, one after another.
-///
-/// Modelled on [`merge_into_previous`], in the other direction. Each join is computed on a
-/// simulated state, so `3J` is one plan — and therefore one undo step — instead of three.
 pub fn join_next(
     st: &PageState,
     id: &BlockId,
@@ -668,8 +633,6 @@ pub fn join_next(
         let text = sim.block(id).map(|b| b.text.clone()).unwrap_or_default();
         let mut join = Vec::new();
         if !n.text.is_empty() {
-            // One space between the two, unless one side already brings it. Vim joins lines
-            // the same way; the block that was joined keeps the joined text.
             let space = !text.is_empty()
                 && !text.ends_with(char::is_whitespace)
                 && !n.text.starts_with(char::is_whitespace);
@@ -687,9 +650,6 @@ pub fn join_next(
         } else {
             sim.last_child(Some(id), false)
         };
-        // FR-2.9: the joined block's children climb one level to land here, and their own
-        // descendants climb with them. `J` is a re-parent like `Indent`, so it is refused
-        // the same way instead of building an outline deeper than the ceiling allows.
         for c in &n.children {
             if sim.block(c).is_none_or(|b| !b.present) {
                 continue;
@@ -731,10 +691,6 @@ pub fn join_next(
     Ok(Plan { cmds, focus: None }.focus(id, caret))
 }
 
-/// `p` / `P` of a yanked tree (VM-10): the rows come back as NEW blocks after (`p`) or before
-/// (`P`) `id`, as its siblings. `InsertBlock` carries the kind; a checked to-do also needs
-/// `SetBlockKind`. A count pastes that many copies. FR-2.9's ceiling applies, measured from
-/// the depth the rows land at.
 pub fn insert_tree_after(
     st: &PageState,
     id: &BlockId,
@@ -751,22 +707,17 @@ pub fn insert_tree_after(
         return Err(DomainError::TooDeep);
     }
     let parent = st.parent_of(id);
-    // The block the first pasted row goes after: `id` itself for `p`, the one above it for
-    // `P` (None = the first child, or the first root).
     let anchor = if before {
         st.prev_sibling(id, false)
     } else {
         Some(id.clone())
     };
-    // last[d]: the most recent block written at depth d; parents[d]: its parent.
     let mut last: Vec<Option<BlockId>> = vec![anchor];
     let mut parents: Vec<Option<BlockId>> = vec![parent];
     let mut cmds: Vec<Command> = Vec::new();
     let mut focus: Option<Focus> = None;
     for _ in 0..count.max(1) {
         for row in tree {
-            // A row deeper than one level below the deepest written so far cannot be placed
-            // where it says; it becomes a child of the deepest one instead of being lost.
             let d = row.depth.min(last.len());
             let (parent, after) = if d < last.len() {
                 (parents[d].clone(), last[d].clone())
@@ -801,15 +752,6 @@ pub fn insert_tree_after(
     Ok(Plan { cmds, focus })
 }
 
-/// The first `p` after a `dd` (VM-10): restore the tombstoned blocks and move them, so the
-/// restore and the move are ONE plan and one undo step, and every id survives — which is what
-/// keeps each `((reference))` to a moved block resolving.
-///
-/// `ids` are exactly the blocks the delete tombstoned ([`block_ids`]). A tombstone never
-/// unlinks the block, so moving the roots moves the subtrees. A live id means the cut was
-/// undone (or is not a cut at all), and an id that has `moved_to` has left this page (a
-/// drag, a merge or a sync): the caller copies instead, so the command never writes where
-/// the blocks already are (VM-10, F11).
 pub fn restore_after(
     st: &PageState,
     ids: &[BlockId],
@@ -829,8 +771,6 @@ pub fn restore_after(
             Some(_) => {}
         }
     }
-    // The target must not be inside the cut: `MoveBlock` would make a cycle (`p` on a live
-    // block a sync put under a tombstoned one), and it is not where a cut may go anyway.
     if ids.contains(target) || ids.iter().any(|id| st.is_ancestor(id, target)) {
         return Err(DomainError::NoOp);
     }
@@ -842,8 +782,6 @@ pub fn restore_after(
     let Some(first) = roots.first().cloned() else {
         return Err(DomainError::NoOp);
     };
-    // FR-2.9: the restored roots land beside the target, so the shape they keep has to fit
-    // under the target's own depth.
     let root_depth = st.depth(&first);
     let deepest = ids
         .iter()
@@ -854,8 +792,6 @@ pub fn restore_after(
         return Err(DomainError::TooDeep);
     }
     let parent = st.parent_of(target);
-    // The anchor for `P`: the nearest previous sibling the cut did not take. A tombstoned cut
-    // root is still a row, and `MoveBlock` would take it for its own anchor.
     let mut after = if before {
         let mut prev = st.prev_sibling(target, false);
         while let Some(p) = prev.clone() {
@@ -1207,7 +1143,6 @@ mod tests {
         assert!(st.block(&ids[2]).unwrap().deleted_at.is_some());
     }
 
-    /// A page of sibling roots, each with `kids` children, for the linewise counts.
     fn siblings(roots: usize, kids: usize) -> (PageState, Vec<BlockId>) {
         let mut lines: Vec<(String, usize)> = Vec::new();
         for r in 0..roots {
@@ -1220,9 +1155,6 @@ mod tests {
         page_with(&refs)
     }
 
-    /// VM-8: a count on `dd` takes this block and its next N-1 SIBLINGS, each with its
-    /// subtree, in one plan (so one undo step). A page emptied by it has nowhere to put the
-    /// cursor.
     #[test]
     fn vm_8_delete_blocks_takes_siblings_with_their_subtrees() {
         let (mut st, ids) = siblings(3, 2);
@@ -1241,12 +1173,9 @@ mod tests {
         assert_eq!(st.blocks.len(), 9, "nine rows, none purged");
     }
 
-    /// VM-8: `dd` focuses the NEXT block; at the end of the page it is the last one above.
     #[test]
     fn vm_8_delete_blocks_focuses_the_next_then_the_previous() {
-        // r0, r0k0, r0k1, r1, r1k0, r1k1, r2, r2k0, r2k1.
         let (mut st, ids) = siblings(3, 2);
-        // `dd` on r1, with children: the next visible block after the deleted rows is r2.
         let plan = delete_blocks(&st, &ids[3], 1, 1, None, &|_| false).unwrap();
         assert_eq!(
             plan.focus,
@@ -1256,7 +1185,6 @@ mod tests {
             })
         );
         apply(&mut st, &plan);
-        // The last live block of the page: the one above it, at its end.
         let plan = delete_blocks(&st, &ids[6], 1, 1, None, &|_| false).unwrap();
         assert_eq!(
             plan.focus,
@@ -1267,8 +1195,6 @@ mod tests {
         );
     }
 
-    /// VM-8, VM-10: `block_roots`, `block_ids` and `block_tree` are one answer, so the ids a
-    /// `dd` tombstones are exactly the rows a `yy` puts in the register.
     #[test]
     fn vm_10_the_roots_ids_and_rows_agree() {
         let (mut st, ids) = siblings(3, 2);
@@ -1289,7 +1215,6 @@ mod tests {
         assert_eq!(tree[0].depth, 0);
         assert_eq!(tree[1].depth, 1);
         assert_eq!(tree[3].depth, 0, "the second root is back at the top");
-        // A to-do yanked keeps its done state in the register (VM-10).
         st.apply(
             &Command::SetBlockKind {
                 id: ids[1].clone(),
@@ -1304,8 +1229,6 @@ mod tests {
         assert!(tree[1].checked);
     }
 
-    /// VM-8: `J` appends the next visible block's text with a space, re-parents its children
-    /// and tombstones it — never hard-deletes it (rule 5). A count joins that many.
     #[test]
     fn vm_8_join_next_keeps_the_text_and_the_children() {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("b1", 1), ("c", 0)]);
@@ -1326,7 +1249,6 @@ mod tests {
         assert_eq!(st.block(&ids[1]).unwrap().deleted_at, Some(4));
         assert_eq!(st.block(&ids[1]).unwrap().text, "b", "its text is not lost");
 
-        // A count joins again from the same block: `3J` is one plan.
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("c", 0), ("d", 0)]);
         let plan = join_next(&st, &ids[0], 3, None, &|_| false, 4).unwrap();
         apply(&mut st, &plan);
@@ -1338,20 +1260,15 @@ mod tests {
             .all(|c| !matches!(c, Command::PurgeBlock { .. })));
     }
 
-    /// FR-2.9, F8: `J` re-parents the joined block's children under this one, so it is a
-    /// re-parent like `Indent` and is refused when the result would pass the ceiling. The
-    /// case that bites: the cursor is at the bottom of a chain and the next visible row is a
-    /// shallow root, so its children climb from depth 1 to depth 12.
     #[test]
     fn vm_8_join_next_refuses_a_join_that_would_pass_the_ceiling() {
-        // a / c0 … c10 (depths 0 to 11, the deepest the ceiling allows), then b / b1.
         let mut lines: Vec<(String, usize)> = vec![("a".into(), 0)];
         lines.extend((0..(MAX_DROP_DEPTH - 1)).map(|d| (format!("c{d}"), d + 1)));
         lines.push(("b".into(), 0));
         lines.push(("b1".into(), 1));
         let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
         let (mut st, ids) = page_with(&refs);
-        let deepest = ids[MAX_DROP_DEPTH - 1].clone(); // c10, depth 11
+        let deepest = ids[MAX_DROP_DEPTH - 1].clone();
         let before = rows(&st);
         let r = join_next(&st, &deepest, 1, None, &|_| false, 7);
         assert!(
@@ -1360,8 +1277,7 @@ mod tests {
         );
         assert_eq!(rows(&st), before, "and nothing was planned");
 
-        // One level up there is room, and the join still works.
-        let shallow = ids[MAX_DROP_DEPTH - 2].clone(); // c9, depth 10
+        let shallow = ids[MAX_DROP_DEPTH - 2].clone();
         let plan = join_next(&st, &shallow, 1, None, &|_| false, 7).unwrap();
         apply(&mut st, &plan);
         assert!(
@@ -1371,16 +1287,12 @@ mod tests {
         );
     }
 
-    /// VM-10, F11: a restore is refused, as a whole and before anything is written, when the
-    /// target is inside the cut — a live block a sync put under a tombstoned one — because
-    /// `MoveBlock` would make a cycle there.
     #[test]
     fn vm_10_restore_after_refuses_a_target_inside_the_cut() {
         let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
         let cut = block_ids(&st, &ids[0], 1).unwrap();
         let plan = delete_blocks(&st, &ids[0], 1, 3, None, &|_| false).unwrap();
         apply(&mut st, &plan);
-        // What a sync can bring: a live child under the tombstone (§12.4).
         let arrived = BlockId::new();
         st.apply(
             &Command::InsertBlock {
@@ -1401,8 +1313,6 @@ mod tests {
         assert_eq!(st.canonical(), before.canonical(), "nothing was written");
     }
 
-    /// VM-10, F11: a cut block a drag, a merge or a sync has moved away has no row here to
-    /// restore, so the paste copies instead of resurrecting it half-way.
     #[test]
     fn vm_10_restore_after_refuses_a_block_that_moved_away() {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0)]);
@@ -1423,11 +1333,8 @@ mod tests {
         ));
     }
 
-    /// VM-8, F12: the caret after `dd` goes to the next VISIBLE row. A collapsed block's
-    /// children are not on screen, so the previous row cannot be one of them.
     #[test]
     fn vm_8_delete_blocks_focus_ignores_rows_a_collapse_hides() {
-        // a / a1, then b (the last visible row).
         let (st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
         let collapsed = |b: &BlockId| b == &ids[0];
         let plan = delete_blocks(&st, &ids[2], 1, 9, None, &collapsed).unwrap();
@@ -1440,8 +1347,6 @@ mod tests {
             "the row above is `a`, not its hidden child"
         );
     }
-    /// VM-8: `J` joins a child into its parent too, and a collapsed parent's own rows are the
-    /// ones that count.
     #[test]
     fn vm_8_join_next_takes_the_next_visible_row() {
         let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
@@ -1457,8 +1362,6 @@ mod tests {
         assert_eq!(rows(&st), vec![("a b".into(), 0), ("a1".into(), 1)]);
     }
 
-    /// VM-10: pasting a tree makes new blocks with the same kinds and done state, after the
-    /// block for `p` and before it for `P`.
     #[test]
     fn vm_10_insert_tree_keeps_kind_and_done_state() {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0)]);
@@ -1498,14 +1401,12 @@ mod tests {
         let child = st.live_children(Some(&first))[0].clone();
         assert_eq!(st.block(&child).unwrap().kind, BlockKind::Heading(2));
 
-        // `P` puts the rows above the block instead.
         let plan = insert_tree_after(&st, &ids[1], &tree, true, 1).unwrap();
         apply(&mut st, &plan);
         assert_eq!(
             rows(&st)[3..].to_vec(),
             vec![("todo".into(), 0), ("heading".into(), 1), ("b".into(), 0)]
         );
-        // A count pastes that many copies, in order.
         let plan = insert_tree_after(&st, &ids[0], &tree[..1], false, 2).unwrap();
         apply(&mut st, &plan);
         assert_eq!(
@@ -1514,7 +1415,6 @@ mod tests {
         );
     }
 
-    /// FR-2.9: a paste that would go past the depth ceiling is refused, not clamped.
     #[test]
     fn vm_10_insert_tree_refuses_past_the_depth_ceiling() {
         let mut lines: Vec<(String, usize)> =
@@ -1523,7 +1423,7 @@ mod tests {
         let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
         let (st, ids) = page_with(&refs);
         let deep = ids[MAX_DROP_DEPTH - 1].clone();
-        let shallow = ids[MAX_DROP_DEPTH].clone(); // the root `leaf`
+        let shallow = ids[MAX_DROP_DEPTH].clone();
         let tree = vec![
             TreeRow {
                 depth: 0,
@@ -1545,8 +1445,6 @@ mod tests {
         assert!(insert_tree_after(&st, &shallow, &tree, false, 1).is_ok());
     }
 
-    /// VM-10: the first `p` after a `dd` restores the tombstones and moves them in one plan,
-    /// keeping every id — which is what keeps `((references))` resolving.
     #[test]
     fn vm_10_restore_after_keeps_the_ids() {
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("b1", 1), ("c", 0)]);
@@ -1556,7 +1454,6 @@ mod tests {
             apply(&mut st, &p);
         }
         assert_eq!(rows(&st), vec![("a".into(), 0), ("c".into(), 0)]);
-        // `p` after `c`: the blocks come back below it, with the same ids.
         let plan = restore_after(&st, &cut, &ids[3], false).unwrap();
         assert!(matches!(
             plan.cmds[0],
@@ -1588,7 +1485,6 @@ mod tests {
             "the subtree came back too"
         );
 
-        // `P` puts them above the target instead.
         let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("c", 0)]);
         let cut = block_ids(&st, &ids[1], 1).unwrap();
         {
@@ -1607,8 +1503,6 @@ mod tests {
         );
     }
 
-    /// VM-10: a live block is not a cut, so the caller must copy instead of moving, and an
-    /// id that is not on the page is refused.
     #[test]
     fn vm_10_restore_after_refuses_live_and_missing_blocks() {
         let (st, ids) = page_with(&[("a", 0), ("b", 0)]);

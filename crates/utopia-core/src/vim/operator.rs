@@ -1,26 +1,9 @@
-//! Operator ranges (docs/vim-mode-plan.md 2B): what `d`, `c` and `y` take.
-//!
-//! A motion is a jump and an operator is a span, and the two are not the same range. `w`
-//! puts the cursor on the next word's first character; `dw` takes the text *up to* that
-//! character and leaves it. `e` and `f` include the grapheme they land on, and `$` stops
-//! before the line break. That is Vim's inclusive/exclusive distinction, and it lives here
-//! — with the motions and the text objects, not in the UI — so `d`, `c` and `y` cannot
-//! disagree about it.
-//!
-//! Every range is built from the grapheme-derived offsets [`super::motion`] returns, so it
-//! sits on grapheme boundaries of `text` and the caller may slice with it (rule 11).
-
 use std::ops::Range;
 
 use super::motion;
 use super::Motion;
 use crate::text::{next_grapheme, prev_grapheme};
 
-/// The range an operator acts on for `motion`, or `None` when the motion is not charwise
-/// inside one block (`j`/`k` cross blocks, `gg`/`G` go to the page's edges) or finds
-/// nothing.
-///
-/// `count` is the motion's count (`d2w`), and `last_find` is the parser's `;`/`,` target.
 pub fn motion_range(
     text: &str,
     offset: usize,
@@ -31,10 +14,7 @@ pub fn motion_range(
     let count = count.max(1);
     let offset = motion::clamp_normal(text, offset);
     match motion {
-        // Not charwise: the host moves the cursor between blocks (PR 2C and PR 4).
         Motion::Down | Motion::Up | Motion::PageFirst | Motion::PageLast => None,
-        // `$` is exclusive at the line's end: `d$` takes the line's text, not its break. A
-        // count takes that many lines.
         Motion::LineEnd => {
             let mut end = motion::line_end_exclusive(text, offset);
             for _ in 1..count {
@@ -45,7 +25,6 @@ pub fn motion_range(
             }
             Some(offset..end)
         }
-        // `e`, `f` and `t` include the grapheme they stop on.
         Motion::WordEnd { big } => {
             let mut end = offset;
             for _ in 0..count {
@@ -62,7 +41,6 @@ pub fn motion_range(
             let target = motion::repeat_find(text, offset, ch, till, back != reverse, count)?;
             Some(find_range(text, offset, target, back != reverse))
         }
-        // `w` is exclusive, and an end that reaches column 1 belongs to the line before it.
         Motion::WordForward { big } => {
             let mut end = offset;
             for _ in 0..count {
@@ -70,9 +48,6 @@ pub fn motion_range(
             }
             Some(offset..exclusive_end(text, end).max(offset))
         }
-        // `l` is exclusive (`dl` is `x`), and stops at the end of the line: a `5l` in a
-        // block with a line break inside it never crosses that break (`d5j` is how Vim
-        // reaches the next line).
         Motion::Right => {
             let mut end = offset;
             for _ in 0..count {
@@ -84,8 +59,6 @@ pub fn motion_range(
             }
             Some(offset..exclusive_end(text, end).max(offset))
         }
-        // `^` is the one motion in this group that can also go forwards: with the cursor
-        // left of the first non-blank, `d^` takes the blanks in front of it.
         Motion::LineFirstNonBlank => {
             let mut at = offset;
             for _ in 0..count {
@@ -93,14 +66,12 @@ pub fn motion_range(
             }
             Some(if at > offset { offset..at } else { at..offset })
         }
-        // Backwards: the target's grapheme is included, the cursor's is not.
         Motion::Left | Motion::WordBack { .. } | Motion::LineStart => {
             let mut start = offset;
             for _ in 0..count {
                 start = match motion {
                     Motion::WordBack { big } => motion::word_back(text, start, big),
                     Motion::LineStart => motion::line_start(text, start),
-                    // `h`.
                     _ => prev_grapheme(text, start),
                 };
             }
@@ -109,14 +80,6 @@ pub fn motion_range(
     }
 }
 
-/// `cw`'s range (2B, VM-…): Vim treats `cw` on a word as `ce`, but `e` takes its first step
-/// one grapheme to the right, so from the LAST character of a word it runs on to the end of
-/// the NEXT one — `cw` on the final `a` of `alpha beta` took `a beta` where Vim takes `a`
-/// (F5). The word under the cursor is therefore taken whole, without that step, and a
-/// count takes that many words after it.
-///
-/// `None` when the cursor is not on a word: there `cw` is `dw`, whose range
-/// [`motion_range`] already has.
 pub fn change_word_range(
     text: &str,
     offset: usize,
@@ -124,7 +87,6 @@ pub fn change_word_range(
     count: usize,
 ) -> Option<Range<usize>> {
     let offset = motion::clamp_normal(text, offset);
-    // On a blank `cw` is `w`, which the caller's `motion_range` answers.
     if motion::class_at(text, offset, big) == Some(motion::Class::Blank) {
         return None;
     }
@@ -132,11 +94,9 @@ pub fn change_word_range(
         super::textobj::range_of(text, offset, super::TextObject::Word { big, around: false })?;
     let mut end = word.end;
     for _ in 1..count.max(1) {
-        // From the word's last grapheme, `e` steps over the gap to the end of the next word.
         let last = prev_grapheme(text, end);
         let next = next_grapheme(text, motion::word_end(text, last, big));
         if next <= end {
-            // At the end of the block: the range stops there.
             break;
         }
         end = next;
@@ -144,14 +104,10 @@ pub fn change_word_range(
     Some(offset..end)
 }
 
-/// One past the last grapheme of the target: an inclusive motion's span.
 fn inclusive_end(text: &str, target: usize) -> usize {
     next_grapheme(text, target)
 }
 
-/// The span between the cursor and a find's target. A find to the right includes the
-/// grapheme it lands on; one to the left starts on it, so the cursor's own grapheme stays,
-/// as Vim's `dF` leaves the character under the cursor alone.
 fn find_range(text: &str, offset: usize, target: usize, back: bool) -> Range<usize> {
     if back {
         target.min(offset)..offset
@@ -160,9 +116,6 @@ fn find_range(text: &str, offset: usize, target: usize, back: bool) -> Range<usi
     }
 }
 
-/// Vim's rule for an exclusive motion (`:help exclusive`): an end that lands on the first
-/// grapheme of a line belongs to the end of the previous one, so `dw` over a line's last
-/// word takes the word and leaves the break after it.
 fn exclusive_end(text: &str, end: usize) -> usize {
     if end == 0 || end > text.len() {
         return end.min(text.len());
@@ -183,7 +136,6 @@ mod tests {
         check(text, range)
     }
 
-    /// A range must sit on grapheme boundaries and inside the text.
     fn check(text: &str, range: Range<usize>) -> Range<usize> {
         assert!(
             range.start <= range.end && range.end <= text.len(),
@@ -202,45 +154,31 @@ mod tests {
         Motion::WordForward { big: false }
     }
 
-    /// `dw` takes the text up to the next word, and the next word stays.
     #[test]
     fn exclusive_motions_stop_before_their_target() {
         let text = "alpha beta";
         assert_eq!(range(text, 0, word_forward(), 1), 0..6);
         assert_eq!(range(text, 0, word_forward(), 2), 0..10, "d2w takes both");
-        // `dl` is `x`.
         assert_eq!(range(text, 0, Motion::Right, 1), 0..1);
         assert_eq!(range(text, 0, Motion::Right, 3), 0..3);
-        // Backwards: the target is included, the cursor's own grapheme is not.
-        // The block cursor never rests past the last grapheme, so `db` from the end is
-        // taken from the last character.
         assert_eq!(range(text, 10, Motion::WordBack { big: false }, 1), 6..9);
         assert_eq!(range(text, 6, Motion::LineStart, 1), 0..6);
         assert_eq!(range(text, 4, Motion::Left, 2), 2..4);
     }
 
-    /// 2B: `dw` on the last word of a block takes the whole word — no stray character and
-    /// no line break.
     #[test]
     fn d_w_on_the_last_word_takes_it() {
-        // The cursor on the last word: `w` would clamp onto its last grapheme, and a naive
-        // `cursor..target` would leave the first letters behind.
         assert_eq!(range("alpha beta", 6, word_forward(), 1), 6..10);
         assert_eq!(range("alpha beta", 6, word_forward(), 2), 6..10);
-        // The cursor on the first of two words: the blank goes, the second word stays.
         assert_eq!(range("ab c", 0, word_forward(), 1), 0..3);
-        // A line break is not part of the word: `dw` leaves it there.
         assert_eq!(range("alpha\nbeta", 0, word_forward(), 1), 0..5);
         assert_eq!(range("alpha\nbeta", 0, word_forward(), 2), 0..10);
-        // A `w` that runs out of the text still takes what is left.
         assert_eq!(range("alpha", 0, word_forward(), 1), 0..5);
         assert_eq!(range("alpha\n", 0, word_forward(), 1), 0..5);
         assert_eq!(range("", 0, word_forward(), 1), 0..0);
         assert_eq!(range(" ", 0, word_forward(), 1), 0..1);
     }
 
-    /// F5: `cw` on a word takes the word under the cursor — including from its LAST
-    /// character, where `e` would step over the gap and run on to the next word.
     #[test]
     fn cw_takes_the_word_under_the_cursor() {
         for at in 0..5 {
@@ -250,7 +188,6 @@ mod tests {
                 "`cw` from {at} takes the rest of `alpha`, not `beta`"
             );
         }
-        // A count takes that many words after the word under the cursor.
         assert_eq!(
             change_word_range("alpha beta gamma", 0, false, 2),
             Some(0..10)
@@ -259,11 +196,8 @@ mod tests {
             change_word_range("alpha beta gamma", 4, false, 2),
             Some(4..10)
         );
-        // On a blank there is no word: `cw` is `dw`, which `motion_range` answers.
         assert_eq!(change_word_range("alpha beta", 5, false, 1), None);
-        // At the end of the block the count simply stops.
         assert_eq!(change_word_range("alpha", 0, false, 3), Some(0..5));
-        // The big word folds punctuation in.
         assert_eq!(change_word_range("a b-c d", 2, true, 1), Some(2..5));
         for text in ["alpha beta", "e\u{301}cole x", "日本 語", "", "  "] {
             for at in 0..=text.len() {
@@ -274,21 +208,15 @@ mod tests {
         }
     }
 
-    /// F9: `^` is a motion that can go forwards, so `d^` with the cursor left of the first
-    /// non-blank takes the blanks in front of it instead of writing nothing.
     #[test]
     fn d_caret_from_the_indent_takes_the_blanks() {
         let text = "  abc";
         assert_eq!(range(text, 0, Motion::LineFirstNonBlank, 1), 0..2);
         assert_eq!(range(text, 1, Motion::LineFirstNonBlank, 1), 1..2);
-        // On the first non-blank there is nothing to take.
         assert_eq!(range(text, 2, Motion::LineFirstNonBlank, 1), 2..2);
-        // Past it, it is the ordinary backwards motion.
         assert_eq!(range(text, 4, Motion::LineFirstNonBlank, 1), 2..4);
     }
 
-    /// F9: `l` stops at the end of the line, so a count cannot step over a line break
-    /// inside a block (`d5l` is not `d5j`).
     #[test]
     fn d_l_stops_at_the_end_of_the_line() {
         assert_eq!(range("ab\ncd", 0, Motion::Right, 5), 0..2);
@@ -296,16 +224,13 @@ mod tests {
         assert_eq!(range("ab\ncd", 0, Motion::Right, 1), 0..1);
     }
 
-    /// `de`, `d$` and `df` include the grapheme they land on; `d$` stops before the break.
     #[test]
     fn inclusive_motions_take_their_target() {
         let text = "alpha beta";
         assert_eq!(range(text, 0, Motion::WordEnd { big: false }, 1), 0..5);
         assert_eq!(range(text, 0, Motion::WordEnd { big: false }, 2), 0..10);
         assert_eq!(range(text, 6, Motion::LineEnd, 1), 6..10);
-        // `$` on a line with a break after it never takes the break.
         assert_eq!(range("alpha\nbeta", 0, Motion::LineEnd, 1), 0..5);
-        // A count takes further lines, ending before the last line's break.
         assert_eq!(range("ab\ncd\nef", 0, Motion::LineEnd, 2), 0..5);
         let find = Motion::Find {
             ch: 't',
@@ -313,22 +238,18 @@ mod tests {
             back: false,
         };
         assert_eq!(range(text, 6, find, 1), 6..9, "df includes the target");
-        // A find that finds nothing has no range: the operator writes nothing.
         let missing = Motion::Find {
             ch: 'z',
             till: false,
             back: false,
         };
         assert_eq!(motion_range(text, 6, missing, 1, None), None);
-        // A `t` stops before its target, so the operator covers what it passed over.
         let till = Motion::Find {
             ch: 'a',
             till: true,
             back: false,
         };
-        // `dta` takes the text before the `a`, which is its `t` stop included.
         assert_eq!(range(text, 6, till, 1), 6..9);
-        // A find to the left includes the target and not the cursor's grapheme.
         let back = Motion::Find {
             ch: 'b',
             till: false,
@@ -337,7 +258,6 @@ mod tests {
         assert_eq!(range(text, 10, back, 1), 6..9);
     }
 
-    /// `;` and `,` reuse the last find, in the direction the repeat names.
     #[test]
     fn repeat_find_ranges() {
         let text = "a,b,c";
@@ -359,7 +279,6 @@ mod tests {
         );
     }
 
-    /// The block-crossing motions are the host's: an operator gets no range for them.
     #[test]
     fn block_motions_have_no_charwise_range() {
         for motion in [
@@ -372,7 +291,6 @@ mod tests {
         }
     }
 
-    /// The offsets are grapheme boundaries on text a careless implementation splits.
     #[test]
     fn hard_text_never_splits_a_grapheme() {
         for text in [

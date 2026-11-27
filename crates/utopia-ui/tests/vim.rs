@@ -1143,18 +1143,12 @@ fn rules_2_5_11_a_seeded_random_session_leaves_the_graph_recoverable(cx: &mut Te
     });
 }
 
-// ------------------------------------------------------------------------ PR 2 — 2A
-// Undo runs (VM-12; PRD §9.1.1, the FR-2.12 note): one Insert run is one undo group.
-
-/// The system clipboard's text, as the app would paste it.
 fn clipboard(cx: &mut VisualTestContext) -> String {
     cx.read_from_clipboard()
         .and_then(|item| item.text())
         .unwrap_or_default()
 }
 
-/// 2A.4 (VM-12): pauses longer than the 500 ms coalesce window do not split an Insert run.
-/// The store's clock is settable, so this jumps it instead of sleeping.
 #[gpui::test]
 fn vm_12_an_insert_run_with_long_pauses_is_one_undo_group(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1165,7 +1159,6 @@ fn vm_12_an_insert_run_with_long_pauses_is_one_undo_group(cx: &mut TestAppContex
 
     cx.simulate_keystrokes("A");
     for (i, ch) in ["a", "b", "c"].iter().enumerate() {
-        // 600 ms apart: three groups outside a run, one inside it.
         app.update(cx, |app, _| {
             app.store.set_clock(Some(1_000 + 600 * i as i64))
         });
@@ -1181,7 +1174,6 @@ fn vm_12_an_insert_run_with_long_pauses_is_one_undo_group(cx: &mut TestAppContex
         depth + 1,
         "one Insert run is one undo group, whatever the pauses (VM-12)"
     );
-    // And one `u` takes the whole run back.
     cx.simulate_keystrokes("u");
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "x", "one undo, the whole run");
@@ -1189,8 +1181,6 @@ fn vm_12_an_insert_run_with_long_pauses_is_one_undo_group(cx: &mut TestAppContex
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// 2A.3 (VM-12): a blur closes the run, so `i`, two typed characters and a click elsewhere
-/// are still one undo step.
 #[gpui::test]
 fn vm_12_a_run_closed_by_a_blur_is_one_group(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1211,7 +1201,6 @@ fn vm_12_a_run_closed_by_a_blur_is_one_group(cx: &mut TestAppContext) {
         "typing in Insert holds the run open"
     );
 
-    // The keyboard goes somewhere else without an Escape.
     editor.update(cx, |e, cx| e.focus_lost(cx));
     cx.run_until_parked();
 
@@ -1229,8 +1218,6 @@ fn vm_12_a_run_closed_by_a_blur_is_one_group(cx: &mut TestAppContext) {
     assert_eq!(rows(&app, &page, cx)[0].0, "x");
 }
 
-/// 2A.1 (VM-12): an undo that starts while a run is open closes the run first, so it takes
-/// the whole Insert run and not the edit before it.
 #[gpui::test]
 fn vm_12_an_undo_during_an_open_run_closes_it_first(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1247,9 +1234,6 @@ fn vm_12_an_undo_during_an_open_run_closes_it_first(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "xab");
 
-    // Cmd+Z through the editor, with the run still open: the run is folded and undone as one
-    // step. (Driving `store.undo()` directly skipped the editor's own bookkeeping, which is
-    // where F7 lived.)
     let editor = editor(&ws, cx);
     cx.simulate_keystrokes("cmd-z");
     cx.run_until_parked();
@@ -1267,8 +1251,6 @@ fn vm_12_an_undo_during_an_open_run_closes_it_first(cx: &mut TestAppContext) {
     assert_eq!(undo_depth(&app, cx), depth);
 }
 
-/// A named page built by `seed`, opened in the window with Vim on. The launch page is the
-/// daily feed, so a test that needs a property bar or a zoom opens its own page.
 fn setup_page(
     cx: &mut TestAppContext,
     seed: impl FnOnce(&mut Store) -> PageId,
@@ -1297,13 +1279,11 @@ fn setup_page(
     (app, ws, cx, page)
 }
 
-/// Click a block's rendered row, which is how a test puts the caret in it.
 fn click_block(cx: &mut VisualTestContext, block: &BlockId) {
     let selector: String = format!("text-{}", block.0);
     click_selector(cx, &selector);
 }
 
-/// Click whatever an element with this debug selector drew (a property row, a block).
 fn click_selector(cx: &mut VisualTestContext, selector: &str) {
     let selector: &'static str = Box::leak(selector.to_string().into_boxed_str());
     let row = cx
@@ -1313,8 +1293,6 @@ fn click_selector(cx: &mut VisualTestContext, selector: &str) {
     cx.run_until_parked();
 }
 
-/// Seed `depth` levels of a chain under a new root on `page`, returning the ids outermost
-/// first.
 fn seed_chain(store: &mut Store, page: &PageId, depth: usize) -> Vec<BlockId> {
     let mut ids = Vec::new();
     let mut parent: Option<BlockId> = None;
@@ -1345,8 +1323,6 @@ fn seed_chain(store: &mut Store, page: &PageId, depth: usize) -> Vec<BlockId> {
     ids
 }
 
-/// VM-8, F12: the properties bar is not the outline. `dd` on a property row leaves it alone,
-/// and `p` there pastes nothing into it.
 #[gpui::test]
 fn vm_8_block_commands_leave_the_properties_bar_alone(cx: &mut TestAppContext) {
     let (app, ws, cx, page) = setup_page(cx, |s| {
@@ -1387,11 +1363,9 @@ fn vm_8_block_commands_leave_the_properties_bar_alone(cx: &mut TestAppContext) {
     let ids = live_blocks(&app, &page, cx);
     assert_eq!(ids.len(), 3);
 
-    // `yy` a body block, then `dd` on a property row: neither one touches the bar.
     click_block(cx, &ids[2]);
     cx.simulate_keystrokes("y y");
     cx.run_until_parked();
-    // The bar draws its rows itself, so the row is `property-0`, not the block's text.
     click_selector(cx, "property-0");
     assert_eq!(target_block(&ws, cx), Some(ids[0].clone()));
     cx.simulate_keystrokes("d d");
@@ -1411,7 +1385,6 @@ fn vm_8_block_commands_leave_the_properties_bar_alone(cx: &mut TestAppContext) {
         "and the bar keeps its row"
     );
 
-    // `p` in the bar pastes nothing into it.
     cx.simulate_keystrokes("p");
     cx.run_until_parked();
     assert_eq!(
@@ -1425,9 +1398,6 @@ fn vm_8_block_commands_leave_the_properties_bar_alone(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-8, F12: `dd` on the last row of a zoom hands the caret to a row the view can SHOW.
-/// The row above is the one on screen (`a`), not the collapsed child of `a` and not the row
-/// outside the zoom that the page's own order comes to next.
 #[gpui::test]
 fn vm_8_dd_in_a_zoom_focuses_a_visible_row(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -1446,7 +1416,6 @@ fn vm_8_dd_in_a_zoom_focuses_a_visible_row(cx: &mut TestAppContext) {
             Default::default(),
         )
         .unwrap();
-        // Children in this order: `a` (collapsed, holding `a1`), then `b`.
         let a = BlockId::new();
         let b = BlockId::new();
         let a1 = BlockId::new();
@@ -1474,7 +1443,6 @@ fn vm_8_dd_in_a_zoom_focuses_a_visible_row(cx: &mut TestAppContext) {
                     text: "a1".into(),
                     kind: BlockKind::Bullet,
                 },
-                // A row outside the zoom, straight after it on the page.
                 Command::InsertBlock {
                     id: BlockId::new(),
                     parent: None,
@@ -1493,7 +1461,6 @@ fn vm_8_dd_in_a_zoom_focuses_a_visible_row(cx: &mut TestAppContext) {
     });
     let (z, a, b) = seeded.into_inner().expect("seeded");
 
-    // Open the page zoomed into `z`, with the caret on `b`.
     let (z2, b2) = (z.clone(), b.clone());
     ws.update_in(cx, |w, window, cx| {
         w.open(page.clone(), Some(z2), Some(b2), false, window, cx)
@@ -1519,21 +1486,14 @@ fn vm_8_dd_in_a_zoom_focuses_a_visible_row(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-10, F3: a cut that does not fit at the caret is refused and KEPT — on the same page
-/// and across pages — so the same `p` somewhere shallower still moves the blocks with their
-/// ids instead of quietly copying them.
 #[gpui::test]
 fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
     let (app, ws, cx, src) = setup_page(cx, |s| {
         let src = s.create_page("Source").unwrap();
         let chain = seed_chain(s, &src, utopia_core::outline::MAX_DROP_DEPTH);
-        // A second chain on the same page, so a same-page paste can want more room than
-        // there is.
         let other = seed_chain(s, &src, utopia_core::outline::MAX_DROP_DEPTH - 1);
         let dst = s.create_page("Destination").unwrap();
-        // A deep chain, so a paste under its last block cannot fit, and a shallow shelf
-        // root, so the same paste under that one can.
         let deep = seed_chain(s, &dst, utopia_core::outline::MAX_DROP_DEPTH - 1);
         let shelf = seed_chain(s, &dst, 1);
         seeded.replace(Some((chain, other, dst, deep, shelf)));
@@ -1542,7 +1502,6 @@ fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
     let (chain, other, dst, deep, shelf) = seeded.into_inner().expect("seeded");
     let root = chain[0].clone();
 
-    // `dd` the whole chain A.
     click_block(cx, &root);
     cx.simulate_keystrokes("d d");
     cx.run_until_parked();
@@ -1553,7 +1512,6 @@ fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
         .is_live(&root)));
     let before = all_block_ids(&app, &src, cx);
 
-    // `p` under the deepest block of chain B, on the same page: no room, nothing happens.
     click_block(cx, &other[other.len() - 1]);
     cx.simulate_keystrokes("p");
     cx.run_until_parked();
@@ -1570,7 +1528,6 @@ fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
         "and the cut is still a cut (F3)"
     );
 
-    // The same paste across pages, under the destination's deepest block: no room either.
     let dst2 = dst.clone();
     ws.update_in(cx, |w, window, cx| {
         w.open(dst2, None, None, false, window, cx)
@@ -1593,7 +1550,6 @@ fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
         "and the cut survived that refusal too (F3)"
     );
 
-    // Under the shelf root it fits, so the blocks move with their ids.
     click_block(cx, &shelf[0]);
     cx.simulate_keystrokes("p");
     cx.run_until_parked();
@@ -1621,14 +1577,8 @@ fn vm_10_a_cut_that_is_too_deep_here_is_not_spent(cx: &mut TestAppContext) {
     });
 }
 
-// ------------------------------------------------------------------------ PR 2 — 2B
-// Charwise operators: one command is one undo step, and `c`/`s`/`S`/`C` type inside it.
-
-/// 2B (VM-12): each charwise edit is ONE undo step. One block per case, so each starts from
-/// its own text; `j` reaches the next one and `0` plus `l` place the Normal cursor.
 #[gpui::test]
 fn vm_12_each_charwise_edit_is_one_undo_step(cx: &mut TestAppContext) {
-    // (text, cursor offset, keys, text after)
     let cases: &[(&str, usize, &str, &str)] = &[
         ("abc", 1, "x", "ac"),
         ("abc", 1, "X", "bc"),
@@ -1636,7 +1586,6 @@ fn vm_12_each_charwise_edit_is_one_undo_step(cx: &mut TestAppContext) {
         ("abc", 0, "~", "Abc"),
         ("abc", 0, "r x", "xbc"),
         ("alpha beta", 0, "d w", "beta"),
-        // The last word of the block: no stray character and no other block joined.
         ("alpha beta", 6, "d w", "alpha "),
         ("alpha beta", 0, "d e", " beta"),
         ("alpha beta", 6, "d $", "alpha "),
@@ -1685,11 +1634,8 @@ fn vm_12_each_charwise_edit_is_one_undo_step(cx: &mut TestAppContext) {
     }
 }
 
-/// 2B (VM-12): `c`, `s`, `S` and `C` delete and then type inside one run, so the whole
-/// change is one undo step.
 #[gpui::test]
 fn vm_12_each_change_types_inside_one_run(cx: &mut TestAppContext) {
-    // (text, cursor offset, keys, text after)
     let cases: &[(&str, usize, &str, &str)] = &[
         ("abc def", 4, "C", "abc X"),
         ("abc", 1, "s", "aXc"),
@@ -1736,8 +1682,6 @@ fn vm_12_each_change_types_inside_one_run(cx: &mut TestAppContext) {
     }
 }
 
-/// 2A.4 + 2B, the headline acceptance: `ciw`, a typed word and Escape are one undo step, and
-/// `u` brings the original word back in one more.
 #[gpui::test]
 fn vm_12_ciw_typing_and_escape_undo_as_one_step(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1746,7 +1690,7 @@ fn vm_12_ciw_typing_and_escape_undo_as_one_step(cx: &mut TestAppContext) {
     let page = today_page(&app, cx);
     let depth = undo_depth(&app, cx);
 
-    cx.simulate_keystrokes("0 w"); // on `beta`
+    cx.simulate_keystrokes("0 w");
     assert_eq!(cursor(&ws, cx), 6);
     cx.simulate_keystrokes("c i w");
     cx.run_until_parked();
@@ -1779,7 +1723,6 @@ fn vm_12_ciw_typing_and_escape_undo_as_one_step(cx: &mut TestAppContext) {
     );
 }
 
-/// 2B (VM-8): `cc` changes the block's own text and leaves its children alone.
 #[gpui::test]
 fn vm_12_cc_changes_the_text_and_keeps_the_children(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -1822,15 +1765,12 @@ fn vm_12_cc_changes_the_text_and_keeps_the_children(cx: &mut TestAppContext) {
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-/// 2B: `ci[` inside `[[Alpha]]` leaves the caret inside the link, and entering Insert
-/// re-reads the trigger, so the page menu opens (PR 1's rule, relied on here).
 #[gpui::test]
 fn vm_12_ci_bracket_inside_a_link_opens_the_menu(cx: &mut TestAppContext) {
     let (_app, ws, cx) = setup_seeded(cx, true, |s| {
         seed_roots(s, &["[[Alpha]]"]);
         s.create_page("Alphabet").unwrap();
     });
-    // On the `h` of `Alpha`, inside the brackets.
     cx.simulate_keystrokes("0 3 l");
     assert_eq!(cursor(&ws, cx), 3);
     assert_eq!(field_text(&ws, cx), "[[Alpha]]");
@@ -1857,8 +1797,6 @@ fn vm_12_ci_bracket_inside_a_link_opens_the_menu(cx: &mut TestAppContext) {
     assert_eq!(menu.start, 0, "the trigger is the link's opening `[[`");
 }
 
-/// 2B (VM-11): `y` writes the register *and* the system clipboard; `d`, `c` and `x` write
-/// the register only. `"_` discards.
 #[gpui::test]
 fn vm_11_a_yank_writes_the_clipboard_and_a_delete_does_not(cx: &mut TestAppContext) {
     let (app, _ws, cx) = setup_seeded(cx, true, |s| {
@@ -1890,7 +1828,6 @@ fn vm_11_a_yank_writes_the_clipboard_and_a_delete_does_not(cx: &mut TestAppConte
         "yanking writes no text"
     );
 
-    // `d`, `c` and `x` leave the clipboard as it was.
     for (keys, typed) in [("0 d w", false), ("0 x", false), ("j 0 c w", true)] {
         cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
         cx.simulate_keystrokes(keys);
@@ -1906,15 +1843,12 @@ fn vm_11_a_yank_writes_the_clipboard_and_a_delete_does_not(cx: &mut TestAppConte
         );
     }
 
-    // `"_` writes neither: the black hole register.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".into()));
     cx.simulate_keystrokes("\" _ y y");
     cx.run_until_parked();
     assert_eq!(clipboard(cx), "sentinel", "`\"_` discards");
 }
 
-/// 2B (VM-12): a text object with no object under the cursor writes nothing and leaves no
-/// undo step — `di(` outside any bracket.
 #[gpui::test]
 fn vm_12_an_object_that_is_not_there_writes_nothing(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -1932,11 +1866,6 @@ fn vm_12_an_object_that_is_not_there_writes_nothing(cx: &mut TestAppContext) {
     assert_eq!(mode(&ws, cx), Mode::Normal);
 }
 
-// ------------------------------------------------------------------------ PR 2 — 2C
-// Linewise block commands: `dd yy p P J >> <<`, counted over siblings (VM-8, VM-10, VM-11).
-
-/// Every id a page's shard knows, live or tombstoned — rule 5 keeps the rows, which is what
-/// lets `p` put the same ids back.
 fn all_block_ids(
     app: &Entity<AppState>,
     page: &PageId,
@@ -1950,7 +1879,6 @@ fn all_block_ids(
     })
 }
 
-/// A block's `(kind, checked)` as the store has it.
 fn kind_of(
     app: &Entity<AppState>,
     page: &PageId,
@@ -1966,7 +1894,6 @@ fn kind_of(
     })
 }
 
-/// Seed a child under `parent` (the Daily Notes seed helper writes roots only).
 fn seed_child(store: &mut Store, page: &PageId, parent: &BlockId, text: &str) -> BlockId {
     let id = BlockId::new();
     store
@@ -1985,8 +1912,6 @@ fn seed_child(store: &mut Store, page: &PageId, parent: &BlockId, text: &str) ->
     id
 }
 
-/// VM-8: `dd` tombstones the block and its subtree in one undo step, keeps the ids as
-/// tombstones (rule 5) and leaves the cursor on the NEXT block, not the previous one.
 #[gpui::test]
 fn vm_8_dd_deletes_the_subtree_in_one_undo_step(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -2038,15 +1963,12 @@ fn vm_8_dd_deletes_the_subtree_in_one_undo_step(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-10, the headline: `dd` then `p` MOVES the blocks, so every id survives — and a
-/// `((reference))` to one of them still resolves, which a copy with new ids would break.
 #[gpui::test]
 fn vm_10_dd_then_p_moves_the_blocks_and_keeps_every_id(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
         let (page, ids) = seed_roots(s, &["parent", "next", "last"]);
         let child = seed_child(s, &page, &ids[0], "child");
-        // Something that points at the block which is about to move.
         let other = s.create_page("Other").unwrap();
         let ref_block = BlockId::new();
         s.execute(
@@ -2067,7 +1989,6 @@ fn vm_10_dd_then_p_moves_the_blocks_and_keeps_every_id(cx: &mut TestAppContext) 
     let before = all_block_ids(&app, &page, cx);
     let depth = undo_depth(&app, cx);
 
-    // `dd` on `parent`, then `p` after `next`.
     cx.simulate_keystrokes("d d p");
     cx.run_until_parked();
 
@@ -2102,7 +2023,6 @@ fn vm_10_dd_then_p_moves_the_blocks_and_keeps_every_id(cx: &mut TestAppContext) 
     assert_eq!(backlinks, 1, "the ((reference)) still resolves");
     let _ = other;
 
-    // The next `p` is a COPY (Vim's second `p` pastes twice), so it mints new ids.
     let before_second = all_block_ids(&app, &page, cx);
     cx.simulate_keystrokes("p");
     cx.run_until_parked();
@@ -2118,8 +2038,6 @@ fn vm_10_dd_then_p_moves_the_blocks_and_keeps_every_id(cx: &mut TestAppContext) 
     );
 }
 
-/// VM-10: `P` puts the pasted blocks above the cursor's block, with the same ids.
-// The test's own name spells the key.
 #[allow(non_snake_case)]
 #[gpui::test]
 fn vm_10_dd_then_P_puts_the_blocks_above(cx: &mut TestAppContext) {
@@ -2130,7 +2048,6 @@ fn vm_10_dd_then_P_puts_the_blocks_above(cx: &mut TestAppContext) {
     let ids = live_blocks(&app, &page, cx);
     let before = all_block_ids(&app, &page, cx);
 
-    // `dd` on `alpha` leaves the cursor on `beta`; `P` puts it back above.
     cx.simulate_keystrokes("d d P");
     cx.run_until_parked();
 
@@ -2143,7 +2060,6 @@ fn vm_10_dd_then_P_puts_the_blocks_above(cx: &mut TestAppContext) {
     assert_eq!(target_block(&ws, cx), Some(ids[0].clone()));
 }
 
-/// VM-10: `yy` then `p` makes a copy — and a to-do stays a to-do, done state and all.
 #[gpui::test]
 fn vm_10_yy_then_p_copies_a_todo(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -2156,8 +2072,6 @@ fn vm_10_yy_then_p_copies_a_todo(cx: &mut TestAppContext) {
     });
     let (page, ids) = seeded.into_inner().expect("seeded");
 
-    // `yy` on the to-do, then `p` after the anchor (two rows down: the child, then the
-    // anchor).
     cx.simulate_keystrokes("y y j j p");
     cx.run_until_parked();
 
@@ -2183,8 +2097,6 @@ fn vm_10_yy_then_p_copies_a_todo(cx: &mut TestAppContext) {
     assert_eq!(original, ids[0], "the original did not move or change");
 }
 
-/// VM-8: `3dd` is ONE undo step, and nine blocks (three roots with two children each) become
-/// tombstones rather than disappearing.
 #[gpui::test]
 fn vm_8_3dd_is_one_undo_step_and_tombstones_nine_blocks(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -2235,8 +2147,6 @@ fn vm_8_3dd_is_one_undo_step_and_tombstones_nine_blocks(cx: &mut TestAppContext)
     assert_eq!(undo_depth(&app, cx), depth);
 }
 
-/// VM-8: `J` appends the next visible block's text with a space, re-parents its children and
-/// leaves the joined block as a tombstone (rule 5).
 #[gpui::test]
 fn vm_8_join_tombstones_the_joined_block(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -2286,8 +2196,6 @@ fn vm_8_join_tombstones_the_joined_block(cx: &mut TestAppContext) {
     });
 }
 
-/// VM-8: `>>` and `<<` reuse the editor's own indent and outdent, so a count of one works
-/// and the caret stays in the block.
 #[gpui::test]
 fn vm_8_indent_and_outdent_act_on_the_block(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2321,9 +2229,6 @@ fn vm_8_indent_and_outdent_act_on_the_block(cx: &mut TestAppContext) {
     assert_eq!(undo_depth(&app, cx), depth + 2, "one undo step each");
 }
 
-/// VM-11: a block yank writes the register AND the system clipboard as Markdown; a delete
-/// writes the register only. `p` pastes from the register while the clipboard still holds
-/// Utopia's own write, and from the clipboard once something else has replaced it.
 #[gpui::test]
 fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
     cx: &mut TestAppContext,
@@ -2346,8 +2251,6 @@ fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
         "and in the block register"
     );
 
-    // The clipboard is still ours, so `p` uses the structured register: a copy with new ids.
-    // Two rows down (the child, then the anchor) puts the copy below both.
     cx.simulate_keystrokes("j j p");
     cx.run_until_parked();
     assert_eq!(
@@ -2361,8 +2264,6 @@ fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
         ]
     );
 
-    // Something else takes the clipboard: `p` now pastes that, as characters — after the
-    // character under the cursor, which is `p`'s linewise rule for text.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("XYZ".to_string()));
     cx.simulate_keystrokes("0 p");
     cx.run_until_parked();
@@ -2376,7 +2277,6 @@ fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
         "pXYZarent",
         "and it reached the block"
     );
-    // A delete writes the register only.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".to_string()));
     cx.simulate_keystrokes("j 0 d d");
     cx.run_until_parked();
@@ -2388,9 +2288,6 @@ fn vm_11_a_block_yank_writes_the_clipboard_and_p_prefers_it_when_it_changed(
     let _ = ws;
 }
 
-/// VM-11, F2: `x` writes the register, not the clipboard, so `p` pastes the character it
-/// took — whatever another app copied before that. The clipboard is only newer when it
-/// changed since the register was written.
 #[gpui::test]
 fn vm_11_x_then_p_pastes_the_register_even_with_an_external_clipboard(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2413,8 +2310,6 @@ fn vm_11_x_then_p_pastes_the_register_even_with_an_external_clipboard(cx: &mut T
     let _ = ws;
 }
 
-/// VM-11, F2: the same for a `d`/`c` operator range. `dw` and `cw` write the register only,
-/// so `p` pastes what they took and not the clipboard's older contents.
 #[gpui::test]
 fn vm_11_dw_and_cw_then_p_paste_the_register(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2423,8 +2318,6 @@ fn vm_11_dw_and_cw_then_p_paste_the_register(cx: &mut TestAppContext) {
     let page = today_page(&app, cx);
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("external".to_string()));
 
-    // `dw` on `alpha`: the register holds "alpha" and the cursor stays at 0, so `P` puts it
-    // back in front of what is left.
     cx.simulate_keystrokes("d w P");
     cx.run_until_parked();
     assert_eq!(
@@ -2433,7 +2326,6 @@ fn vm_11_dw_and_cw_then_p_paste_the_register(cx: &mut TestAppContext) {
         "`dw` then `P` puts `alpha` back where it was, not the clipboard"
     );
 
-    // `cw` on the second block, a typed word, Escape, then `P`.
     cx.simulate_keystrokes("j 0 c w X escape 0 P");
     cx.run_until_parked();
     assert_eq!(
@@ -2445,9 +2337,6 @@ fn vm_11_dw_and_cw_then_p_paste_the_register(cx: &mut TestAppContext) {
     let _ = ws;
 }
 
-/// VM-10, F2: `dd` then `p` is the MOVE even when another app's text is on the clipboard —
-/// the clipboard is not newer than the register, and preferring it would silently turn the
-/// move into a copy.
 #[gpui::test]
 fn vm_10_dd_then_p_is_a_move_even_with_an_external_clipboard(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2475,9 +2364,6 @@ fn vm_10_dd_then_p_is_a_move_even_with_an_external_clipboard(cx: &mut TestAppCon
     let _ = ws;
 }
 
-/// VM-11, F6: a copy made AFTER the cut is newer than the register, so `p` pastes it. A cut
-/// does not outlive a fresh clipboard, and it does not need to: `p` is not the only place the
-/// blocks are.
 #[gpui::test]
 fn vm_11_a_copy_made_after_a_cut_beats_the_cut(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2488,7 +2374,6 @@ fn vm_11_a_copy_made_after_a_cut_beats_the_cut(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx), vec![("beta".to_string(), 0)]);
 
-    // The user copies a URL in a browser and comes back.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(
         "https://example.com".to_string(),
     ));
@@ -2503,7 +2388,6 @@ fn vm_11_a_copy_made_after_a_cut_beats_the_cut(cx: &mut TestAppContext) {
     let _ = ws;
 }
 
-/// VM-11, F6: a cut that was undone and then overtaken by a copy leaves the block alone.
 #[gpui::test]
 fn vm_11_a_cut_undone_then_an_external_copy_pastes_the_copy(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2522,8 +2406,6 @@ fn vm_11_a_cut_undone_then_an_external_copy_pastes_the_copy(cx: &mut TestAppCont
         "the undo brought the block back"
     );
 
-    // Something else takes the clipboard after the cut: it is newer than the register, so it
-    // wins, and the cut is not pasted a second time as a copy.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("later".to_string()));
     cx.simulate_keystrokes("0 $ p");
     cx.run_until_parked();
@@ -2540,11 +2422,8 @@ fn vm_11_a_cut_undone_then_an_external_copy_pastes_the_copy(cx: &mut TestAppCont
     let _ = ws;
 }
 
-/// 2B, F5: `cw` on the LAST character of a word changes that word, as Vim's does. It used to
-/// run on to the end of the next word, because `e` starts one grapheme to the right.
 #[gpui::test]
 fn vm_5_cw_on_a_words_last_character_takes_only_that_word(cx: &mut TestAppContext) {
-    // (cursor column, keys) for the first, middle and last character of `alpha`.
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
         seed_roots(s, &["alpha beta", "alpha beta", "alpha beta"]);
     });
@@ -2561,8 +2440,6 @@ fn vm_5_cw_on_a_words_last_character_takes_only_that_word(cx: &mut TestAppContex
         cx.simulate_keystrokes(&keys);
         cx.run_until_parked();
         assert_eq!(cursor(&ws, cx), col, "the caret is on character {col}");
-        // The command and the typing in their own batch: a batched `simulate_keystrokes`
-        // can type before the delete has been committed, which is not what is under test.
         cx.simulate_keystrokes("c w");
         cx.run_until_parked();
         cx.simulate_input("X");
@@ -2581,8 +2458,6 @@ fn vm_5_cw_on_a_words_last_character_takes_only_that_word(cx: &mut TestAppContex
     let _ = ws;
 }
 
-/// VM-12, F7: a Cmd+Z during Insert takes the whole run, and the run is opened again, so the
-/// rest of the session is still one undo step and not one per keystroke.
 #[gpui::test]
 fn vm_12_cmd_z_in_insert_takes_the_run_and_reopens_it(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2600,7 +2475,6 @@ fn vm_12_cmd_z_in_insert_takes_the_run_and_reopens_it(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "xab");
 
-    // Cmd+Z reaches the keymap (not the grammar) and closes the run as it undoes it.
     cx.simulate_keystrokes("cmd-z");
     cx.run_until_parked();
     assert_eq!(
@@ -2609,9 +2483,6 @@ fn vm_12_cmd_z_in_insert_takes_the_run_and_reopens_it(cx: &mut TestAppContext) {
         "the undo took the whole run, not one keystroke of it"
     );
     assert_eq!(undo_depth(&app, cx), depth);
-    // The undo closed the run; the editor opened a new one because it is still in Insert.
-    // Without that the flag went stale, and a later `begin_insert_run` returned early for
-    // the rest of the session (F7).
     assert!(
         app.update(cx, |app, _| app.store.in_undo_run()),
         "a run is open again for the rest of the Insert session (F7)"
@@ -2621,7 +2492,6 @@ fn vm_12_cmd_z_in_insert_takes_the_run_and_reopens_it(cx: &mut TestAppContext) {
         "and the editor's flag agrees with the store"
     );
 
-    // Still Insert: what is typed now is one step of its own, whatever the pauses.
     app.update(cx, |app, _| app.store.set_clock(Some(5_000)));
     cx.simulate_input("c");
     app.update(cx, |app, _| app.store.set_clock(Some(9_000)));
@@ -2637,8 +2507,6 @@ fn vm_12_cmd_z_in_insert_takes_the_run_and_reopens_it(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-11, F9: `"+x` puts what the delete took on the clipboard, and `"_x` leaves the
-/// register (and the clipboard) alone.
 #[gpui::test]
 fn vm_11_a_delete_names_its_register(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2656,7 +2524,6 @@ fn vm_11_a_delete_names_its_register(cx: &mut TestAppContext) {
         "`\"+x` writes the clipboard register (F9)"
     );
 
-    // `"_x` discards: the register still holds what `"+x` put there.
     cx.simulate_keystrokes("\" _ x");
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx)[0].0, "");
@@ -2667,8 +2534,6 @@ fn vm_11_a_delete_names_its_register(cx: &mut TestAppContext) {
     let _ = ws;
 }
 
-/// VM-8, F9: `"+dd` writes the clipboard with the block's Markdown, as `"+yy` does; a plain
-/// `dd` leaves the clipboard alone.
 #[gpui::test]
 fn vm_8_a_cut_names_its_register(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2687,7 +2552,6 @@ fn vm_8_a_cut_names_its_register(cx: &mut TestAppContext) {
     );
     assert_eq!(rows(&app, &page, cx), vec![("anchor".to_string(), 0)]);
 
-    // A plain `dd` writes the register only.
     cx.write_to_clipboard(gpui::ClipboardItem::new_string("sentinel".to_string()));
     cx.simulate_keystrokes("d d");
     cx.run_until_parked();
@@ -2699,8 +2563,6 @@ fn vm_8_a_cut_names_its_register(cx: &mut TestAppContext) {
     let _ = ws;
 }
 
-/// VM-8, F9: `3D` takes three lines, not one, and stops before the last break.
-// The requirement's own name spells the key.
 #[allow(non_snake_case)]
 #[gpui::test]
 fn vm_8_3D_takes_three_lines(cx: &mut TestAppContext) {
@@ -2718,7 +2580,6 @@ fn vm_8_3D_takes_three_lines(cx: &mut TestAppContext) {
     let _ = ws;
 }
 
-/// VM-11: `p` of clipboard text with line breaks is today's outline paste.
 #[gpui::test]
 fn vm_11_pasting_multiline_clipboard_text_makes_blocks(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2743,8 +2604,6 @@ fn vm_11_pasting_multiline_clipboard_text_makes_blocks(cx: &mut TestAppContext) 
     let _ = ws;
 }
 
-/// The whole set of block commands in one session: `doctor` must stay clean (rule 2) and
-/// every id must still resolve.
 #[gpui::test]
 fn vm_8_a_scripted_block_session_leaves_doctor_clean(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
@@ -2803,13 +2662,6 @@ fn vm_8_a_scripted_block_session_leaves_doctor_clean(cx: &mut TestAppContext) {
     });
 }
 
-// ------------------------------------------------------------------------ PR 2 — 2D
-// Text objects. `iw aw iW aW i( a( i[ a[ i{ a{ i" a" i' a' i\`` are wired through
-// `utopia_core::vim::textobj::range_of` (2B's table); `il` and `al` are the Utopia reference
-// object and answer `None` until PR 4, which is the case pinned here.
-
-/// 2D: `il` / `al` — a `[[page]]`, `#tag` or `((block))` under the cursor — are PR 4, so
-/// they write nothing at all: no text, no undo step, and no trip into Insert.
 #[gpui::test]
 fn vm_8_a_reference_text_object_is_pr_4_and_writes_nothing(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2820,7 +2672,6 @@ fn vm_8_a_reference_text_object_is_pr_4_and_writes_nothing(cx: &mut TestAppConte
     let before = rows(&app, &page, cx);
     let depth = undo_depth(&app, cx);
 
-    // On the `h` of `Alpha`, inside the brackets, then `il` and `al`.
     cx.simulate_keystrokes("0 5 l d i l");
     cx.run_until_parked();
     cx.simulate_keystrokes("d a l");
@@ -2830,7 +2681,6 @@ fn vm_8_a_reference_text_object_is_pr_4_and_writes_nothing(cx: &mut TestAppConte
     assert_eq!(undo_depth(&app, cx), depth, "and no undo step");
     assert_eq!(mode(&ws, cx), Mode::Normal);
 
-    // `c` with it does not enter Insert either: nothing to change.
     cx.simulate_keystrokes("c i l");
     cx.run_until_parked();
     assert_eq!(
@@ -2841,17 +2691,12 @@ fn vm_8_a_reference_text_object_is_pr_4_and_writes_nothing(cx: &mut TestAppConte
     assert_eq!(rows(&app, &page, cx), before);
 }
 
-/// VM-10: `dd` on one page and `p` on another MOVES the blocks, keeping every id. The store
-/// does the restore and the move in one undo group, because `cross_page_move` refuses a
-/// block that is not live.
 #[gpui::test]
 fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
     let seeded = std::cell::RefCell::new(None);
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
         let (page, ids) = seed_roots(s, &["alpha", "beta"]);
         let child = seed_child(s, &page, &ids[0], "alpha child");
-        // A tombstone between two live children, which is what Enter then Backspace leaves:
-        // the paste must not reverse the children around it (F1).
         let gone = seed_child(s, &page, &ids[0], "a tombstoned child");
         let last = seed_child(s, &page, &ids[0], "alpha last child");
         s.execute(
@@ -2875,7 +2720,6 @@ fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
             Default::default(),
         )
         .unwrap();
-        // The destination page needs a block to click into: Vim's cursor lives in one.
         let other = s.create_page("Other").unwrap();
         let anchor = BlockId::new();
         s.execute(
@@ -2895,12 +2739,10 @@ fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
     let (page, ids, child, other, anchor) = seeded.into_inner().expect("seeded");
     let before = all_block_ids(&app, &page, cx);
 
-    // `dd` on `alpha`, which leaves the cursor on `beta`.
     cx.simulate_keystrokes("d d");
     cx.run_until_parked();
     assert_eq!(rows(&app, &page, cx), vec![("beta".to_string(), 0)]);
 
-    // Open the other page and click into its block: the cut is still in the register.
     let other2 = other.clone();
     ws.update_in(cx, |w, window, cx| {
         w.open(other2, None, None, false, window, cx)
@@ -2925,8 +2767,6 @@ fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
         ],
         "the blocks were restored and moved into this page, children in order (VM-10, F1)"
     );
-    // `doctor` in the MOVED state, not only after the undo: this is where a cross-page paste
-    // can leave a projection disagreeing with the shards (rule 2).
     app.update(cx, |app, _| {
         let report = app.store.doctor().unwrap();
         assert!(report.is_ok(), "rule 2 after the paste: {report:?}");
@@ -2953,8 +2793,6 @@ fn vm_10_dd_then_p_on_another_page_keeps_the_ids(cx: &mut TestAppContext) {
     );
 }
 
-/// VM-10: after the delete was undone the blocks are live again, so `p` copies instead of
-/// moving them — the ids a cut names must never be dragged a second time.
 #[gpui::test]
 fn vm_10_p_after_an_undone_cut_copies(cx: &mut TestAppContext) {
     let (app, ws, cx) = setup_seeded(cx, true, |s| {
@@ -2974,7 +2812,6 @@ fn vm_10_p_after_an_undone_cut_copies(cx: &mut TestAppContext) {
         "the undo brought the block back"
     );
 
-    // The cut is no longer a cut: `p` copies with a new id.
     cx.simulate_keystrokes("j p");
     cx.run_until_parked();
     assert_eq!(

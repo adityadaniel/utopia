@@ -90,15 +90,7 @@ pub use utopia_core::outline::TreeRow;
 
 thread_local! {
     static REGISTER: RefCell<Register> = const { RefCell::new(Register::Chars(String::new())) };
-    /// What Utopia itself last put on the system clipboard (VM-11). `p` uses the clipboard
-    /// only when its text differs from this, so a block yank survives the round trip as a
-    /// structured register instead of coming back as Markdown.
     static CLIPBOARD: RefCell<Option<String>> = const { RefCell::new(None) };
-    /// What the system clipboard held at the moment the register was written — by a delete
-    /// or a change, which do not write the clipboard at all. `p` prefers the register while
-    /// the clipboard still reads this, so `x` then `p` pastes what `x` took and not whatever
-    /// another app had copied before it (F2). Once the clipboard changes it is newer than
-    /// the register, and it wins (F6) — there is no cut here to outlive it.
     static CLIPBOARD_AT_REGISTER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
@@ -112,13 +104,9 @@ pub fn last() -> Register {
 
 pub fn clipboard_written(text: &str) {
     CLIPBOARD.with(|c| *c.borrow_mut() = Some(text.to_string()));
-    // What the register was written against is now this text, so the write is not mistaken
-    // for someone else's copy either.
     CLIPBOARD_AT_REGISTER.with(|c| *c.borrow_mut() = Some(text.to_string()));
 }
 
-/// Note the system clipboard as it stands while a register is written by a delete or a
-/// change, which leave the clipboard alone.
 pub fn clipboard_at_register(text: Option<String>) {
     CLIPBOARD_AT_REGISTER.with(|c| *c.borrow_mut() = text);
 }
@@ -249,7 +237,6 @@ impl BlockEditor {
         if !crate::appearance::vim(cx) {
             return;
         }
-        // The click leaves Insert, so it leaves the Insert run too (VM-12).
         self.close_insert_run(cx);
         self.vim_mut().leave_insert();
         self.vim_mut().mode = Mode::Normal;
@@ -341,9 +328,6 @@ impl BlockEditor {
                 }
             }
             Command::Insert { at, register } => {
-                // The run opens before the caret moves, the text is deleted or the block is
-                // split, so what the command does and what is typed afterwards undo
-                // together (VM-12).
                 self.begin_insert_run(cx);
                 match at {
                     InsertAt::Cursor => {}
@@ -442,14 +426,6 @@ impl BlockEditor {
         cx.notify();
     }
 
-    // ------------------------------------------------------- charwise operators (2B)
-
-    /// Write a register (VM-11). A yank (`clipboard`) and `"+` also put the text on the
-    /// system clipboard; `d`, `c` and `x` write the register only; `"_` discards.
-    ///
-    /// A delete leaves the clipboard alone, so the clipboard as it stands now is recorded
-    /// with the register: `p` pastes the register while the clipboard still reads that, and
-    /// the clipboard once it changed (F2, F6).
     fn vim_set_register(
         &self,
         text: &str,
@@ -470,10 +446,6 @@ impl BlockEditor {
         }
     }
 
-    /// Delete `range` as one undo step, putting what it took in the register. The caret
-    /// lands where the text was removed from; `clamp` then puts it on the block cursor's
-    /// resting place, which a delete wants and a `c` command does not — its Insert bar may
-    /// sit past the last grapheme of the line.
     fn vim_delete(
         &mut self,
         range: std::ops::Range<usize>,
@@ -500,8 +472,6 @@ impl BlockEditor {
         }
     }
 
-    /// `x` and `X`: `count` graphemes under and after the cursor, or before it, inside the
-    /// line (Vim's `x` never joins two lines).
     fn vim_delete_chars(
         &mut self,
         back: bool,
@@ -541,8 +511,6 @@ impl BlockEditor {
         self.vim_delete(range, register, false, clamp, window, cx);
     }
 
-    /// `D` and `C`'s delete: the caret to the end of the line, exclusive of its break. A
-    /// count reaches the end of that many lines (`3D`), as Vim's does.
     fn vim_delete_to_line_end(
         &mut self,
         register: Option<char>,
@@ -561,14 +529,11 @@ impl BlockEditor {
             if end >= text.len() {
                 break;
             }
-            // Over the break, then on to the end of the line it opens.
             end = motion::line_end_exclusive(&text, next_grapheme(&text, end));
         }
         self.vim_delete(cursor..end, register, false, clamp, window, cx);
     }
 
-    /// `r{char}`: put `ch` over the grapheme under the cursor. Vim writes no register for
-    /// it — nothing was taken, it was replaced.
     fn vim_replace_char(&mut self, ch: char, window: &mut Window, cx: &mut Context<BlockEditor>) {
         if self.field().composing() {
             return;
@@ -577,15 +542,12 @@ impl BlockEditor {
         let cursor = self.field().cursor();
         let end = next_grapheme(&text, cursor);
         if end == cursor {
-            // An empty block has nothing under the cursor.
             return;
         }
         self.discrete_edit(cursor..end, &ch.to_string(), Some(cursor), window, cx);
         self.clamp_normal_cursor(cx);
     }
 
-    /// `~`: swap the case of `count` graphemes and step over them, as Vim's does. It is a
-    /// replacement, so it writes no register.
     fn vim_toggle_case(
         &mut self,
         count: usize,
@@ -618,19 +580,11 @@ impl BlockEditor {
                 swapped.push(c);
             }
         }
-        // The cursor steps past the last toggled grapheme, and rests on it at a line's
-        // end (1E.3).
         let at = motion::clamp_normal(&text, end);
         self.discrete_edit(cursor..end, &swapped, Some(at), window, cx);
         self.clamp_normal_cursor(cx);
     }
 
-    /// `d`, `c` and `y` with a motion or a text object: one range from
-    /// [`utopia_core::vim::operator`] or [`utopia_core::vim::textobj`], one undo step.
-    ///
-    /// A linewise operator (`dd`, `yy`, `>>`, `<<`) acts on BLOCKS rather than on text, so it
-    /// is one host plan; only `cc` stays here, because it changes the block's own text and
-    /// leaves its children (VM-8, 2B).
     fn vim_operate(
         &mut self,
         op: Operator,
@@ -644,12 +598,6 @@ impl BlockEditor {
             return;
         }
         if matches!(target, Target::Line) {
-            // A count on `>>` / `<<` would take the next siblings too; multi-block indent is
-            // PR 4, so a count there indents the block the caret is on and nothing else.
-            // `3cc` is the same shape and the same limit: changing three blocks means
-            // deleting the text of three rows and opening Insert over them, which is a
-            // multi-block plan PR 4 owns, so the count changes this block's text only. It is
-            // in the PR's known limits (F9).
             let event = match op {
                 Operator::Delete => Some(EditorEvent::DeleteBlocks {
                     count: count.max(1),
@@ -672,17 +620,12 @@ impl BlockEditor {
         let cursor = self.field().cursor();
         let count = count.max(1);
         let range = match target {
-            // `cc`: the block's text. Its children are other blocks, so they stay (VM-8).
             Target::Line => 0..text.len(),
             Target::Object(obj) => match textobj::range_of(&text, cursor, obj) {
                 Some(range) => range,
-                // Not in such an object: the command writes nothing.
                 None => return,
             },
             Target::Motion(motion) => {
-                // `cw` on a word takes the word under the cursor without the first step of
-                // `e`, which would run on into the next word from a word's last character
-                // (F5); on a blank it is `w`, which `motion_range` already has.
                 let range = match (op, motion) {
                     (Operator::Change, Motion::WordForward { big }) => {
                         operator::change_word_range(&text, cursor, big, count).or_else(|| {
@@ -713,8 +656,6 @@ impl BlockEditor {
         let range = range.start.min(len)..range.end.min(len);
         match op {
             Operator::Yank => {
-                // VM-11: a yank writes the register and the system clipboard, and the
-                // cursor moves to the start of what it took.
                 if range.is_empty() {
                     return;
                 }
@@ -727,26 +668,15 @@ impl BlockEditor {
             }
             Operator::Delete => self.vim_delete(range, register, false, true, window, cx),
             Operator::Change => {
-                // The run opens before the delete, so the delete and the typing are one
-                // undo step (VM-12), and Insert starts after it. A range of no width
-                // (`ci(` in `()`) still enters Insert, as Vim's does.
                 self.begin_insert_run(cx);
                 self.vim_delete(range, register, false, false, window, cx);
                 self.vim_mut().mode = Mode::Insert;
                 self.refresh_autocomplete(cx);
             }
-            // `>` with a motion (`>w`) would indent lines; that is PR 4.
             Operator::Indent | Operator::Outdent => {}
         }
     }
 
-    /// `p` / `P` (VM-10, VM-11).
-    ///
-    /// What gets pasted: a block register goes to the host as one plan (it makes or moves
-    /// blocks); characters insert at the caret, and clipboard text with line breaks is today's
-    /// outline paste. The system clipboard wins over the register only when it changed after
-    /// the register was written — something the user copied elsewhere (F2, F6). `"+` asks for
-    /// it by name.
     fn vim_paste(
         &mut self,
         before: bool,
@@ -758,7 +688,6 @@ impl BlockEditor {
         if self.field().composing() {
             return;
         }
-        // `"_p` is the black hole: it pastes nothing at all.
         if register_char == Some('_') {
             return;
         }
@@ -767,10 +696,6 @@ impl BlockEditor {
         let register = last();
         let pasted = match clipboard {
             Some(text) if register_char == Some('+') => Register::Chars(text),
-            // A cut whose blocks are still tombstones wins over an unchanged clipboard:
-            // `dd` then `p` is the MOVE that keeps ids (VM-10), and the clipboard cannot
-            // carry a linewise flag, so preferring it would silently turn the move into a
-            // copy. A clipboard that changed since is newer than the register, so it wins.
             Some(text) if clipboard_is_newer(&text) => Register::Chars(text),
             _ => register,
         };
@@ -779,16 +704,12 @@ impl BlockEditor {
                 self.emit_after_commit(EditorEvent::PasteBlocks { before, count }, cx)
             }
             Register::Blocks { markdown, .. } => {
-                // The clipboard copy of a block yank is Markdown, which is all a system paste
-                // can carry (the clipboard has no linewise flag).
                 self.vim_paste_text(&markdown, before, count, window, cx)
             }
             Register::Chars(text) => self.vim_paste_text(&text, before, count, window, cx),
         }
     }
 
-    /// Insert `text` at the caret (`P`) or just after it (`p`), as one undo step. Text with a
-    /// line break goes to the host as an outline paste, which is what Cmd+V does.
     fn vim_paste_text(
         &mut self,
         text: &str,
@@ -812,8 +733,6 @@ impl BlockEditor {
         } else {
             next_grapheme(&field.text, field.cursor())
         };
-        // Vim leaves the cursor on the last character it pasted; `clamp_normal_cursor`
-        // puts it back on a grapheme once the text is in the buffer.
         let after = start + repeated.len();
         self.discrete_edit(start..start, &repeated, Some(after), window, cx);
         self.clamp_normal_cursor(cx);

@@ -1,4 +1,3 @@
-
 use crate::command::Command;
 use crate::ids::{BlockId, PageId};
 
@@ -94,7 +93,6 @@ pub enum Direction {
 pub struct UndoStack {
     undo: Vec<UndoGroup>,
     redo: Vec<UndoGroup>,
-    /// Where an open run's groups start in `undo` (VM-12).
     run_start: Option<usize>,
 }
 
@@ -108,8 +106,6 @@ impl UndoStack {
             return;
         }
         self.redo.clear();
-        // A run is one step of its own: its first group never coalesces with the edit
-        // before it, or `i` would carry on the group the previous keystroke started.
         let floor = self.run_start.unwrap_or(0);
         let may_join = self.undo.len() > floor;
         if may_join {
@@ -125,52 +121,30 @@ impl UndoStack {
         self.undo.push(group);
         if self.undo.len() > LIMIT {
             self.undo.remove(0);
-            // The stack moved down one: so did the run's first group.
             if let Some(start) = self.run_start.as_mut() {
                 *start = start.saturating_sub(1);
             }
         }
     }
 
-    /// Open a run: every group pushed until [`UndoStack::end_run`] folds into one step
-    /// (VM-12). In Vim mode one Insert run — from `i` to Escape, a blur or the end of the
-    /// session — is one undo group, so the 500 ms coalesce window does not apply inside it
-    /// (PRD §9.1.1, the FR-2.12 note).
-    ///
-    /// Opening a run that is already open changes nothing: an Insert run opened by `c`
-    /// covers the words typed after it, and the `i` of a following block is the same run
-    /// until something closes it.
-    ///
-    /// Every group pushed while a run is open folds into it, so a write that is not the
-    /// editor's own must close the run first, or the owner's next undo would take it too:
-    /// an assistant's call through `/v1/op` (MC-8, MC-9) is closed by `utopia_api::handle`
-    /// and a capture by `Store::capture`, and the editor opens a new run on its next edit
-    /// (VM-12, F4). The stack cannot tell the two apart itself: `push` sees the same store
-    /// either way.
     pub fn begin_run(&mut self) {
         if self.run_start.is_some() {
             return;
         }
-        // The edit before the run is not part of it.
         self.seal();
         self.run_start = Some(self.undo.len());
     }
 
-    /// Close the run and fold its groups into one group, in push order. A group is an
-    /// ordered list of steps whose inverses are applied in reverse, so concatenating the
-    /// lists keeps each inverse next to the step it undoes.
     pub fn end_run(&mut self) {
         let Some(start) = self.run_start.take() else {
             return;
         };
         let start = start.min(self.undo.len());
         if self.undo.len() <= start + 1 {
-            // Nothing to fold: zero or one group, which is already one undo step.
             self.seal();
             return;
         }
         let mut groups = self.undo.drain(start..);
-        // `drain` on a non-empty tail always yields the first group.
         let Some(first) = groups.next() else {
             return;
         };
@@ -185,14 +159,11 @@ impl UndoStack {
             folded.caret_after = group.caret_after;
         }
         self.undo.push(folded);
-        // A run may hold more groups than the history may: the limit is the stack's, not
-        // the run's.
         while self.undo.len() > LIMIT {
             self.undo.remove(0);
         }
     }
 
-    /// Whether a run is open.
     pub fn in_run(&self) -> bool {
         self.run_start.is_some()
     }
@@ -204,8 +175,6 @@ impl UndoStack {
     }
 
     pub fn begin(&mut self, dir: Direction) -> Option<UndoGroup> {
-        // An undo that starts while a run is open closes it first, so it takes the run's
-        // one step and not the edit before it (VM-12).
         self.end_run();
         match dir {
             Direction::Undo => self.undo.pop(),
@@ -250,26 +219,18 @@ mod tests {
     use super::*;
     use crate::command::TextEdit;
 
-    // ---- Adversarial tests for the run fold (added during review of PR 2) ----
-
-    /// A run that outlives the 1000-group limit must not fold groups from BEFORE it.
-    /// `push` decrements `run_start` on each eviction, so the worry is that it saturates at
-    /// 0 while pre-run groups are still on the stack.
     #[test]
     fn a_run_that_outlives_the_limit_never_folds_the_edit_before_it() {
         let mut u = UndoStack::new();
-        // One sealed group before the run, which must survive as its own step.
         u.push(edit_group("BEFORE", "b0", 0));
         u.seal();
         u.begin_run();
-        // Push far more groups than the stack may hold, each sealed so none coalesce.
         for i in 0..(LIMIT + 50) {
             u.push(edit_group("run", &format!("b{}", i + 1), i as i64 * 10_000));
             u.seal();
         }
         u.end_run();
         assert!(u.len() <= LIMIT, "the limit still holds: {}", u.len());
-        // Whatever survived, undoing everything must not panic.
         let mut steps = 0;
         while u.can_undo() {
             let Some(g) = u.begin(Direction::Undo) else {
@@ -281,22 +242,19 @@ mod tests {
         }
     }
 
-    /// `begin_run` twice without `end_run` is documented as a no-op. Prove the second call
-    /// does not move the start forward and orphan the groups pushed since the first.
     #[test]
     fn opening_a_run_twice_keeps_the_first_start() {
         let mut u = UndoStack::new();
         u.begin_run();
         u.push(edit_group("one", "b1", 0));
         u.seal();
-        u.begin_run(); // must not re-anchor here
+        u.begin_run();
         u.push(edit_group("two", "b2", 10_000));
         u.seal();
         u.end_run();
         assert_eq!(u.len(), 1, "both groups fold into one step");
     }
 
-    /// `end_run` with no run open must do nothing, not fold the whole history.
     #[test]
     fn closing_a_run_that_was_never_opened_folds_nothing() {
         let mut u = UndoStack::new();
@@ -309,8 +267,6 @@ mod tests {
         assert_eq!(u.len(), before, "the history is untouched");
     }
 
-    /// A run left open must not keep folding every later edit into one step forever.
-    /// `begin(Direction::Undo)` closes it, which is the only guarantee the stack makes.
     #[test]
     fn an_undo_closes_a_run_that_nobody_closed() {
         let mut u = UndoStack::new();
@@ -322,7 +278,6 @@ mod tests {
         let g = u.begin(Direction::Undo).expect("something to undo");
         u.finish(Direction::Undo, g);
         assert!(!u.in_run(), "the undo closed the run");
-        // A later edit is its own step, not folded with the run.
         u.push(edit_group("three", "b3", 20_000));
         u.seal();
         assert!(u.can_undo());
@@ -348,7 +303,6 @@ mod tests {
         }
     }
 
-    /// A group whose forward step is distinguishable (`insert`) and carries both carets.
     fn edit_group(insert: &str, block: &str, at: i64) -> UndoGroup {
         let cmd = Command::SetBlockText {
             id: block.into(),
@@ -374,7 +328,6 @@ mod tests {
         }
     }
 
-    /// The `insert` of each step, in the order the stack holds them.
     fn inserts(group: &UndoGroup) -> Vec<String> {
         group
             .steps
@@ -386,14 +339,11 @@ mod tests {
             .collect()
     }
 
-    /// 2A.1 (VM-12): every group pushed during a run folds into one, in push order, and
-    /// the carets come from the ends of the run.
     #[test]
     fn a_run_folds_its_groups_into_one_in_push_order() {
         let mut s = UndoStack::new();
         s.begin_run();
         assert!(s.in_run());
-        // Far enough apart that coalescing would have split them into three groups.
         s.push(edit_group("a", "b", 0));
         s.push(edit_group("b", "b", 5000));
         s.push(edit_group("c", "b", 10000));
@@ -414,13 +364,11 @@ mod tests {
         );
     }
 
-    /// The folded group is sealed: the edit after the run starts its own step.
     #[test]
     fn a_run_does_not_coalesce_with_the_group_before_it() {
         let mut s = UndoStack::new();
         s.push(text_group("b", 0));
         s.begin_run();
-        // Same block, 100 ms later: it would coalesce outside a run.
         s.push(text_group("b", 100));
         s.end_run();
         assert_eq!(s.len(), 2, "the run is a step of its own");
@@ -428,7 +376,6 @@ mod tests {
         assert_eq!(s.len(), 3, "and the folded group is sealed");
     }
 
-    /// A run of one group is left as it is: there is nothing to fold.
     #[test]
     fn a_run_that_holds_one_group_keeps_it() {
         let mut s = UndoStack::new();
@@ -437,14 +384,11 @@ mod tests {
         s.end_run();
         assert_eq!(s.len(), 1);
         assert_eq!(inserts(&s.undo[0]), ["a"]);
-        // A run nothing was pushed into leaves no empty step behind.
         s.begin_run();
         s.end_run();
         assert_eq!(s.len(), 1, "an empty run is not a group");
     }
 
-    /// 2A.1: a fold never leaves the stack holding more than the limit. Each push during
-    /// the run already trims, and the fold cannot add to what is left.
     #[test]
     fn the_limit_holds_after_a_fold() {
         let mut s = UndoStack::new();
@@ -462,11 +406,8 @@ mod tests {
             "a fold leaves the stack at or under its cap: {}",
             s.len()
         );
-        // The folded run is the newest group, and it holds every step the run kept.
         assert_eq!(s.undo.last().unwrap().steps.len(), 50);
 
-        // A run longer than the whole history is still bounded: the oldest groups are
-        // dropped as they are pushed, so the fold leaves one step of what is left.
         s.begin_run();
         for i in 0..(LIMIT + 100) {
             s.push(text_group(&format!("long{i}"), 0));
@@ -476,8 +417,6 @@ mod tests {
         assert!(!s.in_run());
     }
 
-    /// 2A.1: an undo that starts during a run closes it first, so it takes the whole run
-    /// and not the edit before it.
     #[test]
     fn an_undo_during_a_run_closes_it_first() {
         let mut s = UndoStack::new();
@@ -494,7 +433,6 @@ mod tests {
             "the undo took the run, not the edit before it"
         );
         assert!(!s.in_run(), "and closed the run");
-        // Redo puts the run back as one step.
         let group = s
             .begin(Direction::Redo)
             .expect("the run is on the redo stack");

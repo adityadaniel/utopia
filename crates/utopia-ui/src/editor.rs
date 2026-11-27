@@ -56,6 +56,7 @@ pub enum EditorEvent {
     JoinNext {
         count: usize,
     },
+    /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
     Navigate {
         up: bool,
         x: Option<Pixels>,
@@ -1018,9 +1019,6 @@ impl BlockEditor {
         let Some(t) = self.target().cloned() else {
             return false;
         };
-        // Insert keeps its run open across every edit. If something closed it behind the
-        // editor — a Cmd+Z, an assistant's write through `/v1/op` (MC-8) — the next
-        // keystroke opens a new one, so the run is still one undo step (VM-12, F4, F7).
         if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
             self.begin_insert_run(cx);
         }
@@ -1837,9 +1835,6 @@ impl BlockEditor {
     /// otherwise coalesce with it. `caret` is where the caret ends up, after the
     /// insertion when `None`. Nothing happens while the input method owns the buffer
     /// (§13.5).
-    ///
-    /// Vim's charwise operators go through here too (2B): the seals on both sides are what
-    /// make one command one undo step.
     pub(crate) fn discrete_edit(
         &mut self,
         range: std::ops::Range<usize>,
@@ -2248,8 +2243,6 @@ impl BlockEditor {
             return;
         }
         self.commit(cx);
-        // The run closes after the commit, so the text the composition committed is inside
-        // it: from `i` to this Escape is one undo step (VM-12).
         self.close_insert_run(cx);
         self.vim.leave_insert();
         self.ac = Autocomplete::Closed;
@@ -2284,14 +2277,9 @@ impl BlockEditor {
             app.changed(Vec::new(), true, cx);
             caret
         });
-        // An undo or a redo always closes the run it found open (VM-12), so the editor's
-        // flag follows the store instead of going stale: a later `begin_insert_run` that
-        // still believed a run was open would never reopen one, and the rest of the Insert
-        // session would be one undo step per keystroke (F7).
         let open = self.app.update(cx, |app, _| app.store.in_undo_run());
         self.vim.insert_run = open;
         if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
-            // Still typing: the run continues from here, as one step of its own.
             self.begin_insert_run(cx);
         }
         self.sync_from_store(cx);

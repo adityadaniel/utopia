@@ -556,8 +556,6 @@ mod tests {
         ] {
             assert_eq!(run(keys), Command::Insert { at, register: None }, "{keys}");
         }
-        // A register before a command that deletes is kept for the delete it does first
-        // (`"_s` discards, `"+C` puts it on the clipboard; F9).
         assert_eq!(
             run("\"_s"),
             Command::Insert {

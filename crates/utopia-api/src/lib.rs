@@ -481,11 +481,6 @@ fn parse_date(store: &Store, s: &str) -> Result<NaiveDate, ApiError> {
 
 /// Run one operation against the store. Writes commit before returning and name the pages
 /// they touched in [`Outcome::changed`]; [`Op::kind`] says which ops those are.
-///
-/// A write is an undo step of its own (MC-8, MC-9), so it closes whatever Vim Insert run the
-/// owner has open (VM-12) instead of folding into the owner's typing: an assistant's
-/// `append_blocks` landing while the user is in Insert must not disappear with the user's
-/// next `u`. The editor opens its run again on its next edit.
 pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
     if op.kind() == OpKind::Write {
         store.end_undo_run();
