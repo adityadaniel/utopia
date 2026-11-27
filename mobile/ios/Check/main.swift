@@ -103,7 +103,8 @@ let nextWeekLink = AcceptedLink(
     start: 0,
     end: 9,
     day: "2026-11-10",
-    words: "next week"
+    words: "next week",
+    typed: false
 )
 let rebased = rebaseLinks(
     textBefore: "next week",

@@ -3276,6 +3276,7 @@ mod tests {
             end: found[0].end,
             day: Some(found[0].day.clone()),
             words: Some(found[0].words.clone()),
+            typed: false,
         };
         let stored = g.text_with_links(text, vec![link.clone()]).unwrap();
         assert_eq!(stored, "call Ana [[2026-12-04]]");
@@ -3307,6 +3308,7 @@ mod tests {
             end: found.end,
             day: Some(found.day),
             words: Some(found.words),
+            typed: false,
         };
         let edited = "Call Ana next week".to_string();
         let rebased = rebase_links(text, 0, 0, "Call Ana ".into(), vec![link]);

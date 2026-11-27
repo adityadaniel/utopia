@@ -142,14 +142,4 @@ extension DraftLink {
             typed: typed ?? (day == nil && words != nil)
         )
     }
-
-    init(accepted: AcceptedLink) {
-        self.init(
-            title: accepted.title,
-            start: Int(accepted.start),
-            end: Int(accepted.end),
-            day: accepted.day,
-            words: accepted.words
-        )
-    }
 }
