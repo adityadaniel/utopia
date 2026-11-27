@@ -1448,6 +1448,31 @@ impl PageView {
         self.interest = Interest::ThisPage;
     }
 
+    fn focus_edge(
+        &mut self,
+        page: &PageId,
+        first: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let block = if first {
+            self.items.iter().find_map(|i| match i {
+                Item::Row(r) if r.embed == 0 && r.page == *page => Some(r.block.clone()),
+                _ => None,
+            })
+        } else {
+            self.items.iter().rev().find_map(|i| match i {
+                Item::Row(r) if r.embed == 0 && r.page == *page => Some(r.block.clone()),
+                _ => None,
+            })
+        };
+        let Some(block) = block else {
+            return;
+        };
+        let caret = first.then_some(0);
+        self.edit(page.clone(), block, caret, None, window, cx);
+    }
+
     /// Start editing the first block (creating one on an empty page, §9.3).
     pub fn focus_first(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(page) = self.page() else {
@@ -2552,15 +2577,18 @@ impl PageView {
                     cx,
                 );
             }
-            EditorEvent::Navigate { up, x } => {
+            EditorEvent::Navigate { up, x, count } => {
+                let count = (*count).max(1);
                 if self.is_property_block(&t.block) {
                     let props = self.property_blocks();
                     let pos = props.iter().position(|b| b == &t.block);
                     let next = pos.and_then(|p| {
                         if *up {
-                            p.checked_sub(1).map(|i| (props[i].clone(), true))
+                            Some((props[p.saturating_sub(count)].clone(), true))
                         } else {
-                            props.get(p + 1).map(|b| (b.clone(), false))
+                            props
+                                .get(p.saturating_add(count))
+                                .map(|b| (b.clone(), false))
                         }
                     });
                     match next {
@@ -2598,18 +2626,28 @@ impl PageView {
                         _ => None,
                     })
                     .collect();
-                let pos = rows.iter().position(|(i, _)| *i == ix);
-                let next = pos.and_then(|p| if *up { p.checked_sub(1) } else { Some(p + 1) });
-                if *up && next.is_none() {
-                    // Arrow up from the first body block moves into the last property row.
-                    if let Some(last) = self.property_blocks().last().cloned() {
+                let Some(p) = rows.iter().position(|(i, _)| *i == ix) else {
+                    return;
+                };
+                if *up && p < count {
+                    let remaining = count - p;
+                    let props = self.property_blocks();
+                    if let Some(last) = props.get(props.len().saturating_sub(remaining)).cloned() {
                         let x = x.unwrap_or(px(0.));
                         let len = self.block_text_len(&last, cx);
                         self.edit_property_at(last, Some(len), Some(Goal::LastLine(x)), window, cx);
                         return;
                     }
                 }
-                if let Some(r) = next.and_then(|n| rows.get(n)).map(|(_, r)| (*r).clone()) {
+                let target = if *up {
+                    p.saturating_sub(count)
+                } else {
+                    p.saturating_add(count).min(rows.len().saturating_sub(1))
+                };
+                if target == p {
+                    return;
+                }
+                if let Some(r) = rows.get(target).map(|(_, r)| (*r).clone()) {
                     let x = x.unwrap_or(px(0.));
                     let goal = if *up {
                         Goal::LastLine(x)
@@ -2619,6 +2657,9 @@ impl PageView {
                     let caret = if *up { r.text.len() } else { 0 };
                     self.edit(r.page, r.block, Some(caret), Some(goal), window, cx);
                 }
+            }
+            EditorEvent::GoEdge { first } => {
+                self.focus_edge(&t.page, *first, window, cx);
             }
             // Option+Up/Down ran out of block: carry on at the start of the block above or
             // the end of the block below, which is what macOS text views do with a
@@ -2740,7 +2781,10 @@ impl PageView {
                     self.edit(t.page.clone(), f, None, None, window, cx);
                 }
             }
-            EditorEvent::Restore(_) | EditorEvent::Blurred | EditorEvent::Switched { .. } => {}
+            EditorEvent::Restore(_)
+            | EditorEvent::Blurred
+            | EditorEvent::Switched { .. }
+            | EditorEvent::VimChanged => {}
         }
     }
 
@@ -2757,7 +2801,12 @@ impl PageView {
     }
 
     /// Put the caret back where an undo/redo says, if that block can be shown here.
-    pub fn restore_caret(&mut self, caret: &Caret, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore_caret(
+        &mut self,
+        caret: &Caret,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.rebuild(cx);
         // `edit` opens a folded attribute's path when needed, and declines a block this view
         // cannot draw.
@@ -2769,6 +2818,10 @@ impl PageView {
             window,
             cx,
         );
+        self.editor
+            .read(cx)
+            .target()
+            .is_some_and(|t| t.block == caret.block)
     }
 
     fn apply_plan(&mut self, page: &PageId, plan: Plan, cx: &mut Context<Self>) -> Option<Focus> {
@@ -3369,6 +3422,7 @@ impl PageView {
                         let (Ok(i) | Err(i)) = ix;
                         let caret = (prefix + rendered.source_offset(i)).min(end);
                         cx.stop_propagation();
+                        this.editor.update(cx, |e, cx| e.vim_click_entry(cx));
                         this.edit(
                             r.page.clone(),
                             r.block.clone(),
