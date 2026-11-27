@@ -143,7 +143,9 @@ Read these before you write Swift:
   the pull request that added the app.
 - Editing text before or after a link moves its stored range with the single edit the
   text view reports (`rebase_links`; when none is reported the core's `edit_between`
-  computes one on whole Unicode scalars, so it never splits a surrogate pair). A
+  computes one on whole Unicode scalars, so it never splits a surrogate pair, and for a
+  pure insertion or deletion picks an equivalent position outside an accepted link when
+  one exists). A
   replacement inside or across the words keeps a date link while the resulting words still
   match the stored words in any letter case, including replacing the whole phrase;
   replacing them with other words drops it. A picker insert rebases the older links before

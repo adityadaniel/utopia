@@ -118,7 +118,11 @@ let emojiDate = AcceptedLink(
     day: "2026-12-04",
     words: "next week"
 )
-let emojiEdit = editBetween(old: "\u{1F600} next week", new: "\u{1F601} next week")
+let emojiEdit = editBetween(
+    old: "\u{1F600} next week",
+    new: "\u{1F601} next week",
+    links: [emojiDate]
+)
 check(
     emojiEdit.start == 0 && emojiEdit.removed == 2 && emojiEdit.replacement == "\u{1F601}",
     "an emoji edit is one scalar-wide edit"

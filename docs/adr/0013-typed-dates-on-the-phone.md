@@ -50,7 +50,9 @@ such day (roll to next year once it has passed), or ask. Only two can be a chip.
   with the edit's UTF-16 start, removed length and replacement). When no edit is reported
   (autocorrect, dictation), the app asks the core for the edit between the two lines
   (`edit_between`), whose common prefix and suffix run over whole Unicode scalars, so an
-  edit never starts or ends inside a surrogate pair. A replacement inside or across the
+  edit never starts or ends inside a surrogate pair; for a pure insertion or deletion it
+  picks an equivalent position outside an accepted link when one exists. A replacement
+  inside or across the
   link's words keeps a date link while the resulting words still match the stored words in
   any letter case, including replacing the whole phrase (`next week` to `Next week`);
   replacing them with other words drops it.

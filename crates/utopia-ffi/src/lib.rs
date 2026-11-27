@@ -205,7 +205,7 @@ pub struct TextEdit {
     pub replacement: String,
 }
 
-fn edit_between_in(old: &str, new: &str) -> TextEdit {
+fn edit_between_in(old: &str, new: &str, links: &[AcceptedLink]) -> TextEdit {
     let before: Vec<char> = old.chars().collect();
     let after: Vec<char> = new.chars().collect();
     let mut prefix = 0;
@@ -219,12 +219,23 @@ fn edit_between_in(old: &str, new: &str) -> TextEdit {
     {
         suffix += 1;
     }
-    let start = before[..prefix].iter().map(|c| c.len_utf16() as u32).sum();
-    let removed = before[prefix..before.len() - suffix]
+    let removed_run = &before[prefix..before.len() - suffix];
+    let inserted_run = &after[prefix..after.len() - suffix];
+    let insertion = removed_run.is_empty() && !inserted_run.is_empty();
+    let deletion = !removed_run.is_empty() && inserted_run.is_empty();
+    let (position, replacement) = if insertion || deletion {
+        let slide_run = if insertion { inserted_run } else { removed_run };
+        let (position, run) = equivalent_edit(&before, prefix, slide_run, insertion, links);
+        (position, if insertion { run } else { Vec::new() })
+    } else {
+        (prefix, inserted_run.to_vec())
+    };
+    let start = before[..position]
         .iter()
         .map(|c| c.len_utf16() as u32)
         .sum();
-    let replacement = after[prefix..after.len() - suffix].iter().collect();
+    let removed = removed_run.iter().map(|c| c.len_utf16() as u32).sum();
+    let replacement = replacement.iter().collect();
     TextEdit {
         start,
         removed,
@@ -232,9 +243,63 @@ fn edit_between_in(old: &str, new: &str) -> TextEdit {
     }
 }
 
+fn equivalent_edit(
+    before: &[char],
+    original: usize,
+    original_run: &[char],
+    insertion: bool,
+    links: &[AcceptedLink],
+) -> (usize, Vec<char>) {
+    let mut candidates: Vec<(i64, usize, Vec<char>)> = vec![(0, original, original_run.to_vec())];
+    let mut position = original;
+    let mut run = original_run.to_vec();
+    while position > 0 && before[position - 1] == *run.last().expect("a nonempty run") {
+        let last = run.pop().expect("a nonempty run");
+        run.insert(0, last);
+        position -= 1;
+        candidates.push((-((original - position) as i64), position, run.clone()));
+    }
+    position = original;
+    run = original_run.to_vec();
+    loop {
+        let next = if insertion {
+            position
+        } else {
+            position + run.len()
+        };
+        if next >= before.len() || before[next] != run[0] {
+            break;
+        }
+        let first = run.remove(0);
+        run.push(first);
+        position += 1;
+        candidates.push(((position - original) as i64, position, run.clone()));
+    }
+    let offsets: Vec<u32> = (0..=before.len())
+        .scan(0u32, |units, index| {
+            let here = *units;
+            if index < before.len() {
+                *units += before[index].len_utf16() as u32;
+            }
+            Some(here)
+        })
+        .collect();
+    candidates.sort_by_key(|(step, _, _)| (step.unsigned_abs(), *step > 0));
+    for (_, position, run) in candidates {
+        let offset = offsets[position];
+        if !links
+            .iter()
+            .any(|link| link.start < offset && offset < link.end)
+        {
+            return (position, run);
+        }
+    }
+    (original, original_run.to_vec())
+}
+
 #[uniffi::export]
-pub fn edit_between(old: String, new: String) -> TextEdit {
-    edit_between_in(&old, &new)
+pub fn edit_between(old: String, new: String, links: Vec<AcceptedLink>) -> TextEdit {
+    edit_between_in(&old, &new, &links)
 }
 
 #[uniffi::export]
@@ -2674,14 +2739,14 @@ mod tests {
         let before = "\u{1f600} next week";
         let after = "\u{1f601} next week";
         assert_eq!(
-            edit_between_in(before, after),
+            edit_between_in(before, after, &[]),
             TextEdit {
                 start: 0,
                 removed: 2,
                 replacement: "\u{1f601}".into(),
             }
         );
-        let prefixed = edit_between_in("next week", "note: next week");
+        let prefixed = edit_between_in("next week", "note: next week", &[]);
         assert_eq!(
             format!(
                 "{}{}{}",
@@ -2706,6 +2771,79 @@ mod tests {
         assert_eq!(
             g.text_with_links(after.into(), rebased).unwrap(),
             "\u{1f601} [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_fallback_prefix_insert_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let edit = edit_between_in("next week", "note: next week", &[link.clone()]);
+        assert_eq!(
+            edit,
+            TextEdit {
+                start: 0,
+                removed: 0,
+                replacement: "note: ".into(),
+            }
+        );
+        let rebased = rebase_links(
+            "next week".into(),
+            edit.start,
+            edit.removed,
+            edit.replacement,
+            vec![link],
+        );
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        assert_eq!(
+            g.text_with_links("note: next week".into(), rebased)
+                .unwrap(),
+            "note: [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_fallback_suffix_insert_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let edit = edit_between_in("next week", "next week week", &[link.clone()]);
+        assert_eq!(
+            edit,
+            TextEdit {
+                start: 9,
+                removed: 0,
+                replacement: " week".into(),
+            }
+        );
+        let rebased = rebase_links(
+            "next week".into(),
+            edit.start,
+            edit.removed,
+            edit.replacement,
+            vec![link],
+        );
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 9));
+        assert_eq!(
+            g.text_with_links("next week week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]] week"
         );
     }
 

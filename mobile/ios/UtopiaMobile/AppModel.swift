@@ -262,7 +262,7 @@ final class AppModel {
             if let edit, edit.matches(text, oldText: old) {
                 change = edit
             } else {
-                change = Self.fallbackEdit(old, text)
+                change = Self.fallbackEdit(old, text, links: links.map(\.accepted))
             }
             draft.lines[index].links = rebaseLinks(
                 textBefore: old,
@@ -279,8 +279,8 @@ final class AppModel {
         refreshSuggestions()
     }
 
-    private static func fallbackEdit(_ old: String, _ new: String) -> LineEdit {
-        let edit = editBetween(old: old, new: new)
+    private static func fallbackEdit(_ old: String, _ new: String, links: [AcceptedLink]) -> LineEdit {
+        let edit = editBetween(old: old, new: new, links: links)
         return LineEdit(
             start: Int(edit.start),
             removed: Int(edit.removed),
