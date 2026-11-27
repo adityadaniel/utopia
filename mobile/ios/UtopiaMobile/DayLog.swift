@@ -45,6 +45,8 @@ struct DayLog: View {
     @ScaledMetric(relativeTo: .body) private var childLineHeight: CGFloat = 22
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .caption) private var timeWidth: CGFloat = 52
+    @ScaledMetric(relativeTo: .body) private var rowPaddingTop: CGFloat = 6
+    @ScaledMetric(relativeTo: .body) private var rowPaddingBottom: CGFloat = 6
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -129,8 +131,8 @@ struct DayLog: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.top, 12)
-        .padding(.bottom, 12)
+        .padding(.top, rowPaddingTop)
+        .padding(.bottom, rowPaddingBottom)
         .padding(.leading, 20)
         .padding(.trailing, 16)
         .accessibilityElement(children: .contain)

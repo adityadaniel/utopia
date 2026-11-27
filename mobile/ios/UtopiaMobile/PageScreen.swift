@@ -17,6 +17,7 @@ struct PageScreen: View {
     @ScaledMetric(relativeTo: .body) private var childSize: CGFloat = 15
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
+    @ScaledMetric(relativeTo: .body) private var blockRowPadding: CGFloat = 2
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -111,7 +112,7 @@ struct PageScreen: View {
             }
             if block.placeholder != nil {
                 BlockPlaceholderView(text: block.placeholder ?? "", size: block.depth == 0 ? bodySize : childSize)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, blockRowPadding)
             } else {
                 PartTextView(
                     parts: block.parts,
@@ -120,7 +121,7 @@ struct PageScreen: View {
                     colour: block.kind == "todo" && block.checked ? Tokens.muted : (block.depth == 0 ? Tokens.ink : Tokens.ink3),
                     struck: block.kind == "todo" && block.checked
                 )
-                .padding(.vertical, 4)
+                .padding(.vertical, blockRowPadding)
             }
         }
         .padding(.leading, 20)

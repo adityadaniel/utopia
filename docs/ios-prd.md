@@ -149,7 +149,8 @@ and this area.
 ### 4.4 The day log
 
 - One row for each entry, oldest first, newest last. A 1 pt `line-soft` rule between rows.
-  Row padding: 12 pt above and below, 20 pt leading, 16 pt trailing.
+  Row padding: 6 pt above and below, 20 pt leading, 16 pt trailing. A block row on a page
+  screen has 2 pt above and below, with the same 20/16 pt sides.
 - **Time column.** 52 pt wide, label font, 12 pt, `muted`. It shows the time at which the
   entry's top-level block was made, in the device's time format. If the core cannot give
   that time, the column is empty and keeps its width, which is acceptable (K10; the core
