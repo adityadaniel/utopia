@@ -18,7 +18,7 @@ struct PageScreen: View {
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
     @ScaledMetric(relativeTo: .body) private var blockRowPadding: CGFloat = 2
-    @ScaledMetric(relativeTo: .body) private var todoRowHeight: CGFloat = 44
+    @ScaledMetric(relativeTo: .body) private var todoLineHeight: CGFloat = 44
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -102,7 +102,7 @@ struct PageScreen: View {
             if block.kind == "todo" {
                 // A to-do has its box at every depth; it is the one thing the phone may change
                 // on a block that is already in the graph (K9).
-                TodoBox(done: block.checked, lineHeight: lineHeight) {
+                TodoBox(done: block.checked, lineHeight: lineHeight, blockHeight: max(44, todoLineHeight)) {
                     Task { await model.toggleTodo(block: block) }
                 }
             } else if block.depth > 0 {
@@ -127,7 +127,7 @@ struct PageScreen: View {
         }
         .padding(.leading, 20)
         .padding(.trailing, 16)
-        .frame(minHeight: block.kind == "todo" ? todoRowHeight : nil, alignment: .top)
+        .frame(minHeight: block.kind == "todo" ? max(44, todoLineHeight) : nil, alignment: .topLeading)
     }
 
     @ViewBuilder
