@@ -146,68 +146,6 @@ pub struct AbsorbedDraft {
     pub caret: Option<u32>,
 }
 
-fn rebase_links_in(
-    text_before: &str,
-    edit_start: u32,
-    edit_removed_len: u32,
-    replacement: &str,
-    links: Vec<AcceptedLink>,
-) -> Vec<AcceptedLink> {
-    let edit_end = edit_start.saturating_add(edit_removed_len);
-    let Some(range) = utf16_range(text_before, edit_start, edit_end) else {
-        return Vec::new();
-    };
-    let new_text = format!(
-        "{}{}{}",
-        &text_before[..range.start],
-        replacement,
-        &text_before[range.end..]
-    );
-    let replacement_len = utf16_len(replacement);
-    let delta = replacement_len as i64 - edit_removed_len as i64;
-    let mut out = Vec::with_capacity(links.len());
-    for link in links {
-        if link.end <= edit_start {
-            out.push(link);
-            continue;
-        }
-        if link.start >= edit_end {
-            let start = (link.start as i64 + delta).max(0) as u32;
-            let end = (link.end as i64 + delta).max(0) as u32;
-            if start < end {
-                out.push(AcceptedLink { start, end, ..link });
-            }
-            continue;
-        }
-        let Some(stored) = link.words.as_deref().filter(|_| link.day.is_some()) else {
-            continue;
-        };
-        let inside = if edit_removed_len == 0 {
-            link.start < edit_start && edit_start < link.end
-        } else {
-            link.start <= edit_start
-                && edit_end <= link.end
-                && !(edit_start == link.start && edit_end == link.end)
-        };
-        if !inside {
-            continue;
-        }
-        let end = (link.end as i64 + delta).max(0) as u32;
-        if link.start >= end {
-            continue;
-        }
-        let Some(words_range) = utf16_range(&new_text, link.start, end) else {
-            continue;
-        };
-        let words = &new_text[words_range];
-        if words.trim().is_empty() || words.to_lowercase() != stored.to_lowercase() {
-            continue;
-        }
-        out.push(AcceptedLink { end, ..link });
-    }
-    out
-}
-
 #[uniffi::export]
 pub fn rebase_links(
     text_before: String,
@@ -704,14 +642,15 @@ fn written_link(
     let words = &text[range.clone()];
     if let Some(day) = &link.day {
         let typed = link.words.as_deref()?;
-        let boundaries = text[..range.start]
-            .chars()
-            .next_back()
-            .is_none_or(|c| !c.is_alphanumeric())
-            && text[range.end..]
+        let boundaries = link.typed
+            || (text[..range.start]
                 .chars()
-                .next()
-                .is_none_or(|c| !c.is_alphanumeric());
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+                && text[range.end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric()));
         if !boundaries || words.to_lowercase() != typed.to_lowercase() {
             return None;
         }
@@ -792,10 +731,6 @@ fn rebase_links_in(
             }
             continue;
         }
-        let typed = link.typed || (link.day.is_none() && link.words.is_some());
-        if !typed {
-            continue;
-        }
         let inside = if edit_removed_len == 0 {
             link.start < edit_start && edit_start < link.end
         } else {
@@ -813,18 +748,28 @@ fn rebase_links_in(
         let Some(words_range) = utf16_range(&new_text, link.start, end) else {
             continue;
         };
-        let words = new_text[words_range].to_string();
+        let words = &new_text[words_range];
         if words.trim().is_empty() {
             continue;
         }
-        out.push(AcceptedLink {
-            title: words.clone(),
-            start: link.start,
-            end,
-            day: None,
-            words: Some(words),
-            typed: true,
-        });
+        if link.typed || (link.day.is_none() && link.words.is_some()) {
+            out.push(AcceptedLink {
+                title: words.to_string(),
+                start: link.start,
+                end,
+                day: None,
+                words: Some(words.to_string()),
+                typed: true,
+            });
+            continue;
+        }
+        let Some(stored) = link.words.as_deref().filter(|_| link.day.is_some()) else {
+            continue;
+        };
+        if words.to_lowercase() != stored.to_lowercase() {
+            continue;
+        }
+        out.push(AcceptedLink { end, ..link });
     }
     out
 }
@@ -1326,23 +1271,6 @@ impl Graph {
                 &text, links, today, &format, caret, exists,
             ))
         })
-    }
-
-    pub fn rebase_links(
-        &self,
-        text_before: String,
-        edit_start: u32,
-        edit_removed_len: u32,
-        replacement: String,
-        links: Vec<AcceptedLink>,
-    ) -> Result<Vec<AcceptedLink>> {
-        Ok(rebase_links_in(
-            &text_before,
-            edit_start,
-            edit_removed_len,
-            &replacement,
-            links,
-        ))
     }
 
     /// The drawn pieces of a draft line: plain runs and the links the reader accepted, in
@@ -2687,9 +2615,7 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links("Utopia sync".into(), 0, 0, "U".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 0, 0, "U".into(), absorbed.links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!((rebased[0].start, rebased[0].end), (1, 7));
         assert_eq!(
@@ -2699,9 +2625,7 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links("Utopia sync".into(), 0, 0, "Use ".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 0, 0, "Use ".into(), absorbed.links);
         assert_eq!((rebased[0].start, rebased[0].end), (4, 10));
         assert_eq!(
             g.text_with_links("Use Utopia sync".into(), rebased)
@@ -2716,9 +2640,7 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links("Utopia sync".into(), 6, 0, "!".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 6, 0, "!".into(), absorbed.links);
         assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
         assert_eq!(
             g.text_with_links("Utopia! sync".into(), rebased).unwrap(),
@@ -2734,9 +2656,7 @@ mod tests {
             .unwrap();
         assert_eq!(absorbed.text, "UUtopia now");
         assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (1, 7));
-        let rebased = g
-            .rebase_links("UUtopia now".into(), 0, 1, "".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("UUtopia now".into(), 0, 1, "".into(), absorbed.links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
         assert_eq!(
@@ -2751,9 +2671,7 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("[[Utopai]]".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links("Utopai".into(), 4, 2, "ia".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("Utopai".into(), 4, 2, "ia".into(), absorbed.links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
         assert_eq!(rebased[0].words.as_deref(), Some("Utopia"));
@@ -2769,15 +2687,13 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links(
-                "see Utopia now".into(),
-                0,
-                14,
-                "Buy milk".into(),
-                absorbed.links,
-            )
-            .unwrap();
+        let rebased = rebase_links(
+            "see Utopia now".into(),
+            0,
+            14,
+            "Buy milk".into(),
+            absorbed.links,
+        );
         assert!(rebased.is_empty(), "{rebased:?}");
         assert_eq!(
             g.text_with_links("Buy milk".into(), rebased).unwrap(),
@@ -2786,16 +2702,12 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
             .unwrap();
-        let left = g
-            .rebase_links("see Utopia now".into(), 2, 4, "X".into(), absorbed.links)
-            .unwrap();
+        let left = rebase_links("see Utopia now".into(), 2, 4, "X".into(), absorbed.links);
         assert!(left.is_empty(), "{left:?}");
         let absorbed = g
             .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
             .unwrap();
-        let right = g
-            .rebase_links("see Utopia now".into(), 8, 4, "Y".into(), absorbed.links)
-            .unwrap();
+        let right = rebase_links("see Utopia now".into(), 8, 4, "Y".into(), absorbed.links);
         assert!(right.is_empty(), "{right:?}");
     }
 
@@ -2805,15 +2717,13 @@ mod tests {
         let absorbed = g
             .absorb_typed_links("[[Atlas]] and [[Utopia]]".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links(
-                "Atlas and Utopia".into(),
-                3,
-                10,
-                "or".into(),
-                absorbed.links,
-            )
-            .unwrap();
+        let rebased = rebase_links(
+            "Atlas and Utopia".into(),
+            3,
+            10,
+            "or".into(),
+            absorbed.links,
+        );
         assert!(rebased.is_empty(), "{rebased:?}");
     }
 
@@ -2824,9 +2734,7 @@ mod tests {
             .absorb_typed_links("[[next friday]]".into(), vec![], None)
             .unwrap();
         assert_eq!(absorbed.links[0].day.as_deref(), Some("2026-11-27"));
-        let rebased = g
-            .rebase_links("next friday".into(), 5, 6, "fri".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("next friday".into(), 5, 6, "fri".into(), absorbed.links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!(rebased[0].day, None);
         assert_eq!(rebased[0].words.as_deref(), Some("next fri"));
@@ -2848,9 +2756,7 @@ mod tests {
             words: None,
             typed: false,
         }];
-        let rebased = g
-            .rebase_links("Lunch with dana".into(), 0, 0, "Plan ".into(), links)
-            .unwrap();
+        let rebased = rebase_links("Lunch with dana".into(), 0, 0, "Plan ".into(), links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!((rebased[0].start, rebased[0].end), (16, 20));
         assert_eq!(
@@ -2862,7 +2768,7 @@ mod tests {
 
     #[test]
     fn ac_4_14_an_edit_that_does_not_fit_drops_the_links() {
-        let g = phone();
+        phone();
         let links = vec![AcceptedLink {
             title: "Dana".into(),
             start: 11,
@@ -2871,10 +2777,7 @@ mod tests {
             words: None,
             typed: false,
         }];
-        assert!(g
-            .rebase_links("abc".into(), 10, 0, "x".into(), links)
-            .unwrap()
-            .is_empty());
+        assert!(rebase_links("abc".into(), 10, 0, "x".into(), links).is_empty());
     }
 
     #[test]
@@ -2893,6 +2796,39 @@ mod tests {
     }
 
     #[test]
+    fn ac_4_14_adjacent_pasted_links_both_survive_send() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let absorbed = g
+            .absorb_typed_links("[[tomorrow]][[Dana]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "tomorrowDana");
+        assert_eq!(absorbed.links.len(), 2, "{absorbed:?}");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (0, 8));
+        assert_eq!(absorbed.links[0].day.as_deref(), Some("2026-11-28"));
+        assert!(absorbed.links[0].typed);
+        assert_eq!((absorbed.links[1].start, absorbed.links[1].end), (8, 12));
+        assert_eq!(absorbed.links[1].day, None);
+        assert!(absorbed.links[1].typed);
+        let stored = g
+            .text_with_links(absorbed.text.clone(), absorbed.links.clone())
+            .unwrap();
+        assert!(
+            stored.contains("]][[") && stored.ends_with("[[Dana]]"),
+            "{stored}"
+        );
+        let parts = g.draft_parts(absorbed.text, absorbed.links).unwrap();
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|p| p.kind == PartKind::Date || p.kind == PartKind::Page)
+                .count(),
+            2,
+            "{parts:?}"
+        );
+    }
+
+    #[test]
     fn ac_4_14_an_empty_bracket_pair_stays_as_typed() {
         let g = phone();
         let absorbed = g.absorb_typed_links("[[ ]]".into(), vec![], None).unwrap();
@@ -2907,24 +2843,20 @@ mod tests {
             .absorb_typed_links("🙂 [[Utopia]]".into(), vec![], None)
             .unwrap();
         assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (3, 9));
-        let rebased = g
-            .rebase_links("🙂 Utopia".into(), 0, 0, "界".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("🙂 Utopia".into(), 0, 0, "界".into(), absorbed.links);
         assert_eq!((rebased[0].start, rebased[0].end), (4, 10));
         assert_eq!(rebased[0].words.as_deref(), Some("Utopia"));
         let absorbed = g
             .absorb_typed_links("[[Utopia]]".into(), vec![], None)
             .unwrap();
-        let rebased = g
-            .rebase_links("Utopia".into(), 1, 2, "日本".into(), absorbed.links)
-            .unwrap();
+        let rebased = rebase_links("Utopia".into(), 1, 2, "日本".into(), absorbed.links);
         assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
         assert_eq!(rebased[0].words.as_deref(), Some("U日本pia"));
     }
 
     #[test]
     fn ac_4_14_an_insert_at_the_start_of_a_chip_link_shifts_it() {
-        let g = phone();
+        phone();
         let links = vec![AcceptedLink {
             title: "Dana".into(),
             start: 11,
@@ -2933,9 +2865,7 @@ mod tests {
             words: None,
             typed: false,
         }];
-        let rebased = g
-            .rebase_links("Lunch with dana".into(), 11, 0, "X".into(), links)
-            .unwrap();
+        let rebased = rebase_links("Lunch with dana".into(), 11, 0, "X".into(), links);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
         assert_eq!((rebased[0].start, rebased[0].end), (12, 16));
     }
@@ -3337,6 +3267,7 @@ mod tests {
             end: found.end,
             day: Some(found.day),
             words: Some(found.words),
+            typed: false,
         };
         let rebased = rebase_links("next week".into(), 0, 0, "note: ".into(), vec![link]);
         assert_eq!(rebased.len(), 1);
@@ -3360,6 +3291,7 @@ mod tests {
             end: found.end,
             day: Some(found.day.clone()),
             words: Some(found.words),
+            typed: false,
         };
         let rebased = rebase_links("next week".into(), 0, 1, "N".into(), vec![link]);
         assert_eq!(rebased.len(), 1, "{rebased:?}");
@@ -3382,6 +3314,7 @@ mod tests {
             end: found.end,
             day: Some(found.day),
             words: Some(found.words),
+            typed: false,
         };
         let mut rebased = rebase_links("next week".into(), 0, 0, "Dana ".into(), vec![date]);
         rebased.push(AcceptedLink {
@@ -3390,6 +3323,7 @@ mod tests {
             end: 4,
             day: None,
             words: None,
+            typed: false,
         });
         assert_eq!(rebased.len(), 2);
         assert_eq!(
@@ -3411,6 +3345,7 @@ mod tests {
             end: found.end,
             day: Some(found.day),
             words: Some(found.words),
+            typed: false,
         };
         let rebased = rebase_links(before.into(), 3, 1, "e\u{301}".into(), vec![link]);
         assert_eq!(rebased.len(), 1, "{rebased:?}");

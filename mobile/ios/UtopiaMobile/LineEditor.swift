@@ -162,13 +162,15 @@ struct LineEditor: UIViewRepresentable {
         var lastLinks: [LinkSpan] = []
         var isUpdating = false
         var pendingEdit: LineEdit?
+        var wasComposing = false
 
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
             let edit = pendingEdit
             pendingEdit = nil
             onCaret?(textView.selectedRange.location)
-            onText?(textView.text, textView.markedTextRange != nil, edit)
+            wasComposing = textView.markedTextRange != nil
+            onText?(textView.text, wasComposing, edit)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -178,6 +180,11 @@ struct LineEditor: UIViewRepresentable {
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !isUpdating else { return }
             onCaret?(textView.selectedRange.location)
+            let composing = textView.markedTextRange != nil
+            if wasComposing && !composing {
+                wasComposing = false
+                onText?(textView.text, false, nil)
+            }
         }
 
         /// Return makes a new line of the draft; it never sends (§4.5 rule 3, AC-1.6).

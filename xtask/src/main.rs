@@ -726,6 +726,7 @@ fn mobile(ios: bool) -> Result<()> {
     let mut c = swiftc("macosx");
     c.arg(root.join("mobile/ios/Check/main.swift"))
         .arg(root.join("mobile/ios/UtopiaMobile/LineEdit.swift"))
+        .arg(root.join("mobile/ios/UtopiaMobile/LineWork.swift"))
         .arg("-o")
         .arg(&check);
     link(&mut c, &lib);

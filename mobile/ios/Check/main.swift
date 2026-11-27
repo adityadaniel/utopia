@@ -170,7 +170,7 @@ check(
     "an ISO date in brackets stays exactly as typed (AC-4.14)"
 )
 let typedLink = try g.absorbTypedLinks(text: "[[Utopia]] sync", links: [], caret: nil)
-let rebasedTyped = try g.rebaseLinks(
+let rebasedTyped = rebaseLinks(
     textBefore: "Utopia sync",
     editStart: 0,
     editRemovedLen: 0,
@@ -183,7 +183,7 @@ check(
     "an edit before a typed link shifts its range (AC-4.14)"
 )
 let typo = try g.absorbTypedLinks(text: "[[Utopai]]", links: [], caret: nil)
-let fixed = try g.rebaseLinks(
+let fixed = rebaseLinks(
     textBefore: "Utopai",
     editStart: 4,
     editRemovedLen: 2,
@@ -193,6 +193,36 @@ let fixed = try g.rebaseLinks(
 check(
     try g.textWithLinks(text: "Utopia", links: fixed) == "[[Utopia]]",
     "a typo fix inside a typed link keeps it verbatim (AC-4.14)"
+)
+let adjacent = try g.absorbTypedLinks(text: "[[tomorrow]][[Dana]]", links: [], caret: nil)
+check(adjacent.links.count == 2, "both adjacent pasted links are absorbed (AC-4.14)")
+check(
+    adjacent.links[0].day == "2026-11-11" && adjacent.links[1].day == nil,
+    "the adjacent relative date stays a date and the name a page (AC-4.14)"
+)
+let adjacentStored = try g.textWithLinks(text: adjacent.text, links: adjacent.links)
+check(
+    adjacentStored.contains("]][[") && adjacentStored.hasSuffix("[[Dana]]"),
+    "both adjacent pasted links survive Send (AC-4.14)"
+)
+let chipDana = AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil, typed: false)
+let shiftedDana = rebaseLinks(
+    textBefore: "Lunch with dana",
+    editStart: 0,
+    editRemovedLen: 0,
+    replacement: "Ana ",
+    links: [chipDana]
+)
+let chipAna = AcceptedLink(title: "Ana", start: 0, end: 3, day: nil, words: nil, typed: false)
+check(
+    try g.textWithLinks(text: "Ana Lunch with dana", links: shiftedDana + [chipAna])
+        == "[[Ana]] Lunch with [[Dana]]",
+    "a chip accepted after a prefix insertion keeps both links (AC-4.14)"
+)
+let plainLine = try g.absorbTypedLinks(text: "no brackets here", links: [], caret: nil)
+check(
+    plainLine.text == "no brackets here",
+    "the core returns a line without links unchanged (AC-4.14)"
 )
 
 let grownLink = AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil, typed: false)
@@ -258,4 +288,17 @@ do {
 let again = try Graph.open(path: path, passphrase: nil)
 try again.setToday(date: "2026-11-02")
 check(try again.today().blocks.count == 3, "durable across reopen")
+
+var order: [String] = []
+let work = LineWork()
+let workLine = UUID()
+work.enqueue(for: workLine) {
+    try? await Task.sleep(nanoseconds: 50_000_000)
+    order.append("absorbed")
+}
+work.enqueue(for: workLine) {
+    order.append("chip")
+}
+await work.waitForAll()
+check(order == ["absorbed", "chip"], "Send awaits a delayed per-line conversion in order (AC-4.14)")
 print("all checks passed")

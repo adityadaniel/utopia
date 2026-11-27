@@ -72,22 +72,6 @@ struct CoreClient: Sendable {
         try await run { try graph.absorbTypedLinks(text: text, links: links, caret: caret) }
     }
 
-    func rebaseLinks(
-        _ textBefore: String,
-        edit: LineEdit,
-        links: [AcceptedLink]
-    ) async throws -> [AcceptedLink] {
-        try await run {
-            try graph.rebaseLinks(
-                textBefore: textBefore,
-                editStart: UInt32(max(0, edit.start)),
-                editRemovedLen: UInt32(max(0, edit.removed)),
-                replacement: edit.replacement,
-                links: links
-            )
-        }
-    }
-
     func search(_ words: String, limit: UInt32 = 40) async throws -> SearchResults {
         try await run { try graph.search(words: words, limit: limit) }
     }
