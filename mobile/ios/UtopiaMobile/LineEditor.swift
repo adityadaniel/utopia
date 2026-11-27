@@ -19,7 +19,7 @@ struct LineEditor: UIViewRepresentable {
     let caret: CaretRequest?
     let size: CGFloat
 
-    let onText: (String) -> Void
+    let onText: (String, LineEdit?) -> Void
     let onReturn: () -> Void
     let onDeleteAtStart: () -> Void
     let onPicker: () -> Void
@@ -151,7 +151,7 @@ struct LineEditor: UIViewRepresentable {
     }
 
     final class Coordinator: NSObject, UITextViewDelegate {
-        var onText: ((String) -> Void)?
+        var onText: ((String, LineEdit?) -> Void)?
         var onReturn: (() -> Void)?
         var onDeleteAtStart: (() -> Void)?
         var onPicker: (() -> Void)?
@@ -161,10 +161,13 @@ struct LineEditor: UIViewRepresentable {
         var appliedCaret: UUID?
         var lastLinks: [LinkSpan] = []
         var isUpdating = false
+        var pendingEdit: LineEdit?
 
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
-            onText?(textView.text)
+            let edit = pendingEdit
+            pendingEdit = nil
+            onText?(textView.text, edit)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -182,6 +185,7 @@ struct LineEditor: UIViewRepresentable {
             shouldChangeTextIn range: NSRange,
             replacementText text: String
         ) -> Bool {
+            pendingEdit = nil
             if text == "\n" {
                 onReturn?()
                 return false
@@ -195,7 +199,7 @@ struct LineEditor: UIViewRepresentable {
                     // The first bracket is taken away too, so the typed characters are gone
                     // (AC-4.7); the model is told, because this change is not a keystroke.
                     textView.text = ns.replacingCharacters(in: NSRange(location: range.location - 1, length: 1), with: "")
-                    onText?(textView.text)
+                    onText?(textView.text, LineEdit(start: range.location - 1, removed: 1, replacement: ""))
                     onPicker?()
                     return false
                 }
@@ -207,6 +211,7 @@ struct LineEditor: UIViewRepresentable {
                     return false
                 }
             }
+            pendingEdit = LineEdit(start: range.location, removed: range.length, replacement: text)
             return true
         }
     }

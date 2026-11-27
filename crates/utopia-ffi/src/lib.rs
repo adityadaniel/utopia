@@ -138,69 +138,83 @@ pub struct AcceptedLink {
     pub words: Option<String>,
 }
 
-fn common_prefix_utf16(a: &str, b: &str) -> usize {
-    let mut units = 0;
-    for (ca, cb) in a.chars().zip(b.chars()) {
-        if ca != cb {
-            break;
+fn rebase_links_in(
+    text_before: &str,
+    edit_start: u32,
+    edit_removed_len: u32,
+    replacement: &str,
+    links: Vec<AcceptedLink>,
+) -> Vec<AcceptedLink> {
+    let edit_end = edit_start.saturating_add(edit_removed_len);
+    let Some(range) = utf16_range(text_before, edit_start, edit_end) else {
+        return Vec::new();
+    };
+    let new_text = format!(
+        "{}{}{}",
+        &text_before[..range.start],
+        replacement,
+        &text_before[range.end..]
+    );
+    let replacement_len = utf16_len(replacement);
+    let delta = replacement_len as i64 - edit_removed_len as i64;
+    let mut out = Vec::with_capacity(links.len());
+    for link in links {
+        if link.end <= edit_start {
+            out.push(link);
+            continue;
         }
-        units += ca.len_utf16();
+        if link.start >= edit_end {
+            let start = (link.start as i64 + delta).max(0) as u32;
+            let end = (link.end as i64 + delta).max(0) as u32;
+            if start < end {
+                out.push(AcceptedLink { start, end, ..link });
+            }
+            continue;
+        }
+        let Some(stored) = link.words.as_deref().filter(|_| link.day.is_some()) else {
+            continue;
+        };
+        let inside = if edit_removed_len == 0 {
+            link.start < edit_start && edit_start < link.end
+        } else {
+            link.start <= edit_start
+                && edit_end <= link.end
+                && !(edit_start == link.start && edit_end == link.end)
+        };
+        if !inside {
+            continue;
+        }
+        let end = (link.end as i64 + delta).max(0) as u32;
+        if link.start >= end {
+            continue;
+        }
+        let Some(words_range) = utf16_range(&new_text, link.start, end) else {
+            continue;
+        };
+        let words = &new_text[words_range];
+        if words.trim().is_empty() || words.to_lowercase() != stored.to_lowercase() {
+            continue;
+        }
+        out.push(AcceptedLink { end, ..link });
     }
-    units
-}
-
-fn common_suffix_utf16(a: &str, b: &str, prefix: usize) -> usize {
-    let limit = (utf16_len(a) as usize - prefix).min(utf16_len(b) as usize - prefix);
-    let mut units = 0;
-    let mut ac = a.chars().rev();
-    let mut bc = b.chars().rev();
-    while let (Some(ca), Some(cb)) = (ac.next(), bc.next()) {
-        if ca != cb {
-            break;
-        }
-        let width = ca.len_utf16();
-        if units + width > limit {
-            break;
-        }
-        units += width;
-    }
-    units
+    out
 }
 
 #[uniffi::export]
 pub fn rebase_links(
-    old_text: String,
-    new_text: String,
+    text_before: String,
+    edit_start: u32,
+    edit_removed_len: u32,
+    replacement: String,
     links: Vec<AcceptedLink>,
 ) -> Vec<AcceptedLink> {
-    let prefix = common_prefix_utf16(&old_text, &new_text);
-    let suffix = common_suffix_utf16(&old_text, &new_text, prefix);
-    let old_len = utf16_len(&old_text) as i64;
-    let new_len = utf16_len(&new_text) as i64;
-    let edit_start = prefix as i64;
-    let edit_old_end = old_len - suffix as i64;
-    let delta = new_len - old_len;
-    links
-        .into_iter()
-        .filter_map(|mut link| {
-            let start = i64::from(link.start);
-            let end = i64::from(link.end);
-            if end <= edit_start {
-                Some(link)
-            } else if start >= edit_old_end {
-                let start = start + delta;
-                let end = end + delta;
-                if start < 0 || end < 0 || end > new_len {
-                    return None;
-                }
-                link.start = start as u32;
-                link.end = end as u32;
-                Some(link)
-            } else {
-                None
-            }
-        })
-        .collect()
+    rebase_links_in(
+        &text_before,
+        edit_start,
+        edit_removed_len,
+        &replacement,
+        links,
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
@@ -2505,7 +2519,7 @@ mod tests {
             words: Some(found.words),
         };
         let edited = "Call Ana next week".to_string();
-        let rebased = rebase_links(text, edited.clone(), vec![link]);
+        let rebased = rebase_links(text, 0, 0, "Call Ana ".into(), vec![link]);
         assert_eq!(rebased.len(), 1);
         assert_eq!((rebased[0].start, rebased[0].end), (9, 18));
         assert_eq!(
@@ -2517,6 +2531,103 @@ mod tests {
             .unwrap()
             .iter()
             .any(|p| p.kind == PartKind::Date));
+    }
+
+    #[test]
+    fn ac_4_12_a_prefix_sharing_a_letter_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!((found.start, found.end), (0, 9));
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let rebased = rebase_links("next week".into(), 0, 0, "note: ".into(), vec![link]);
+        assert_eq!(rebased.len(), 1);
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        assert_eq!(
+            g.text_with_links("note: next week".into(), rebased)
+                .unwrap(),
+            "note: [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_case_change_keeps_the_chosen_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!(found.day, "2026-12-04");
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day.clone()),
+            words: Some(found.words),
+        };
+        let rebased = rebase_links("next week".into(), 0, 1, "N".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!(rebased[0].day.as_deref(), Some("2026-12-04"));
+        g.set_today(Some("2026-12-10".into())).unwrap();
+        assert_eq!(
+            g.text_with_links("Next week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_picker_insert_before_a_date_keeps_both() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let date = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let mut rebased = rebase_links("next week".into(), 0, 0, "Dana ".into(), vec![date]);
+        rebased.push(AcceptedLink {
+            title: "Dana".into(),
+            start: 0,
+            end: 4,
+            day: None,
+            words: None,
+        });
+        assert_eq!(rebased.len(), 2);
+        assert_eq!(
+            g.text_with_links("Dana next week".into(), rebased).unwrap(),
+            "[[Dana]] [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_normalization_change_before_a_date_shifts_it() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let before = "caf\u{e9} next week";
+        let found = g.date_suggestions(before.into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!((found.start, found.end), (5, 14));
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let rebased = rebase_links(before.into(), 3, 1, "e\u{301}".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        let after = "cafe\u{301} next week";
+        assert_eq!(
+            g.text_with_links(after.into(), rebased).unwrap(),
+            "cafe\u{301} [[December 4th, 2026]]"
+        );
     }
 
     #[test]

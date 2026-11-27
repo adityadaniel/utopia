@@ -46,9 +46,11 @@ such day (roll to next year once it has passed), or ask. Only two can be a chip.
   letters or digits, so `tomorrow's` keeps its link and the Send writes `[[…]]'s`; that is
   deliberate. The check applies only to a date chip's link, never to a title link or a
   picker insert, which keep the rule they had before. The check never consults the clock.
-- A link's UTF-16 range follows a single edit before or after it, computed from the common
-  prefix and suffix of the old and new line (`rebase_links`). An edit that overlaps the
-  words drops the link.
+- A link's UTF-16 range follows the single edit the text view reports (`rebase_links`,
+  with the edit's UTF-16 start, removed length and replacement). When no edit is reported
+  (autocorrect, dictation), the app falls back to the common prefix and suffix of the old
+  and new line. An edit that replaces the whole words drops the link; an edit inside them
+  keeps a date link only while the words still match in any letter case.
 - A title link with no page yet writes the typed words as the title; the Send makes the
   page.
 - One FFI call, `date_suggestions(text, accepted, limit)`, returns the title, the day, the

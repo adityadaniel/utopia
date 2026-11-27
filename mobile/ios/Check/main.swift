@@ -97,8 +97,10 @@ let nextWeekLink = AcceptedLink(
     words: "next week"
 )
 let rebased = rebaseLinks(
-    oldText: "next week",
-    newText: "Call Ana next week",
+    textBefore: "next week",
+    editStart: 0,
+    editRemovedLen: 0,
+    replacement: "Call Ana ",
     links: [nextWeekLink]
 )
 check(

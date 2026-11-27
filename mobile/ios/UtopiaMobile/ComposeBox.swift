@@ -89,7 +89,7 @@ struct ComposeBox: View {
                     isActive: model.activeLine == line.id && model.picker == nil,
                     caret: model.caretRequest,
                     size: textSize,
-                    onText: { text in model.setText(text, for: line.id) },
+                    onText: { text, edit in model.setText(text, edit: edit, for: line.id) },
                     onReturn: { _ = model.newLine(after: line.id) },
                     onDeleteAtStart: { model.deleteEmptyLine(line.id) },
                     onPicker: {

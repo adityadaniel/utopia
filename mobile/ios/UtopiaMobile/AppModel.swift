@@ -252,15 +252,23 @@ final class AppModel {
         refreshSuggestions()
     }
 
-    func setText(_ text: String, for id: UUID) {
+    func setText(_ text: String, edit: LineEdit? = nil, for id: UUID) {
         guard let index = draft.index(of: id) else { return }
         let old = draft.lines[index].text
         let links = draft.lines[index].links
         draft.lines[index].text = text
-        if old != text {
+        if Array(old.utf16) != Array(text.utf16) {
+            let change: LineEdit
+            if let edit, edit.matches(text, oldText: old) {
+                change = edit
+            } else {
+                change = Self.fallbackEdit(old, text)
+            }
             draft.lines[index].links = rebaseLinks(
-                oldText: old,
-                newText: text,
+                textBefore: old,
+                editStart: UInt32(max(0, change.start)),
+                editRemovedLen: UInt32(max(0, change.removed)),
+                replacement: change.replacement,
                 links: links.map(\.accepted)
             ).map(DraftLink.init(accepted:))
         }
@@ -269,6 +277,22 @@ final class AppModel {
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+    }
+
+    private static func fallbackEdit(_ old: String, _ new: String) -> LineEdit {
+        let before = Array(old.utf16)
+        let after = Array(new.utf16)
+        var prefix = 0
+        while prefix < before.count && prefix < after.count && before[prefix] == after[prefix] {
+            prefix += 1
+        }
+        var suffix = 0
+        while suffix < before.count - prefix && suffix < after.count - prefix
+            && before[before.count - 1 - suffix] == after[after.count - 1 - suffix] {
+            suffix += 1
+        }
+        let replacement = String(decoding: after[prefix..<(after.count - suffix)], as: UTF16.self)
+        return LineEdit(start: prefix, removed: before.count - prefix - suffix, replacement: replacement)
     }
 
     /// Rule 3: Return makes a new line below and puts the caret in it.
@@ -434,6 +458,13 @@ final class AppModel {
         var updated = text
         updated.insert(contentsOf: title + " ", at: at)
         draft.lines[index].text = updated
+        draft.lines[index].links = rebaseLinks(
+            textBefore: text,
+            editStart: UInt32(caret),
+            editRemovedLen: 0,
+            replacement: title + " ",
+            links: line.links.map(\.accepted)
+        ).map(DraftLink.init(accepted:))
         draft.lines[index].links.append(
             DraftLink(title: title, start: caret, end: caret + title.utf16.count)
         )
