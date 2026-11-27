@@ -18,6 +18,7 @@ struct PageScreen: View {
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
     @ScaledMetric(relativeTo: .body) private var blockRowPadding: CGFloat = 2
+    @ScaledMetric(relativeTo: .body) private var todoRowHeight: CGFloat = 44
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -126,6 +127,7 @@ struct PageScreen: View {
         }
         .padding(.leading, 20)
         .padding(.trailing, 16)
+        .frame(minHeight: block.kind == "todo" ? todoRowHeight : nil, alignment: .top)
     }
 
     @ViewBuilder

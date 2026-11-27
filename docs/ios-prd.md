@@ -162,7 +162,8 @@ and this area.
 - **To-do:** a 16 pt box (4 pt radius, 1.5 pt border in `bullet`) in a 26 pt column in the
   place of the bullet. Done: the box is filled with `link` and has a white check; the text
   is `muted` and struck through. A tap on the box ticks the to-do, and a second tap
-  removes the tick (K9). The touch target is 44 × 44 pt around the box, and VoiceOver
+  removes the tick (K9). A to-do row is at least 44 pt high so its box keeps a 44 × 44 pt
+  target. The touch target is 44 × 44 pt around the box, and VoiceOver
   reads "Mark done" or "Mark not done". The tick shows at once and does not wait for sync.
   It works for a to-do in any day of the log and on a page screen.
 - **Links, tags and dates** show in `link` colour with no brackets. A tap opens the page
