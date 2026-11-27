@@ -486,6 +486,133 @@ impl Store {
         Ok(())
     }
 
+    pub fn restore_and_move_to_page(
+        &mut self,
+        src: &PageId,
+        blocks: &[BlockId],
+        dst: &PageId,
+        parent: Option<&BlockId>,
+        after: Option<&BlockId>,
+    ) -> Result<()> {
+        if src == dst {
+            return Err(StoreError::Invalid("use a same-page restore".into()));
+        }
+        if blocks.is_empty() {
+            return Err(StoreError::Invalid("nothing to restore".into()));
+        }
+        let s = self.page_state(src)?.clone();
+        for b in blocks {
+            match s.block(b) {
+                None => return Err(StoreError::NotFound(format!("block {b}"))),
+                Some(n) if n.moved_to.is_some() => {
+                    return Err(utopia_core::DomainError::NoOp.into())
+                }
+                Some(n) if n.deleted_at.is_some() => {}
+                Some(_) => {
+                    return Err(StoreError::Invalid(format!(
+                        "block {b} is live, not a tombstone: copy it instead"
+                    )))
+                }
+            }
+        }
+        let roots: Vec<BlockId> = blocks
+            .iter()
+            .filter(|b| !s.parent_of(b).is_some_and(|p| blocks.contains(&p)))
+            .cloned()
+            .collect();
+        let d = self.page_state(dst)?.clone();
+        if let Some(p) = parent {
+            d.block(p)
+                .ok_or_else(|| StoreError::NotFound(format!("block {p}")))?;
+        }
+        let own = roots.first().map(|r| s.depth(r)).unwrap_or(0);
+        let deepest = blocks.iter().map(|b| s.depth(b)).max().unwrap_or(own);
+        let base = parent.map_or(0, |p| d.depth(p) + 1);
+        if base + deepest.saturating_sub(own) >= outline::MAX_DROP_DEPTH {
+            return Err(StoreError::Domain(utopia_core::DomainError::TooDeep));
+        }
+        let mut dst_cmds: Vec<Command> = Vec::new();
+        let mut after = after.cloned();
+        for root in &roots {
+            for id in s.subtree(root, false) {
+                if !blocks.contains(&id) {
+                    continue;
+                }
+                let Some(n) = s.block(&id) else { continue };
+                let p = if &id == root {
+                    parent.cloned()
+                } else if n.parent.as_ref().is_some_and(|p| blocks.contains(p)) {
+                    n.parent.clone()
+                } else {
+                    s.ancestors(&id)
+                        .into_iter()
+                        .rev()
+                        .find(|a| blocks.contains(a))
+                        .or_else(|| parent.cloned())
+                };
+                let a = if &id == root {
+                    after.clone()
+                } else {
+                    let mut prev = s.prev_sibling(&id, false);
+                    while let Some(prev_id) = prev.clone() {
+                        if blocks.contains(&prev_id) {
+                            break;
+                        }
+                        prev = s.prev_sibling(&prev_id, false);
+                    }
+                    prev
+                };
+                if d.block(&id).is_some() {
+                    if d.is_live(&id) {
+                        return Err(StoreError::Invalid(format!(
+                            "block {id} is already live on this page"
+                        )));
+                    }
+                    dst_cmds.push(Command::SetMoved {
+                        ids: vec![id.clone()],
+                        to: None,
+                    });
+                    dst_cmds.push(Command::SetDeleted {
+                        ids: vec![id.clone()],
+                        deleted_at: None,
+                    });
+                    dst_cmds.push(Command::MoveBlock {
+                        id: id.clone(),
+                        parent: p,
+                        after: a,
+                    });
+                } else {
+                    dst_cmds.push(Command::InsertBlock {
+                        id: id.clone(),
+                        parent: p,
+                        after: a,
+                        text: n.text.clone(),
+                        kind: n.kind,
+                    });
+                    if n.checked {
+                        dst_cmds.push(Command::SetBlockKind {
+                            id: id.clone(),
+                            kind: n.kind,
+                            checked: true,
+                        });
+                    }
+                }
+            }
+            after = Some(root.clone());
+        }
+        let src_cmds = vec![Command::SetMoved {
+            ids: blocks.to_vec(),
+            to: Some(dst.clone()),
+        }];
+        self.seal_undo();
+        self.execute_multi(
+            vec![(dst.clone(), dst_cmds), (src.clone(), src_cmds)],
+            EditOpts::default(),
+        )?;
+        self.seal_undo();
+        Ok(())
+    }
+
     /// Move one block and its live subtree within its own page (PRD §13.8 MC-8, MC-9;
     /// FR-2.9): `Op::MoveBlock` when the target page is the page the block is already on.
     /// One undo step, like the editor's drag. A drop into the block's own subtree
@@ -572,6 +699,7 @@ impl Store {
 
     /// Global quick capture (FR-2.19): append `text` to today's daily note and commit it.
     pub fn capture(&mut self, text: &str) -> Result<(PageId, BlockId)> {
+        self.end_undo_run();
         let (page, first) = self.open_daily(self.today())?;
         let st = self.page_state(&page)?;
         let roots = st.live_roots();

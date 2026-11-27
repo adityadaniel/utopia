@@ -41,6 +41,21 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
+    DeleteBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    YankBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    PasteBlocks {
+        before: bool,
+        count: usize,
+    },
+    JoinNext {
+        count: usize,
+    },
     /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
     Navigate {
         up: bool,
@@ -639,6 +654,7 @@ impl BlockEditor {
         // it belongs to (machine issue 4).
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        self.close_insert_run(cx);
         self.vim.reset();
         if was_editing {
             cx.emit(EditorEvent::Blurred);
@@ -705,6 +721,7 @@ impl BlockEditor {
     fn detach(&mut self, cx: &mut Context<Self>) {
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        self.close_insert_run(cx);
         self.vim.reset();
         cx.emit(EditorEvent::Blurred);
         cx.notify();
@@ -948,6 +965,7 @@ impl BlockEditor {
             self.accept_composition(cx);
         }
         self.commit_block(true, cx);
+        self.close_insert_run(cx);
         self.vim.leave_insert();
         // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
         // above may also have rewritten the text it was offering completions for (an
@@ -1001,6 +1019,9 @@ impl BlockEditor {
         let Some(t) = self.target().cloned() else {
             return false;
         };
+        if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
+            self.begin_insert_run(cx);
+        }
         let text = self.field.text.clone();
         let caret = self.field.cursor();
         let changed = self.app.update(cx, |app, cx| {
@@ -1465,7 +1486,7 @@ impl BlockEditor {
     /// taken as committed first (§13.5). Deferring the commit instead would let the host
     /// remove the row being composed and then queue a `begin` on its neighbour, which the
     /// focus change from that removal discards — the caret would not continue next door.
-    fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
+    pub(crate) fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }
@@ -1814,7 +1835,7 @@ impl BlockEditor {
     /// otherwise coalesce with it. `caret` is where the caret ends up, after the
     /// insertion when `None`. Nothing happens while the input method owns the buffer
     /// (§13.5).
-    fn discrete_edit(
+    pub(crate) fn discrete_edit(
         &mut self,
         range: std::ops::Range<usize>,
         new: &str,
@@ -2200,11 +2221,29 @@ impl BlockEditor {
         self.end(cx);
     }
 
+    pub(crate) fn begin_insert_run(&mut self, cx: &mut Context<Self>) {
+        let open = self.app.update(cx, |app, _| app.store.in_undo_run());
+        if self.vim.insert_run && open {
+            return;
+        }
+        self.vim.insert_run = true;
+        self.app.update(cx, |app, _| app.store.begin_undo_run());
+    }
+
+    pub(crate) fn close_insert_run(&mut self, cx: &mut Context<Self>) {
+        if !self.vim.insert_run {
+            return;
+        }
+        self.vim.insert_run = false;
+        self.app.update(cx, |app, _| app.store.end_undo_run());
+    }
+
     fn vim_normal_mode(&mut self, _: &VimNormalMode, _: &mut Window, cx: &mut Context<Self>) {
         if self.field.composing() {
             return;
         }
         self.commit(cx);
+        self.close_insert_run(cx);
         self.vim.leave_insert();
         self.ac = Autocomplete::Closed;
         let to = {
@@ -2238,6 +2277,11 @@ impl BlockEditor {
             app.changed(Vec::new(), true, cx);
             caret
         });
+        let open = self.app.update(cx, |app, _| app.store.in_undo_run());
+        self.vim.insert_run = open;
+        if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
+            self.begin_insert_run(cx);
+        }
         self.sync_from_store(cx);
         if let Some(c) = caret {
             cx.emit(EditorEvent::Restore(c));
@@ -2263,6 +2307,7 @@ impl BlockEditor {
         }
         let ix = self.field.index_at(e.position);
         if crate::appearance::vim(cx) {
+            self.close_insert_run(cx);
             self.vim.leave_insert();
         }
         if e.click_count >= 2 {

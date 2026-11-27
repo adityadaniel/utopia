@@ -622,6 +622,13 @@ struct DraggedBlock {
 
 struct DragPreview(SharedString);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutPaste {
+    Moved,
+    NoRoom,
+    Spent,
+}
+
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
@@ -2743,6 +2750,65 @@ impl PageView {
                     cx,
                 );
             }
+            EditorEvent::DeleteBlocks { count, register } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                self.yank_blocks(&t, *count, *register, true, cx);
+                let now = self.app.read(cx).store.now();
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
+                self.run_plan(
+                    &t.page,
+                    |st| {
+                        outline::delete_blocks(st, &t.block, *count, now, zoom.as_ref(), &|b| {
+                            collapsed.contains(b)
+                        })
+                    },
+                    window,
+                    cx,
+                );
+            }
+            EditorEvent::YankBlocks { count, register } => {
+                self.yank_blocks(&t, *count, *register, false, cx)
+            }
+            EditorEvent::PasteBlocks { before, count } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                self.paste_blocks(&t, *before, *count, window, cx)
+            }
+            EditorEvent::JoinNext { count } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
+                let now = self.app.read(cx).store.now();
+                self.run_plan(
+                    &t.page,
+                    |st| {
+                        outline::join_next(
+                            st,
+                            &t.block,
+                            *count,
+                            zoom.as_ref(),
+                            &|b| collapsed.contains(b),
+                            now,
+                        )
+                    },
+                    window,
+                    cx,
+                );
+            }
             EditorEvent::PasteOutline(text) => {
                 let sel = editor.read(cx).selection();
                 self.run_plan(
@@ -2879,6 +2945,154 @@ impl PageView {
             t.block.clone(),
             Some(caret),
             None,
+            window,
+            cx,
+        );
+    }
+
+    fn yank_blocks(
+        &mut self,
+        t: &EditTarget,
+        count: usize,
+        register: Option<char>,
+        is_cut: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if register == Some('_') {
+            return;
+        }
+        let data = self.app.update(cx, |app, _| {
+            let st = app.store.page_state(&t.page).ok()?;
+            let rows = outline::block_tree(st, &t.block, count).ok()?;
+            let roots = outline::block_roots(st, &t.block, count).ok()?;
+            let markdown = utopia_core::markdown::blocks_to_markdown(st, &roots);
+            let ids = if is_cut {
+                outline::block_ids(st, &t.block, count).ok()
+            } else {
+                None
+            };
+            Some((rows, markdown, ids))
+        });
+        let Some((tree, markdown, ids)) = data else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        let cut = ids
+            .filter(|i| !i.is_empty())
+            .map(|ids| (t.page.clone(), ids));
+        crate::vim::remember(crate::vim::Register::Blocks {
+            markdown: markdown.clone(),
+            tree,
+            cut,
+        });
+        if !is_cut || register == Some('+') {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
+            crate::vim::clipboard_written(&markdown);
+        } else {
+            let current = cx.read_from_clipboard().and_then(|c| c.text());
+            crate::vim::clipboard_at_register(current);
+        }
+    }
+
+    fn paste_blocks(
+        &mut self,
+        t: &EditTarget,
+        before: bool,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::vim::Register::Blocks { tree, cut, .. } = crate::vim::last() else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        let mut spent = false;
+        if let Some((src, ids)) = cut.clone() {
+            let alive = self.app.update(cx, |app, _| {
+                let Ok(st) = app.store.page_state(&src) else {
+                    return false;
+                };
+                !ids.is_empty()
+                    && ids.iter().all(|i| {
+                        st.block(i)
+                            .is_some_and(|b| b.deleted_at.is_some() && b.moved_to.is_none())
+                    })
+            });
+            spent = !alive;
+            if alive && src == t.page {
+                let plan = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&src).ok()?;
+                    Some(outline::restore_after(st, &ids, &t.block, before))
+                });
+                match plan {
+                    Some(Ok(plan)) => {
+                        if let Some(f) = self.apply_plan(&t.page, plan, cx) {
+                            crate::vim::forget_cut();
+                            self.edit(t.page.clone(), f.block, Some(f.offset), None, window, cx);
+                        }
+                        return;
+                    }
+                    Some(Err(utopia_core::DomainError::TooDeep)) => return,
+                    _ => spent = true,
+                }
+            } else if alive {
+                let place = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&t.page).ok()?;
+                    let after = if before {
+                        st.prev_sibling(&t.block, false)
+                    } else {
+                        Some(t.block.clone())
+                    };
+                    Some((st.parent_of(&t.block), after))
+                });
+                if let Some((parent, after)) = place {
+                    let moved = self.app.update(cx, |app, cx| {
+                        let r = app.store.restore_and_move_to_page(
+                            &src,
+                            &ids,
+                            &t.page,
+                            parent.as_ref(),
+                            after.as_ref(),
+                        );
+                        match r {
+                            Ok(()) => {
+                                app.changed(vec![src.clone(), t.page.clone()], true, cx);
+                                CutPaste::Moved
+                            }
+                            Err(utopia_store::StoreError::Domain(
+                                utopia_core::DomainError::TooDeep,
+                            )) => CutPaste::NoRoom,
+                            Err(e) => {
+                                app.report::<()>(Err(e));
+                                CutPaste::Spent
+                            }
+                        }
+                    });
+                    match moved {
+                        CutPaste::Moved => {
+                            crate::vim::forget_cut();
+                            self.rebuild(cx);
+                            if let Some(first) = ids.first().cloned() {
+                                self.edit(t.page.clone(), first, Some(0), None, window, cx);
+                            }
+                            return;
+                        }
+                        CutPaste::NoRoom => return,
+                        CutPaste::Spent => spent = true,
+                    }
+                }
+            }
+        }
+        if spent {
+            crate::vim::forget_cut();
+        }
+        self.run_plan(
+            &t.page,
+            |st| outline::insert_tree_after(st, &t.block, &tree, before, count),
             window,
             cx,
         );

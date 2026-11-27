@@ -1,4 +1,5 @@
 pub mod motion;
+pub mod operator;
 pub mod parse;
 pub mod textobj;
 
@@ -73,12 +74,19 @@ pub enum Command {
         count: usize,
         register: Option<char>,
     },
-    Insert(InsertAt),
+    Insert {
+        at: InsertAt,
+        register: Option<char>,
+    },
     DeleteChar {
         back: bool,
         count: usize,
+        register: Option<char>,
     },
-    DeleteToLineEnd,
+    DeleteToLineEnd {
+        count: usize,
+        register: Option<char>,
+    },
     ReplaceChar(char),
     ToggleCase {
         count: usize,

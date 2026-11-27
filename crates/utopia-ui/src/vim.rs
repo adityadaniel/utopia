@@ -1,10 +1,12 @@
 use std::cell::RefCell;
 
-use gpui::{Context, EntityId, Keystroke, Window};
+use gpui::{ClipboardItem, Context, EntityId, Keystroke, Window};
 use utopia_core::text::{next_grapheme, prev_grapheme};
 use utopia_core::undo::Caret;
-use utopia_core::vim::{motion, Command, InsertAt, Key, Motion, Parser, Step};
-use utopia_core::{BlockId, BlockKind, PageId};
+use utopia_core::vim::{
+    motion, operator, textobj, Command, InsertAt, Key, Motion, Operator, Parser, Step, Target,
+};
+use utopia_core::{BlockId, PageId};
 
 use crate::actions::{VIM_INSERT_CONTEXT, VIM_NORMAL_CONTEXT, VIM_VISUAL_CONTEXT};
 use crate::editor::{BlockEditor, EditorEvent};
@@ -64,12 +66,10 @@ impl Default for VimState {
 impl VimState {
     pub fn reset(&mut self) {
         self.mode = Mode::Normal;
-        self.insert_run = false;
         self.parser.reset();
     }
 
     pub fn leave_insert(&mut self) {
-        self.insert_run = false;
         if self.mode == Mode::Insert {
             self.mode = Mode::Normal;
         }
@@ -86,16 +86,12 @@ pub enum Register {
     },
 }
 
-#[derive(Clone, Debug)]
-pub struct TreeRow {
-    pub depth: usize,
-    pub text: String,
-    pub kind: BlockKind,
-    pub checked: bool,
-}
+pub use utopia_core::outline::TreeRow;
 
 thread_local! {
     static REGISTER: RefCell<Register> = const { RefCell::new(Register::Chars(String::new())) };
+    static CLIPBOARD: RefCell<Option<String>> = const { RefCell::new(None) };
+    static CLIPBOARD_AT_REGISTER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 pub fn remember(register: Register) {
@@ -104,6 +100,31 @@ pub fn remember(register: Register) {
 
 pub fn last() -> Register {
     REGISTER.with(|r| r.borrow().clone())
+}
+
+pub fn clipboard_written(text: &str) {
+    CLIPBOARD.with(|c| *c.borrow_mut() = Some(text.to_string()));
+    CLIPBOARD_AT_REGISTER.with(|c| *c.borrow_mut() = Some(text.to_string()));
+}
+
+pub fn clipboard_at_register(text: Option<String>) {
+    CLIPBOARD_AT_REGISTER.with(|c| *c.borrow_mut() = text);
+}
+
+pub fn clipboard_is_ours(text: &str) -> bool {
+    CLIPBOARD.with(|c| c.borrow().as_deref() == Some(text))
+}
+
+pub fn clipboard_is_newer(text: &str) -> bool {
+    !clipboard_is_ours(text) && !CLIPBOARD_AT_REGISTER.with(|c| c.borrow().as_deref() == Some(text))
+}
+
+pub fn forget_cut() {
+    REGISTER.with(|r| {
+        if let Register::Blocks { cut, .. } = &mut *r.borrow_mut() {
+            *cut = None;
+        }
+    });
 }
 
 pub fn key_from_keystroke(keystroke: &Keystroke) -> Option<Key> {
@@ -216,6 +237,7 @@ impl BlockEditor {
         if !crate::appearance::vim(cx) {
             return;
         }
+        self.close_insert_run(cx);
         self.vim_mut().leave_insert();
         self.vim_mut().mode = Mode::Normal;
         self.vim_mut().parser.reset();
@@ -245,7 +267,7 @@ impl BlockEditor {
     pub fn vim_run(
         &mut self,
         command: Command,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<BlockEditor>,
     ) {
         match command {
@@ -305,7 +327,8 @@ impl BlockEditor {
                     }
                 }
             }
-            Command::Insert(at) => {
+            Command::Insert { at, register } => {
+                self.begin_insert_run(cx);
                 match at {
                     InsertAt::Cursor => {}
                     InsertAt::After => {
@@ -326,23 +349,53 @@ impl BlockEditor {
                     InsertAt::BlockBelow => {
                         let caret = self.field().text.len();
                         self.vim_mut().mode = Mode::Insert;
-                        self.vim_mut().insert_run = true;
                         self.commit(cx);
                         cx.emit(EditorEvent::Split { caret });
                         return;
                     }
                     InsertAt::BlockAbove => {
                         self.vim_mut().mode = Mode::Insert;
-                        self.vim_mut().insert_run = true;
                         self.commit(cx);
                         cx.emit(EditorEvent::InsertAbove);
                         return;
                     }
-                    InsertAt::ReplaceChar | InsertAt::ReplaceLine | InsertAt::ToLineEnd => return,
+                    InsertAt::ReplaceChar => {
+                        self.vim_delete_chars(false, 1, register, false, window, cx)
+                    }
+                    InsertAt::ReplaceLine => {
+                        let len = self.field().text.len();
+                        self.vim_delete(0..len, register, false, false, window, cx);
+                    }
+                    InsertAt::ToLineEnd => {
+                        self.vim_delete_to_line_end(register, 1, false, window, cx)
+                    }
                 }
                 self.vim_mut().mode = Mode::Insert;
-                self.vim_mut().insert_run = true;
                 self.refresh_autocomplete(cx);
+            }
+            Command::DeleteChar {
+                back,
+                count,
+                register,
+            } => self.vim_delete_chars(back, count, register, true, window, cx),
+            Command::DeleteToLineEnd { count, register } => {
+                self.vim_delete_to_line_end(register, count, true, window, cx)
+            }
+            Command::ReplaceChar(ch) => self.vim_replace_char(ch, window, cx),
+            Command::ToggleCase { count } => self.vim_toggle_case(count, window, cx),
+            Command::Operate {
+                op,
+                target,
+                count,
+                register,
+            } => self.vim_operate(op, target, count, register, window, cx),
+            Command::Paste {
+                before,
+                count,
+                register,
+            } => self.vim_paste(before, count, register, window, cx),
+            Command::JoinNext { count } => {
+                self.emit_after_commit(EditorEvent::JoinNext { count }, cx)
             }
             Command::Undo { count } => {
                 for _ in 0..count.max(1) {
@@ -371,5 +424,317 @@ impl BlockEditor {
             _ => {}
         }
         cx.notify();
+    }
+
+    fn vim_set_register(
+        &self,
+        text: &str,
+        register: Option<char>,
+        clipboard: bool,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if register == Some('_') {
+            return;
+        }
+        remember(Register::Chars(text.to_string()));
+        if clipboard || register == Some('+') {
+            cx.write_to_clipboard(ClipboardItem::new_string(text.to_string()));
+            clipboard_written(text);
+        } else {
+            let current = cx.read_from_clipboard().and_then(|c| c.text());
+            clipboard_at_register(current);
+        }
+    }
+
+    fn vim_delete(
+        &mut self,
+        range: std::ops::Range<usize>,
+        register: Option<char>,
+        clipboard: bool,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let len = self.field().text.len();
+        let range = range.start.min(len)..range.end.min(len);
+        if range.is_empty() {
+            return;
+        }
+        let cut = self.field().text[range.clone()].to_string();
+        self.vim_set_register(&cut, register, clipboard, cx);
+        let at = range.start;
+        self.discrete_edit(range, "", Some(at), window, cx);
+        if clamp {
+            self.clamp_normal_cursor(cx);
+        }
+    }
+
+    fn vim_delete_chars(
+        &mut self,
+        back: bool,
+        count: usize,
+        register: Option<char>,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let count = count.max(1);
+        let range = if back {
+            let limit = motion::line_start(&text, cursor);
+            let mut start = cursor;
+            for _ in 0..count {
+                if start <= limit {
+                    break;
+                }
+                start = prev_grapheme(&text, start);
+            }
+            start..cursor
+        } else {
+            let limit = motion::line_end_exclusive(&text, cursor);
+            let mut end = cursor;
+            for _ in 0..count {
+                if end >= limit {
+                    break;
+                }
+                end = next_grapheme(&text, end);
+            }
+            cursor..end
+        };
+        self.vim_delete(range, register, false, clamp, window, cx);
+    }
+
+    fn vim_delete_to_line_end(
+        &mut self,
+        register: Option<char>,
+        count: usize,
+        clamp: bool,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let mut end = motion::line_end_exclusive(&text, cursor);
+        for _ in 1..count.max(1) {
+            if end >= text.len() {
+                break;
+            }
+            end = motion::line_end_exclusive(&text, next_grapheme(&text, end));
+        }
+        self.vim_delete(cursor..end, register, false, clamp, window, cx);
+    }
+
+    fn vim_replace_char(&mut self, ch: char, window: &mut Window, cx: &mut Context<BlockEditor>) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let end = next_grapheme(&text, cursor);
+        if end == cursor {
+            return;
+        }
+        self.discrete_edit(cursor..end, &ch.to_string(), Some(cursor), window, cx);
+        self.clamp_normal_cursor(cx);
+    }
+
+    fn vim_toggle_case(
+        &mut self,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let limit = motion::line_end_exclusive(&text, cursor);
+        let mut end = cursor;
+        for _ in 0..count.max(1) {
+            if end >= limit {
+                break;
+            }
+            end = next_grapheme(&text, end);
+        }
+        if end == cursor {
+            return;
+        }
+        let mut swapped = String::with_capacity(end - cursor);
+        for c in text[cursor..end].chars() {
+            if c.is_lowercase() {
+                swapped.extend(c.to_uppercase());
+            } else if c.is_uppercase() {
+                swapped.extend(c.to_lowercase());
+            } else {
+                swapped.push(c);
+            }
+        }
+        let at = motion::clamp_normal(&text, end);
+        self.discrete_edit(cursor..end, &swapped, Some(at), window, cx);
+        self.clamp_normal_cursor(cx);
+    }
+
+    fn vim_operate(
+        &mut self,
+        op: Operator,
+        target: Target,
+        count: usize,
+        register: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        if matches!(target, Target::Line) {
+            let event = match op {
+                Operator::Delete => Some(EditorEvent::DeleteBlocks {
+                    count: count.max(1),
+                    register,
+                }),
+                Operator::Yank => Some(EditorEvent::YankBlocks {
+                    count: count.max(1),
+                    register,
+                }),
+                Operator::Indent => Some(EditorEvent::Indent),
+                Operator::Outdent => Some(EditorEvent::Outdent),
+                Operator::Change => None,
+            };
+            if let Some(event) = event {
+                self.emit_after_commit(event, cx);
+                return;
+            }
+        }
+        let text = self.field().text.clone();
+        let cursor = self.field().cursor();
+        let count = count.max(1);
+        let range = match target {
+            Target::Line => 0..text.len(),
+            Target::Object(obj) => match textobj::range_of(&text, cursor, obj) {
+                Some(range) => range,
+                None => return,
+            },
+            Target::Motion(motion) => {
+                let range = match (op, motion) {
+                    (Operator::Change, Motion::WordForward { big }) => {
+                        operator::change_word_range(&text, cursor, big, count).or_else(|| {
+                            operator::motion_range(
+                                &text,
+                                cursor,
+                                motion,
+                                count,
+                                self.vim().parser.last_find(),
+                            )
+                        })
+                    }
+                    _ => operator::motion_range(
+                        &text,
+                        cursor,
+                        motion,
+                        count,
+                        self.vim().parser.last_find(),
+                    ),
+                };
+                match range {
+                    Some(range) => range,
+                    None => return,
+                }
+            }
+        };
+        let len = text.len();
+        let range = range.start.min(len)..range.end.min(len);
+        match op {
+            Operator::Yank => {
+                if range.is_empty() {
+                    return;
+                }
+                let taken = text[range.clone()].to_string();
+                self.vim_set_register(&taken, register, true, cx);
+                let at = range.start;
+                self.field_mut().move_to(at);
+                self.field_mut().reset_caret_motion();
+                self.clamp_normal_cursor(cx);
+            }
+            Operator::Delete => self.vim_delete(range, register, false, true, window, cx),
+            Operator::Change => {
+                self.begin_insert_run(cx);
+                self.vim_delete(range, register, false, false, window, cx);
+                self.vim_mut().mode = Mode::Insert;
+                self.refresh_autocomplete(cx);
+            }
+            Operator::Indent | Operator::Outdent => {}
+        }
+    }
+
+    fn vim_paste(
+        &mut self,
+        before: bool,
+        count: usize,
+        register_char: Option<char>,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        if self.field().composing() {
+            return;
+        }
+        if register_char == Some('_') {
+            return;
+        }
+        let count = count.max(1);
+        let clipboard = cx.read_from_clipboard().and_then(|c| c.text());
+        let register = last();
+        let pasted = match clipboard {
+            Some(text) if register_char == Some('+') => Register::Chars(text),
+            Some(text) if clipboard_is_newer(&text) => Register::Chars(text),
+            _ => register,
+        };
+        match pasted {
+            Register::Blocks { tree, .. } if register_char != Some('+') && !tree.is_empty() => {
+                self.emit_after_commit(EditorEvent::PasteBlocks { before, count }, cx)
+            }
+            Register::Blocks { markdown, .. } => {
+                self.vim_paste_text(&markdown, before, count, window, cx)
+            }
+            Register::Chars(text) => self.vim_paste_text(&text, before, count, window, cx),
+        }
+    }
+
+    fn vim_paste_text(
+        &mut self,
+        text: &str,
+        before: bool,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<BlockEditor>,
+    ) {
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        if text.trim_end_matches('\n').contains('\n') {
+            return self.emit_after_commit(EditorEvent::PasteOutline(text), cx);
+        }
+        let line = text.trim_end_matches('\n');
+        if line.is_empty() {
+            return;
+        }
+        let repeated = line.repeat(count.max(1));
+        let field = self.field();
+        let start = if before {
+            field.cursor()
+        } else {
+            next_grapheme(&field.text, field.cursor())
+        };
+        let after = start + repeated.len();
+        self.discrete_edit(start..start, &repeated, Some(after), window, cx);
+        self.clamp_normal_cursor(cx);
     }
 }
