@@ -254,7 +254,16 @@ final class AppModel {
 
     func setText(_ text: String, for id: UUID) {
         guard let index = draft.index(of: id) else { return }
+        let old = draft.lines[index].text
+        let links = draft.lines[index].links
         draft.lines[index].text = text
+        if old != text {
+            draft.lines[index].links = rebaseLinks(
+                oldText: old,
+                newText: text,
+                links: links.map(\.accepted)
+            ).map(DraftLink.init(accepted:))
+        }
         draft.lines[index].dropStaleLinks()
         draft.applyDepthRule()
         DraftStore.save(draft)

@@ -138,6 +138,71 @@ pub struct AcceptedLink {
     pub words: Option<String>,
 }
 
+fn common_prefix_utf16(a: &str, b: &str) -> usize {
+    let mut units = 0;
+    for (ca, cb) in a.chars().zip(b.chars()) {
+        if ca != cb {
+            break;
+        }
+        units += ca.len_utf16();
+    }
+    units
+}
+
+fn common_suffix_utf16(a: &str, b: &str, prefix: usize) -> usize {
+    let limit = (utf16_len(a) as usize - prefix).min(utf16_len(b) as usize - prefix);
+    let mut units = 0;
+    let mut ac = a.chars().rev();
+    let mut bc = b.chars().rev();
+    while let (Some(ca), Some(cb)) = (ac.next(), bc.next()) {
+        if ca != cb {
+            break;
+        }
+        let width = ca.len_utf16();
+        if units + width > limit {
+            break;
+        }
+        units += width;
+    }
+    units
+}
+
+#[uniffi::export]
+pub fn rebase_links(
+    old_text: String,
+    new_text: String,
+    links: Vec<AcceptedLink>,
+) -> Vec<AcceptedLink> {
+    let prefix = common_prefix_utf16(&old_text, &new_text);
+    let suffix = common_suffix_utf16(&old_text, &new_text, prefix);
+    let old_len = utf16_len(&old_text) as i64;
+    let new_len = utf16_len(&new_text) as i64;
+    let edit_start = prefix as i64;
+    let edit_old_end = old_len - suffix as i64;
+    let delta = new_len - old_len;
+    links
+        .into_iter()
+        .filter_map(|mut link| {
+            let start = i64::from(link.start);
+            let end = i64::from(link.end);
+            if end <= edit_start {
+                Some(link)
+            } else if start >= edit_old_end {
+                let start = start + delta;
+                let end = end + delta;
+                if start < 0 || end < 0 || end > new_len {
+                    return None;
+                }
+                link.start = start as u32;
+                link.end = end as u32;
+                Some(link)
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct DateMatch {
     pub title: String,
@@ -629,10 +694,15 @@ fn written_link(
             return None;
         }
         let day = parse_day(day).ok()?;
-        return Some((
-            Some(PageId::for_date(day).as_str().to_string()),
-            store.date_format().format(day),
-        ));
+        let label = store.date_format().format(day);
+        let title = if utopia_core::date::parse_unambiguous_date(&label, store.date_format())
+            == Some(day)
+        {
+            label
+        } else {
+            day.format("%Y-%m-%d").to_string()
+        };
+        return Some((Some(PageId::for_date(day).as_str().to_string()), title));
     }
     let accepted = &link.title;
     let key = utopia_core::title::normalize_title(words);
@@ -2380,6 +2450,84 @@ mod tests {
             "on [[November 22nd, 2026]]",
             "a month and day kept in a draft hold across a new year"
         );
+    }
+
+    #[test]
+    fn ac_4_12_an_ambiguous_title_writes_the_iso_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        g.with(|s| {
+            s.set_date_format("MM/dd/yyyy")?;
+            Ok(())
+        })
+        .unwrap();
+        let text = "call Ana next week".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].title, "12/04/2026");
+        assert_eq!(found[0].day, "2026-12-04");
+        let link = AcceptedLink {
+            title: found[0].title.clone(),
+            start: found[0].start,
+            end: found[0].end,
+            day: Some(found[0].day.clone()),
+            words: Some(found[0].words.clone()),
+        };
+        let stored = g.text_with_links(text, vec![link.clone()]).unwrap();
+        assert_eq!(stored, "call Ana [[2026-12-04]]");
+        g.append_outline(vec![line(&stored, 0, false)]).unwrap();
+        let page = PageId::for_date(parse_day("2026-12-04").unwrap());
+        assert_eq!(
+            g.backlinks(page.as_str().to_string()).unwrap().len(),
+            1,
+            "the written link resolves to the chosen day"
+        );
+        let parts = g
+            .draft_parts("call Ana next week".into(), vec![link])
+            .unwrap();
+        let date = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Date)
+            .expect("a date part");
+        assert_eq!(date.page_id.as_deref(), Some(page.as_str()));
+    }
+
+    #[test]
+    fn ac_4_12_editing_before_a_date_link_keeps_the_day() {
+        let g = phone();
+        let text = "next week".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+        };
+        let edited = "Call Ana next week".to_string();
+        let rebased = rebase_links(text, edited.clone(), vec![link]);
+        assert_eq!(rebased.len(), 1);
+        assert_eq!((rebased[0].start, rebased[0].end), (9, 18));
+        assert_eq!(
+            g.text_with_links(edited.clone(), rebased.clone()).unwrap(),
+            "Call Ana [[November 28th, 2026]]"
+        );
+        assert!(g
+            .draft_parts(edited, rebased)
+            .unwrap()
+            .iter()
+            .any(|p| p.kind == PartKind::Date));
+    }
+
+    #[test]
+    fn ac_4_12_no_chip_inside_inline_code() {
+        let g = phone();
+        let dates = g
+            .date_suggestions("`next week` and next week".into(), vec![], 5)
+            .unwrap();
+        assert_eq!(dates.len(), 1, "{dates:?}");
+        assert_eq!(dates[0].words, "next week");
+        assert_eq!((dates[0].start, dates[0].end), (16, 25));
     }
 
     /// AC-5.1: a sent to-do is not done.

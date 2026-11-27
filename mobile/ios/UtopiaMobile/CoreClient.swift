@@ -100,4 +100,14 @@ extension DraftLink {
     var accepted: AcceptedLink {
         AcceptedLink(title: title, start: UInt32(max(0, start)), end: UInt32(max(0, end)), day: day, words: words)
     }
+
+    init(accepted: AcceptedLink) {
+        self.init(
+            title: accepted.title,
+            start: Int(accepted.start),
+            end: Int(accepted.end),
+            day: accepted.day,
+            words: accepted.words
+        )
+    }
 }

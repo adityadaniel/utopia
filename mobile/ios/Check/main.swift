@@ -89,6 +89,30 @@ let staleDate = try g.textWithLinks(
 check(staleDate == "call Ana next fri", "changed date words are plain text")
 let grown = try g.textWithLinks(text: "call Ana tomorrows", links: [dateLink])
 check(grown == "call Ana tomorrows", "a word that grows past the range drops the link")
+let nextWeekLink = AcceptedLink(
+    title: "November 10th, 2026",
+    start: 0,
+    end: 9,
+    day: "2026-11-10",
+    words: "next week"
+)
+let rebased = rebaseLinks(
+    oldText: "next week",
+    newText: "Call Ana next week",
+    links: [nextWeekLink]
+)
+check(
+    rebased.count == 1 && rebased[0].start == 9 && rebased[0].end == 18,
+    "editing the prefix moves the accepted range"
+)
+check(
+    try g.textWithLinks(text: "Call Ana next week", links: rebased) == "Call Ana [[November 10th, 2026]]",
+    "editing the prefix keeps the accepted day"
+)
+check(
+    try g.dateSuggestions(text: "`next week` and next week", accepted: [], limit: 6).map(\.words) == ["next week"],
+    "a date inside inline code is no chip"
+)
 check(
     try g.dateSuggestions(text: "🙂 tomorrow", accepted: [], limit: 6).first?.start == 3,
     "a date after an emoji keeps UTF-16 offsets"

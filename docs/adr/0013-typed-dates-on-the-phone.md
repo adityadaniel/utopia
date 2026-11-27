@@ -37,12 +37,18 @@ such day (roll to next year once it has passed), or ask. Only two can be a chip.
   Full weekday names (`friday`) are, because they are unambiguous.
 - The day is resolved when the chip is offered and stored on the accepted link as
   `YYYY-MM-DD`, together with the words that were tapped. The chip shows the day's title,
-  and the Send writes `[[title of the accepted day]]`. The link is kept while its range
+  and the Send writes `[[title of the accepted day]]`. When that title does not resolve
+  back to the day through the core's own date resolver, which happens with an ambiguous
+  numeric format such as `MM/dd/yyyy`, the Send writes the ISO date `[[YYYY-MM-DD]]`
+  instead; the ISO form always resolves to the day. The link is kept while its range
   still holds those same words (in any letter case) and the range sits on word boundaries,
   so the character before and after it is not a letter or digit. `'` and `-` are not
   letters or digits, so `tomorrow's` keeps its link and the Send writes `[[…]]'s`; that is
   deliberate. The check applies only to a date chip's link, never to a title link or a
   picker insert, which keep the rule they had before. The check never consults the clock.
+- A link's UTF-16 range follows a single edit before or after it, computed from the common
+  prefix and suffix of the old and new line (`rebase_links`). An edit that overlaps the
+  words drops the link.
 - A title link with no page yet writes the typed words as the title; the Send makes the
   page.
 - One FFI call, `date_suggestions(text, accepted, limit)`, returns the title, the day, the

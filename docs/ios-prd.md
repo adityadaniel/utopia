@@ -286,10 +286,13 @@ current year (ADR 0013).
 - A date chip works as a title chip does: a tap accepts the link for that line, the words
   stay as typed and show in `link` colour, the chip goes away, and the caret and keyboard
   do not move. On Send the words are written as `[[November 26th, 2026]]`, the day's title.
+  If the graph's date format makes that title ambiguous (for example `MM/dd/yyyy`), the
+  Send writes the day's ISO date instead, so the link still resolves to that day.
 - The day is fixed when the chip is tapped, so the link means the day the reader saw. The
   typed words are stored with the link; it stays while the range still holds those same
   words (in any letter case) and the range sits on word boundaries. It is never dropped by
-  time, a launch or a refresh, only when the reader edits those words.
+  time, a launch or a refresh, only when the reader edits those words. An edit before or
+  after the words moves the range with them.
 - A bare number (`26`), a bare month name (`may`, `march`), a bare short weekday (`sun`,
   `sat`) and a numeric date (`11/6/26`, §7) are not date chips.
 - Which words are a date and which day they mean comes from the core (C1, C3); the app

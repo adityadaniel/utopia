@@ -141,6 +141,9 @@ Read these before you write Swift:
 - Open review findings for the first build (Send and typing at the same time, a kill during
   Send, the first Send in two commits, link ranges after edits, and others) are listed in
   the pull request that added the app.
-- Editing text before a date link moves the line's characters but not the stored range, so
-  the date link is dropped (title links are drawn plain); link ranges do not follow edits
-  yet.
+- Editing text before or after a link moves its stored range with the edit
+  (`rebase_links`, computed from the common prefix and suffix). An edit that overlaps the
+  link's words drops it; title links are then drawn plain, and a date link is pruned.
+- A date link whose graph date format is ambiguous (`MM/dd/yyyy`) is displayed with the
+  formatted title but sent as the ISO date, because the formatted title does not resolve
+  back to the chosen day.

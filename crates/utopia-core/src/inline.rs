@@ -521,6 +521,21 @@ fn atom_ranges(nodes: &[Inline], out: &mut Vec<Range<usize>>) {
     }
 }
 
+pub fn code_ranges(src: &str) -> Vec<Range<usize>> {
+    fn walk(nodes: &[Inline], out: &mut Vec<Range<usize>>) {
+        for n in nodes {
+            match n {
+                Inline::Emph { children, .. } => walk(children, out),
+                Inline::Code { range, .. } => out.push(range.clone()),
+                _ => {}
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&parse(src), &mut out);
+    out
+}
+
 pub fn find_mentions(src: &str, title: &str) -> Vec<Range<usize>> {
     let want: String = title.trim().to_lowercase();
     let n = title.trim().chars().count();

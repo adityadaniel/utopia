@@ -173,7 +173,7 @@ pub fn parse_unambiguous_date(s: &str, graph_format: &DateFormat) -> Option<Naiv
 pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
     let lower = phrase.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
-    let days = |n: i64| today.checked_add_signed(chrono::Duration::days(n));
+    let days = |n: i64| today.checked_add_signed(chrono::Duration::try_days(n)?);
     let months = |n: i32| {
         if n >= 0 {
             today.checked_add_months(chrono::Months::new(n as u32))
@@ -193,13 +193,14 @@ pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
     let offset = |n: &str, unit: &str, sign: i64| -> Option<NaiveDate> {
         let n: i64 = match n {
             "a" | "an" | "one" => 1,
-            _ => n.parse().ok().filter(|n| *n <= 3660)?,
+            _ => n.parse().ok().filter(|n| (0..=3660).contains(n))?,
         };
+        let total = sign.checked_mul(n)?;
         match unit.trim_end_matches('s') {
-            "day" => days(sign * n),
-            "week" => days(sign * 7 * n),
-            "month" => months((sign * n) as i32),
-            "year" => months((sign * 12 * n) as i32),
+            "day" => days(total),
+            "week" => days(total.checked_mul(7)?),
+            "month" => months(i32::try_from(total).ok()?),
+            "year" => months(i32::try_from(total.checked_mul(12)?).ok()?),
             _ => None,
         }
     };
@@ -219,7 +220,7 @@ pub fn relative_date(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
                     let target = weekday(w)?;
                     let mut d = days(sign)?;
                     while d.weekday() != target {
-                        d = d.checked_add_signed(chrono::Duration::days(sign))?;
+                        d = d.checked_add_signed(chrono::Duration::try_days(sign)?)?;
                     }
                     Some(d)
                 }
@@ -376,12 +377,19 @@ pub fn date_phrase(phrase: &str, today: NaiveDate) -> Option<NaiveDate> {
 
 pub fn find_date_phrases(text: &str, today: NaiveDate) -> Vec<DatePhrase> {
     let words = crate::text::word_ranges(text);
+    let code = crate::inline::code_ranges(text);
     let mut out = Vec::new();
     let mut i = 0;
     while i < words.len() {
         let mut found = None;
         for take in (1..=MAX_DATE_PHRASE_WORDS.min(words.len() - i)).rev() {
             let range = words[i].start..words[i + take - 1].end;
+            if code
+                .iter()
+                .any(|c| c.start < range.end && range.start < c.end)
+            {
+                continue;
+            }
             if let Some(date) = date_phrase(&text[range.clone()], today) {
                 found = Some((range, date, take));
                 break;
@@ -683,6 +691,20 @@ mod tests {
 
     fn d(y: i32, m: u32, day: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    }
+
+    #[test]
+    fn ac_4_12_out_of_range_offsets_are_no_date() {
+        let t = d(2026, 11, 3);
+        for phrase in [
+            "-99999999999 days ago",
+            "in 99999999999999 weeks",
+            "in -3 days",
+        ] {
+            assert_eq!(relative_date(phrase, t), None, "{phrase:?}");
+            assert_eq!(date_phrase(phrase, t), None, "{phrase:?}");
+            assert!(find_date_phrases(phrase, t).is_empty(), "{phrase:?}");
+        }
     }
 
     #[test]
