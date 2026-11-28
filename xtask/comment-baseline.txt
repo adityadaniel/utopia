@@ -1,6 +1,6 @@
 # Comment ratchet: comment lines each file may still hold (docs/adr/0001-no-code-comments.md).
 # A count may only go down. Regenerate with `cargo run -p xtask -- comments --update`.
-# total 10682
+# total 10671
 34 crates/utopia-api/src/access.rs
 25 crates/utopia-api/src/client.rs
 301 crates/utopia-api/src/lib.rs
@@ -99,7 +99,7 @@
 1 crates/utopia-ui/src/lib.rs
 50 crates/utopia-ui/src/line_input.rs
 3 crates/utopia-ui/src/motion.rs
-749 crates/utopia-ui/src/page_view.rs
+748 crates/utopia-ui/src/page_view.rs
 102 crates/utopia-ui/src/pane_stack.rs
 27 crates/utopia-ui/src/pdf.rs
 49 crates/utopia-ui/src/pdf_view.rs
@@ -121,10 +121,10 @@
 153 crates/utopia-ui/tests/settings.rs
 772 crates/utopia-ui/tests/workspace.rs
 7 mobile/ios/Check/main.swift
-47 mobile/ios/UtopiaMobile/AppModel.swift
+46 mobile/ios/UtopiaMobile/AppModel.swift
 9 mobile/ios/UtopiaMobile/ComposeBox.swift
 3 mobile/ios/UtopiaMobile/CoreClient.swift
-8 mobile/ios/UtopiaMobile/DayLog.swift
+4 mobile/ios/UtopiaMobile/DayLog.swift
 25 mobile/ios/UtopiaMobile/Draft.swift
 21 mobile/ios/UtopiaMobile/LineEditor.swift
 11 mobile/ios/UtopiaMobile/PageScreen.swift
@@ -133,7 +133,7 @@
 9 mobile/ios/UtopiaMobile/Setup.swift
 9 mobile/ios/UtopiaMobile/Storage.swift
 11 mobile/ios/UtopiaMobile/TodayScreen.swift
-10 mobile/ios/UtopiaMobile/Tokens.swift
+5 mobile/ios/UtopiaMobile/Tokens.swift
 2 mobile/ios/UtopiaMobile/UtopiaMobileApp.swift
 159 relay-cloudflare/src/graph.ts
 6 relay-cloudflare/src/index.ts

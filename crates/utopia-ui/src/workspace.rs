@@ -33,10 +33,10 @@ use crate::sync_runner::{
 use crate::tasks_view::{TaskFilter, TasksEvent, TasksView};
 use crate::theme::{
     ghost_icon, ghost_text, kbd, label_mono, nav_row, quiet_control, quiet_danger, theme,
-    BUTTON_HEIGHT, COUNT, FOOTER_DOT, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT, RADIUS_CHIP,
-    RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL, TAG, TAG_HEIGHT,
-    TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X, TOP_BAR_PADDING_Y, UI,
-    VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
+    BUTTON_HEIGHT, COUNT, FOOTER_DOT, LABEL, MENU_OFFSET, PAGE_MENU_WIDTH, PAGE_ROW_HEIGHT,
+    RADIUS_CHIP, RADIUS_CONTROL, RADIUS_INPUT, RADIUS_TAG, SEARCH_HEIGHT, SIDEBAR_LABEL, SMALL,
+    TAG, TAG_HEIGHT, TAG_PADDING_X, TOOLTIP_MAX_WIDTH, TOP_BAR_MIN_HEIGHT, TOP_BAR_PADDING_X,
+    TOP_BAR_PADDING_Y, UI, VAULT_NAME_MAX_WIDTH, WORKSPACE_NAME, WORKSPACE_SQUARE,
 };
 use crate::theme::{
     outline_button, PANE_HEADER_HEIGHT, PANE_SPINE, PANE_SPINE_THRESHOLD, PANE_WIDTH, SPINE_TITLE,
@@ -414,6 +414,9 @@ impl Workspace {
                     if matches!(e, EditorEvent::Blurred) && editor.read(cx).target().is_none() {
                         window.focus(&this.focus);
                     }
+                    if matches!(e, EditorEvent::VimChanged) {
+                        cx.notify();
+                    }
                 },
             ),
             // §13.5: the input method can only reach the editor while its handle has
@@ -487,21 +490,78 @@ impl Workspace {
             let handle = window.window_handle();
             let me = cx.entity().downgrade();
             subs.push(cx.intercept_keystrokes(move |ev, window, cx| {
-                if window.window_handle() != handle || ev.keystroke.key != "escape" {
+                if window.window_handle() != handle {
                     return;
                 }
-                let closed = me
+                if ev.keystroke.key == "escape" {
+                    let closed = me
+                        .update(cx, |this, cx| {
+                            if this.page_menu {
+                                this.page_menu = false;
+                                cx.notify();
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .unwrap_or(false);
+                    if closed {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if !crate::appearance::vim(cx) {
+                    return;
+                }
+                let Some(key) = crate::vim::key_from_keystroke(&ev.keystroke) else {
+                    return;
+                };
+                let claimed = me
                     .update(cx, |this, cx| {
                         if this.page_menu {
-                            this.page_menu = false;
-                            cx.notify();
-                            true
-                        } else {
-                            false
+                            return false;
                         }
+                        let editor = this.editor.clone();
+                        if editor.read(cx).target().is_some() {
+                            let focused = editor.read(cx).focus_handle(cx).is_focused(window);
+                            let state = editor.read(cx).vim().mode;
+                            if !focused
+                                || state == crate::vim::Mode::Insert
+                                || editor.read(cx).composing()
+                            {
+                                return false;
+                            }
+                            editor.update(cx, |e, cx| e.vim_key(key, window, cx));
+                            return true;
+                        }
+                        if !matches!(&this.content, MainContent::Page)
+                            || !this.focus.is_focused(window)
+                        {
+                            return false;
+                        }
+                        let resume = editor.read(cx).vim().resume.clone();
+                        let view = resume
+                            .as_ref()
+                            .and_then(|r| this.view_by_id(r.host))
+                            .unwrap_or_else(|| this.main_view());
+                        let woken = match &resume {
+                            Some(r) => {
+                                view.update(cx, |v, cx| v.restore_caret(&r.caret, window, cx))
+                            }
+                            None => false,
+                        };
+                        if !woken {
+                            editor.update(cx, |e, _| e.vim_mut().resume = None);
+                            view.update(cx, |v, cx| v.focus_first(window, cx));
+                        }
+                        if editor.read(cx).target().is_none() {
+                            return false;
+                        }
+                        editor.update(cx, |e, cx| e.vim_key(key, window, cx));
+                        true
                     })
                     .unwrap_or(false);
-                if closed {
+                if claimed {
                     cx.stop_propagation();
                 }
             }));
@@ -1469,6 +1529,14 @@ impl Workspace {
         self.stack.iter().position(|v| v == view)
     }
 
+    fn view_by_id(&self, id: EntityId) -> Option<Entity<PageView>> {
+        self.stack
+            .iter()
+            .chain(self.panes.iter().map(|p| &p.view))
+            .find(|v| v.entity_id() == id)
+            .cloned()
+    }
+
     /// Open from a click (`pane_stack::open`): `origin` is the pane the link was in.
     #[allow(clippy::too_many_arguments)]
     pub fn open_from(
@@ -1559,6 +1627,22 @@ impl Workspace {
             ViewMode::Single => ViewMode::Panes,
         };
         self.set_mode(next, window, cx);
+    }
+
+    fn toggle_vim_mode(&mut self, _: &ToggleVimMode, _: &mut Window, cx: &mut Context<Self>) {
+        let on = !crate::appearance::vim(cx);
+        let dir = crate::appearance::config_dir(cx);
+        let saved = crate::appearance::set_vim(cx, on, &dir);
+        let message = match saved {
+            Ok(()) if on => "Vim mode on".to_string(),
+            Ok(()) => "Vim mode off".to_string(),
+            Err(e) => format!("Vim mode is on for this session only: {e}"),
+        };
+        self.app.update(cx, |app, cx| {
+            app.notice = Some(message);
+            cx.notify();
+        });
+        cx.notify();
     }
 
     fn close_pane_action(&mut self, _: &ClosePane, window: &mut Window, cx: &mut Context<Self>) {
@@ -1726,6 +1810,10 @@ impl Workspace {
             .iter()
             .filter_map(|p| p.view.read(cx).page())
             .collect()
+    }
+
+    pub fn sidebar_view(&self, i: usize) -> Option<Entity<PageView>> {
+        self.panes.get(i).map(|p| p.view.clone())
     }
 
     /// Open the configured launch page (FR-1.1): today by default, or the last page. The
@@ -4362,6 +4450,7 @@ impl Workspace {
                 .child(self.pin_button(p, cx))
                 .child(self.page_menu_button(cx));
         }
+        bar = bar.when_some(self.vim_mode_label(&th, cx), |bar, label| bar.child(label));
         bar = bar.child(self.mode_toggle(&th, cx));
         if self.mode == ViewMode::Panes {
             bar = bar.child(
@@ -4383,6 +4472,41 @@ impl Workspace {
                 })),
         )
         .into_any_element()
+    }
+
+    fn vim_mode_label(
+        &self,
+        th: &crate::theme::Theme,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if !crate::appearance::vim(cx) {
+            return None;
+        }
+        let (mode, pending) = {
+            let editor = self.editor.read(cx);
+            (editor.vim().mode, editor.vim().parser.pending())
+        };
+        Some(
+            div()
+                .debug_selector(|| "vim-mode".into())
+                .flex_none()
+                .font_family(label_mono())
+                .text_size(px(LABEL.size))
+                .line_height(px(LABEL.line))
+                .font_weight(LABEL.weight)
+                .text_color(th.ink_3)
+                .child(format!("{} {pending}", Self::mode_name(mode)))
+                .into_any_element(),
+        )
+    }
+
+    fn mode_name(mode: crate::vim::Mode) -> &'static str {
+        match mode {
+            crate::vim::Mode::Normal => "NORMAL",
+            crate::vim::Mode::Insert => "INSERT",
+            crate::vim::Mode::Visual { line: false, .. } => "VISUAL",
+            crate::vim::Mode::Visual { line: true, .. } => "VISUAL LINE",
+        }
     }
 
     /// The top bar over the Tasks view (DESIGN.md §4.5): Back (to the stack), the title,
@@ -5072,6 +5196,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::toggle_left))
             .on_action(cx.listener(Self::toggle_refs))
             .on_action(cx.listener(Self::toggle_view_mode))
+            .on_action(cx.listener(Self::toggle_vim_mode))
             .on_action(cx.listener(Self::close_pane_action))
             .on_action(cx.listener(Self::focus_pane_left))
             .on_action(cx.listener(Self::focus_pane_right))

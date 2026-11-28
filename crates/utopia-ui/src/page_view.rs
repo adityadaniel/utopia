@@ -622,6 +622,13 @@ struct DraggedBlock {
 
 struct DragPreview(SharedString);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CutPaste {
+    Moved,
+    NoRoom,
+    Spent,
+}
+
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let th = theme(cx).clone();
@@ -1446,6 +1453,31 @@ impl PageView {
         // every later change on any page rebuild this one (rebuild-cycle issue 2).
         self.open_embeds.clear();
         self.interest = Interest::ThisPage;
+    }
+
+    fn focus_edge(
+        &mut self,
+        page: &PageId,
+        first: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let block = if first {
+            self.items.iter().find_map(|i| match i {
+                Item::Row(r) if r.embed == 0 && r.page == *page => Some(r.block.clone()),
+                _ => None,
+            })
+        } else {
+            self.items.iter().rev().find_map(|i| match i {
+                Item::Row(r) if r.embed == 0 && r.page == *page => Some(r.block.clone()),
+                _ => None,
+            })
+        };
+        let Some(block) = block else {
+            return;
+        };
+        let caret = first.then_some(0);
+        self.edit(page.clone(), block, caret, None, window, cx);
     }
 
     /// Start editing the first block (creating one on an empty page, §9.3).
@@ -2552,15 +2584,18 @@ impl PageView {
                     cx,
                 );
             }
-            EditorEvent::Navigate { up, x } => {
+            EditorEvent::Navigate { up, x, count } => {
+                let count = (*count).max(1);
                 if self.is_property_block(&t.block) {
                     let props = self.property_blocks();
                     let pos = props.iter().position(|b| b == &t.block);
                     let next = pos.and_then(|p| {
                         if *up {
-                            p.checked_sub(1).map(|i| (props[i].clone(), true))
+                            Some((props[p.saturating_sub(count)].clone(), true))
                         } else {
-                            props.get(p + 1).map(|b| (b.clone(), false))
+                            props
+                                .get(p.saturating_add(count))
+                                .map(|b| (b.clone(), false))
                         }
                     });
                     match next {
@@ -2598,18 +2633,28 @@ impl PageView {
                         _ => None,
                     })
                     .collect();
-                let pos = rows.iter().position(|(i, _)| *i == ix);
-                let next = pos.and_then(|p| if *up { p.checked_sub(1) } else { Some(p + 1) });
-                if *up && next.is_none() {
-                    // Arrow up from the first body block moves into the last property row.
-                    if let Some(last) = self.property_blocks().last().cloned() {
+                let Some(p) = rows.iter().position(|(i, _)| *i == ix) else {
+                    return;
+                };
+                if *up && p < count {
+                    let remaining = count - p;
+                    let props = self.property_blocks();
+                    if let Some(last) = props.get(props.len().saturating_sub(remaining)).cloned() {
                         let x = x.unwrap_or(px(0.));
                         let len = self.block_text_len(&last, cx);
                         self.edit_property_at(last, Some(len), Some(Goal::LastLine(x)), window, cx);
                         return;
                     }
                 }
-                if let Some(r) = next.and_then(|n| rows.get(n)).map(|(_, r)| (*r).clone()) {
+                let target = if *up {
+                    p.saturating_sub(count)
+                } else {
+                    p.saturating_add(count).min(rows.len().saturating_sub(1))
+                };
+                if target == p {
+                    return;
+                }
+                if let Some(r) = rows.get(target).map(|(_, r)| (*r).clone()) {
                     let x = x.unwrap_or(px(0.));
                     let goal = if *up {
                         Goal::LastLine(x)
@@ -2619,6 +2664,9 @@ impl PageView {
                     let caret = if *up { r.text.len() } else { 0 };
                     self.edit(r.page, r.block, Some(caret), Some(goal), window, cx);
                 }
+            }
+            EditorEvent::GoEdge { first } => {
+                self.focus_edge(&t.page, *first, window, cx);
             }
             // Option+Up/Down ran out of block: carry on at the start of the block above or
             // the end of the block below, which is what macOS text views do with a
@@ -2702,6 +2750,65 @@ impl PageView {
                     cx,
                 );
             }
+            EditorEvent::DeleteBlocks { count, register } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                self.yank_blocks(&t, *count, *register, true, cx);
+                let now = self.app.read(cx).store.now();
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
+                self.run_plan(
+                    &t.page,
+                    |st| {
+                        outline::delete_blocks(st, &t.block, *count, now, zoom.as_ref(), &|b| {
+                            collapsed.contains(b)
+                        })
+                    },
+                    window,
+                    cx,
+                );
+            }
+            EditorEvent::YankBlocks { count, register } => {
+                self.yank_blocks(&t, *count, *register, false, cx)
+            }
+            EditorEvent::PasteBlocks { before, count } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                self.paste_blocks(&t, *before, *count, window, cx)
+            }
+            EditorEvent::JoinNext { count } => {
+                if self.is_property_block(&t.block) {
+                    return;
+                }
+                let zoom = if self.page().as_ref() == Some(&t.page) {
+                    self.zoom()
+                } else {
+                    None
+                };
+                let collapsed = self.app.read(cx).store.collapsed_set().clone();
+                let now = self.app.read(cx).store.now();
+                self.run_plan(
+                    &t.page,
+                    |st| {
+                        outline::join_next(
+                            st,
+                            &t.block,
+                            *count,
+                            zoom.as_ref(),
+                            &|b| collapsed.contains(b),
+                            now,
+                        )
+                    },
+                    window,
+                    cx,
+                );
+            }
             EditorEvent::PasteOutline(text) => {
                 let sel = editor.read(cx).selection();
                 self.run_plan(
@@ -2740,7 +2847,10 @@ impl PageView {
                     self.edit(t.page.clone(), f, None, None, window, cx);
                 }
             }
-            EditorEvent::Restore(_) | EditorEvent::Blurred | EditorEvent::Switched { .. } => {}
+            EditorEvent::Restore(_)
+            | EditorEvent::Blurred
+            | EditorEvent::Switched { .. }
+            | EditorEvent::VimChanged => {}
         }
     }
 
@@ -2757,7 +2867,12 @@ impl PageView {
     }
 
     /// Put the caret back where an undo/redo says, if that block can be shown here.
-    pub fn restore_caret(&mut self, caret: &Caret, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn restore_caret(
+        &mut self,
+        caret: &Caret,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         self.rebuild(cx);
         // `edit` opens a folded attribute's path when needed, and declines a block this view
         // cannot draw.
@@ -2769,6 +2884,10 @@ impl PageView {
             window,
             cx,
         );
+        self.editor
+            .read(cx)
+            .target()
+            .is_some_and(|t| t.block == caret.block)
     }
 
     fn apply_plan(&mut self, page: &PageId, plan: Plan, cx: &mut Context<Self>) -> Option<Focus> {
@@ -2826,6 +2945,154 @@ impl PageView {
             t.block.clone(),
             Some(caret),
             None,
+            window,
+            cx,
+        );
+    }
+
+    fn yank_blocks(
+        &mut self,
+        t: &EditTarget,
+        count: usize,
+        register: Option<char>,
+        is_cut: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if register == Some('_') {
+            return;
+        }
+        let data = self.app.update(cx, |app, _| {
+            let st = app.store.page_state(&t.page).ok()?;
+            let rows = outline::block_tree(st, &t.block, count).ok()?;
+            let roots = outline::block_roots(st, &t.block, count).ok()?;
+            let markdown = utopia_core::markdown::blocks_to_markdown(st, &roots);
+            let ids = if is_cut {
+                outline::block_ids(st, &t.block, count).ok()
+            } else {
+                None
+            };
+            Some((rows, markdown, ids))
+        });
+        let Some((tree, markdown, ids)) = data else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        let cut = ids
+            .filter(|i| !i.is_empty())
+            .map(|ids| (t.page.clone(), ids));
+        crate::vim::remember(crate::vim::Register::Blocks {
+            markdown: markdown.clone(),
+            tree,
+            cut,
+        });
+        if !is_cut || register == Some('+') {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(markdown.clone()));
+            crate::vim::clipboard_written(&markdown);
+        } else {
+            let current = cx.read_from_clipboard().and_then(|c| c.text());
+            crate::vim::clipboard_at_register(current);
+        }
+    }
+
+    fn paste_blocks(
+        &mut self,
+        t: &EditTarget,
+        before: bool,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let crate::vim::Register::Blocks { tree, cut, .. } = crate::vim::last() else {
+            return;
+        };
+        if tree.is_empty() {
+            return;
+        }
+        let mut spent = false;
+        if let Some((src, ids)) = cut.clone() {
+            let alive = self.app.update(cx, |app, _| {
+                let Ok(st) = app.store.page_state(&src) else {
+                    return false;
+                };
+                !ids.is_empty()
+                    && ids.iter().all(|i| {
+                        st.block(i)
+                            .is_some_and(|b| b.deleted_at.is_some() && b.moved_to.is_none())
+                    })
+            });
+            spent = !alive;
+            if alive && src == t.page {
+                let plan = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&src).ok()?;
+                    Some(outline::restore_after(st, &ids, &t.block, before))
+                });
+                match plan {
+                    Some(Ok(plan)) => {
+                        if let Some(f) = self.apply_plan(&t.page, plan, cx) {
+                            crate::vim::forget_cut();
+                            self.edit(t.page.clone(), f.block, Some(f.offset), None, window, cx);
+                        }
+                        return;
+                    }
+                    Some(Err(utopia_core::DomainError::TooDeep)) => return,
+                    _ => spent = true,
+                }
+            } else if alive {
+                let place = self.app.update(cx, |app, _| {
+                    let st = app.store.page_state(&t.page).ok()?;
+                    let after = if before {
+                        st.prev_sibling(&t.block, false)
+                    } else {
+                        Some(t.block.clone())
+                    };
+                    Some((st.parent_of(&t.block), after))
+                });
+                if let Some((parent, after)) = place {
+                    let moved = self.app.update(cx, |app, cx| {
+                        let r = app.store.restore_and_move_to_page(
+                            &src,
+                            &ids,
+                            &t.page,
+                            parent.as_ref(),
+                            after.as_ref(),
+                        );
+                        match r {
+                            Ok(()) => {
+                                app.changed(vec![src.clone(), t.page.clone()], true, cx);
+                                CutPaste::Moved
+                            }
+                            Err(utopia_store::StoreError::Domain(
+                                utopia_core::DomainError::TooDeep,
+                            )) => CutPaste::NoRoom,
+                            Err(e) => {
+                                app.report::<()>(Err(e));
+                                CutPaste::Spent
+                            }
+                        }
+                    });
+                    match moved {
+                        CutPaste::Moved => {
+                            crate::vim::forget_cut();
+                            self.rebuild(cx);
+                            if let Some(first) = ids.first().cloned() {
+                                self.edit(t.page.clone(), first, Some(0), None, window, cx);
+                            }
+                            return;
+                        }
+                        CutPaste::NoRoom => return,
+                        CutPaste::Spent => spent = true,
+                    }
+                }
+            }
+        }
+        if spent {
+            crate::vim::forget_cut();
+        }
+        self.run_plan(
+            &t.page,
+            |st| outline::insert_tree_after(st, &t.block, &tree, before, count),
             window,
             cx,
         );
@@ -3369,6 +3636,7 @@ impl PageView {
                         let (Ok(i) | Err(i)) = ix;
                         let caret = (prefix + rendered.source_offset(i)).min(end);
                         cx.stop_propagation();
+                        this.editor.update(cx, |e, cx| e.vim_click_entry(cx));
                         this.edit(
                             r.page.clone(),
                             r.block.clone(),

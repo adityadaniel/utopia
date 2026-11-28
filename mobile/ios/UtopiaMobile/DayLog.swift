@@ -1,6 +1,3 @@
-// The day log: today's note in time order, for reading (ios-prd §4.4). A row is not editable,
-// except the tick of a to-do (K9). Which words are links comes from the core (C1).
-
 import SwiftUI
 
 /// One top-level block with the blocks below it (§4.2 "Entry").
@@ -49,28 +46,15 @@ struct DayLog: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0, pinnedViews: []) {
-                    // Earlier days come above today: scrolling up shows the day before (§4.4).
-                    ForEach(earlierDays, id: \.page.id) { day in
-                        DaySectionHeader(day: day.page)
-                            .onAppear {
-                                if day.page.id == earlierDays.first?.page.id {
-                                    Task { await model.loadEarlier() }
-                                }
-                            }
-                        ForEach(day.entries) { entry in
-                            row(entry, page: day.page)
-                            rule
-                        }
-                    }
+                LazyVStack(alignment: .leading, spacing: 0) {
                     if let today = model.today {
                         if today.exists && !today.entries.isEmpty {
                             ForEach(today.entries) { entry in
-                                row(entry, page: today)
+                                row(entry)
                                     .id(entry.id)
                                 rule
                             }
-                        } else if model.earlier.isEmpty {
+                        } else {
                             Text("Nothing for today yet.")
                                 .font(.system(size: childSize))
                                 .foregroundStyle(Tokens.muted)
@@ -100,13 +84,6 @@ struct DayLog: View {
         }
     }
 
-    private var earlierDays: [(page: PageView, entries: [LogEntry])] {
-        model.earlier
-            .filter { $0.exists }
-            .map { (page: $0, entries: $0.entries) }
-            .reversed()
-    }
-
     private var rule: some View {
         Rectangle()
             .fill(Tokens.lineSoft)
@@ -115,7 +92,7 @@ struct DayLog: View {
             .padding(.trailing, 16)
     }
 
-    private func row(_ entry: LogEntry, page: PageView) -> some View {
+    private func row(_ entry: LogEntry) -> some View {
         HStack(alignment: .top, spacing: 0) {
             Text(time(entry.head.createdAtMs))
                 .font(.label(labelSize))
@@ -241,39 +218,26 @@ struct TodoBox: View {
     }
 }
 
-/// The header row of an earlier day (§4.4).
-struct DaySectionHeader: View {
-    let day: PageView
-
-    @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
-    @ScaledMetric(relativeTo: .headline) private var titleSize: CGFloat = 17
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(weekday)
-                .font(.label(labelSize))
-                .foregroundStyle(Tokens.muted)
-            Text(day.title)
-                .font(.system(size: titleSize, weight: .semibold))
-                .foregroundStyle(Tokens.ink)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.leading, 20)
-        .padding(.trailing, 16)
-        .padding(.top, 20)
-        .padding(.bottom, 8)
-    }
-
-    private var weekday: String {
-        guard let date = day.date.flatMap(Self.parse) else { return "" }
-        return date.formatted(.dateTime.weekday(.wide)).uppercased()
-    }
-
-    static func parse(_ iso: String) -> Date? {
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-        let parts = iso.split(separator: "-").compactMap { Int($0) }
-        guard parts.count == 3 else { return nil }
-        return calendar.date(from: DateComponents(year: parts[0], month: parts[1], day: parts[2]))
-    }
+#if DEBUG
+#Preview("Day log") {
+    DayLog { _ in }
+        .environment(AppModel.preview())
+        .background(Tokens.paper)
 }
+
+#Preview("Day log · Empty day") {
+    DayLog { _ in }
+        .environment(AppModel.preview(today: PreviewData.emptyToday))
+        .background(Tokens.paper)
+}
+
+#Preview("To-do box") {
+    @Previewable @State var done = false
+    HStack(spacing: 24) {
+        TodoBox(done: done, lineHeight: 24) { done.toggle() }
+        TodoBox(done: true, lineHeight: 24) {}
+        TodoBox(done: false, lineHeight: 24) {}
+    }
+    .padding(40)
+}
+#endif

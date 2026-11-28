@@ -41,10 +41,29 @@ pub enum EditorEvent {
     Indent,
     Outdent,
     MergeBackward,
+    DeleteBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    YankBlocks {
+        count: usize,
+        register: Option<char>,
+    },
+    PasteBlocks {
+        before: bool,
+        count: usize,
+    },
+    JoinNext {
+        count: usize,
+    },
     /// Up/Down ran out of block. `x` is the column to keep, in window coordinates.
     Navigate {
         up: bool,
         x: Option<Pixels>,
+        count: usize,
+    },
+    GoEdge {
+        first: bool,
     },
     /// Option+Up/Down pressed at the edge of a block: carry on at the start of the block
     /// above (`to_start`) or at the end of the block below. The host knows the visible
@@ -73,6 +92,7 @@ pub enum EditorEvent {
         from: BlockId,
     },
     Blurred,
+    VimChanged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -384,6 +404,7 @@ pub struct BlockEditor {
     focus: FocusHandle,
     session: EditorSession,
     ac: Autocomplete,
+    vim: crate::vim::VimState,
     blink: Blink,
     /// The block, text length and selection the caret was last drawn for: a change in any
     /// of them is a keystroke or a move, which holds the caret steady (see `render`).
@@ -405,6 +426,14 @@ impl BlockEditor {
     pub fn composing(&self) -> bool {
         self.field.composing()
     }
+
+    pub fn vim(&self) -> &crate::vim::VimState {
+        &self.vim
+    }
+
+    pub(crate) fn vim_mut(&mut self) -> &mut crate::vim::VimState {
+        &mut self.vim
+    }
 }
 
 impl FieldHost for BlockEditor {
@@ -423,12 +452,30 @@ impl FieldHost for BlockEditor {
     fn caret_visible(&self) -> bool {
         self.blink.visible()
     }
+    fn accepts_marked_text(&self, cx: &gpui::App) -> bool {
+        !crate::appearance::vim(cx) || self.vim.mode == crate::vim::Mode::Insert
+    }
+    fn caret_shape(&self, cx: &gpui::App) -> crate::field::CaretShape {
+        let modal = crate::appearance::vim(cx)
+            && matches!(
+                self.vim.mode,
+                crate::vim::Mode::Normal | crate::vim::Mode::Visual { .. }
+            );
+        if modal {
+            crate::field::CaretShape::Block
+        } else {
+            crate::field::CaretShape::Bar
+        }
+    }
+    fn clamp_cursor(&mut self, cx: &gpui::App) {
+        self.clamp_normal_cursor(cx);
+    }
 }
 
 crate::impl_field_input_handler!(
     BlockEditor,
     BlockEditor::after_edit,
-    BlockEditor::typed_bracket
+    BlockEditor::intercept_typed
 );
 
 impl BlockEditor {
@@ -453,6 +500,7 @@ impl BlockEditor {
             focus: cx.focus_handle(),
             session: EditorSession::Idle,
             ac: Autocomplete::Closed,
+            vim: crate::vim::VimState::default(),
             blink: Blink::default(),
             blink_mark: (None, 0, 0..0),
             _sub: sub,
@@ -467,7 +515,7 @@ impl BlockEditor {
     /// path that moves the caret can forget to show it.
     fn sync_blink(&mut self, cx: &mut Context<Self>) {
         let target = self.target().map(|t| t.block.clone());
-        if target.is_none() {
+        if target.is_none() || self.caret_shape(cx) == crate::field::CaretShape::Block {
             self.blink.disable();
             return;
         }
@@ -585,6 +633,7 @@ impl BlockEditor {
         }
         // Up/Down from the neighbouring block lands under the caret's x once laid out.
         self.field.goal = goal;
+        self.clamp_normal_cursor(cx);
         window.focus(&self.focus);
         cx.notify();
     }
@@ -605,6 +654,8 @@ impl BlockEditor {
         // it belongs to (machine issue 4).
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        self.close_insert_run(cx);
+        self.vim.reset();
         if was_editing {
             cx.emit(EditorEvent::Blurred);
         }
@@ -640,6 +691,18 @@ impl BlockEditor {
             Some(_) => {}
             None => self.detach(cx),
         }
+        self.clamp_normal_cursor(cx);
+    }
+
+    pub(crate) fn clamp_normal_cursor(&mut self, cx: &gpui::App) {
+        if self.caret_shape(cx) != crate::field::CaretShape::Block {
+            return;
+        }
+        let to = utopia_core::vim::motion::clamp_normal(&self.field.text, self.field.cursor());
+        if to != self.field.cursor() {
+            self.field.move_to(to);
+            self.field.reset_caret_motion();
+        }
     }
 
     /// The target's stored text, or `None` when the block went away (its creation undone,
@@ -658,6 +721,8 @@ impl BlockEditor {
     fn detach(&mut self, cx: &mut Context<Self>) {
         self.session = EditorSession::Idle;
         self.ac = Autocomplete::Closed;
+        self.close_insert_run(cx);
+        self.vim.reset();
         cx.emit(EditorEvent::Blurred);
         cx.notify();
     }
@@ -729,6 +794,7 @@ impl BlockEditor {
         if let Some(text) = insert {
             self.insert_text(&text, window, cx);
         }
+        self.clamp_normal_cursor(cx);
         cx.notify();
     }
 
@@ -741,6 +807,7 @@ impl BlockEditor {
         let start = sel.start.min(sel.end);
         self.field.replace(sel, text);
         self.field.move_to(start + text.len());
+        self.clamp_normal_cursor(cx);
         self.after_edit(window, cx);
         cx.notify();
         true
@@ -773,13 +840,19 @@ impl BlockEditor {
     /// already there; see [`utopia_core::text::auto_pair`]. Each is one text edit, so one
     /// undo step like any keystroke. Only for plain typing at the selection: never while
     /// IME text is being composed.
-    fn typed_bracket(
+    fn intercept_typed(
         &mut self,
         range: std::ops::Range<usize>,
         text: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
+        if crate::appearance::vim(cx) && self.vim.mode != crate::vim::Mode::Insert {
+            for ch in text.chars() {
+                self.vim_key(utopia_core::vim::Key::Char(ch), window, cx);
+            }
+            return true;
+        }
         if self.target().is_none() || self.field.composing() || range != self.field.sel {
             return false;
         }
@@ -892,6 +965,8 @@ impl BlockEditor {
             self.accept_composition(cx);
         }
         self.commit_block(true, cx);
+        self.close_insert_run(cx);
+        self.vim.leave_insert();
         // A menu is a keyboard affordance and the keyboard is elsewhere now; the commit
         // above may also have rewritten the text it was offering completions for (an
         // expanded relative date), so accepting from it later would edit the wrong range.
@@ -944,6 +1019,9 @@ impl BlockEditor {
         let Some(t) = self.target().cloned() else {
             return false;
         };
+        if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
+            self.begin_insert_run(cx);
+        }
         let text = self.field.text.clone();
         let caret = self.field.cursor();
         let changed = self.app.update(cx, |app, cx| {
@@ -966,7 +1044,7 @@ impl BlockEditor {
                     .await;
                 // `Ok(false)`: still inside a link being typed, so look again later.
                 let done = this.update(cx, |this, cx| {
-                    if this.typing_link() {
+                    if this.typing_link(cx) {
                         return false;
                     }
                     this.commit_block(false, cx);
@@ -991,7 +1069,10 @@ impl BlockEditor {
     /// A bare `#tag` counts too (FR-2.15): it is the same link as `[[tag]]`, and it is
     /// complete at every letter, so committing on idle made a page for each pause
     /// (`#Apple` → "A", "Ap", "App", …). The idle commit waits until the caret leaves it.
-    fn typing_link(&self) -> bool {
+    fn typing_link(&self, cx: &gpui::App) -> bool {
+        if crate::appearance::vim(cx) && self.vim.mode != crate::vim::Mode::Insert {
+            return false;
+        }
         matches!(
             detect_trigger(&self.field.text, self.field.cursor()),
             Some((AcKind::Page | AcKind::BracketTag | AcKind::Tag, ..))
@@ -1120,7 +1201,11 @@ impl BlockEditor {
         }
     }
 
-    fn refresh_autocomplete(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn refresh_autocomplete(&mut self, cx: &mut Context<Self>) {
+        if crate::appearance::vim(cx) && self.vim.mode != crate::vim::Mode::Insert {
+            self.ac = Autocomplete::Closed;
+            return;
+        }
         if self.field.composing() {
             // §13.5: the buffer is provisional, so a menu over it would name text the store
             // has never seen. Nothing may open one mid-composition; the end of the
@@ -1401,7 +1486,7 @@ impl BlockEditor {
     /// taken as committed first (§13.5). Deferring the commit instead would let the host
     /// remove the row being composed and then queue a `begin` on its neighbour, which the
     /// focus change from that removal discards — the caret would not continue next door.
-    fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
+    pub(crate) fn emit_after_commit(&mut self, e: EditorEvent, cx: &mut Context<Self>) {
         if self.field.composing() {
             self.accept_composition(cx);
         }
@@ -1750,7 +1835,7 @@ impl BlockEditor {
     /// otherwise coalesce with it. `caret` is where the caret ends up, after the
     /// insertion when `None`. Nothing happens while the input method owns the buffer
     /// (§13.5).
-    fn discrete_edit(
+    pub(crate) fn discrete_edit(
         &mut self,
         range: std::ops::Range<usize>,
         new: &str,
@@ -1977,7 +2062,7 @@ impl BlockEditor {
             }
             None => {
                 let x = self.field.caret_window_x();
-                self.emit_after_commit(EditorEvent::Navigate { up, x }, cx);
+                self.emit_after_commit(EditorEvent::Navigate { up, x, count: 1 }, cx);
             }
         }
     }
@@ -2136,6 +2221,42 @@ impl BlockEditor {
         self.end(cx);
     }
 
+    pub(crate) fn begin_insert_run(&mut self, cx: &mut Context<Self>) {
+        let open = self.app.update(cx, |app, _| app.store.in_undo_run());
+        if self.vim.insert_run && open {
+            return;
+        }
+        self.vim.insert_run = true;
+        self.app.update(cx, |app, _| app.store.begin_undo_run());
+    }
+
+    pub(crate) fn close_insert_run(&mut self, cx: &mut Context<Self>) {
+        if !self.vim.insert_run {
+            return;
+        }
+        self.vim.insert_run = false;
+        self.app.update(cx, |app, _| app.store.end_undo_run());
+    }
+
+    fn vim_normal_mode(&mut self, _: &VimNormalMode, _: &mut Window, cx: &mut Context<Self>) {
+        if self.field.composing() {
+            return;
+        }
+        self.commit(cx);
+        self.close_insert_run(cx);
+        self.vim.leave_insert();
+        self.ac = Autocomplete::Closed;
+        let to = {
+            let text = &self.field.text;
+            let left = utopia_core::text::prev_grapheme(text, self.field.cursor());
+            utopia_core::vim::motion::clamp_normal(text, left)
+        };
+        self.field.move_to(to);
+        self.field.reset_caret_motion();
+        cx.emit(EditorEvent::VimChanged);
+        cx.notify();
+    }
+
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
         self.history(true, cx);
     }
@@ -2144,7 +2265,7 @@ impl BlockEditor {
         self.history(false, cx);
     }
 
-    fn history(&mut self, undo: bool, cx: &mut Context<Self>) {
+    pub(crate) fn history(&mut self, undo: bool, cx: &mut Context<Self>) {
         self.commit(cx);
         let caret = self.app.update(cx, |app, cx| {
             let r = if undo {
@@ -2156,6 +2277,11 @@ impl BlockEditor {
             app.changed(Vec::new(), true, cx);
             caret
         });
+        let open = self.app.update(cx, |app, _| app.store.in_undo_run());
+        self.vim.insert_run = open;
+        if crate::appearance::vim(cx) && self.vim.mode == crate::vim::Mode::Insert {
+            self.begin_insert_run(cx);
+        }
         self.sync_from_store(cx);
         if let Some(c) = caret {
             cx.emit(EditorEvent::Restore(c));
@@ -2180,6 +2306,10 @@ impl BlockEditor {
             return;
         }
         let ix = self.field.index_at(e.position);
+        if crate::appearance::vim(cx) {
+            self.close_insert_run(cx);
+            self.vim.leave_insert();
+        }
         if e.click_count >= 2 {
             let r = utopia_core::text::word_range_at(&self.field.text, ix);
             self.field.move_to(r.start);
@@ -2188,6 +2318,7 @@ impl BlockEditor {
             self.field.select_to(ix);
         } else {
             self.field.move_to(ix);
+            self.clamp_normal_cursor(cx);
         }
         self.field.reset_caret_motion();
         self.field.selecting = true;
@@ -2348,6 +2479,9 @@ impl Render for BlockEditor {
         if self.ac.captures_keys() {
             key_context.add(AUTOCOMPLETE_CONTEXT);
         }
+        if crate::appearance::vim(cx) {
+            key_context.add(self.vim.mode.context());
+        }
         div()
             .key_context(key_context)
             .debug_selector(|| "block-editor".into())
@@ -2420,6 +2554,7 @@ impl Render for BlockEditor {
             .on_action(cx.listener(Self::copy_block_ref))
             .on_action(cx.listener(Self::delete_block))
             .on_action(cx.listener(Self::escape))
+            .on_action(cx.listener(Self::vim_normal_mode))
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::show_character_palette))

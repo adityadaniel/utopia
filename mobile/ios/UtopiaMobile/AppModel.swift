@@ -103,6 +103,9 @@ final class AppModel {
     private var settings = SyncSettings.load()
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+    #if DEBUG
+    private var fixture: PreviewFixture?
+    #endif
 
     var hasSuggestions: Bool { !suggestions.isEmpty || !dateSuggestions.isEmpty }
 
@@ -117,6 +120,9 @@ final class AppModel {
     // MARK: - Launch
 
     func launch() async {
+        #if DEBUG
+        if fixture != nil { return }
+        #endif
         errorMessage = nil
         let exists = FileManager.default.fileExists(atPath: Paths.graph.path)
         guard exists else {
@@ -183,7 +189,7 @@ final class AppModel {
             let day = try await core.today()
             today = day
             if let date = day.date {
-                earlier = try await core.daysBefore(date, count: 20)
+                earlier = try await core.daysBefore(date, count: 1)
             }
             if draft.lines.isEmpty {
                 draft = Draft()
@@ -203,22 +209,25 @@ final class AppModel {
         }
     }
 
-    /// Earlier days load as the log is scrolled up past today (§4.4).
-    func loadEarlier() async {
-        guard let core, let date = today?.date, earlier.count < 60 else { return }
-        do {
-            earlier = try await core.daysBefore(date, count: UInt32(earlier.count + 20))
-        } catch {
-            errorMessage = Self.describe(error)
-        }
-    }
-
     func page(_ id: String) async -> PageView? {
-        try? await core?.page(id)
+        #if DEBUG
+        if let fixture { return fixture.pages[id] }
+        #endif
+        return try? await core?.page(id)
     }
 
     func backlinks(_ id: String) async -> [(pageTitle: String, hits: [RefView])] {
-        guard let refs = try? await core?.backlinks(id) else { return [] }
+        let found: [RefView]?
+        #if DEBUG
+        if let fixture {
+            found = fixture.backlinks[id] ?? []
+        } else {
+            found = try? await core?.backlinks(id)
+        }
+        #else
+        found = try? await core?.backlinks(id)
+        #endif
+        guard let refs = found else { return [] }
         var order: [String] = []
         var grouped: [String: [RefView]] = [:]
         for ref in refs {
@@ -231,11 +240,17 @@ final class AppModel {
     }
 
     func search(_ words: String) async -> SearchResults? {
-        try? await core?.search(words)
+        #if DEBUG
+        if let fixture { return fixture.search(words) }
+        #endif
+        return try? await core?.search(words)
     }
 
     func recent() async -> [PageRef] {
-        (try? await core?.recentPages()) ?? []
+        #if DEBUG
+        if let fixture { return fixture.recent }
+        #endif
+        return (try? await core?.recentPages()) ?? []
     }
 
     func refreshRecents() async {
@@ -516,6 +531,12 @@ final class AppModel {
     // MARK: - A to-do (§4.4, K9)
 
     func toggleTodo(block: BlockView) async {
+        #if DEBUG
+        if fixture != nil {
+            paintTodo(block.id, done: !block.checked)
+            return
+        }
+        #endif
         guard let core else { return }
         let done = !block.checked
         // The tick shows at once and does not wait for sync (AC-5.3).
@@ -641,3 +662,54 @@ final class AppModel {
         return error.localizedDescription
     }
 }
+
+#if DEBUG
+struct PreviewFixture {
+    var pages: [String: PageView] = [:]
+    var backlinks: [String: [RefView]] = [:]
+    var recent: [PageRef] = []
+
+    func search(_ words: String) -> SearchResults {
+        let needle = words.lowercased()
+        let found = pages.values
+            .filter { $0.title.lowercased().contains(needle) }
+            .sorted { $0.title < $1.title }
+            .map { PageRef(id: $0.id, title: $0.title, date: $0.date) }
+        let hits = pages.values.sorted { $0.title < $1.title }.flatMap { page in
+            page.blocks
+                .filter { $0.plain.lowercased().contains(needle) }
+                .map { SearchHit(pageId: page.id, pageTitle: page.title, blockId: $0.id, text: $0.plain) }
+        }
+        return SearchResults(pages: found, blocks: hits)
+    }
+}
+
+extension AppModel {
+    static func preview(
+        phase: Phase = .ready,
+        today: PageView? = PreviewData.today,
+        earlier: [PageView] = [PreviewData.yesterday],
+        syncState: SyncState = .synced,
+        draft: Draft = PreviewData.draft,
+        suggestions: [TitleMatch] = [],
+        picker: Picker? = nil,
+        errorMessage: String? = nil,
+        fixture: PreviewFixture = PreviewData.fixture
+    ) -> AppModel {
+        let model = AppModel()
+        model.fixture = fixture
+        model.phase = phase
+        model.today = today
+        model.earlier = earlier
+        model.syncState = syncState
+        model.draft = draft
+        model.activeLine = draft.lines.last?.id
+        model.suggestions = suggestions
+        model.suggestionLine = suggestions.isEmpty ? nil : draft.lines.last?.id
+        model.picker = picker
+        model.errorMessage = errorMessage
+        model.recentPages = fixture.recent
+        return model
+    }
+}
+#endif

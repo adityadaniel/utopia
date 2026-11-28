@@ -93,6 +93,7 @@ pub enum Direction {
 pub struct UndoStack {
     undo: Vec<UndoGroup>,
     redo: Vec<UndoGroup>,
+    run_start: Option<usize>,
 }
 
 impl UndoStack {
@@ -105,18 +106,66 @@ impl UndoStack {
             return;
         }
         self.redo.clear();
-        if let Some(top) = self.undo.last_mut() {
-            if group.coalesce.joins(&top.coalesce) {
-                top.steps.append(&mut group.steps);
-                top.coalesce = group.coalesce;
-                top.caret_after = group.caret_after;
-                return;
+        let floor = self.run_start.unwrap_or(0);
+        let may_join = self.undo.len() > floor;
+        if may_join {
+            if let Some(top) = self.undo.last_mut() {
+                if group.coalesce.joins(&top.coalesce) {
+                    top.steps.append(&mut group.steps);
+                    top.coalesce = group.coalesce;
+                    top.caret_after = group.caret_after;
+                    return;
+                }
             }
         }
         self.undo.push(group);
         if self.undo.len() > LIMIT {
             self.undo.remove(0);
+            if let Some(start) = self.run_start.as_mut() {
+                *start = start.saturating_sub(1);
+            }
         }
+    }
+
+    pub fn begin_run(&mut self) {
+        if self.run_start.is_some() {
+            return;
+        }
+        self.seal();
+        self.run_start = Some(self.undo.len());
+    }
+
+    pub fn end_run(&mut self) {
+        let Some(start) = self.run_start.take() else {
+            return;
+        };
+        let start = start.min(self.undo.len());
+        if self.undo.len() <= start + 1 {
+            self.seal();
+            return;
+        }
+        let mut groups = self.undo.drain(start..);
+        let Some(first) = groups.next() else {
+            return;
+        };
+        let mut folded = UndoGroup {
+            steps: first.steps,
+            coalesce: Coalesce::Sealed,
+            caret_before: first.caret_before,
+            caret_after: first.caret_after,
+        };
+        for group in groups {
+            folded.steps.extend(group.steps);
+            folded.caret_after = group.caret_after;
+        }
+        self.undo.push(folded);
+        while self.undo.len() > LIMIT {
+            self.undo.remove(0);
+        }
+    }
+
+    pub fn in_run(&self) -> bool {
+        self.run_start.is_some()
     }
 
     pub fn seal(&mut self) {
@@ -126,6 +175,7 @@ impl UndoStack {
     }
 
     pub fn begin(&mut self, dir: Direction) -> Option<UndoGroup> {
+        self.end_run();
         match dir {
             Direction::Undo => self.undo.pop(),
             Direction::Redo => self.redo.pop(),
@@ -169,6 +219,70 @@ mod tests {
     use super::*;
     use crate::command::TextEdit;
 
+    #[test]
+    fn a_run_that_outlives_the_limit_never_folds_the_edit_before_it() {
+        let mut u = UndoStack::new();
+        u.push(edit_group("BEFORE", "b0", 0));
+        u.seal();
+        u.begin_run();
+        for i in 0..(LIMIT + 50) {
+            u.push(edit_group("run", &format!("b{}", i + 1), i as i64 * 10_000));
+            u.seal();
+        }
+        u.end_run();
+        assert!(u.len() <= LIMIT, "the limit still holds: {}", u.len());
+        let mut steps = 0;
+        while u.can_undo() {
+            let Some(g) = u.begin(Direction::Undo) else {
+                break;
+            };
+            u.finish(Direction::Undo, g);
+            steps += 1;
+            assert!(steps <= LIMIT + 2, "undo did not terminate");
+        }
+    }
+
+    #[test]
+    fn opening_a_run_twice_keeps_the_first_start() {
+        let mut u = UndoStack::new();
+        u.begin_run();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.begin_run();
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        u.end_run();
+        assert_eq!(u.len(), 1, "both groups fold into one step");
+    }
+
+    #[test]
+    fn closing_a_run_that_was_never_opened_folds_nothing() {
+        let mut u = UndoStack::new();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        let before = u.len();
+        u.end_run();
+        assert_eq!(u.len(), before, "the history is untouched");
+    }
+
+    #[test]
+    fn an_undo_closes_a_run_that_nobody_closed() {
+        let mut u = UndoStack::new();
+        u.begin_run();
+        u.push(edit_group("one", "b1", 0));
+        u.seal();
+        u.push(edit_group("two", "b2", 10_000));
+        u.seal();
+        let g = u.begin(Direction::Undo).expect("something to undo");
+        u.finish(Direction::Undo, g);
+        assert!(!u.in_run(), "the undo closed the run");
+        u.push(edit_group("three", "b3", 20_000));
+        u.seal();
+        assert!(u.can_undo());
+    }
+
     fn text_group(block: &str, at: i64) -> UndoGroup {
         let cmd = Command::SetBlockText {
             id: block.into(),
@@ -187,6 +301,142 @@ mod tests {
             caret_before: None,
             caret_after: None,
         }
+    }
+
+    fn edit_group(insert: &str, block: &str, at: i64) -> UndoGroup {
+        let cmd = Command::SetBlockText {
+            id: block.into(),
+            edit: TextEdit {
+                range: 0..0,
+                insert: insert.into(),
+            },
+        };
+        let caret = |offset| Caret {
+            page: "p".into(),
+            block: block.into(),
+            offset,
+        };
+        UndoGroup {
+            steps: vec![UndoStep {
+                page: "p".into(),
+                forward: vec![cmd.clone()],
+                inverse: vec![cmd],
+            }],
+            coalesce: Coalesce::open(block.into(), at),
+            caret_before: Some(caret(0)),
+            caret_after: Some(caret(insert.len())),
+        }
+    }
+
+    fn inserts(group: &UndoGroup) -> Vec<String> {
+        group
+            .steps
+            .iter()
+            .map(|s| match &s.forward[0] {
+                Command::SetBlockText { edit, .. } => edit.insert.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_run_folds_its_groups_into_one_in_push_order() {
+        let mut s = UndoStack::new();
+        s.begin_run();
+        assert!(s.in_run());
+        s.push(edit_group("a", "b", 0));
+        s.push(edit_group("b", "b", 5000));
+        s.push(edit_group("c", "b", 10000));
+        assert_eq!(s.len(), 3, "still three groups until the run ends");
+        s.end_run();
+        assert!(!s.in_run());
+        assert_eq!(s.len(), 1, "one Insert run is one undo step");
+        assert_eq!(inserts(&s.undo[0]), ["a", "b", "c"], "in push order");
+        assert_eq!(
+            s.undo[0].caret_before.as_ref().map(|c| c.offset),
+            Some(0),
+            "the run undoes to where it started"
+        );
+        assert_eq!(
+            s.undo[0].caret_after.as_ref().map(|c| c.offset),
+            Some(1),
+            "and redoes to where it ended"
+        );
+    }
+
+    #[test]
+    fn a_run_does_not_coalesce_with_the_group_before_it() {
+        let mut s = UndoStack::new();
+        s.push(text_group("b", 0));
+        s.begin_run();
+        s.push(text_group("b", 100));
+        s.end_run();
+        assert_eq!(s.len(), 2, "the run is a step of its own");
+        s.push(text_group("b", 200));
+        assert_eq!(s.len(), 3, "and the folded group is sealed");
+    }
+
+    #[test]
+    fn a_run_that_holds_one_group_keeps_it() {
+        let mut s = UndoStack::new();
+        s.begin_run();
+        s.push(edit_group("a", "b", 0));
+        s.end_run();
+        assert_eq!(s.len(), 1);
+        assert_eq!(inserts(&s.undo[0]), ["a"]);
+        s.begin_run();
+        s.end_run();
+        assert_eq!(s.len(), 1, "an empty run is not a group");
+    }
+
+    #[test]
+    fn the_limit_holds_after_a_fold() {
+        let mut s = UndoStack::new();
+        for i in 0..LIMIT {
+            s.push(text_group(&format!("b{i}"), 0));
+        }
+        assert_eq!(s.len(), LIMIT);
+        s.begin_run();
+        for i in 0..50 {
+            s.push(text_group(&format!("run{i}"), 0));
+        }
+        s.end_run();
+        assert!(
+            s.len() <= LIMIT,
+            "a fold leaves the stack at or under its cap: {}",
+            s.len()
+        );
+        assert_eq!(s.undo.last().unwrap().steps.len(), 50);
+
+        s.begin_run();
+        for i in 0..(LIMIT + 100) {
+            s.push(text_group(&format!("long{i}"), 0));
+        }
+        s.end_run();
+        assert!(s.len() <= LIMIT, "{}", s.len());
+        assert!(!s.in_run());
+    }
+
+    #[test]
+    fn an_undo_during_a_run_closes_it_first() {
+        let mut s = UndoStack::new();
+        s.push(edit_group("before", "b", 0));
+        s.begin_run();
+        s.push(edit_group("one", "b", 5000));
+        s.push(edit_group("two", "b", 10000));
+        let group = s.begin(Direction::Undo).expect("the run is an undo step");
+        s.finish(Direction::Undo, group);
+        assert_eq!(s.len(), 1, "the edit before the run is still there");
+        assert_eq!(
+            inserts(&s.undo[0]),
+            ["before"],
+            "the undo took the run, not the edit before it"
+        );
+        assert!(!s.in_run(), "and closed the run");
+        let group = s
+            .begin(Direction::Redo)
+            .expect("the run is on the redo stack");
+        assert_eq!(inserts(&group), ["one", "two"]);
     }
 
     #[test]

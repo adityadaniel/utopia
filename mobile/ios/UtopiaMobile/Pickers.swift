@@ -217,3 +217,21 @@ struct DayPickerPanel: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Page picker") {
+    VStack {
+        Spacer()
+        LinkPickerPanel()
+    }
+    .environment(AppModel.preview(picker: .link))
+}
+
+#Preview("Day picker") {
+    VStack {
+        Spacer()
+        DayPickerPanel()
+    }
+    .environment(AppModel.preview(picker: .date))
+}
+#endif

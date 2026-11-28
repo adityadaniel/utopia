@@ -2210,6 +2210,36 @@ fn page_top_bar_breadcrumb_and_actions(cx: &mut TestAppContext) {
     );
 }
 
+#[gpui::test]
+fn vim_mode_label_sits_in_the_top_bar(cx: &mut TestAppContext) {
+    let cx = setup(cx);
+    assert!(
+        cx.debug_bounds("vim-mode").is_none(),
+        "the label is not drawn while Vim is off"
+    );
+    cx.update(|_, cx| {
+        utopia_ui::appearance::set_vim(cx, true, std::path::Path::new("")).unwrap();
+    });
+    cx.run_until_parked();
+    let bar = bounds(cx, "top-bar");
+    let label = bounds(cx, "vim-mode");
+    let toggle = bounds(cx, "mode-toggle");
+    assert!(
+        label.origin.y >= bar.origin.y
+            && label.origin.y + label.size.height <= bar.origin.y + bar.size.height + px(0.5),
+        "the mode label sits in the top bar: {label:?} {bar:?}"
+    );
+    assert!(
+        label.origin.x >= bar.origin.x
+            && label.origin.x + label.size.width <= bar.origin.x + bar.size.width,
+        "the mode label sits inside the bar's width: {label:?} {bar:?}"
+    );
+    assert!(
+        label.origin.x + label.size.width <= toggle.origin.x,
+        "the mode label is left of the view-mode control: {label:?} {toggle:?}"
+    );
+}
+
 /// SB-3: a page pinned from its "···" menu sits in a Pinned group above Pages, the pin is
 /// written to settings.json as local state (rule 9), and the row's ✕ unpins it without
 /// opening the page behind the click.
