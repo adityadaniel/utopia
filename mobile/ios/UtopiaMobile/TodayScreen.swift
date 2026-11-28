@@ -140,3 +140,60 @@ struct SyncStatusLine: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Today") {
+    TodayScreen()
+        .environment(AppModel.preview())
+}
+
+#Preview("Today · Dark") {
+    TodayScreen()
+        .environment(AppModel.preview())
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Today · Empty day") {
+    TodayScreen()
+        .environment(AppModel.preview(today: PreviewData.emptyToday, syncState: .off, draft: PreviewData.emptyDraft))
+}
+
+#Preview("Today · Offline with an error") {
+    TodayScreen()
+        .environment(AppModel.preview(
+            syncState: .offline(queued: 3),
+            errorMessage: "Sync: the relay did not answer."
+        ))
+}
+
+#Preview("Today · Suggestions") {
+    TodayScreen()
+        .environment(AppModel.preview(
+            draft: Draft(lines: [DraftLine(text: "Meeting with Dana about the budget")]),
+            suggestions: PreviewData.suggestions
+        ))
+}
+
+#Preview("Today · Link picker") {
+    TodayScreen()
+        .environment(AppModel.preview(picker: .link))
+}
+
+#Preview("Today · Day picker") {
+    TodayScreen()
+        .environment(AppModel.preview(picker: .date))
+}
+
+#Preview("Sync status · Every state") {
+    let states: [SyncState] = [
+        .off, .syncing, .synced, .offline(queued: 0), .offline(queued: 2),
+        .needsAuth, .unsupported(version: 3), .failed("Timed out"),
+    ]
+    VStack(alignment: .leading, spacing: 12) {
+        ForEach(states, id: \.text) { state in
+            SyncStatusLine(state: state, size: 13)
+        }
+    }
+    .padding()
+}
+#endif

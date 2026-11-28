@@ -177,9 +177,9 @@ and this area.
   action and no drag.
 - An empty day shows one line of `muted` text in the middle of the log: "Nothing for
   today yet."
-- Earlier days: scroll up past the top of today to load the day before, with its own
-  header row (weekday and title). They are read-only in the same way. A Send always goes
-  to today (AC-2.3).
+- **Today only.** The log is pinned to today's note and shows no other day. An earlier
+  day opens from Find (its "Yesterday" row, or a search) as a read-only page screen
+  (IO-7). A Send always goes to today (AC-2.3).
 
 ### 4.5 The compose box
 
@@ -304,21 +304,24 @@ is ticked in the day log (§4.4).
 - **Font.** The system font for text and the system monospaced font for the label font
   (weekday, times, row notes). This matches the desktop default. All sizes above are for
   the default text size and must follow Dynamic Type.
-- **Colour.** The token names of `DESIGN.md` ("Quiet paper"). Light values:
+- **Colour.** One accent: the blue `link` of `DESIGN.md` §2.1 (`#2D5BD2` light, `#7FA3F0`
+  dark), with `link-tint` as the fill behind a control that is on. It marks links, the
+  text caret, the Send button, a done to-do and the tint of system controls. Every other
+  colour is an iOS system colour, so the app follows the system's light, dark and
+  Increase Contrast looks. The views keep the `DESIGN.md` token names (`Tokens.swift`):
 
-  | Token | Value | Token | Value |
+  | Token | iOS colour | Token | iOS colour |
   |---|---|---|---|
-  | `paper` | `#FFFFFF` | `ink` | `#1B1B19` |
-  | `shelf` | `#F6F6F4` | `ink-3` | `#57574F` |
-  | `well` | `#FAFAF8` | `muted` | `#6C6C65` |
-  | `selected` | `#E9E9E5` | `bullet` | `#8A8A83` |
-  | `line` | `#E8E7E3` | `disabled` | `#B9B8B1` |
-  | `line-soft` | `#EFEEEA` | `link` | `#2D5BD2` |
-  | `line-strong` | `#E1E0DB` | `link-hover` | `#2249B0` |
-  | `success` | `#1F7A3D` | `link-tint` | `#EAEFFB` |
+  | `paper` | `systemBackground` | `ink` | `label` |
+  | `shelf` | `secondarySystemBackground` | `ink-3` | `secondaryLabel` |
+  | `well` | `secondarySystemBackground` | `muted` | `secondaryLabel` |
+  | `selected` | `tertiarySystemFill` | `placeholder` | `placeholderText` |
+  | `line` | `separator` | `bullet` | `systemGray2` |
+  | `line-soft` | `separator` | `disabled` | `tertiaryLabel` |
+  | `line-strong` | `opaqueSeparator` | `success` | `systemGreen` |
+  | `danger` | `systemRed` | `warning` | `systemOrange` |
 
-  The dark theme uses the dark values of the same tokens from `DESIGN.md` and follows the
-  system appearance. No raw colour in a view.
+  No raw colour in a view.
 - **No shadows.** Surfaces differ by fill and by 1 pt rules.
 - **Targets.** Each control is 44 × 44 pt or larger (G5).
 
@@ -356,7 +359,7 @@ is ticked in the day log (§4.4).
 **In (v1):**
 
 - iPhone, portrait. One graph.
-- Today screen: the day log and the compose box (§4). Scroll up for earlier days.
+- Today screen: the day log of today and the compose box (§4). Earlier days open from Find.
 - A draft outline with Return, Deeper, Shallower, To-do, Link, Date and Send.
 - Tap-to-link suggestions from existing page titles and aliases.
 - Tick a to-do, and remove the tick, in the day log and on a page screen (K9).
@@ -628,7 +631,7 @@ goes below an entry sent before; each Send starts new top-level blocks, K11).
 - A8. The existing shell is a starting point to replace, not to extend as is. [ASSUMPTION]
 - A9. Attachments made on the Mac show as a name and type on the phone; images show a
   preview once downloaded. [ASSUMPTION]
-- A10. The reading parts (page screen, search, earlier days) stay in v1. K6 is about
+- A10. The reading parts (page screen, search, earlier days as pages) stay in v1. K6 is about
   writing. [ASSUMPTION]
 - A11. The system font is used, as on the desktop by default; the prototype used IBM
   Plex. [ASSUMPTION]
