@@ -103,6 +103,9 @@ final class AppModel {
     private var settings = SyncSettings.load()
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+    private var composingLines: Set<UUID> = []
+    private var caretOffsets: [UUID: Int] = [:]
+    private let work = LineWork()
     #if DEBUG
     private var fixture: PreviewFixture?
     #endif
@@ -203,6 +206,7 @@ final class AppModel {
             }
             for line in draft.lines where !line.text.isEmpty {
                 refreshParts(for: line)
+                absorbTypedLinks(in: line.id)
             }
         } catch {
             errorMessage = Self.describe(error)
@@ -267,31 +271,49 @@ final class AppModel {
         refreshSuggestions()
     }
 
-    func setText(_ text: String, edit: LineEdit? = nil, for id: UUID) {
+    func caretMoved(in id: UUID, at offset: Int) {
+        caretOffsets[id] = offset
+        if activeLine != id {
+            focusLine(id, at: nil)
+        }
+    }
+
+    func setText(_ text: String, composing: Bool = false, edit: LineEdit? = nil, for id: UUID) {
         guard let index = draft.index(of: id) else { return }
-        let old = draft.lines[index].text
+        let oldText = draft.lines[index].text
         let links = draft.lines[index].links
         draft.lines[index].text = text
-        if Array(old.utf16) != Array(text.utf16) {
+        if Array(oldText.utf16) != Array(text.utf16) {
             let change: LineEdit
-            if let edit, edit.matches(text, oldText: old) {
+            if let edit, edit.matches(text, oldText: oldText) {
                 change = edit
             } else {
-                change = Self.fallbackEdit(old, text, links: links.map(\.accepted))
+                change = Self.fallbackEdit(oldText, text, links: links.map(\.accepted))
             }
             draft.lines[index].links = rebaseLinks(
-                textBefore: old,
+                textBefore: oldText,
                 editStart: UInt32(max(0, change.start)),
                 editRemovedLen: UInt32(max(0, change.removed)),
                 replacement: change.replacement,
                 links: links.map(\.accepted)
-            ).map(DraftLink.init(accepted:))
+            ).map(DraftLink.init)
         }
         draft.lines[index].dropStaleLinks()
         draft.applyDepthRule()
+        if composing {
+            composingLines.insert(id)
+        } else {
+            composingLines.remove(id)
+        }
+        if links != draft.lines[index].links {
+            lineParts[id] = nil
+        }
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        if !composing {
+            absorbTypedLinks(in: id)
+        }
     }
 
     private static func fallbackEdit(_ old: String, _ new: String, links: [AcceptedLink]) -> LineEdit {
@@ -333,15 +355,22 @@ final class AppModel {
         guard !inserted.isEmpty else { return }
         if base.isEmpty {
             draft.lines.remove(at: index)
+            composingLines.remove(base.id)
+            work.remove(base.id)
             draft.lines.insert(contentsOf: inserted, at: index)
         } else {
             draft.lines.insert(contentsOf: inserted, at: index + 1)
         }
         draft.applyDepthRule()
+        for line in inserted {
+            guard let at = draft.index(of: line.id) else { continue }
+            draft.lines[at].dropStaleLinks()
+            refreshParts(for: draft.lines[at])
+            absorbTypedLinks(in: line.id)
+        }
         DraftStore.save(draft)
         let last = inserted.last
         if let last, let at = draft.index(of: last.id) {
-            draft.lines[at].dropStaleLinks()
             focusLine(last.id, at: draft.lines[at].text.utf16.count)
         }
     }
@@ -350,6 +379,8 @@ final class AppModel {
     func deleteEmptyLine(_ id: UUID) {
         guard let index = draft.index(of: id) else { return }
         guard let target = draft.deleteEmptyLine(at: index) else { return }
+        composingLines.remove(id)
+        work.remove(id)
         DraftStore.save(draft)
         focusLine(target.id, at: target.caretAtEnd ? endOf(target.id) : nil)
     }
@@ -426,6 +457,7 @@ final class AppModel {
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        absorbTypedLinks(in: draft.lines[index].id)
     }
 
     func acceptDate(_ match: DateMatch) {
@@ -442,6 +474,7 @@ final class AppModel {
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        absorbTypedLinks(in: draft.lines[index].id)
     }
 
     // MARK: - The page picker (§4.6)
@@ -460,7 +493,7 @@ final class AppModel {
     func insertLink(title: String) {
         guard let index = activeIndex else { return }
         let line = draft.lines[index]
-        let caret = min(caretRequest?.line == line.id ? caretRequest?.offset ?? line.text.utf16.count : line.text.utf16.count, line.text.utf16.count)
+        let caret = min(caretOffsets[line.id] ?? line.text.utf16.count, line.text.utf16.count)
         let text = line.text
         let at = text.utf16.index(text.utf16.startIndex, offsetBy: caret)
         var updated = text
@@ -472,12 +505,13 @@ final class AppModel {
             editRemovedLen: 0,
             replacement: title + " ",
             links: line.links.map(\.accepted)
-        ).map(DraftLink.init(accepted:))
+        ).map(DraftLink.init)
         draft.lines[index].links.append(
             DraftLink(title: title, start: caret, end: caret + title.utf16.count)
         )
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
+        absorbTypedLinks(in: line.id)
         picker = nil
         focusLine(line.id, at: caret + title.utf16.count + 1)
     }
@@ -503,6 +537,7 @@ final class AppModel {
         guard let core, canSend else { return }
         sending = true
         defer { sending = false }
+        await work.waitForAll()
         // Each line's links are written as `[[Title]]` by the core (C1, AC-4.1).
         var stored: [UUID: String] = [:]
         do {
@@ -515,6 +550,8 @@ final class AppModel {
             today = appended
             lastSentEntry = appended.entries.last?.id
             draft = Draft()
+            composingLines.removeAll()
+            work.removeAll()
             DraftStore.save(draft)
             lineParts = [:]
             suggestions = []
@@ -622,6 +659,37 @@ final class AppModel {
             else { return }
             self.lineParts[id] = parts
             self.dropStaleDateLinks(in: id, parts: parts)
+        }
+    }
+
+    private func absorbTypedLinks(in id: UUID) {
+        guard let core, let index = draft.index(of: id) else { return }
+        let text = draft.lines[index].text
+        let links = draft.lines[index].links
+        let caret = caretOffsets[id].map { UInt32(max(0, $0)) }
+        work.enqueue(for: id) { [weak self] in
+            guard let absorbed = try? await core.absorbTypedLinks(
+                text,
+                links: links.map(\.accepted),
+                caret: caret
+            ), absorbed.text != text
+            else { return }
+            guard let self, !self.composingLines.contains(id),
+                  let at = self.draft.index(of: id),
+                  self.draft.lines[at].text == text, self.draft.lines[at].links == links
+            else { return }
+            self.lineParts[id] = nil
+            self.draft.lines[at].text = absorbed.text
+            self.draft.lines[at].links = absorbed.links.map { DraftLink($0) }
+            self.draft.lines[at].dropStaleLinks()
+            let unchangedCaret = self.caretOffsets[id].map { UInt32(max(0, $0)) } == caret
+            if self.activeLine == id, let newCaret = absorbed.caret, unchangedCaret {
+                self.caretOffsets[id] = Int(newCaret)
+                self.caretRequest = CaretRequest(line: id, offset: Int(newCaret))
+            }
+            DraftStore.save(self.draft)
+            self.refreshParts(for: self.draft.lines[at])
+            self.refreshSuggestions()
         }
     }
 

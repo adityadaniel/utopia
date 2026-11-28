@@ -89,19 +89,16 @@ struct ComposeBox: View {
                     isActive: model.activeLine == line.id && model.picker == nil,
                     caret: model.caretRequest,
                     size: textSize,
-                    onText: { text, edit in model.setText(text, edit: edit, for: line.id) },
+                    onText: { text, composing, edit in
+                        model.setText(text, composing: composing, edit: edit, for: line.id)
+                    },
                     onReturn: { _ = model.newLine(after: line.id) },
                     onDeleteAtStart: { model.deleteEmptyLine(line.id) },
                     onPicker: {
                         model.focusLine(line.id, at: nil)
                         model.showPicker(.link)
                     },
-                    onCaret: { offset in
-                        if model.activeLine != line.id {
-                            model.focusLine(line.id, at: nil)
-                        }
-                        _ = offset
-                    },
+                    onCaret: { offset in model.caretMoved(in: line.id, at: offset) },
                     onFocus: { model.focusLine(line.id, at: nil) },
                     onPasteLines: { lines in model.pasteLines(lines, after: line.id) }
                 )

@@ -64,6 +64,14 @@ struct CoreClient: Sendable {
         try await run { try graph.draftParts(text: text, links: links) }
     }
 
+    func absorbTypedLinks(
+        _ text: String,
+        links: [AcceptedLink],
+        caret: UInt32?
+    ) async throws -> AbsorbedDraft {
+        try await run { try graph.absorbTypedLinks(text: text, links: links, caret: caret) }
+    }
+
     func search(_ words: String, limit: UInt32 = 40) async throws -> SearchResults {
         try await run { try graph.search(words: words, limit: limit) }
     }
@@ -97,17 +105,25 @@ struct CoreClient: Sendable {
 
 /// A link the reader accepted, in the form the core takes.
 extension DraftLink {
-    var accepted: AcceptedLink {
-        AcceptedLink(title: title, start: UInt32(max(0, start)), end: UInt32(max(0, end)), day: day, words: words)
+    init(_ link: AcceptedLink) {
+        self.init(
+            title: link.title,
+            start: Int(link.start),
+            end: Int(link.end),
+            day: link.day,
+            words: link.words,
+            typed: link.typed
+        )
     }
 
-    init(accepted: AcceptedLink) {
-        self.init(
-            title: accepted.title,
-            start: Int(accepted.start),
-            end: Int(accepted.end),
-            day: accepted.day,
-            words: accepted.words
+    var accepted: AcceptedLink {
+        AcceptedLink(
+            title: title,
+            start: UInt32(max(0, start)),
+            end: UInt32(max(0, end)),
+            day: day,
+            words: words,
+            typed: typed ?? (day == nil && words != nil)
         )
     }
 }
