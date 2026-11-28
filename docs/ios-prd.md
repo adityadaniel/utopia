@@ -2,13 +2,21 @@
 
 | Field | Value |
 |---|---|
-| Document version | 0.2, design direction decided |
-| Date | 2026-11-21 (0.1: 2026-11-18) |
+| Document version | 0.4, typed links |
+| Date | 2026-11-25 (0.3: 2026-11-25; 0.2: 2026-11-21; 0.1: 2026-11-18) |
 | Owner | Aditya Daniel |
-| Source of behaviour | `~/Developer/utopia/PRD.md` (§2.3, §4, §5, §6, §10, §12, §14), `DESIGN.md`, `docs/sync-modes.md`, `mobile/ios/UtopiaMobile`, `crates/utopia-ffi` at `main` `bc7f6fd` |
+| Source of behaviour | `~/Developer/utopia/PRD.md` (§2.3, §4, §5, §6, §10, §12, §14), `DESIGN.md`, `docs/sync-modes.md`, `mobile/ios/UtopiaMobile`, `crates/utopia-ffi` at `main` `aa42d2e` |
 
 The existing PRD stays the spec for the data model, the resolver, sync and every `FR-`/`AC-`
 id. This document covers the iPhone app only. New ids start with `IO-`.
+
+**What changed in 0.4.** A complete `[[Title]]` typed, pasted or filled in by autocorrect
+is an accepted link in the compose box: the brackets are removed, the title shows in `link`
+colour, and the Send writes `[[Title]]` back exactly as typed (§4.6, AC-4.14).
+
+**What changed in 0.3.** Words in the compose box that name a day now get a date chip like a
+page-title chip: a tap links the day the reader saw, and the Send writes its title (§4.6,
+AC-4.12, AC-4.13, ADR 0015). The Date control stays.
 
 **What changed in 0.2.** The owner tried four interactive prototypes and chose direction A
 in a changed form: the outline is written in the compose box, the phone only adds to
@@ -177,9 +185,9 @@ and this area.
   action and no drag.
 - An empty day shows one line of `muted` text in the middle of the log: "Nothing for
   today yet."
-- Earlier days: scroll up past the top of today to load the day before, with its own
-  header row (weekday and title). They are read-only in the same way. A Send always goes
-  to today (AC-2.3).
+- **Today only.** The log is pinned to today's note and shows no other day. An earlier
+  day opens from Find (its "Yesterday" row, or a search) as a read-only page screen
+  (IO-7). A Send always goes to today (AC-2.3).
 
 ### 4.5 The compose box
 
@@ -194,7 +202,8 @@ this radius is a new token; `DESIGN.md` stops at 13.
   (`bullet`), or a 16 pt empty to-do box when the line is a to-do.
 - Indent: 20 pt for each level of depth, before the mark.
 - Text: 16/22 pt, `ink`. A line is at least 44 pt high and wraps; it does not scroll
-  sideways. An accepted link shows in `link` colour (§4.6).
+  sideways. An accepted link shows in `link` colour (§4.6), whether a chip, a picker or a
+  complete `[[Title]]` typed or pasted made it (AC-4.14).
 - Empty first line: "Add to today" in `muted`. An empty later line: "Next line", or
   "Next to-do" when the line is a to-do.
 - The lines area shows about three lines (138 pt), then scrolls inside the box. When a
@@ -272,6 +281,29 @@ sideways when there are many chips.
 - Which titles match a text comes from the core (C1, C3). The app does not search titles
   with its own rules.
 
+**Date suggestions.** When the words of the active line name a day, the same row offers a
+chip "Link **November 26th, 2026**" with that day's title, next to any title chips. The
+forms are `today`, `tomorrow`, `yesterday`, `friday`, `next friday`, `in 3 days`,
+`2 weeks ago`, `Nov 26`, `26 November`, `November 26th` and `2026-11-26`, in any letter
+case and as a whole word or phrase. A month and day with no year mean that day in the
+current year (ADR 0015).
+
+- A date chip works as a title chip does: a tap accepts the link for that line, the words
+  stay as typed and show in `link` colour, the chip goes away, and the caret and keyboard
+  do not move. On Send the words are written as `[[November 26th, 2026]]`, the day's title.
+  If the graph's date format makes that title ambiguous (for example `MM/dd/yyyy`), the
+  Send writes the day's ISO date instead, so the link still resolves to that day.
+- The day is fixed when the chip is tapped, so the link means the day the reader saw. The
+  typed words are stored with the link; it stays while the range still holds those same
+  words (in any letter case) and the range sits on word boundaries. It is never dropped by
+  time, a launch or a refresh, only when the reader replaces those words with others. An
+  edit before or after the words moves the range with them, and replacing the whole
+  phrase with the same words in another letter case keeps the chosen day.
+- A bare number (`26`), a bare month name (`may`, `march`), a bare short weekday (`sun`,
+  `sat`) and a numeric date (`11/6/26`, §7) are not date chips.
+- Which words are a date and which day they mean comes from the core (C1, C3); the app
+  never parses a date. The Date control still inserts a day from its picker.
+
 **Link picker.** The Link control puts a panel in the place of the keyboard, with the
 same height, a `well` fill and a 1 pt `line` rule above it. The compose box stays
 visible above it.
@@ -292,6 +324,23 @@ visible above it.
 - Typing `[[` or `#` in a line opens the same picker, and the typed characters are
   removed (AC-4.7).
 
+**Typed links.** A complete `[[Title]]` that arrives in one change, from a paste,
+autocorrect or dictation, becomes an accepted link to that page: the brackets are removed,
+the title shows in `link` colour, and the Send writes `[[Title]]` back exactly as the
+reader typed it, including its case, an alias and date-looking text such as
+`[[2026-11-26]]`. A title that has no page yet becomes a link that creates the page on Send,
+as the picker's Create row does (AC-4.6). A relative date inside the brackets (`[[tomorrow]]`,
+`[[next friday]]`, `[[2 weeks ago]]`) becomes a date link whose words stay as typed and
+whose Send writes the day's title, as an accepted date chip does (AC-4.12). A `[[` that is
+not closed yet stays as typed. Only `[[…]]` is absorbed: `#tag` and `#[[Multi Word]]`
+pasted into a line stay as raw text.
+
+An edit before a typed link shifts it. An edit inside its words keeps it a link, follows
+the edited words, and writes the new words as a typed `[[…]]`; a typed relative-date link
+that is edited this way becomes a typed page link rather than a date. An edit that covers
+the link or crosses either edge drops the link. Which text a typed link covers comes from
+the core (C1, AC-4.14).
+
 **Day picker.** The Date control opens a panel in the same place with the rows "Today",
 "Tomorrow" and "Pick a date…" (the system date picker). A tap inserts the title of that
 day at the caret as an accepted link.
@@ -304,21 +353,24 @@ is ticked in the day log (§4.4).
 - **Font.** The system font for text and the system monospaced font for the label font
   (weekday, times, row notes). This matches the desktop default. All sizes above are for
   the default text size and must follow Dynamic Type.
-- **Colour.** The token names of `DESIGN.md` ("Quiet paper"). Light values:
+- **Colour.** One accent: the blue `link` of `DESIGN.md` §2.1 (`#2D5BD2` light, `#7FA3F0`
+  dark), with `link-tint` as the fill behind a control that is on. It marks links, the
+  text caret, the Send button, a done to-do and the tint of system controls. Every other
+  colour is an iOS system colour, so the app follows the system's light, dark and
+  Increase Contrast looks. The views keep the `DESIGN.md` token names (`Tokens.swift`):
 
-  | Token | Value | Token | Value |
+  | Token | iOS colour | Token | iOS colour |
   |---|---|---|---|
-  | `paper` | `#FFFFFF` | `ink` | `#1B1B19` |
-  | `shelf` | `#F6F6F4` | `ink-3` | `#57574F` |
-  | `well` | `#FAFAF8` | `muted` | `#6C6C65` |
-  | `selected` | `#E9E9E5` | `bullet` | `#8A8A83` |
-  | `line` | `#E8E7E3` | `disabled` | `#B9B8B1` |
-  | `line-soft` | `#EFEEEA` | `link` | `#2D5BD2` |
-  | `line-strong` | `#E1E0DB` | `link-hover` | `#2249B0` |
-  | `success` | `#1F7A3D` | `link-tint` | `#EAEFFB` |
+  | `paper` | `systemBackground` | `ink` | `label` |
+  | `shelf` | `secondarySystemBackground` | `ink-3` | `secondaryLabel` |
+  | `well` | `secondarySystemBackground` | `muted` | `secondaryLabel` |
+  | `selected` | `tertiarySystemFill` | `placeholder` | `placeholderText` |
+  | `line` | `separator` | `bullet` | `systemGray2` |
+  | `line-soft` | `separator` | `disabled` | `tertiaryLabel` |
+  | `line-strong` | `opaqueSeparator` | `success` | `systemGreen` |
+  | `danger` | `systemRed` | `warning` | `systemOrange` |
 
-  The dark theme uses the dark values of the same tokens from `DESIGN.md` and follows the
-  system appearance. No raw colour in a view.
+  No raw colour in a view.
 - **No shadows.** Surfaces differ by fill and by 1 pt rules.
 - **Targets.** Each control is 44 × 44 pt or larger (G5).
 
@@ -356,7 +408,7 @@ is ticked in the day log (§4.4).
 **In (v1):**
 
 - iPhone, portrait. One graph.
-- Today screen: the day log and the compose box (§4). Scroll up for earlier days.
+- Today screen: the day log of today and the compose box (§4). Earlier days open from Find.
 - A draft outline with Return, Deeper, Shallower, To-do, Link, Date and Send.
 - Tap-to-link suggestions from existing page titles and aliases.
 - Tick a to-do, and remove the tick, in the day log and on a page screen (K9).
@@ -463,6 +515,26 @@ removed.)*
   matching title: the chip row goes away.
 - AC-4.11: Accept "Dana", then change the word to `Dan`. The word is plain text again and
   the stored text after Send has no link.
+- AC-4.12: With today on November 3rd, type `call Ana tomorrow`. A chip "Link November
+  4th, 2026" shows next to any title chips. Tap it: `tomorrow` stays as typed and shows in
+  the link colour, and the chip goes away. Send: the stored text is `call Ana [[November
+  4th, 2026]]`. On the Mac, the block is under "Scheduled for this day" on November 4th.
+- AC-4.13: Accept `friday`, then change the word to `Sat`. The word is plain text again.
+  Typing `26` or `may` alone, or `11/6/26`, shows no date chip. A draft with an accepted
+  date that is sent after midnight, or a week later, still writes the day the chip was
+  tapped for while its words are unchanged; only editing those words drops the link.
+- AC-4.14: Paste `[[Utopia]]` into a draft line. The brackets are removed, `Utopia`
+  shows in the link colour, and Send writes `[[Utopia]]` exactly as typed. Paste
+  `[[Fresh Page]]` where no page exists: it shows as a link, and the page exists after Send
+  and not before. `[[utopia]]`, `[[UT]]` (an alias) and `[[2026-11-26]]` are written back
+  exactly as typed; `[[tomorrow]]` is written as the day's title. A `[[` that is not closed
+  stays as typed, and `#tag` or `#[[Multi Word]]` stays raw text.
+
+  Type `Plan ` before `[[Utopia]]`: Send writes `Plan [[Utopia]]`. Correct a typo inside
+  `[[Utopai]]`: Send writes the corrected `[[Utopia]]`. Replace the whole line, or edit
+  across the link's edge: the link is gone. Edit a typed `[[next friday]]` inside its
+  words: it becomes a typed page link and Send writes the new words as `[[…]]`, not the
+  day's title.
 
 **IO-5 To-dos.**
 - AC-5.1: Tap To-do, type `Pay rent`, Send. The block is a to-do that is not done, and
@@ -529,7 +601,8 @@ The tick of a to-do is in IO-5.)*
 - **A suggestion matches a common word** (a page titled "On"). Titles of one or two
   characters are not suggested. The Link control still finds them.
 - **A typed date that is ambiguous** (`11/6/26`). Never linked as a date (existing PRD
-  §5.5).
+  §5.5). A month and day without a year (`Nov 26`) mean that day in the current year, even
+  when it has already passed (ADR 0015).
 - **A new title that differs from an existing one only by case or spacing.** It links to
   the existing page. No second page is made.
 - **Widget tapped while the graph is locked** (encrypted at rest). The unlock screen
@@ -539,8 +612,8 @@ The tick of a to-do is in IO-5.)*
 - **A day with 5,000 blocks.** It opens and scrolls. Only visible rows are drawn.
 - **A very long line** (2,000 characters). It wraps; the lines area scrolls.
 - **The system keyboard's dictation or autocorrect** changes a word inside an accepted
-  link. The link is kept if the title still matches; otherwise it becomes plain text, and
-  the colour shows that.
+  link. The link is kept if the words still name it (the title, or the day), otherwise it
+  becomes plain text, and the colour shows that.
 - **Low Power Mode or no background time.** Sync waits for the next open. The queued
   count is shown.
 - **A to-do is ticked on the phone and its text is changed on the Mac, both offline.**
@@ -628,7 +701,7 @@ goes below an entry sent before; each Send starts new top-level blocks, K11).
 - A8. The existing shell is a starting point to replace, not to extend as is. [ASSUMPTION]
 - A9. Attachments made on the Mac show as a name and type on the phone; images show a
   preview once downloaded. [ASSUMPTION]
-- A10. The reading parts (page screen, search, earlier days) stay in v1. K6 is about
+- A10. The reading parts (page screen, search, earlier days as pages) stay in v1. K6 is about
   writing. [ASSUMPTION]
 - A11. The system font is used, as on the desktop by default; the prototype used IBM
   Plex. [ASSUMPTION]

@@ -260,7 +260,7 @@ A **block** is `{ id, page_id, parent_id, position, depth, text, type, checked, 
 | FR-2.9 | Drag-and-drop reorders blocks within a page with a valid-drop indicator; invalid drops (own descendant, depth > 12) are rejected with a shake. Cross-page drag is P1. |
 | FR-2.10 | Paste: single line → inline text; multi-line plain text → one block per line preserving relative indentation; pasted markdown → parsed into blocks + inline marks; pasted URL on selection → markdown link. |
 | FR-2.11 | Copy/cut of a collapsed or multi-selected subtree yields nested Markdown list syntax. |
-| FR-2.12 | Undo/redo is a per-page command stack, coalescing same-kind consecutive edits within 500 ms; survives window close (persisted per session). |
+| FR-2.12 | Undo/redo is a per-page command stack, coalescing same-kind consecutive edits within 500 ms; survives window close (persisted per session). In Vim mode, one Insert run (from entering Insert to Escape, a blur, or the end of the session) is one undo group. The 500 ms coalesce window does not apply inside a run. |
 | FR-2.13 | Block type switching (P1): bullet, numbered, todo, quote, code, heading 1–3. `todo` checkboxes are the first P1 item and may be pulled into M1 if the daily-note workflow demands it. Enter in a to-do makes the new block a to-do too (the new block always takes the kind of the block it splits from); Backspace at offset 0 of a to-do, ticked or not, makes it a bullet first, and only the next Backspace merges (FR-2.5). |
 | FR-2.14 | A page renders only visible blocks; scroll performance must not degrade linearly with page size. |
 | FR-2.15 | **A hashtag is a page link.** `#mindfulness` and `[[mindfulness]]` produce the identical edge, the identical page, and the identical backlink. Typing `#` opens the same autocomplete as `[[`, and the canonical stored form is `#[[Title]]` for any multi-word title. The bare form is single-token (`#` + letters/digits/`-`/`_`); a bare multi-word phrase commits as a tag only under the longest-match rule in §6.5. Grammar: §20.B. |
@@ -496,6 +496,50 @@ Roam's most quietly important behavior: **renaming a page onto another page's ti
 | Delete block | `Cmd+Shift+Backspace` | Deletes subtree to trash |
 
 Bindings load from `keymap.json` in the app config dir; unknown actions log a warning and are ignored (never panic).
+
+#### 9.1.1 Vim mode (VM)
+
+An optional modal layer over the block editor, turned off by default. The cursor stays on one
+character of one block, and Normal mode on top of that block turns keys into commands. Vim
+motions and operators act inside the block that owns the caret (§6.2). Vim's linewise
+commands act on blocks, because in an outliner the block is the line. The mode is local UI
+state (rule 9): it is not in a shard, not in the outbox and not in a sync message. The state
+machine is in `docs/state-machines/vim-mode.md`; the key list and the phases are in
+`docs/vim-mode-proposal.md`.
+
+| Id | Requirement |
+|---|---|
+| VM-1 | Vim mode is off by default: `settings.json` holds `"vim": false`, and an unknown value means off and is logged. |
+| VM-2 | With Vim off, behaviour and keystroke cost do not change. |
+| VM-3 | Vim mode has four states — Rest, Normal, Insert and Visual — and Pending is a sub-state of Normal and of Visual. |
+| VM-4 | A block in edit is in Normal mode at entry: at launch, after a click and after navigation. |
+| VM-5 | In Normal mode no key puts a character in the block, and an unknown key does nothing. |
+| VM-6 | Charwise motions and operators act only inside the block that owns the caret. |
+| VM-7 | `j` and `k` move by wrapped line, and then cross to the next or previous block. |
+| VM-8 | Linewise commands (`dd`, `yy`, `cc`, `>>`, `<<`, `J`, `o`, `O`) act on blocks. |
+| VM-9 | `dd` tombstones the block and its subtree, and keeps every id. |
+| VM-10 | `dd` then `p` moves the same blocks back with the same ids, in one undo step, so each `((reference))` to them still resolves. |
+| VM-11 | `y` writes the register and the system clipboard; `d`, `c` and `x` write the register only. |
+| VM-12 | One command is one undo step, and one Insert run is one undo step (FR-2.12). |
+| VM-13 | Escape is a ladder: it cancels a composition, then leaves Insert, then ends the edit, and a Normal key then wakes the cursor where it was. |
+| VM-14 | In Insert mode, input-method behaviour is the same as with Vim off (§13.5); in Normal mode the app takes no marked text. |
+
+**Acceptance criteria**
+
+- **AC-VM-1** With no `settings.json`, Vim mode is off; with `"vim": 3` in it, the app logs the value and reads it as off.
+- **AC-VM-2** With Vim off, every existing test passes unchanged, and `bench --ui` (AC-2.2) shows no change on the keystroke path.
+- **AC-VM-3** A test drives each state and no other: Rest with no block in edit, Normal, Pending as Normal with a pending string, Insert, Visual.
+- **AC-VM-4** The block in edit is in Normal mode at launch, after a click and after navigation.
+- **AC-VM-5** With a block in edit and Vim on, a letter, a digit, a space and an unknown key in Normal mode leave the block text and the undo depth unchanged.
+- **AC-VM-6** `w` at the end of a block and `h` at offset 0 of a block keep the caret in that block.
+- **AC-VM-7** `j` on the last wrapped line of a block moves the caret into the next visible block, and `k` on the first line moves it into the previous one.
+- **AC-VM-8** `dd`, `yy`, `cc`, `>>`, `<<`, `J`, `o` and `O` change the block, not one of its text lines.
+- **AC-VM-9** `dd` on a block with two children leaves three tombstones with the same three ids, and `doctor` stays clean.
+- **AC-VM-10** `dd` then `p` gives every block its id back in one undo step, and a `((reference))` to a moved block still resolves.
+- **AC-VM-11** `y` puts the block's Markdown in the register and in the system clipboard; `d`, `c` and `x` leave the clipboard as it was.
+- **AC-VM-12** Each of `dd`, `dw`, `>>` and `ciw` is one undo step, and an Insert run with a pause longer than 500 ms is one undo step.
+- **AC-VM-13** Escape in Insert leaves Insert and keeps the edit, Escape in Normal ends it, and a Normal key then puts the caret back where it was and applies the key.
+- **AC-VM-14** Marked text offered in Normal changes neither the block text nor the composition, and marked text in Insert commits as it does with Vim off (§13.5).
 
 ### 9.2 Main window
 

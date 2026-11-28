@@ -10,6 +10,9 @@ struct DraftLink: Codable, Equatable, Sendable {
     var title: String
     var start: Int
     var end: Int
+    var day: String? = nil
+    var words: String? = nil
+    var typed: Bool? = nil
 }
 
 struct DraftLine: Identifiable, Codable, Equatable, Sendable {
@@ -165,7 +168,16 @@ enum DraftStore {
               let saved = try? JSONDecoder().decode(Saved.self, from: data),
               saved.version == 1
         else { return Draft() }
-        return Draft(lines: saved.lines)
+        var lines = saved.lines
+        for i in lines.indices {
+            for j in lines[i].links.indices where lines[i].links[j].day != nil && lines[i].links[j].words == nil {
+                let link = lines[i].links[j]
+                let utf16 = Array(lines[i].text.utf16)
+                guard link.start >= 0, link.end <= utf16.count, link.start < link.end else { continue }
+                lines[i].links[j].words = String(decoding: utf16[link.start..<link.end], as: UTF16.self)
+            }
+        }
+        return Draft(lines: lines)
     }
 
     static func save(_ draft: Draft) {

@@ -77,7 +77,7 @@ struct ComposeBox: View {
                 if line.text.isEmpty {
                     Text(placeholder(line))
                         .font(.system(size: textSize))
-                        .foregroundStyle(Tokens.muted)
+                        .foregroundStyle(Tokens.placeholder)
                         .padding(.top, textInset)
                         .allowsHitTesting(false)
                 }
@@ -89,19 +89,16 @@ struct ComposeBox: View {
                     isActive: model.activeLine == line.id && model.picker == nil,
                     caret: model.caretRequest,
                     size: textSize,
-                    onText: { text in model.setText(text, for: line.id) },
+                    onText: { text, composing, edit in
+                        model.setText(text, composing: composing, edit: edit, for: line.id)
+                    },
                     onReturn: { _ = model.newLine(after: line.id) },
                     onDeleteAtStart: { model.deleteEmptyLine(line.id) },
                     onPicker: {
                         model.focusLine(line.id, at: nil)
                         model.showPicker(.link)
                     },
-                    onCaret: { offset in
-                        if model.activeLine != line.id {
-                            model.focusLine(line.id, at: nil)
-                        }
-                        _ = offset
-                    },
+                    onCaret: { offset in model.caretMoved(in: line.id, at: offset) },
                     onFocus: { model.focusLine(line.id, at: nil) },
                     onPasteLines: { lines in model.pasteLines(lines, after: line.id) }
                 )
@@ -181,7 +178,7 @@ struct ComposeBox: View {
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: iconSize))
-                .foregroundStyle(enabled ? (on ? Tokens.linkHover : Tokens.ink3) : Tokens.disabled)
+                .foregroundStyle(enabled ? (on ? Tokens.link : Tokens.ink3) : Tokens.disabled)
                 .frame(width: Metrics.control, height: Metrics.control)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -217,8 +214,6 @@ struct ComposeBox: View {
     }
 }
 
-/// The chips above the box: one for each title the core found in the active line (§4.6).
-/// A tap accepts the link and leaves the words as they are (AC-4.1, AC-4.4).
 struct SuggestionRow: View {
     @Environment(AppModel.self) private var model
 
@@ -229,34 +224,68 @@ struct SuggestionRow: View {
         ScrollView(.horizontal) {
             HStack(spacing: 8) {
                 ForEach(model.suggestions, id: \.pageId) { match in
-                    Button {
-                        model.acceptSuggestion(match)
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: "link")
-                                .font(.system(size: iconSize))
-                                .foregroundStyle(Tokens.ink3)
-                            Text("Link \(Text(match.title).bold())")
-                                .font(.system(size: textSize))
-                                .foregroundStyle(Tokens.ink)
-                        }
-                        .padding(.horizontal, 12)
-                        .frame(height: 44)
-                        .background(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .fill(Tokens.paper)
-                                .overlay(
-                                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                        .strokeBorder(Tokens.lineStrong, lineWidth: 1)
-                                )
-                        )
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Link \(match.title)")
+                    chip(match.title) { model.acceptSuggestion(match) }
+                }
+                ForEach(model.dateSuggestions, id: \.start) { match in
+                    chip(match.title, words: match.words) { model.acceptDate(match) }
                 }
             }
             .padding(.horizontal, 2)
         }
         .scrollIndicators(.hidden)
     }
+
+    private func chip(_ title: String, words: String? = nil, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "link")
+                    .font(.system(size: iconSize))
+                    .foregroundStyle(Tokens.ink3)
+                Text("Link \(Text(title).bold())")
+                    .font(.system(size: textSize))
+                    .foregroundStyle(Tokens.ink)
+            }
+            .padding(.horizontal, 12)
+            .frame(height: 44)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(Tokens.paper)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .strokeBorder(Tokens.lineStrong, lineWidth: 1)
+                    )
+            )
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(words.map { "Link \(title), \($0)" } ?? "Link \(title)")
+    }
 }
+
+#if DEBUG
+#Preview("Compose box") {
+    ComposeBox()
+        .padding(12)
+        .environment(AppModel.preview())
+}
+
+#Preview("Compose box · Empty") {
+    ComposeBox()
+        .padding(12)
+        .environment(AppModel.preview(draft: PreviewData.emptyDraft))
+}
+
+#Preview("Compose box · Dark") {
+    ComposeBox()
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .background(Tokens.paper)
+        .environment(AppModel.preview())
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Suggestion chips") {
+    SuggestionRow()
+        .padding(12)
+        .environment(AppModel.preview(suggestions: PreviewData.suggestions))
+}
+#endif

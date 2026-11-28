@@ -30,4 +30,5 @@ pub mod sync_setup;
 pub mod syntax;
 pub mod tasks_view;
 pub mod theme;
+pub mod vim;
 pub mod workspace;

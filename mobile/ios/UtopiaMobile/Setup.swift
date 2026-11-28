@@ -228,3 +228,30 @@ struct SyncSettingsScreen: View {
         }
     }
 }
+
+#if DEBUG
+#Preview("Setup") {
+    SetupScreen()
+        .environment(AppModel.preview(phase: .setup))
+}
+
+#Preview("Setup · Error") {
+    SetupScreen()
+        .environment(AppModel.preview(phase: .setup, errorMessage: "The graph file could not be made."))
+}
+
+#Preview("Locked") {
+    LockedScreen()
+        .environment(AppModel.preview(phase: .locked))
+}
+
+#Preview("Locked · Wrong passphrase") {
+    LockedScreen()
+        .environment(AppModel.preview(phase: .locked, errorMessage: "That passphrase does not open this graph."))
+}
+
+#Preview("Sync settings") {
+    SyncSettingsScreen()
+        .environment(AppModel.preview(syncState: .needsAuth))
+}
+#endif

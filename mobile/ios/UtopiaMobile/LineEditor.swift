@@ -7,13 +7,19 @@ import SwiftUI
 import UIKit
 
 struct LineEditor: UIViewRepresentable {
+    struct LinkSpan: Equatable {
+        let kind: PartKind
+        let start: UInt32
+        let end: UInt32
+    }
+
     let line: DraftLine
     let parts: [TextPart]
     let isActive: Bool
     let caret: CaretRequest?
     let size: CGFloat
 
-    let onText: (String) -> Void
+    let onText: (String, Bool, LineEdit?) -> Void
     let onReturn: () -> Void
     let onDeleteAtStart: () -> Void
     let onPicker: () -> Void
@@ -60,16 +66,25 @@ struct LineEditor: UIViewRepresentable {
             .foregroundColor: UIColor(Tokens.ink),
             .paragraphStyle: paragraph,
         ]
-        if view.text != line.text {
-            // Keep the caret where the reader put it: setting the text selects everything or
-            // jumps to the end in a text view.
-            let selection = view.selectedRange
-            view.attributedText = Self.attributed(parts, text: line.text, attributes: attributes)
-            let length = view.text.utf16.count
-            view.selectedRange = NSRange(
-                location: min(selection.location, length),
-                length: min(selection.length, max(0, length - selection.location))
-            )
+        let links = parts
+            .filter { $0.kind != .plain }
+            .map { LinkSpan(kind: $0.kind, start: $0.start, end: $0.end) }
+        if view.markedTextRange == nil {
+            if view.text != line.text {
+                // Keep the caret where the reader put it: setting the text selects everything or
+                // jumps to the end in a text view.
+                coordinator.lastLinks = links
+                let selection = view.selectedRange
+                view.attributedText = Self.attributed(parts, text: line.text, attributes: attributes)
+                let length = view.text.utf16.count
+                view.selectedRange = NSRange(
+                    location: min(selection.location, length),
+                    length: min(selection.length, max(0, length - selection.location))
+                )
+            } else if coordinator.lastLinks != links {
+                coordinator.lastLinks = links
+                Self.paint(parts, in: view, attributes: attributes)
+            }
         }
         view.typingAttributes = attributes
         view.textContainer.maximumNumberOfLines = 0
@@ -118,8 +133,25 @@ struct LineEditor: UIViewRepresentable {
         return full
     }
 
+    private static func paint(
+        _ parts: [TextPart],
+        in view: LineTextView,
+        attributes: [NSAttributedString.Key: Any]
+    ) {
+        let storage = view.textStorage
+        let length = storage.length
+        storage.beginEditing()
+        storage.setAttributes(attributes, range: NSRange(location: 0, length: length))
+        for part in parts where part.kind == .page || part.kind == .date || part.kind == .tag {
+            let range = NSRange(location: Int(part.start), length: Int(part.end - part.start))
+            guard range.location >= 0, range.location + range.length <= length else { continue }
+            storage.addAttribute(.foregroundColor, value: UIColor(Tokens.link), range: range)
+        }
+        storage.endEditing()
+    }
+
     final class Coordinator: NSObject, UITextViewDelegate {
-        var onText: ((String) -> Void)?
+        var onText: ((String, Bool, LineEdit?) -> Void)?
         var onReturn: (() -> Void)?
         var onDeleteAtStart: (() -> Void)?
         var onPicker: (() -> Void)?
@@ -127,11 +159,18 @@ struct LineEditor: UIViewRepresentable {
         var onFocus: (() -> Void)?
         var onPasteLines: (([String]) -> Void)?
         var appliedCaret: UUID?
+        var lastLinks: [LinkSpan] = []
         var isUpdating = false
+        var pendingEdit: LineEdit?
+        var wasComposing = false
 
         func textViewDidChange(_ textView: UITextView) {
             guard !isUpdating else { return }
-            onText?(textView.text)
+            let edit = pendingEdit
+            pendingEdit = nil
+            onCaret?(textView.selectedRange.location)
+            wasComposing = textView.markedTextRange != nil
+            onText?(textView.text, wasComposing, edit)
         }
 
         func textViewDidBeginEditing(_ textView: UITextView) {
@@ -141,6 +180,11 @@ struct LineEditor: UIViewRepresentable {
         func textViewDidChangeSelection(_ textView: UITextView) {
             guard !isUpdating else { return }
             onCaret?(textView.selectedRange.location)
+            let composing = textView.markedTextRange != nil
+            if wasComposing && !composing {
+                wasComposing = false
+                onText?(textView.text, false, nil)
+            }
         }
 
         /// Return makes a new line of the draft; it never sends (§4.5 rule 3, AC-1.6).
@@ -149,6 +193,7 @@ struct LineEditor: UIViewRepresentable {
             shouldChangeTextIn range: NSRange,
             replacementText text: String
         ) -> Bool {
+            pendingEdit = nil
             if text == "\n" {
                 onReturn?()
                 return false
@@ -162,7 +207,10 @@ struct LineEditor: UIViewRepresentable {
                     // The first bracket is taken away too, so the typed characters are gone
                     // (AC-4.7); the model is told, because this change is not a keystroke.
                     textView.text = ns.replacingCharacters(in: NSRange(location: range.location - 1, length: 1), with: "")
-                    onText?(textView.text)
+                    let caret = max(0, range.location - 1)
+                    textView.selectedRange = NSRange(location: caret, length: 0)
+                    onCaret?(caret)
+                    onText?(textView.text, false, LineEdit(start: range.location - 1, removed: 1, replacement: ""))
                     onPicker?()
                     return false
                 }
@@ -174,6 +222,7 @@ struct LineEditor: UIViewRepresentable {
                     return false
                 }
             }
+            pendingEdit = LineEdit(start: range.location, removed: range.length, replacement: text)
             return true
         }
     }
@@ -206,3 +255,24 @@ final class LineTextView: UITextView {
         super.deleteBackward()
     }
 }
+
+#if DEBUG
+#Preview("Line editor") {
+    LineEditor(
+        line: DraftLine(text: "Meeting with Dana"),
+        parts: PreviewData.parts([.plain("Meeting with "), .page("Dana", PreviewData.danaID)]),
+        isActive: false,
+        caret: nil,
+        size: 16,
+        onText: { _ in },
+        onReturn: {},
+        onDeleteAtStart: {},
+        onPicker: {},
+        onCaret: { _ in },
+        onFocus: {},
+        onPasteLines: { _ in }
+    )
+    .frame(height: 22)
+    .padding()
+}
+#endif

@@ -94,6 +94,7 @@ final class AppModel {
 
     /// The chips for the active line (§4.6), and the line they belong to.
     private(set) var suggestions: [TitleMatch] = []
+    private(set) var dateSuggestions: [DateMatch] = []
     private(set) var suggestionLine: UUID?
     /// The drawn pieces of each draft line: plain runs and accepted links (C1, AC-4.1).
     private(set) var lineParts: [UUID: [TextPart]] = [:]
@@ -102,6 +103,14 @@ final class AppModel {
     private var settings = SyncSettings.load()
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
+    private var composingLines: Set<UUID> = []
+    private var caretOffsets: [UUID: Int] = [:]
+    private let work = LineWork()
+    #if DEBUG
+    private var fixture: PreviewFixture?
+    #endif
+
+    var hasSuggestions: Bool { !suggestions.isEmpty || !dateSuggestions.isEmpty }
 
     var isConfigured: Bool { core != nil }
     var canSync: Bool { settings.isConfigured }
@@ -114,6 +123,9 @@ final class AppModel {
     // MARK: - Launch
 
     func launch() async {
+        #if DEBUG
+        if fixture != nil { return }
+        #endif
         errorMessage = nil
         let exists = FileManager.default.fileExists(atPath: Paths.graph.path)
         guard exists else {
@@ -180,7 +192,7 @@ final class AppModel {
             let day = try await core.today()
             today = day
             if let date = day.date {
-                earlier = try await core.daysBefore(date, count: 20)
+                earlier = try await core.daysBefore(date, count: 1)
             }
             if draft.lines.isEmpty {
                 draft = Draft()
@@ -192,27 +204,34 @@ final class AppModel {
                     focusLine(last.id, at: last.text.utf16.count)
                 }
             }
-        } catch {
-            errorMessage = Self.describe(error)
-        }
-    }
-
-    /// Earlier days load as the log is scrolled up past today (§4.4).
-    func loadEarlier() async {
-        guard let core, let date = today?.date, earlier.count < 60 else { return }
-        do {
-            earlier = try await core.daysBefore(date, count: UInt32(earlier.count + 20))
+            for line in draft.lines where !line.text.isEmpty {
+                refreshParts(for: line)
+                absorbTypedLinks(in: line.id)
+            }
         } catch {
             errorMessage = Self.describe(error)
         }
     }
 
     func page(_ id: String) async -> PageView? {
-        try? await core?.page(id)
+        #if DEBUG
+        if let fixture { return fixture.pages[id] }
+        #endif
+        return try? await core?.page(id)
     }
 
     func backlinks(_ id: String) async -> [(pageTitle: String, hits: [RefView])] {
-        guard let refs = try? await core?.backlinks(id) else { return [] }
+        let found: [RefView]?
+        #if DEBUG
+        if let fixture {
+            found = fixture.backlinks[id] ?? []
+        } else {
+            found = try? await core?.backlinks(id)
+        }
+        #else
+        found = try? await core?.backlinks(id)
+        #endif
+        guard let refs = found else { return [] }
         var order: [String] = []
         var grouped: [String: [RefView]] = [:]
         for ref in refs {
@@ -225,11 +244,17 @@ final class AppModel {
     }
 
     func search(_ words: String) async -> SearchResults? {
-        try? await core?.search(words)
+        #if DEBUG
+        if let fixture { return fixture.search(words) }
+        #endif
+        return try? await core?.search(words)
     }
 
     func recent() async -> [PageRef] {
-        (try? await core?.recentPages()) ?? []
+        #if DEBUG
+        if let fixture { return fixture.recent }
+        #endif
+        return (try? await core?.recentPages()) ?? []
     }
 
     func refreshRecents() async {
@@ -246,14 +271,58 @@ final class AppModel {
         refreshSuggestions()
     }
 
-    func setText(_ text: String, for id: UUID) {
+    func caretMoved(in id: UUID, at offset: Int) {
+        caretOffsets[id] = offset
+        if activeLine != id {
+            focusLine(id, at: nil)
+        }
+    }
+
+    func setText(_ text: String, composing: Bool = false, edit: LineEdit? = nil, for id: UUID) {
         guard let index = draft.index(of: id) else { return }
+        let oldText = draft.lines[index].text
+        let links = draft.lines[index].links
         draft.lines[index].text = text
+        if Array(oldText.utf16) != Array(text.utf16) {
+            let change: LineEdit
+            if let edit, edit.matches(text, oldText: oldText) {
+                change = edit
+            } else {
+                change = Self.fallbackEdit(oldText, text, links: links.map(\.accepted))
+            }
+            draft.lines[index].links = rebaseLinks(
+                textBefore: oldText,
+                editStart: UInt32(max(0, change.start)),
+                editRemovedLen: UInt32(max(0, change.removed)),
+                replacement: change.replacement,
+                links: links.map(\.accepted)
+            ).map(DraftLink.init)
+        }
         draft.lines[index].dropStaleLinks()
         draft.applyDepthRule()
+        if composing {
+            composingLines.insert(id)
+        } else {
+            composingLines.remove(id)
+        }
+        if links != draft.lines[index].links {
+            lineParts[id] = nil
+        }
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        if !composing {
+            absorbTypedLinks(in: id)
+        }
+    }
+
+    private static func fallbackEdit(_ old: String, _ new: String, links: [AcceptedLink]) -> LineEdit {
+        let edit = editBetween(old: old, new: new, links: links)
+        return LineEdit(
+            start: Int(edit.start),
+            removed: Int(edit.removed),
+            replacement: edit.replacement
+        )
     }
 
     /// Rule 3: Return makes a new line below and puts the caret in it.
@@ -286,15 +355,22 @@ final class AppModel {
         guard !inserted.isEmpty else { return }
         if base.isEmpty {
             draft.lines.remove(at: index)
+            composingLines.remove(base.id)
+            work.remove(base.id)
             draft.lines.insert(contentsOf: inserted, at: index)
         } else {
             draft.lines.insert(contentsOf: inserted, at: index + 1)
         }
         draft.applyDepthRule()
+        for line in inserted {
+            guard let at = draft.index(of: line.id) else { continue }
+            draft.lines[at].dropStaleLinks()
+            refreshParts(for: draft.lines[at])
+            absorbTypedLinks(in: line.id)
+        }
         DraftStore.save(draft)
         let last = inserted.last
         if let last, let at = draft.index(of: last.id) {
-            draft.lines[at].dropStaleLinks()
             focusLine(last.id, at: draft.lines[at].text.utf16.count)
         }
     }
@@ -303,6 +379,8 @@ final class AppModel {
     func deleteEmptyLine(_ id: UUID) {
         guard let index = draft.index(of: id) else { return }
         guard let target = draft.deleteEmptyLine(at: index) else { return }
+        composingLines.remove(id)
+        work.remove(id)
         DraftStore.save(draft)
         focusLine(target.id, at: target.caretAtEnd ? endOf(target.id) : nil)
     }
@@ -349,6 +427,7 @@ final class AppModel {
         suggestionTask?.cancel()
         guard let index = activeIndex else {
             suggestions = []
+            dateSuggestions = []
             suggestionLine = nil
             return
         }
@@ -356,13 +435,16 @@ final class AppModel {
         suggestionLine = line.id
         guard let core, !line.text.isEmpty else {
             suggestions = []
+            dateSuggestions = []
             return
         }
         let links = line.links.map(\.accepted)
         suggestionTask = Task { [weak self] in
-            let found = (try? await core.titleSuggestions(line.text, accepted: links)) ?? []
+            let foundTitles = (try? await core.titleSuggestions(line.text, accepted: links)) ?? []
+            let foundDates = (try? await core.dateSuggestions(line.text, accepted: links)) ?? []
             guard !Task.isCancelled, let self, self.activeLine == line.id else { return }
-            self.suggestions = found
+            self.suggestions = foundTitles
+            self.dateSuggestions = foundDates
         }
     }
 
@@ -375,6 +457,24 @@ final class AppModel {
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
         refreshSuggestions()
+        absorbTypedLinks(in: draft.lines[index].id)
+    }
+
+    func acceptDate(_ match: DateMatch) {
+        guard let index = activeIndex else { return }
+        draft.lines[index].links.append(
+            DraftLink(
+                title: match.title,
+                start: Int(match.start),
+                end: Int(match.end),
+                day: match.day,
+                words: match.words
+            )
+        )
+        DraftStore.save(draft)
+        refreshParts(for: draft.lines[index])
+        refreshSuggestions()
+        absorbTypedLinks(in: draft.lines[index].id)
     }
 
     // MARK: - The page picker (§4.6)
@@ -393,17 +493,25 @@ final class AppModel {
     func insertLink(title: String) {
         guard let index = activeIndex else { return }
         let line = draft.lines[index]
-        let caret = min(caretRequest?.line == line.id ? caretRequest?.offset ?? line.text.utf16.count : line.text.utf16.count, line.text.utf16.count)
+        let caret = min(caretOffsets[line.id] ?? line.text.utf16.count, line.text.utf16.count)
         let text = line.text
         let at = text.utf16.index(text.utf16.startIndex, offsetBy: caret)
         var updated = text
         updated.insert(contentsOf: title + " ", at: at)
         draft.lines[index].text = updated
+        draft.lines[index].links = rebaseLinks(
+            textBefore: text,
+            editStart: UInt32(caret),
+            editRemovedLen: 0,
+            replacement: title + " ",
+            links: line.links.map(\.accepted)
+        ).map(DraftLink.init)
         draft.lines[index].links.append(
             DraftLink(title: title, start: caret, end: caret + title.utf16.count)
         )
         DraftStore.save(draft)
         refreshParts(for: draft.lines[index])
+        absorbTypedLinks(in: line.id)
         picker = nil
         focusLine(line.id, at: caret + title.utf16.count + 1)
     }
@@ -429,6 +537,7 @@ final class AppModel {
         guard let core, canSend else { return }
         sending = true
         defer { sending = false }
+        await work.waitForAll()
         // Each line's links are written as `[[Title]]` by the core (C1, AC-4.1).
         var stored: [UUID: String] = [:]
         do {
@@ -441,9 +550,12 @@ final class AppModel {
             today = appended
             lastSentEntry = appended.entries.last?.id
             draft = Draft()
+            composingLines.removeAll()
+            work.removeAll()
             DraftStore.save(draft)
             lineParts = [:]
             suggestions = []
+            dateSuggestions = []
             focusLine(draft.lines.first?.id, at: 0)
             await refresh()
         } catch {
@@ -456,6 +568,12 @@ final class AppModel {
     // MARK: - A to-do (§4.4, K9)
 
     func toggleTodo(block: BlockView) async {
+        #if DEBUG
+        if fixture != nil {
+            paintTodo(block.id, done: !block.checked)
+            return
+        }
+        #endif
         guard let core else { return }
         let done = !block.checked
         // The tick shows at once and does not wait for sync (AC-5.3).
@@ -531,13 +649,62 @@ final class AppModel {
     private func refreshParts(for line: DraftLine) {
         guard let core else { return }
         let text = line.text
-        let links = line.links.map(\.accepted)
+        let links = line.links
+        let accepted = links.map(\.accepted)
         let id = line.id
         Task { [weak self] in
-            let parts = (try? await core.draftParts(text, links: links)) ?? []
-            guard let self, self.draft.index(of: id).map({ self.draft.lines[$0].text }) == text else { return }
+            guard let parts = try? await core.draftParts(text, links: accepted) else { return }
+            guard let self, let at = self.draft.index(of: id),
+                  self.draft.lines[at].text == text, self.draft.lines[at].links == links
+            else { return }
             self.lineParts[id] = parts
+            self.dropStaleDateLinks(in: id, parts: parts)
         }
+    }
+
+    private func absorbTypedLinks(in id: UUID) {
+        guard let core, let index = draft.index(of: id) else { return }
+        let text = draft.lines[index].text
+        let links = draft.lines[index].links
+        let caret = caretOffsets[id].map { UInt32(max(0, $0)) }
+        work.enqueue(for: id) { [weak self] in
+            guard let absorbed = try? await core.absorbTypedLinks(
+                text,
+                links: links.map(\.accepted),
+                caret: caret
+            ), absorbed.text != text
+            else { return }
+            guard let self, !self.composingLines.contains(id),
+                  let at = self.draft.index(of: id),
+                  self.draft.lines[at].text == text, self.draft.lines[at].links == links
+            else { return }
+            self.lineParts[id] = nil
+            self.draft.lines[at].text = absorbed.text
+            self.draft.lines[at].links = absorbed.links.map { DraftLink($0) }
+            self.draft.lines[at].dropStaleLinks()
+            let unchangedCaret = self.caretOffsets[id].map { UInt32(max(0, $0)) } == caret
+            if self.activeLine == id, let newCaret = absorbed.caret, unchangedCaret {
+                self.caretOffsets[id] = Int(newCaret)
+                self.caretRequest = CaretRequest(line: id, offset: Int(newCaret))
+            }
+            DraftStore.save(self.draft)
+            self.refreshParts(for: self.draft.lines[at])
+            self.refreshSuggestions()
+        }
+    }
+
+    private func dropStaleDateLinks(in id: UUID, parts: [TextPart]) {
+        guard let index = draft.index(of: id) else { return }
+        let before = draft.lines[index].links.count
+        draft.lines[index].links.removeAll { link in
+            guard link.day != nil else { return false }
+            return !parts.contains {
+                $0.kind == .date && Int($0.start) == link.start && Int($0.end) == link.end
+            }
+        }
+        guard draft.lines[index].links.count != before else { return }
+        DraftStore.save(draft)
+        refreshSuggestions()
     }
 
     // MARK: - Errors
@@ -563,3 +730,54 @@ final class AppModel {
         return error.localizedDescription
     }
 }
+
+#if DEBUG
+struct PreviewFixture {
+    var pages: [String: PageView] = [:]
+    var backlinks: [String: [RefView]] = [:]
+    var recent: [PageRef] = []
+
+    func search(_ words: String) -> SearchResults {
+        let needle = words.lowercased()
+        let found = pages.values
+            .filter { $0.title.lowercased().contains(needle) }
+            .sorted { $0.title < $1.title }
+            .map { PageRef(id: $0.id, title: $0.title, date: $0.date) }
+        let hits = pages.values.sorted { $0.title < $1.title }.flatMap { page in
+            page.blocks
+                .filter { $0.plain.lowercased().contains(needle) }
+                .map { SearchHit(pageId: page.id, pageTitle: page.title, blockId: $0.id, text: $0.plain) }
+        }
+        return SearchResults(pages: found, blocks: hits)
+    }
+}
+
+extension AppModel {
+    static func preview(
+        phase: Phase = .ready,
+        today: PageView? = PreviewData.today,
+        earlier: [PageView] = [PreviewData.yesterday],
+        syncState: SyncState = .synced,
+        draft: Draft = PreviewData.draft,
+        suggestions: [TitleMatch] = [],
+        picker: Picker? = nil,
+        errorMessage: String? = nil,
+        fixture: PreviewFixture = PreviewData.fixture
+    ) -> AppModel {
+        let model = AppModel()
+        model.fixture = fixture
+        model.phase = phase
+        model.today = today
+        model.earlier = earlier
+        model.syncState = syncState
+        model.draft = draft
+        model.activeLine = draft.lines.last?.id
+        model.suggestions = suggestions
+        model.suggestionLine = suggestions.isEmpty ? nil : draft.lines.last?.id
+        model.picker = picker
+        model.errorMessage = errorMessage
+        model.recentPages = fixture.recent
+        return model
+    }
+}
+#endif

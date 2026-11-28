@@ -134,6 +134,239 @@ pub struct AcceptedLink {
     pub title: String,
     pub start: u32,
     pub end: u32,
+    pub day: Option<String>,
+    pub words: Option<String>,
+    pub typed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct AbsorbedDraft {
+    pub text: String,
+    pub links: Vec<AcceptedLink>,
+    pub caret: Option<u32>,
+}
+
+fn rebase_links_in(
+    text_before: &str,
+    edit_start: u32,
+    edit_removed_len: u32,
+    replacement: &str,
+    links: Vec<AcceptedLink>,
+) -> Vec<AcceptedLink> {
+    let edit_end = edit_start.saturating_add(edit_removed_len);
+    let Some(range) = utf16_range(text_before, edit_start, edit_end) else {
+        return Vec::new();
+    };
+    let new_text = format!(
+        "{}{}{}",
+        &text_before[..range.start],
+        replacement,
+        &text_before[range.end..]
+    );
+    let replacement_len = utf16_len(replacement);
+    let delta = replacement_len as i64 - edit_removed_len as i64;
+    let mut out = Vec::with_capacity(links.len());
+    for link in links {
+        if link.end <= edit_start {
+            out.push(link);
+            continue;
+        }
+        if link.start >= edit_end {
+            let start = (link.start as i64 + delta).max(0) as u32;
+            let end = (link.end as i64 + delta).max(0) as u32;
+            if start < end {
+                out.push(AcceptedLink { start, end, ..link });
+            }
+            continue;
+        }
+        if link.typed || (link.day.is_none() && link.words.is_some()) {
+            let inside = if edit_removed_len == 0 {
+                link.start < edit_start && edit_start < link.end
+            } else {
+                link.start <= edit_start
+                    && edit_end <= link.end
+                    && !(edit_start == link.start && edit_end == link.end)
+            };
+            if !inside {
+                continue;
+            }
+            let end = (link.end as i64 + delta).max(0) as u32;
+            if link.start >= end {
+                continue;
+            }
+            let Some(words_range) = utf16_range(&new_text, link.start, end) else {
+                continue;
+            };
+            let words = &new_text[words_range];
+            if words.trim().is_empty() {
+                continue;
+            }
+            out.push(AcceptedLink {
+                title: words.to_string(),
+                start: link.start,
+                end,
+                day: None,
+                words: Some(words.to_string()),
+                typed: true,
+            });
+            continue;
+        }
+        let Some(stored) = link.words.as_deref().filter(|_| link.day.is_some()) else {
+            continue;
+        };
+        let inside = if edit_removed_len == 0 {
+            link.start < edit_start && edit_start < link.end
+        } else {
+            link.start <= edit_start && edit_end <= link.end
+        };
+        if !inside {
+            continue;
+        }
+        let end = (link.end as i64 + delta).max(0) as u32;
+        if link.start >= end {
+            continue;
+        }
+        let Some(words_range) = utf16_range(&new_text, link.start, end) else {
+            continue;
+        };
+        let words = &new_text[words_range];
+        if words.trim().is_empty() || words.to_lowercase() != stored.to_lowercase() {
+            continue;
+        }
+        out.push(AcceptedLink { end, ..link });
+    }
+    out
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct TextEdit {
+    pub start: u32,
+    pub removed: u32,
+    pub replacement: String,
+}
+
+fn edit_between_in(old: &str, new: &str, links: &[AcceptedLink]) -> TextEdit {
+    let before: Vec<char> = old.chars().collect();
+    let after: Vec<char> = new.chars().collect();
+    let mut prefix = 0;
+    while prefix < before.len() && prefix < after.len() && before[prefix] == after[prefix] {
+        prefix += 1;
+    }
+    let mut suffix = 0;
+    while suffix < before.len() - prefix
+        && suffix < after.len() - prefix
+        && before[before.len() - 1 - suffix] == after[after.len() - 1 - suffix]
+    {
+        suffix += 1;
+    }
+    let removed_run = &before[prefix..before.len() - suffix];
+    let inserted_run = &after[prefix..after.len() - suffix];
+    let insertion = removed_run.is_empty() && !inserted_run.is_empty();
+    let deletion = !removed_run.is_empty() && inserted_run.is_empty();
+    let (position, replacement) = if insertion || deletion {
+        let slide_run = if insertion { inserted_run } else { removed_run };
+        let (position, run) = equivalent_edit(&before, prefix, slide_run, insertion, links);
+        (position, if insertion { run } else { Vec::new() })
+    } else {
+        (prefix, inserted_run.to_vec())
+    };
+    let start = before[..position]
+        .iter()
+        .map(|c| c.len_utf16() as u32)
+        .sum();
+    let removed = removed_run.iter().map(|c| c.len_utf16() as u32).sum();
+    let replacement = replacement.iter().collect();
+    TextEdit {
+        start,
+        removed,
+        replacement,
+    }
+}
+
+fn equivalent_edit(
+    before: &[char],
+    original: usize,
+    original_run: &[char],
+    insertion: bool,
+    links: &[AcceptedLink],
+) -> (usize, Vec<char>) {
+    let mut candidates: Vec<(i64, usize, Vec<char>)> = vec![(0, original, original_run.to_vec())];
+    let mut position = original;
+    let mut run = original_run.to_vec();
+    while position > 0 && before[position - 1] == *run.last().expect("a nonempty run") {
+        let last = run.pop().expect("a nonempty run");
+        run.insert(0, last);
+        position -= 1;
+        candidates.push((-((original - position) as i64), position, run.clone()));
+    }
+    position = original;
+    run = original_run.to_vec();
+    loop {
+        let next = if insertion {
+            position
+        } else {
+            position + run.len()
+        };
+        if next >= before.len() || before[next] != run[0] {
+            break;
+        }
+        let first = run.remove(0);
+        run.push(first);
+        position += 1;
+        candidates.push(((position - original) as i64, position, run.clone()));
+    }
+    let offsets: Vec<u32> = (0..=before.len())
+        .scan(0u32, |units, index| {
+            let here = *units;
+            if index < before.len() {
+                *units += before[index].len_utf16() as u32;
+            }
+            Some(here)
+        })
+        .collect();
+    candidates.sort_by_key(|(step, _, _)| (step.unsigned_abs(), *step > 0));
+    for (_, position, run) in candidates {
+        let offset = offsets[position];
+        if !links
+            .iter()
+            .any(|link| link.start < offset && offset < link.end)
+        {
+            return (position, run);
+        }
+    }
+    (original, original_run.to_vec())
+}
+
+#[uniffi::export]
+pub fn edit_between(old: String, new: String, links: Vec<AcceptedLink>) -> TextEdit {
+    edit_between_in(&old, &new, &links)
+}
+
+#[uniffi::export]
+pub fn rebase_links(
+    text_before: String,
+    edit_start: u32,
+    edit_removed_len: u32,
+    replacement: String,
+    links: Vec<AcceptedLink>,
+) -> Vec<AcceptedLink> {
+    rebase_links_in(
+        &text_before,
+        edit_start,
+        edit_removed_len,
+        &replacement,
+        links,
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
+pub struct DateMatch {
+    pub title: String,
+    pub day: String,
+    pub page_id: String,
+    pub words: String,
+    pub start: u32,
+    pub end: u32,
 }
 
 /// One line of a draft outline (ios-prd §4.2): its text, its depth and whether it is a
@@ -593,15 +826,55 @@ fn link_title_for(store: &Store, words: &str) -> Option<(String, String)> {
     }
     let page = utopia_store::resolve_page_key(store.conn(), &key, store.date_format()).ok()??;
     let (title, date) = page_label(store, &page)?;
-    // A day is named by the Date control, never by suggestion (§4.6).
     date.is_none().then(|| (page.as_str().to_string(), title))
 }
 
-/// The title an accepted link writes, when its words still name it (AC-4.1, AC-4.11): the
-/// page's own spelling for a page that exists, and the typed words for a title no page has
-/// yet — that page is made by the Send (AC-4.6). `None` means the words changed, so the text
-/// stays plain.
-fn written_link(store: &Store, words: &str, accepted: &str) -> Option<(Option<String>, String)> {
+fn written_link(
+    store: &Store,
+    text: &str,
+    range: std::ops::Range<usize>,
+    link: &AcceptedLink,
+) -> Option<(Option<String>, String)> {
+    let words = &text[range.clone()];
+    if let Some(day) = &link.day {
+        let typed = link.words.as_deref()?;
+        let boundaries = link.typed
+            || (text[..range.start]
+                .chars()
+                .next_back()
+                .is_none_or(|c| !c.is_alphanumeric())
+                && text[range.end..]
+                    .chars()
+                    .next()
+                    .is_none_or(|c| !c.is_alphanumeric()));
+        if !boundaries || words.to_lowercase() != typed.to_lowercase() {
+            return None;
+        }
+        let day = parse_day(day).ok()?;
+        let label = store.date_format().format(day);
+        let title = if utopia_core::date::parse_unambiguous_date(&label, store.date_format())
+            == Some(day)
+        {
+            label
+        } else {
+            day.format("%Y-%m-%d").to_string()
+        };
+        return Some((Some(PageId::for_date(day).as_str().to_string()), title));
+    }
+    if let Some(typed) = &link.words {
+        if words != typed.as_str() || typed.trim().is_empty() {
+            return None;
+        }
+        let page = utopia_store::resolve_page_key(
+            store.conn(),
+            &utopia_core::title::normalize_title(typed),
+            store.date_format(),
+        )
+        .ok()
+        .flatten();
+        return Some((page.map(|p| p.as_str().to_string()), typed.clone()));
+    }
+    let accepted = &link.title;
     let key = utopia_core::title::normalize_title(words);
     let accepted_key = utopia_core::title::normalize_title(accepted);
     if key.is_empty() {
@@ -621,40 +894,153 @@ fn written_link(store: &Store, words: &str, accepted: &str) -> Option<(Option<St
     (key == accepted_key).then(|| (None, words.trim().to_string()))
 }
 
-/// The word windows of a line: byte ranges of one word, and of each run of words up to
-/// `MAX_SUGGESTION_WORDS`. A word is letters, digits, `_`, `-` and an inner `'`.
-const MAX_SUGGESTION_WORDS: usize = 6;
+fn on_word_boundary(text: &str, range: &std::ops::Range<usize>) -> bool {
+    text[..range.start]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !c.is_alphanumeric())
+        && text[range.end..]
+            .chars()
+            .next()
+            .is_none_or(|c| !c.is_alphanumeric())
+}
 
-fn word_ranges(text: &str) -> Vec<std::ops::Range<usize>> {
-    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '-' || c == '\'';
-    let mut out = Vec::new();
-    let mut start: Option<usize> = None;
-    for (i, c) in text.char_indices() {
-        match (is_word(c), start) {
-            (true, None) => start = Some(i),
-            (true, Some(_)) => {}
-            (false, Some(s)) => {
-                // A word never ends on a quote or a hyphen: it belongs to the word.
-                let mut end = i;
-                while end > s
-                    && text[s..end]
-                        .chars()
-                        .next_back()
-                        .is_some_and(|c| c == '\'' || c == '-')
-                {
-                    end -= text[s..end].chars().next_back().map_or(1, |c| c.len_utf8());
-                }
-                out.push(s..end);
-                start = None;
-            }
-            (false, None) => {}
+fn typed_relative_day(
+    inner: &str,
+    today: NaiveDate,
+    exists: impl Fn(&str) -> bool,
+) -> Option<NaiveDate> {
+    let phrase = inner.trim();
+    if phrase.is_empty() || exists(phrase) {
+        return None;
+    }
+    let found = utopia_core::date::find_date_phrases(phrase, today);
+    (found.len() == 1 && found[0].range == (0..phrase.len()))
+        .then(|| utopia_core::date::relative_date(phrase, today))
+        .flatten()
+}
+
+fn absorb_typed_links_in(
+    text: &str,
+    links: Vec<AcceptedLink>,
+    today: NaiveDate,
+    format: &utopia_core::date::DateFormat,
+    caret: Option<u32>,
+    exists: impl Fn(&str) -> bool,
+) -> AbsorbedDraft {
+    let refs: Vec<std::ops::Range<usize>> = utopia_core::inline::extract_refs(text)
+        .into_iter()
+        .filter(|r| r.kind == utopia_core::inline::RefKind::Page)
+        .map(|r| r.range)
+        .collect();
+    if refs.is_empty() {
+        return AbsorbedDraft {
+            text: text.to_string(),
+            links,
+            caret,
+        };
+    }
+    let existing: Vec<(std::ops::Range<usize>, AcceptedLink)> = links
+        .iter()
+        .filter_map(|link| {
+            utf16_range(text, link.start, link.end).map(|range| (range, link.clone()))
+        })
+        .collect();
+    let typed_ranges: Vec<std::ops::Range<usize>> = refs
+        .iter()
+        .map(|range| range.start + 2..range.end.saturating_sub(2))
+        .collect();
+    let mut removals: Vec<std::ops::Range<usize>> = Vec::with_capacity(refs.len() * 2);
+    for range in &refs {
+        let open_end = (range.start + 2).min(range.end);
+        let open = range.start..open_end;
+        let close = range.end.saturating_sub(2)..range.end;
+        if !open.is_empty() {
+            removals.push(open);
+        }
+        if close.start > open_end && !close.is_empty() {
+            removals.push(close);
         }
     }
-    if let Some(s) = start {
-        out.push(s..text.len());
+    removals.sort_by_key(|r| r.start);
+    let removed_before = |at: usize| -> usize {
+        removals
+            .iter()
+            .take_while(|r| r.end <= at)
+            .map(|r| r.end - r.start)
+            .sum()
+    };
+    let mut new_text = String::with_capacity(text.len());
+    let mut at = 0usize;
+    for r in &removals {
+        if r.start < at {
+            continue;
+        }
+        new_text.push_str(&text[at..r.start]);
+        at = r.end;
     }
-    out
+    new_text.push_str(&text[at..]);
+    let utf16_at = |byte: usize| utf16_len(&new_text[..byte]);
+    let mapped_caret = caret.and_then(|c| utf16_to_byte(text, c)).map(|byte| {
+        let at = removals
+            .iter()
+            .find(|r| r.start < byte && byte < r.end)
+            .map_or(byte, |r| r.start);
+        utf16_at(at - removed_before(at))
+    });
+    let mut out = Vec::with_capacity(existing.len() + refs.len());
+    for (range, link) in &existing {
+        if removals
+            .iter()
+            .any(|r| r.start < range.end && range.start < r.end)
+            || typed_ranges
+                .iter()
+                .any(|r| r.start < range.end && range.start < r.end)
+        {
+            continue;
+        }
+        out.push(AcceptedLink {
+            start: utf16_at(range.start - removed_before(range.start)),
+            end: utf16_at(range.end - removed_before(range.end)),
+            ..link.clone()
+        });
+    }
+    for range in &refs {
+        let inner_range = range.start + 2..range.end.saturating_sub(2);
+        let inner = &text[inner_range.clone()];
+        let start = utf16_at(inner_range.start - removed_before(inner_range.start));
+        let end = utf16_at(inner_range.end - removed_before(inner_range.end));
+        if let Some(day) =
+            typed_relative_day(inner, today, &exists).filter(|_| on_word_boundary(text, range))
+        {
+            out.push(AcceptedLink {
+                title: format.format(day),
+                start,
+                end,
+                day: Some(day.to_string()),
+                words: Some(inner.to_string()),
+                typed: true,
+            });
+        } else {
+            out.push(AcceptedLink {
+                title: inner.to_string(),
+                start,
+                end,
+                day: None,
+                words: Some(inner.to_string()),
+                typed: true,
+            });
+        }
+    }
+    out.sort_by_key(|l| l.start);
+    AbsorbedDraft {
+        text: new_text,
+        links: out,
+        caret: mapped_caret,
+    }
 }
+
+const MAX_SUGGESTION_WORDS: usize = 6;
 
 #[uniffi::export]
 impl Graph {
@@ -875,7 +1261,7 @@ impl Graph {
         if text.trim().is_empty() {
             return Ok(Vec::new());
         }
-        let words = word_ranges(&text);
+        let words = utopia_core::text::word_ranges(&text);
         // Longest window that starts here, so "Atlas Launch" wins over "Launch" (AC-4.3).
         let mut candidates: Vec<(std::ops::Range<usize>, String, String)> = Vec::new();
         self.with(|s| {
@@ -922,6 +1308,42 @@ impl Graph {
         Ok(out)
     }
 
+    pub fn date_suggestions(
+        &self,
+        text: String,
+        accepted: Vec<AcceptedLink>,
+        limit: u32,
+    ) -> Result<Vec<DateMatch>> {
+        if text.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let taken: Vec<std::ops::Range<usize>> = accepted
+            .iter()
+            .filter_map(|a| utf16_range(&text, a.start, a.end))
+            .collect();
+        self.with(|s| {
+            let today = s.today();
+            let format = s.date_format().clone();
+            Ok(utopia_core::date::find_date_phrases(&text, today)
+                .into_iter()
+                .filter(|phrase| {
+                    !taken
+                        .iter()
+                        .any(|t| t.start < phrase.range.end && phrase.range.start < t.end)
+                })
+                .take(limit as usize)
+                .map(|phrase| DateMatch {
+                    title: format.format(phrase.date),
+                    day: phrase.date.to_string(),
+                    page_id: PageId::for_date(phrase.date).as_str().to_string(),
+                    words: text[phrase.range.clone()].to_string(),
+                    start: utf16_len(&text[..phrase.range.start]),
+                    end: utf16_len(&text[..phrase.range.end]),
+                })
+                .collect())
+        })
+    }
+
     /// The text to store for a draft line, with each accepted link written as `[[Title]]` in
     /// the page's own spelling (AC-4.1, AC-4.11). A link whose words no longer name its page
     /// is written as plain text, so a changed word never leaves a stale link behind.
@@ -932,7 +1354,7 @@ impl Graph {
                 let Some(range) = utf16_range(&text, link.start, link.end) else {
                     continue;
                 };
-                if let Some((_, title)) = written_link(s, &text[range.clone()], &link.title) {
+                if let Some((_, title)) = written_link(s, &text, range.clone(), link) {
                     spans.push((range, title));
                 }
             }
@@ -955,17 +1377,38 @@ impl Graph {
         Ok(out)
     }
 
+    pub fn absorb_typed_links(
+        &self,
+        text: String,
+        links: Vec<AcceptedLink>,
+        caret: Option<u32>,
+    ) -> Result<AbsorbedDraft> {
+        self.with(|s| {
+            let today = s.today();
+            let format = s.date_format().clone();
+            let exists = |title: &str| s.find_page(title).ok().flatten().is_some();
+            Ok(absorb_typed_links_in(
+                &text, links, today, &format, caret, exists,
+            ))
+        })
+    }
+
     /// The drawn pieces of a draft line: plain runs and the links the reader accepted, in
     /// link colour (AC-4.1). A link whose words changed is plain again (AC-4.11).
     pub fn draft_parts(&self, text: String, links: Vec<AcceptedLink>) -> Result<Vec<TextPart>> {
-        let mut spans: Vec<(std::ops::Range<usize>, Option<String>, String)> = Vec::new();
+        let mut spans: Vec<(std::ops::Range<usize>, PartKind, Option<String>)> = Vec::new();
         self.with(|s| {
             for link in &links {
                 let Some(range) = utf16_range(&text, link.start, link.end) else {
                     continue;
                 };
-                if let Some((page_id, title)) = written_link(s, &text[range.clone()], &link.title) {
-                    spans.push((range, page_id, title));
+                if let Some((page_id, _)) = written_link(s, &text, range.clone(), link) {
+                    let kind = if link.day.is_some() {
+                        PartKind::Date
+                    } else {
+                        PartKind::Page
+                    };
+                    spans.push((range, kind, page_id));
                 }
             }
             Ok(())
@@ -988,12 +1431,12 @@ impl Graph {
                 end: offset,
             });
         };
-        for (range, page_id, title) in spans {
+        for (range, kind, page_id) in spans {
             if range.start < at {
                 continue;
             }
             push(&mut out, PartKind::Plain, &text[at..range.start], None);
-            push(&mut out, PartKind::Page, &title, page_id);
+            push(&mut out, kind, &text[range.clone()], page_id);
             at = range.end;
         }
         push(&mut out, PartKind::Plain, &text[at..], None);
@@ -1970,6 +2413,9 @@ mod tests {
                     title: found[0].title.clone(),
                     start: found[0].start,
                     end: found[0].end,
+                    day: None,
+                    words: None,
+                    typed: false,
                 }],
             )
             .unwrap();
@@ -2027,6 +2473,9 @@ mod tests {
             title: "Dana".into(),
             start: 11,
             end: 15,
+            day: None,
+            words: None,
+            typed: false,
         }];
         assert_eq!(
             g.text_with_links("Lunch with dana".into(), accepted.clone())
@@ -2043,6 +2492,517 @@ mod tests {
         assert!(
             parts.iter().all(|p| p.kind == PartKind::Plain),
             "the word draws as plain text again: {parts:?}"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_pasted_bracketed_link_becomes_an_accepted_link() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Utopia").map(|_| ())?))
+            .unwrap();
+        let absorbed = g
+            .absorb_typed_links("see [[utopia]] today".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "see utopia today");
+        assert_eq!(absorbed.links.len(), 1, "{absorbed:?}");
+        assert_eq!(absorbed.links[0].title, "utopia");
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("utopia"));
+        assert_eq!(absorbed.links[0].day, None);
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (4, 10));
+        assert_eq!(
+            g.text_with_links(absorbed.text.clone(), absorbed.links.clone())
+                .unwrap(),
+            "see [[utopia]] today"
+        );
+        let parts = g.draft_parts(absorbed.text, absorbed.links).unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|p| p.kind == PartKind::Page && p.text == "utopia"),
+            "{parts:?}"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_typed_link_keeps_the_text_the_reader_wrote() {
+        let g = phone();
+        g.with(|s| {
+            let page = s.create_page("Utopia")?;
+            s.add_alias(&page, "UT")?;
+            Ok(())
+        })
+        .unwrap();
+        for (written, inner) in [
+            ("[[utopia]]", "utopia"),
+            ("[[UT]]", "UT"),
+            ("[[2026-11-26]]", "2026-11-26"),
+            ("[[Nov 26]]", "Nov 26"),
+        ] {
+            let absorbed = g.absorb_typed_links(written.into(), vec![], None).unwrap();
+            assert_eq!(absorbed.text, inner, "{written}");
+            assert_eq!(absorbed.links.len(), 1, "{written}: {absorbed:?}");
+            assert_eq!(absorbed.links[0].day, None, "{written}");
+            assert_eq!(absorbed.links[0].words.as_deref(), Some(inner), "{written}");
+            assert_eq!(
+                g.text_with_links(absorbed.text, absorbed.links).unwrap(),
+                written,
+                "a typed link is written exactly as typed"
+            );
+        }
+    }
+
+    #[test]
+    fn ac_4_14_a_typed_link_to_a_new_page_is_made_by_send() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Fresh Page]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "Fresh Page");
+        assert_eq!(absorbed.links[0].title, "Fresh Page");
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("Fresh Page"));
+        assert!(
+            g.find_page("Fresh Page".into()).unwrap().is_none(),
+            "a typed link does not make the page before Send"
+        );
+        let stored = g.text_with_links(absorbed.text, absorbed.links).unwrap();
+        assert_eq!(stored, "[[Fresh Page]]");
+        let day = g.append_outline(vec![line(&stored, 0, false)]).unwrap();
+        assert_eq!(day.blocks[0].text, "[[Fresh Page]]");
+        assert!(
+            g.find_page("Fresh Page".into()).unwrap().is_some(),
+            "Send makes the page the typed link names"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_typed_link_keeps_the_links_and_offsets_around_it() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let existing = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let absorbed = g
+            .absorb_typed_links("Lunch with dana 🙂 [[Atlas]]".into(), existing, None)
+            .unwrap();
+        assert_eq!(absorbed.text, "Lunch with dana 🙂 Atlas");
+        assert_eq!(absorbed.links.len(), 2, "{absorbed:?}");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (11, 15));
+        assert_eq!((absorbed.links[1].start, absorbed.links[1].end), (19, 24));
+        assert_eq!(
+            g.text_with_links(absorbed.text, absorbed.links).unwrap(),
+            "Lunch with [[Dana]] 🙂 [[Atlas]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_typed_link_before_an_accepted_link_keeps_its_offsets() {
+        let g = phone();
+        let existing = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 15,
+            end: 19,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let absorbed = g
+            .absorb_typed_links("[[Atlas]] with dana".into(), existing, None)
+            .unwrap();
+        assert_eq!(absorbed.text, "Atlas with dana");
+        assert_eq!(absorbed.links.len(), 2, "{absorbed:?}");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (0, 5));
+        assert_eq!((absorbed.links[1].start, absorbed.links[1].end), (11, 15));
+    }
+
+    #[test]
+    fn ac_4_14_two_typed_links_are_both_absorbed() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Atlas]] and [[Utopia]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "Atlas and Utopia");
+        assert_eq!(absorbed.links.len(), 2, "{absorbed:?}");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (0, 5));
+        assert_eq!((absorbed.links[1].start, absorbed.links[1].end), (10, 16));
+    }
+
+    #[test]
+    fn ac_4_14_a_link_overlapping_the_brackets_is_dropped() {
+        let g = phone();
+        let existing = vec![AcceptedLink {
+            title: "Atlas".into(),
+            start: 0,
+            end: 3,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let absorbed = g
+            .absorb_typed_links("[[Atlas]]".into(), existing, None)
+            .unwrap();
+        assert_eq!(absorbed.text, "Atlas");
+        assert_eq!(absorbed.links.len(), 1, "{absorbed:?}");
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("Atlas"));
+    }
+
+    #[test]
+    fn ac_4_14_a_relative_date_in_brackets_is_a_date_link() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("call [[tomorrow]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "call tomorrow");
+        assert_eq!(absorbed.links[0].day.as_deref(), Some("2026-11-22"));
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("tomorrow"));
+        assert_eq!(
+            g.text_with_links(absorbed.text.clone(), absorbed.links.clone())
+                .unwrap(),
+            "call [[November 22nd, 2026]]"
+        );
+        assert!(g
+            .draft_parts(absorbed.text, absorbed.links)
+            .unwrap()
+            .iter()
+            .any(|p| p.kind == PartKind::Date));
+        let next = g
+            .absorb_typed_links("[[next friday]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(next.links[0].day.as_deref(), Some("2026-11-27"));
+        assert_eq!(
+            g.text_with_links(next.text, next.links).unwrap(),
+            "[[November 27th, 2026]]"
+        );
+        let ago = g
+            .absorb_typed_links("[[2 weeks ago]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(ago.links[0].day.as_deref(), Some("2026-11-07"));
+    }
+
+    #[test]
+    fn ac_4_14_absorption_moves_the_caret_left_by_the_brackets_before_it() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("see [[Utopia]] now".into(), vec![], Some(18))
+            .unwrap();
+        assert_eq!(absorbed.text, "see Utopia now");
+        assert_eq!(absorbed.caret, Some(14));
+        let before = g
+            .absorb_typed_links("see [[Utopia]] now".into(), vec![], Some(4))
+            .unwrap();
+        assert_eq!(before.caret, Some(4));
+    }
+
+    #[test]
+    fn ac_4_14_lines_without_typed_brackets_are_unchanged() {
+        let g = phone();
+        let links = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let absorbed = g
+            .absorb_typed_links("Lunch with dana today".into(), links.clone(), Some(5))
+            .unwrap();
+        assert_eq!(absorbed.text, "Lunch with dana today");
+        assert_eq!(absorbed.links, links);
+        assert_eq!(absorbed.caret, Some(5));
+    }
+
+    #[test]
+    fn ac_4_14_incomplete_or_code_brackets_stay_as_typed() {
+        let g = phone();
+        let incomplete = g.absorb_typed_links("a [[b".into(), vec![], None).unwrap();
+        assert_eq!(incomplete.text, "a [[b");
+        assert!(incomplete.links.is_empty());
+        let code = g
+            .absorb_typed_links("`[[Utopia]]`".into(), vec![], None)
+            .unwrap();
+        assert_eq!(code.text, "`[[Utopia]]`");
+        assert!(code.links.is_empty());
+    }
+
+    #[test]
+    fn ac_4_14_an_insert_at_the_start_of_a_typed_link_shifts_it() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 0, 0, "U".into(), absorbed.links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (1, 7));
+        assert_eq!(
+            g.text_with_links("UUtopia sync".into(), rebased).unwrap(),
+            "U[[Utopia]] sync"
+        );
+        let absorbed = g
+            .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 0, 0, "Use ".into(), absorbed.links);
+        assert_eq!((rebased[0].start, rebased[0].end), (4, 10));
+        assert_eq!(
+            g.text_with_links("Use Utopia sync".into(), rebased)
+                .unwrap(),
+            "Use [[Utopia]] sync"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_an_insert_at_the_end_of_a_typed_link_leaves_it() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Utopia]] sync".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links("Utopia sync".into(), 6, 0, "!".into(), absorbed.links);
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
+        assert_eq!(
+            g.text_with_links("Utopia! sync".into(), rebased).unwrap(),
+            "[[Utopia]]! sync"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_delete_before_a_typed_link_keeps_it() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("U[[Utopia]] now".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "UUtopia now");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (1, 7));
+        let rebased = rebase_links("UUtopia now".into(), 0, 1, "".into(), absorbed.links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
+        assert_eq!(
+            g.text_with_links("Utopia now".into(), rebased).unwrap(),
+            "[[Utopia]] now"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_typo_inside_a_typed_link_stays_a_verbatim_link() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Utopai]]".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links("Utopai".into(), 4, 2, "ia".into(), absorbed.links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
+        assert_eq!(rebased[0].words.as_deref(), Some("Utopia"));
+        assert_eq!(
+            g.text_with_links("Utopia".into(), rebased).unwrap(),
+            "[[Utopia]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_a_covering_edit_drops_a_typed_link() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links(
+            "see Utopia now".into(),
+            0,
+            14,
+            "Buy milk".into(),
+            absorbed.links,
+        );
+        assert!(rebased.is_empty(), "{rebased:?}");
+        assert_eq!(
+            g.text_with_links("Buy milk".into(), rebased).unwrap(),
+            "Buy milk"
+        );
+        let absorbed = g
+            .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
+            .unwrap();
+        let left = rebase_links("see Utopia now".into(), 2, 4, "X".into(), absorbed.links);
+        assert!(left.is_empty(), "{left:?}");
+        let absorbed = g
+            .absorb_typed_links("see [[Utopia]] now".into(), vec![], None)
+            .unwrap();
+        let right = rebase_links("see Utopia now".into(), 8, 4, "Y".into(), absorbed.links);
+        assert!(right.is_empty(), "{right:?}");
+    }
+
+    #[test]
+    fn ac_4_14_an_edit_across_two_typed_links_drops_both() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[Atlas]] and [[Utopia]]".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links(
+            "Atlas and Utopia".into(),
+            3,
+            10,
+            "or".into(),
+            absorbed.links,
+        );
+        assert!(rebased.is_empty(), "{rebased:?}");
+    }
+
+    #[test]
+    fn ac_4_14_a_typed_relative_date_becomes_a_typed_page_link_when_edited() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("[[next friday]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.links[0].day.as_deref(), Some("2026-11-27"));
+        let rebased = rebase_links("next friday".into(), 5, 6, "fri".into(), absorbed.links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!(rebased[0].day, None);
+        assert_eq!(rebased[0].words.as_deref(), Some("next fri"));
+        assert_eq!(
+            g.text_with_links("next fri".into(), rebased).unwrap(),
+            "[[next fri]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_an_edit_before_a_chip_link_shifts_its_range() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let links = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let rebased = rebase_links("Lunch with dana".into(), 0, 0, "Plan ".into(), links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (16, 20));
+        assert_eq!(
+            g.text_with_links("Plan Lunch with dana".into(), rebased)
+                .unwrap(),
+            "Plan Lunch with [[Dana]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_an_edit_that_does_not_fit_drops_the_links() {
+        phone();
+        let links = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        assert!(rebase_links("abc".into(), 10, 0, "x".into(), links).is_empty());
+    }
+
+    #[test]
+    fn ac_4_14_a_relative_date_without_a_boundary_stays_verbatim() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("a[[tomorrow]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "atomorrow");
+        assert_eq!(absorbed.links[0].day, None);
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("tomorrow"));
+        assert_eq!(
+            g.text_with_links(absorbed.text, absorbed.links).unwrap(),
+            "a[[tomorrow]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_adjacent_pasted_links_both_survive_send() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let absorbed = g
+            .absorb_typed_links("[[tomorrow]][[Dana]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.text, "tomorrowDana");
+        assert_eq!(absorbed.links.len(), 2, "{absorbed:?}");
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (0, 8));
+        assert_eq!(absorbed.links[0].day.as_deref(), Some("2026-11-28"));
+        assert!(absorbed.links[0].typed);
+        assert_eq!((absorbed.links[1].start, absorbed.links[1].end), (8, 12));
+        assert_eq!(absorbed.links[1].day, None);
+        assert!(absorbed.links[1].typed);
+        let stored = g
+            .text_with_links(absorbed.text.clone(), absorbed.links.clone())
+            .unwrap();
+        assert!(
+            stored.contains("]][[") && stored.ends_with("[[Dana]]"),
+            "{stored}"
+        );
+        let parts = g.draft_parts(absorbed.text, absorbed.links).unwrap();
+        assert_eq!(
+            parts
+                .iter()
+                .filter(|p| p.kind == PartKind::Date || p.kind == PartKind::Page)
+                .count(),
+            2,
+            "{parts:?}"
+        );
+    }
+
+    #[test]
+    fn ac_4_14_an_empty_bracket_pair_stays_as_typed() {
+        let g = phone();
+        let absorbed = g.absorb_typed_links("[[ ]]".into(), vec![], None).unwrap();
+        assert_eq!(absorbed.text, "[[ ]]");
+        assert!(absorbed.links.is_empty());
+    }
+
+    #[test]
+    fn ac_4_14_rebase_keeps_utf16_offsets_with_emoji_and_cjk() {
+        let g = phone();
+        let absorbed = g
+            .absorb_typed_links("🙂 [[Utopia]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!((absorbed.links[0].start, absorbed.links[0].end), (3, 9));
+        let rebased = rebase_links("🙂 Utopia".into(), 0, 0, "界".into(), absorbed.links);
+        assert_eq!((rebased[0].start, rebased[0].end), (4, 10));
+        assert_eq!(rebased[0].words.as_deref(), Some("Utopia"));
+        let absorbed = g
+            .absorb_typed_links("[[Utopia]]".into(), vec![], None)
+            .unwrap();
+        let rebased = rebase_links("Utopia".into(), 1, 2, "日本".into(), absorbed.links);
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 6));
+        assert_eq!(rebased[0].words.as_deref(), Some("U日本pia"));
+    }
+
+    #[test]
+    fn ac_4_14_an_insert_at_the_start_of_a_chip_link_shifts_it() {
+        phone();
+        let links = vec![AcceptedLink {
+            title: "Dana".into(),
+            start: 11,
+            end: 15,
+            day: None,
+            words: None,
+            typed: false,
+        }];
+        let rebased = rebase_links("Lunch with dana".into(), 11, 0, "X".into(), links);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (12, 16));
+    }
+
+    #[test]
+    fn ac_4_14_a_relative_date_gives_way_to_a_real_page_named_tomorrow() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Tomorrow").map(|_| ())?))
+            .unwrap();
+        let absorbed = g
+            .absorb_typed_links("[[Tomorrow]]".into(), vec![], None)
+            .unwrap();
+        assert_eq!(absorbed.links[0].day, None);
+        assert_eq!(absorbed.links[0].words.as_deref(), Some("Tomorrow"));
+        assert_eq!(
+            g.text_with_links(absorbed.text, absorbed.links).unwrap(),
+            "[[Tomorrow]]"
         );
     }
 
@@ -2063,9 +3023,8 @@ mod tests {
             .is_empty());
     }
 
-    /// §4.6: titles of one or two characters are not suggested, and a day is not either.
     #[test]
-    fn io_4_short_titles_and_days_are_not_suggested() {
+    fn io_4_short_titles_and_days_are_not_title_suggestions() {
         let g = phone();
         g.with(|s| Ok(s.create_page("On").map(|_| ())?)).unwrap();
         assert!(g
@@ -2076,8 +3035,619 @@ mod tests {
             g.title_suggestions("November 21st, 2026".into(), vec![], 5)
                 .unwrap()
                 .is_empty(),
-            "a day is named with the Date control, not a chip"
+            "a day is a date chip, not a title chip (AC-4.12)"
         );
+        assert!(
+            !g.date_suggestions("November 21st, 2026".into(), vec![], 5)
+                .unwrap()
+                .is_empty(),
+            "it is a date chip instead (AC-4.12)"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_date_phrase_is_a_chip_and_writes_the_day() {
+        let g = phone();
+        let text = "call Ana tomorrow".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].title, "November 22nd, 2026");
+        assert_eq!(found[0].day, "2026-11-22");
+        assert_eq!(found[0].words, "tomorrow");
+        let range = utf16_range(&text, found[0].start, found[0].end).unwrap();
+        assert_eq!(&text[range], "tomorrow");
+        let link = AcceptedLink {
+            title: found[0].title.clone(),
+            start: found[0].start,
+            end: found[0].end,
+            day: Some(found[0].day.clone()),
+            words: Some(found[0].words.clone()),
+            typed: false,
+        };
+        let stored = g.text_with_links(text.clone(), vec![link.clone()]).unwrap();
+        assert_eq!(stored, "call Ana [[November 22nd, 2026]]");
+        let day = g.append_outline(vec![line(&stored, 0, false)]).unwrap();
+        assert_eq!(day.blocks[0].text, "call Ana [[November 22nd, 2026]]");
+        let page = PageId::for_date(parse_day("2026-11-22").unwrap());
+        assert_eq!(
+            g.backlinks(page.as_str().to_string()).unwrap().len(),
+            1,
+            "the link is a reference to the day"
+        );
+        let parts = g.draft_parts(text, vec![link]).unwrap();
+        let date = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Date)
+            .expect("a date part");
+        assert_eq!(date.text, "tomorrow", "the words stay as typed");
+        assert_eq!(date.page_id.as_deref(), Some(page.as_str()));
+    }
+
+    #[test]
+    fn ac_4_12_non_ascii_before_a_date_keeps_utf16_ranges() {
+        let g = phone();
+        let text = "🙂 tomorrow".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!((found[0].start, found[0].end), (3, 11));
+        let range = utf16_range(&text, found[0].start, found[0].end).unwrap();
+        assert_eq!(&text[range], "tomorrow");
+        let link = AcceptedLink {
+            title: found[0].title.clone(),
+            start: found[0].start,
+            end: found[0].end,
+            day: Some(found[0].day.clone()),
+            words: Some(found[0].words.clone()),
+            typed: false,
+        };
+        assert_eq!(
+            g.text_with_links(text, vec![link]).unwrap(),
+            "🙂 [[November 22nd, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_9_a_date_control_title_after_cjk_still_links() {
+        let g = phone();
+        let title = "November 22nd, 2026";
+        let text = format!("明日は{title} ");
+        let start = utf16_len("明日は");
+        let end = start + utf16_len(title);
+        let link = AcceptedLink {
+            title: title.into(),
+            start,
+            end,
+            day: None,
+            words: None,
+            typed: false,
+        };
+        assert_eq!(
+            g.text_with_links(text, vec![link]).unwrap(),
+            "明日は[[November 22nd, 2026]] "
+        );
+    }
+
+    #[test]
+    fn ac_4_6_a_picker_title_after_a_letter_still_links() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Dana").map(|_| ())?)).unwrap();
+        let link = AcceptedLink {
+            title: "Dana".into(),
+            start: 4,
+            end: 8,
+            day: None,
+            words: None,
+            typed: false,
+        };
+        assert_eq!(
+            g.text_with_links("withDana ".into(), vec![link.clone()])
+                .unwrap(),
+            "with[[Dana]] "
+        );
+        let parts = g.draft_parts("withDana ".into(), vec![link]).unwrap();
+        assert!(
+            parts
+                .iter()
+                .any(|p| p.kind == PartKind::Page && p.text == "Dana"),
+            "{parts:?}"
+        );
+    }
+
+    #[test]
+    fn ac_4_13_bare_numbers_and_months_are_no_chip() {
+        let g = phone();
+        for text in ["26", "26th", "may", "march", "sun", "sat", "11/6/26", "nov"] {
+            assert!(
+                g.date_suggestions(text.into(), vec![], 5)
+                    .unwrap()
+                    .is_empty(),
+                "{text:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ac_4_13_punctuation_does_not_join_a_month_to_a_day() {
+        let g = phone();
+        for text in ["in May. 5 of us", "may_5", "May, 5", "Nov. 26"] {
+            assert!(
+                g.date_suggestions(text.into(), vec![], 5)
+                    .unwrap()
+                    .is_empty(),
+                "{text:?}"
+            );
+        }
+        assert_eq!(
+            g.date_suggestions("May 5".into(), vec![], 5).unwrap()[0].words,
+            "May 5"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_dates_sit_next_to_title_chips_and_skip_accepted_ranges() {
+        let g = phone();
+        g.with(|s| Ok(s.create_page("Friday").map(|_| ())?))
+            .unwrap();
+        let text = "Ana friday and next friday".to_string();
+        let dates = g.date_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(
+            dates.iter().map(|d| d.words.as_str()).collect::<Vec<_>>(),
+            vec!["friday", "next friday"]
+        );
+        assert!(
+            g.title_suggestions(text.clone(), vec![], 5)
+                .unwrap()
+                .iter()
+                .any(|t| t.title == "Friday"),
+            "the page title is still offered"
+        );
+        let accepted = vec![AcceptedLink {
+            title: dates[0].title.clone(),
+            start: dates[0].start,
+            end: dates[0].end,
+            day: Some(dates[0].day.clone()),
+            words: Some(dates[0].words.clone()),
+            typed: false,
+        }];
+        let after = g.date_suggestions(text, accepted, 5).unwrap();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].words, "next friday");
+    }
+
+    #[test]
+    fn ac_4_13_changed_words_drop_the_date_link() {
+        let g = phone();
+        let text = "call Ana tomorrow".to_string();
+        let found = g.date_suggestions(text, vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let changed = "call Ana next fri".to_string();
+        assert_eq!(
+            g.text_with_links(changed.clone(), vec![link.clone()])
+                .unwrap(),
+            changed
+        );
+        let parts = g.draft_parts(changed, vec![link]).unwrap();
+        assert!(parts.iter().all(|p| p.kind == PartKind::Plain));
+    }
+
+    #[test]
+    fn ac_4_13_a_word_that_grows_past_the_range_drops_the_link() {
+        let g = phone();
+        let found = g
+            .date_suggestions("call Ana tomorrow".into(), vec![], 5)
+            .unwrap()[0]
+            .clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let grown = "call Ana tomorrows".to_string();
+        assert_eq!(
+            g.text_with_links(grown.clone(), vec![link.clone()])
+                .unwrap(),
+            grown
+        );
+        assert!(g
+            .draft_parts(grown, vec![link])
+            .unwrap()
+            .iter()
+            .all(|p| p.kind == PartKind::Plain));
+    }
+
+    #[test]
+    fn ac_4_13_a_date_link_keeps_the_day_it_was_tapped_for() {
+        let g = phone();
+        let text = "call Ana today".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        g.set_today(Some("2026-11-28".into())).unwrap();
+        assert_eq!(
+            g.text_with_links(text.clone(), vec![link.clone()]).unwrap(),
+            "call Ana [[November 21st, 2026]]",
+            "a weekday or today sent a week later keeps the day"
+        );
+        assert!(g
+            .draft_parts(text, vec![link])
+            .unwrap()
+            .iter()
+            .any(|p| p.kind == PartKind::Date));
+        let absolute = AcceptedLink {
+            title: "November 22nd, 2026".into(),
+            start: 3,
+            end: 9,
+            day: Some("2026-11-22".into()),
+            words: Some("Nov 22".into()),
+            typed: false,
+        };
+        g.set_today(Some("2027-06-01".into())).unwrap();
+        assert_eq!(
+            g.text_with_links("on Nov 22".into(), vec![absolute])
+                .unwrap(),
+            "on [[November 22nd, 2026]]",
+            "a month and day kept in a draft hold across a new year"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_an_ambiguous_title_writes_the_iso_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        g.with(|s| {
+            s.set_date_format("MM/dd/yyyy")?;
+            Ok(())
+        })
+        .unwrap();
+        let text = "call Ana next week".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].title, "12/04/2026");
+        assert_eq!(found[0].day, "2026-12-04");
+        let link = AcceptedLink {
+            title: found[0].title.clone(),
+            start: found[0].start,
+            end: found[0].end,
+            day: Some(found[0].day.clone()),
+            words: Some(found[0].words.clone()),
+            typed: false,
+        };
+        let stored = g.text_with_links(text, vec![link.clone()]).unwrap();
+        assert_eq!(stored, "call Ana [[2026-12-04]]");
+        g.append_outline(vec![line(&stored, 0, false)]).unwrap();
+        let page = PageId::for_date(parse_day("2026-12-04").unwrap());
+        assert_eq!(
+            g.backlinks(page.as_str().to_string()).unwrap().len(),
+            1,
+            "the written link resolves to the chosen day"
+        );
+        let parts = g
+            .draft_parts("call Ana next week".into(), vec![link])
+            .unwrap();
+        let date = parts
+            .iter()
+            .find(|p| p.kind == PartKind::Date)
+            .expect("a date part");
+        assert_eq!(date.page_id.as_deref(), Some(page.as_str()));
+    }
+
+    #[test]
+    fn ac_4_12_editing_before_a_date_link_keeps_the_day() {
+        let g = phone();
+        let text = "next week".to_string();
+        let found = g.date_suggestions(text.clone(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let edited = "Call Ana next week".to_string();
+        let rebased = rebase_links(text, 0, 0, "Call Ana ".into(), vec![link]);
+        assert_eq!(rebased.len(), 1);
+        assert_eq!((rebased[0].start, rebased[0].end), (9, 18));
+        assert_eq!(
+            g.text_with_links(edited.clone(), rebased.clone()).unwrap(),
+            "Call Ana [[November 28th, 2026]]"
+        );
+        assert!(g
+            .draft_parts(edited, rebased)
+            .unwrap()
+            .iter()
+            .any(|p| p.kind == PartKind::Date));
+    }
+
+    #[test]
+    fn ac_4_12_a_prefix_sharing_a_letter_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!((found.start, found.end), (0, 9));
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let rebased = rebase_links("next week".into(), 0, 0, "note: ".into(), vec![link]);
+        assert_eq!(rebased.len(), 1);
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        assert_eq!(
+            g.text_with_links("note: next week".into(), rebased)
+                .unwrap(),
+            "note: [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_case_change_keeps_the_chosen_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!(found.day, "2026-12-04");
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day.clone()),
+            words: Some(found.words),
+            typed: false,
+        };
+        let rebased = rebase_links("next week".into(), 0, 1, "N".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!(rebased[0].day.as_deref(), Some("2026-12-04"));
+        g.set_today(Some("2026-12-10".into())).unwrap();
+        assert_eq!(
+            g.text_with_links("Next week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_picker_insert_before_a_date_keeps_both() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let date = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let mut rebased = rebase_links("next week".into(), 0, 0, "Dana ".into(), vec![date]);
+        rebased.push(AcceptedLink {
+            title: "Dana".into(),
+            start: 0,
+            end: 4,
+            day: None,
+            words: None,
+            typed: false,
+        });
+        assert_eq!(rebased.len(), 2);
+        assert_eq!(
+            g.text_with_links("Dana next week".into(), rebased).unwrap(),
+            "[[Dana]] [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_normalization_change_before_a_date_shifts_it() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let before = "caf\u{e9} next week";
+        let found = g.date_suggestions(before.into(), vec![], 5).unwrap()[0].clone();
+        assert_eq!((found.start, found.end), (5, 14));
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let rebased = rebase_links(before.into(), 3, 1, "e\u{301}".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        let after = "cafe\u{301} next week";
+        assert_eq!(
+            g.text_with_links(after.into(), rebased).unwrap(),
+            "cafe\u{301} [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_an_emoji_edit_before_a_date_keeps_it() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let before = "\u{1f600} next week";
+        let after = "\u{1f601} next week";
+        assert_eq!(
+            edit_between_in(before, after, &[]),
+            TextEdit {
+                start: 0,
+                removed: 2,
+                replacement: "\u{1f601}".into(),
+            }
+        );
+        let prefixed = edit_between_in("next week", "note: next week", &[]);
+        assert_eq!(
+            format!(
+                "{}{}{}",
+                &"next week"[..1],
+                prefixed.replacement,
+                &"next week"[1..]
+            ),
+            "note: next week"
+        );
+        let found = g.date_suggestions(before.into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        assert_eq!((link.start, link.end), (3, 12));
+        let rebased = rebase_links(before.into(), 0, 2, "\u{1f601}".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (3, 12));
+        assert_eq!(
+            g.text_with_links(after.into(), rebased).unwrap(),
+            "\u{1f601} [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_fallback_prefix_insert_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let edit = edit_between_in("next week", "note: next week", std::slice::from_ref(&link));
+        assert_eq!(
+            edit,
+            TextEdit {
+                start: 0,
+                removed: 0,
+                replacement: "note: ".into(),
+            }
+        );
+        let rebased = rebase_links(
+            "next week".into(),
+            edit.start,
+            edit.removed,
+            edit.replacement,
+            vec![link],
+        );
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (6, 15));
+        assert_eq!(
+            g.text_with_links("note: next week".into(), rebased)
+                .unwrap(),
+            "note: [[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_a_fallback_suffix_insert_keeps_the_date() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let edit = edit_between_in("next week", "next week week", std::slice::from_ref(&link));
+        assert_eq!(
+            edit,
+            TextEdit {
+                start: 9,
+                removed: 0,
+                replacement: " week".into(),
+            }
+        );
+        let rebased = rebase_links(
+            "next week".into(),
+            edit.start,
+            edit.removed,
+            edit.replacement,
+            vec![link],
+        );
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!((rebased[0].start, rebased[0].end), (0, 9));
+        assert_eq!(
+            g.text_with_links("next week week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]] week"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_replacing_the_whole_phrase_with_a_case_change_keeps_the_day() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let rebased = rebase_links("next week".into(), 0, 9, "Next week".into(), vec![link]);
+        assert_eq!(rebased.len(), 1, "{rebased:?}");
+        assert_eq!(rebased[0].day.as_deref(), Some("2026-12-04"));
+        g.set_today(Some("2026-12-10".into())).unwrap();
+        assert_eq!(
+            g.text_with_links("Next week".into(), rebased).unwrap(),
+            "[[December 4th, 2026]]"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_replacing_the_whole_phrase_with_other_words_drops_the_link() {
+        let g = phone();
+        g.set_today(Some("2026-11-27".into())).unwrap();
+        let found = g.date_suggestions("next week".into(), vec![], 5).unwrap()[0].clone();
+        let link = AcceptedLink {
+            title: found.title,
+            start: found.start,
+            end: found.end,
+            day: Some(found.day),
+            words: Some(found.words),
+            typed: false,
+        };
+        let rebased = rebase_links("next week".into(), 0, 9, "last week".into(), vec![link]);
+        assert!(rebased.is_empty(), "{rebased:?}");
+        assert_eq!(
+            g.text_with_links("last week".into(), rebased).unwrap(),
+            "last week"
+        );
+    }
+
+    #[test]
+    fn ac_4_12_no_chip_inside_inline_code() {
+        let g = phone();
+        let dates = g
+            .date_suggestions("`next week` and next week".into(), vec![], 5)
+            .unwrap();
+        assert_eq!(dates.len(), 1, "{dates:?}");
+        assert_eq!(dates[0].words, "next week");
+        assert_eq!((dates[0].start, dates[0].end), (16, 25));
     }
 
     /// AC-5.1: a sent to-do is not done.
@@ -2203,6 +3773,9 @@ mod tests {
             title: "Quarterly plan".into(),
             start: 14,
             end: 28,
+            day: None,
+            words: None,
+            typed: false,
         }];
         let text = g
             .text_with_links("Ask about the Quarterly plan".into(), accepted.clone())
@@ -2226,7 +3799,10 @@ mod tests {
                 vec![AcceptedLink {
                     title: "Quarterly plan".into(),
                     start: 4,
-                    end: 8
+                    end: 8,
+                    day: None,
+                    words: None,
+                    typed: false,
                 }]
             )
             .unwrap(),
