@@ -56,14 +56,58 @@ SHA-256 of the canonical graph path). POST /v1/op runs one op at the access leve
 routes do not follow it.
 
 sync (optional): set UTOPIA_SYNC_URL=<relay origin>, and optionally UTOPIA_SYNC_GRAPH=<id>
-and UTOPIA_SYNC_TOKEN=<token> (or a macOS keychain item, service \"utopia-sync\"). Without a
+and UTOPIA_SYNC_TOKEN=<token> (or the stored credential, see below). Without a
 window, `utopia sync setup` writes the same per-graph settings Settings → Sync uses, and
 `utopia sync` runs one sync. The token and E2E passphrase come from stdin (no echo on a
 terminal, or --token-stdin / --passphrase-stdin) and are stored only in the macOS keychain
-(services \"utopia-sync\" and \"utopia-sync-passphrase\"); they are never arguments, files or
-output. `utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E passphrase or
-queued changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app
-or serve-api already syncs it). `utopia sync --help` has the details.";
+(services \"utopia-sync\" and \"utopia-sync-passphrase\"), or on Linux in
+<config>/credentials.json, readable only by you (0600); they are never arguments or output.
+`utopia sync` exit codes: 0 synced, 1 failed (target, credential, E2E passphrase or queued
+changes), 2 Sync is Off for this graph, 3 another process owns the graph (the open app or
+serve-api already syncs it). `utopia sync --help` has the details.";
+
+pub const COMMANDS: [&str; 10] = [
+    "doctor",
+    "export",
+    "import-roam",
+    "capture",
+    "serve-api",
+    "mcp",
+    "sync",
+    "encrypt",
+    "decrypt",
+    "help",
+];
+
+pub fn for_program(text: &str, program: &str) -> String {
+    if program == "utopia" {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    for line in text.split_inclusive('\n') {
+        if line.contains("open the desktop app")
+            || line.trim_start().starts_with("utopia utopia://")
+        {
+            continue;
+        }
+        let indent = line.len() - line.trim_start().len();
+        let (lead, rest) = line.split_at(indent);
+        out.push_str(lead);
+        let mut rest = rest
+            .strip_prefix("utopia ")
+            .map_or_else(|| rest.to_string(), |r| format!("{program} {r}"));
+        for command in COMMANDS {
+            for before in ["`", " ", "("] {
+                rest = rest.replace(
+                    &format!("{before}utopia {command}"),
+                    &format!("{before}{program} {command}"),
+                );
+            }
+        }
+        out.push_str(&rest);
+    }
+    out
+}
 
 /// What a process that cannot become the graph's owner says (MC-4), in the window and on
 /// stderr.
@@ -121,7 +165,7 @@ pub fn open_owned(graph: &Path) -> Result<Owned> {
 /// Read a passphrase from the terminal without echoing it. The caller decides when to
 /// prompt (a terminal) and what the prompt says; `utopia sync setup` uses it for its
 /// token and passphrase too.
-pub(crate) fn prompt_secret(prompt: &str) -> Result<String> {
+pub fn prompt_secret(prompt: &str) -> Result<String> {
     use std::io::Write;
     eprint!("{prompt}");
     std::io::stderr().flush()?;
@@ -355,6 +399,36 @@ pub fn serve_api(graph: &Path, addr: &str, config: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_for_a_binary_with_no_window() {
+        assert_eq!(
+            for_program(USAGE, "utopia"),
+            USAGE,
+            "the app keeps its text"
+        );
+        let ut = for_program(USAGE, "ut");
+        assert!(!ut.contains("open the desktop app"), "{ut}");
+        assert!(!ut.contains("utopia://"), "{ut}");
+        assert!(ut.contains("\n  ut doctor <file.utopia>"), "{ut}");
+        assert!(
+            ut.contains("\n  ut sync --graph <file.utopia> [--json]"),
+            "{ut}"
+        );
+        assert!(ut.contains("`ut sync --continuous`"), "{ut}");
+        assert!(
+            !ut.contains("  utopia "),
+            "no command keeps the app's name: {ut}"
+        );
+        assert!(ut.contains("<file.utopia>"), "file names are not commands");
+        assert_eq!(
+            for_program(
+                "unknown option \"-x\".\n\nusage:\n  utopia sync --graph <f>",
+                "ut"
+            ),
+            "unknown option \"-x\".\n\nusage:\n  ut sync --graph <f>"
+        );
+    }
 
     #[test]
     fn doctor_and_export_on_a_real_file() {

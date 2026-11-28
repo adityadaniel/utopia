@@ -133,7 +133,11 @@ impl Secrets for Keychain {
                 Err(_) => Err("Could not read the sync credential from Keychain.".into()),
             }
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            file_secrets::FileSecrets::in_config_dir().get(&self.service(service), account)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (service, account);
             Ok(None)
@@ -149,7 +153,11 @@ impl Secrets for Keychain {
             )
             .map_err(|_| "Could not save the sync credential in Keychain.".into())
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            file_secrets::FileSecrets::in_config_dir().set(&self.service(service), account, value)
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = (service, account, value);
             Err("Secret storage requires macOS Keychain.".into())
@@ -257,6 +265,8 @@ impl Environment {
     }
 }
 
+#[cfg(unix)]
+pub mod file_secrets;
 pub mod probe;
 #[cfg(test)]
 mod tests;

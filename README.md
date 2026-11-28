@@ -112,6 +112,27 @@ terminal, or `--token-stdin` / `--passphrase-stdin` for scripts), never from arg
 process owns the graph (the open app syncs it). [`docs/sync-modes.md`](docs/sync-modes.md)
 has the agent/`launchd` workflow, and `utopia sync --help` has every option.
 
+### `ut`: the commands without the app
+
+`ut` is the same set of commands in a binary with no window toolkit (no GPUI), so you can copy
+it onto a server, Linux included, and sync or serve a graph with no desktop app:
+
+```bash
+make install-ut                          # builds target/release/ut, copies it to ~/.local/bin
+make install-ut PREFIX=/usr/local        # or /usr/local/bin (may need sudo)
+
+ut sync setup --graph ~/notes.utopia --mode relay --url https://relay.example --graph-id notes
+ut sync --graph ~/notes.utopia
+ut sync --continuous --graph ~/notes.utopia   # keep syncing; serves the API for `ut mcp`
+```
+
+Every `utopia <command>` above works as `ut <command>`; only opening the window and
+`utopia://` links need the app. On macOS `ut` keeps the token and passphrase in the Keychain,
+as the app does. Linux has no Keychain, so there they go in `credentials.json` in the config
+directory (`$UTOPIA_CONFIG_DIR`, else `$XDG_CONFIG_HOME/utopia`, else `~/.config/utopia`), a
+file only you can read (mode 0600); `ut` refuses the file if others can read it. `UTOPIA_SYNC_TOKEN` and `UTOPIA_SYNC_PASSPHRASE` still override
+both for one run. `ut` exits 64 for a command it does not know.
+
 ## Keyboard essentials
 
 These are the defaults. Change any of them in Settings → Keybindings; Cmd+/ shows the full

@@ -1222,7 +1222,7 @@ Daily note (today only) · bullet capture · page/block refs (insert) · backlin
 
 - No network calls except sync and update checks. No telemetry by default; opt-in anonymous crash reports.
 - Local graph unencrypted at rest in v1 (rely on OS full-disk encryption); SQLCipher option in v1.1.
-- Sync tokens stored in the OS keychain, never in `graph.db`.
+- Sync tokens stored in the OS keychain, never in `graph.db`. On Linux, which has no keychain (and a server usually no Secret Service), the standalone `ut` keeps them in a `0600` file in the config directory instead (ADR 0014).
 - Server sees ciphertext only once E2E lands.
 - The E2E key-check marker (`setup_e2e_check`, a fixed plaintext sealed under the graph key) is an **offline verifier**: anyone holding the graph file or a rolling backup can test passphrase guesses against it at the Argon2 cost, without the relay. That is the same oracle a relay's ciphertext gives, and the file already holds the notes, so the exposure is passphrase reuse elsewhere; the marker is what makes a copied graph or a lost Keychain item unable to re-key silently (§12.6). A distinct, higher-cost derivation for the marker alone would not remove the oracle (the relay's ciphertext still is one), so the cost stays shared with payload encryption and the trade-off is documented here instead.
 - Assistant access (§13.8) is off by default. When the owner turns it on, text that an assistant reads goes to that assistant and to its model provider. Utopia itself makes no network call for this. Settings says so adjacent to the control that turns access on (MC-12).

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/utopia-core", "crates/utopia-doc", "crates/utopia-store", "crates/utopia-sync", "crates/utopia-ui", "crates/utopia-app", "crates/utopia-proto", "crates/utopia-syncd", "crates/utopia-api", "crates/utopia-mcp", "crates/utopia-plugin", "crates/utopia-ffi", "xtask"]
+members = ["crates/utopia-core", "crates/utopia-doc", "crates/utopia-store", "crates/utopia-sync", "crates/utopia-ui", "crates/utopia-app", "crates/utopia-cli", "crates/utopia-proto", "crates/utopia-syncd", "crates/utopia-api", "crates/utopia-mcp", "crates/utopia-plugin", "crates/utopia-ffi", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,6 +14,7 @@ utopia-doc = { path = "crates/utopia-doc" }
 utopia-store = { path = "crates/utopia-store" }
 utopia-sync = { path = "crates/utopia-sync" }
 utopia-ui = { path = "crates/utopia-ui" }
+utopia-cli = { path = "crates/utopia-cli" }
 utopia-api = { path = "crates/utopia-api" }
 utopia-mcp = { path = "crates/utopia-mcp" }
 utopia-plugin = { path = "crates/utopia-plugin" }

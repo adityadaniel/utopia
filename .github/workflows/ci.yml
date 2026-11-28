@@ -32,8 +32,8 @@ env:
 
 jobs:
   check:
-    # macOS only: the app links AppKit, PDFKit and the macOS keychain, and utopia-store
-    # builds SQLCipher. There is no Linux target to check against.
+    # The whole workspace on macOS: the app links AppKit, PDFKit and the macOS keychain, and
+    # utopia-store builds SQLCipher. Only the standalone `ut` is checked on Linux (linux-cli).
     name: build, test, clippy, fmt
     runs-on: macos-15
     timeout-minutes: 60
@@ -79,3 +79,58 @@ jobs:
       # `xtask bench` is deliberately not run here: it asserts the §15.1 performance
       # budgets, and a shared CI runner's timings are not comparable to a real machine.
       # Run it locally in release before changing anything performance-sensitive.
+
+  linux-cli:
+    # The standalone `ut` (crates/utopia-cli) is the one part meant to run on Linux: it has no
+    # GPUI, and on Linux it keeps sync secrets in a 0600 file (ADR 0014). Build and test it
+    # there, then run a real `ut sync setup` and check the file it writes.
+    name: ut on Linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ubuntu-latest
+
+      - name: No GPUI in ut
+        run: |
+          tree=$(cargo tree --locked -p utopia-cli -e normal)
+          if grep -q gpui <<<"$tree"; then
+            echo "::error::utopia-cli depends on gpui"; exit 1
+          fi
+
+      - name: cargo build
+        run: cargo build --locked -p utopia-cli
+
+      - name: cargo test
+        run: cargo test --locked -p utopia-cli -p utopia-sync
+
+      - name: cargo clippy
+        run: cargo clippy --locked -p utopia-cli -p utopia-sync --all-targets -- -D warnings
+
+      - name: ut sync setup keeps secrets in a 0600 file
+        run: |
+          set -eu
+          export UTOPIA_CONFIG_DIR="$RUNNER_TEMP/utcfg"
+          mkdir -p "$RUNNER_TEMP/folder"
+          printf 'ci-token\nci-passphrase\n' | target/debug/ut sync setup \
+            --graph "$RUNNER_TEMP/g.utopia" --mode folder --folder "$RUNNER_TEMP/folder" \
+            --graph-id ci --token-stdin --passphrase-stdin
+          test "$(stat -c %a "$UTOPIA_CONFIG_DIR/credentials.json")" = 600
+          test "$(stat -c %a "$UTOPIA_CONFIG_DIR")" = 700
+          status=$(target/debug/ut sync status --graph "$RUNNER_TEMP/g.utopia")
+          grep -q "token stored, passphrase stored" <<<"$status"
+          target/debug/ut sync --graph "$RUNNER_TEMP/g.utopia"
+          chmod 644 "$UTOPIA_CONFIG_DIR/credentials.json"
+          code=0
+          target/debug/ut sync --graph "$RUNNER_TEMP/g.utopia" 2>"$RUNNER_TEMP/err" || code=$?
+          test "$code" = 1
+          grep -q "chmod 600" "$RUNNER_TEMP/err"

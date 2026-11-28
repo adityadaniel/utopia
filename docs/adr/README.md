@@ -19,6 +19,7 @@ is where the "why" lives. Cite an ADR from a test name, a commit or a PR, not fr
 | [0011](0011-plugin-sandbox.md) | WASM plugin sandbox and its run result |
 | [0012](0012-dev-tooling.md) | Benchmarks, screenshots, the icon and the mobile check |
 | [0013](0013-vim-mode.md) | Vim mode: a pure grammar, state beside the session, one interceptor |
+| [0014](0014-standalone-cli-and-linux-credentials.md) | A standalone `ut` binary, and sync credentials in a file on Linux |
 | [0015](0015-typed-dates-on-the-phone.md) | Typed dates on the phone mean the day the chip was tapped |
 
 To add one: copy the shape of an existing file (Status, Context, Decision, Consequences),

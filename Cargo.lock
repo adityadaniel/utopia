@@ -7485,12 +7485,29 @@ dependencies = [
  "serde_json",
  "tempfile",
  "utopia-api",
+ "utopia-cli",
  "utopia-core",
  "utopia-mcp",
  "utopia-store",
  "utopia-sync",
  "utopia-syncd",
  "utopia-ui",
+]
+
+[[package]]
+name = "utopia-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "utopia-api",
+ "utopia-core",
+ "utopia-mcp",
+ "utopia-store",
+ "utopia-sync",
+ "utopia-syncd",
 ]
 
 [[package]]

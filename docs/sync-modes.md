@@ -368,8 +368,34 @@ that must sync before anyone logs in, and keep the plist readable by you alone.
 
 `UTOPIA_SYNC_URL`, `UTOPIA_SYNC_FOLDER`, `UTOPIA_LAN_SERVE` and `UTOPIA_SYNC_GRAPH`
 override the saved transport for a run (setup and config refuse to save while one is set),
-and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the Keychain credentials without
+and `UTOPIA_SYNC_TOKEN` / `UTOPIA_SYNC_PASSPHRASE` override the stored credentials without
 being saved.
+
+**Without the app: `ut`.** `cargo build --release -p utopia-cli` builds `ut`, the same
+commands (`ut sync setup`, `ut sync`, `ut sync --continuous`, `ut mcp`, …) with no window
+toolkit, so it runs on a machine that has no Utopia app, Linux included. On macOS its secrets
+are the Keychain items above. On Linux, which has no Keychain (and a server usually no Secret
+Service), `sync setup` writes them to `<config>/credentials.json` (`~/.config/utopia` unless
+`UTOPIA_CONFIG_DIR` or `XDG_CONFIG_HOME` says otherwise): one JSON object keyed by service and
+graph id, the directory `0700` and the file `0600`, replaced whole on each write. A file
+others can read is refused, not used. `sync launchd-plist` is macOS-only; on Linux run the
+daemon from a systemd user unit, for example `~/.config/systemd/user/utopia-sync.service`:
+
+```ini
+[Unit]
+Description=Utopia sync for notes.utopia
+
+[Service]
+ExecStart=%h/.local/bin/ut sync --continuous --graph %h/notes.utopia
+Restart=on-failure
+RestartPreventExitStatus=2 3
+
+[Install]
+WantedBy=default.target
+```
+
+then `systemctl --user enable --now utopia-sync` (and `loginctl enable-linger $USER` so it
+runs while you are logged out). It reads the secrets from `credentials.json` like `ut sync`.
 
 ## Debugging sync
 

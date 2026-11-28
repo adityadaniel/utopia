@@ -105,7 +105,7 @@ fn config(args: &[String]) -> Result<()> {
 /// likes, so the graph it pins must not be relative (MC-13): resolve a relative `--graph`
 /// against the directory the owner typed it in. Nothing here opens or requires the file.
 /// Settings → Assistants shows the same text, so it resolves the path the same way.
-pub(crate) fn absolute(graph: &Path) -> Result<PathBuf> {
+pub fn absolute(graph: &Path) -> Result<PathBuf> {
     if graph.is_absolute() {
         return Ok(graph.to_path_buf());
     }

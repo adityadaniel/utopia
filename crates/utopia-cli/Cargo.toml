@@ -1,0 +1,25 @@
+[package]
+name = "utopia-cli"
+description = "Utopia's headless commands (doctor, export, capture, serve-api, mcp, sync) with no window toolkit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "ut"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+libc.workspace = true
+serde_json.workspace = true
+utopia-api.workspace = true
+utopia-core.workspace = true
+utopia-mcp.workspace = true
+utopia-store.workspace = true
+utopia-sync.workspace = true
+utopia-syncd = { path = "../utopia-syncd" }
+
+[dev-dependencies]
+tempfile.workspace = true
