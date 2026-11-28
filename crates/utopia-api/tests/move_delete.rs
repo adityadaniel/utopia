@@ -518,3 +518,89 @@ fn mc_8_a_moved_away_subtree_does_not_count_towards_the_depth_ceiling() {
     let report = s.doctor().expect("doctor runs");
     assert!(report.is_ok(), "doctor: {report:?}");
 }
+
+#[test]
+fn mc_8_a_write_during_an_open_insert_run_is_its_own_undo_step() {
+    use utopia_core::{Command, TextEdit};
+    use utopia_store::EditOpts;
+
+    let mut s = store();
+    let typed = append(&mut s, "Reading", "one", None);
+    let page = page(&mut s, "Reading");
+    let block = BlockId(typed.clone());
+    let depth = s.undo_depth();
+
+    s.begin_undo_run();
+    s.execute(
+        &page,
+        vec![Command::SetBlockText {
+            id: block.clone(),
+            edit: TextEdit {
+                range: 3..3,
+                insert: "!".into(),
+            },
+        }],
+        EditOpts {
+            coalesce: Some(block.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("the owner's edit");
+    assert!(s.in_undo_run(), "the run is open, as it is inside Insert");
+
+    call(
+        &mut s,
+        json!({
+            "op": "append_outline",
+            "title": "Project X",
+            "markdown": "- from an assistant",
+            "create": false,
+        }),
+    )
+    .expect("the assistant's write");
+    assert!(
+        !s.in_undo_run(),
+        "the write closed the run instead of folding into it (MC-8, VM-12)"
+    );
+
+    s.begin_undo_run();
+    s.set_clock(Some(10_000));
+    s.execute(
+        &page,
+        vec![Command::SetBlockText {
+            id: block.clone(),
+            edit: TextEdit {
+                range: 4..4,
+                insert: "?".into(),
+            },
+        }],
+        EditOpts {
+            coalesce: Some(block.clone()),
+            ..Default::default()
+        },
+    )
+    .expect("more typing");
+    s.end_undo_run();
+
+    assert_eq!(
+        s.undo_depth(),
+        depth + 3,
+        "the owner's two parts and the assistant's call are three steps"
+    );
+    assert_eq!(
+        rows(&mut s, "Reading"),
+        vec![("one!?".to_string(), 0)],
+        "the page has both halves of the typing"
+    );
+
+    s.undo().expect("an undo");
+    assert_eq!(rows(&mut s, "Reading"), vec![("one!".to_string(), 0)]);
+    assert_eq!(
+        rows(&mut s, "Project X"),
+        vec![("from an assistant".to_string(), 0)],
+        "the assistant's blocks are untouched"
+    );
+    s.undo().expect("an undo");
+    assert_eq!(rows(&mut s, "Project X"), Vec::<(String, usize)>::new());
+    assert_eq!(rows(&mut s, "Reading"), vec![("one!".to_string(), 0)]);
+}

@@ -350,6 +350,7 @@ pub const BULLET_SIZE: f32 = 6.;
 pub const COLLAPSED_RING: f32 = 12.;
 /// The collapse chevron (§3.1).
 pub const CARET_SIZE: f32 = 12.;
+pub const VIM_CURSOR_MIN_WIDTH: f32 = 8.;
 const SWITCH_WIDTH: f32 = 34.;
 const SWITCH_HEIGHT: f32 = 20.;
 const SWITCH_PADDING: f32 = 2.;

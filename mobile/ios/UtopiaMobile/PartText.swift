@@ -73,3 +73,15 @@ struct BlockPlaceholderView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
+
+#if DEBUG
+#Preview("Block text") {
+    VStack(alignment: .leading, spacing: 12) {
+        PartTextView(parts: PreviewData.today.blocks[0].parts, size: 16, weight: .medium, colour: Tokens.ink)
+        PartTextView(parts: PreviewData.today.blocks[4].parts)
+        PartTextView(parts: PreviewData.today.blocks[3].parts, colour: Tokens.muted, struck: true)
+        BlockPlaceholderView(text: "A code block")
+    }
+    .padding()
+}
+#endif

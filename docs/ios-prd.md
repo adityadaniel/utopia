@@ -16,7 +16,7 @@ colour, and the Send writes `[[Title]]` back exactly as typed (§4.6, AC-4.14).
 
 **What changed in 0.3.** Words in the compose box that name a day now get a date chip like a
 page-title chip: a tap links the day the reader saw, and the Send writes its title (§4.6,
-AC-4.12, AC-4.13, ADR 0013). The Date control stays.
+AC-4.12, AC-4.13, ADR 0015). The Date control stays.
 
 **What changed in 0.2.** The owner tried four interactive prototypes and chose direction A
 in a changed form: the outline is written in the compose box, the phone only adds to
@@ -185,9 +185,9 @@ and this area.
   action and no drag.
 - An empty day shows one line of `muted` text in the middle of the log: "Nothing for
   today yet."
-- Earlier days: scroll up past the top of today to load the day before, with its own
-  header row (weekday and title). They are read-only in the same way. A Send always goes
-  to today (AC-2.3).
+- **Today only.** The log is pinned to today's note and shows no other day. An earlier
+  day opens from Find (its "Yesterday" row, or a search) as a read-only page screen
+  (IO-7). A Send always goes to today (AC-2.3).
 
 ### 4.5 The compose box
 
@@ -286,7 +286,7 @@ chip "Link **November 26th, 2026**" with that day's title, next to any title chi
 forms are `today`, `tomorrow`, `yesterday`, `friday`, `next friday`, `in 3 days`,
 `2 weeks ago`, `Nov 26`, `26 November`, `November 26th` and `2026-11-26`, in any letter
 case and as a whole word or phrase. A month and day with no year mean that day in the
-current year (ADR 0013).
+current year (ADR 0015).
 
 - A date chip works as a title chip does: a tap accepts the link for that line, the words
   stay as typed and show in `link` colour, the chip goes away, and the caret and keyboard
@@ -296,8 +296,9 @@ current year (ADR 0013).
 - The day is fixed when the chip is tapped, so the link means the day the reader saw. The
   typed words are stored with the link; it stays while the range still holds those same
   words (in any letter case) and the range sits on word boundaries. It is never dropped by
-  time, a launch or a refresh, only when the reader edits those words. An edit before or
-  after the words moves the range with them.
+  time, a launch or a refresh, only when the reader replaces those words with others. An
+  edit before or after the words moves the range with them, and replacing the whole
+  phrase with the same words in another letter case keeps the chosen day.
 - A bare number (`26`), a bare month name (`may`, `march`), a bare short weekday (`sun`,
   `sat`) and a numeric date (`11/6/26`, §7) are not date chips.
 - Which words are a date and which day they mean comes from the core (C1, C3); the app
@@ -352,21 +353,24 @@ is ticked in the day log (§4.4).
 - **Font.** The system font for text and the system monospaced font for the label font
   (weekday, times, row notes). This matches the desktop default. All sizes above are for
   the default text size and must follow Dynamic Type.
-- **Colour.** The token names of `DESIGN.md` ("Quiet paper"). Light values:
+- **Colour.** One accent: the blue `link` of `DESIGN.md` §2.1 (`#2D5BD2` light, `#7FA3F0`
+  dark), with `link-tint` as the fill behind a control that is on. It marks links, the
+  text caret, the Send button, a done to-do and the tint of system controls. Every other
+  colour is an iOS system colour, so the app follows the system's light, dark and
+  Increase Contrast looks. The views keep the `DESIGN.md` token names (`Tokens.swift`):
 
-  | Token | Value | Token | Value |
+  | Token | iOS colour | Token | iOS colour |
   |---|---|---|---|
-  | `paper` | `#FFFFFF` | `ink` | `#1B1B19` |
-  | `shelf` | `#F6F6F4` | `ink-3` | `#57574F` |
-  | `well` | `#FAFAF8` | `muted` | `#6C6C65` |
-  | `selected` | `#E9E9E5` | `bullet` | `#8A8A83` |
-  | `line` | `#E8E7E3` | `disabled` | `#B9B8B1` |
-  | `line-soft` | `#EFEEEA` | `link` | `#2D5BD2` |
-  | `line-strong` | `#E1E0DB` | `link-hover` | `#2249B0` |
-  | `success` | `#1F7A3D` | `link-tint` | `#EAEFFB` |
+  | `paper` | `systemBackground` | `ink` | `label` |
+  | `shelf` | `secondarySystemBackground` | `ink-3` | `secondaryLabel` |
+  | `well` | `secondarySystemBackground` | `muted` | `secondaryLabel` |
+  | `selected` | `tertiarySystemFill` | `placeholder` | `placeholderText` |
+  | `line` | `separator` | `bullet` | `systemGray2` |
+  | `line-soft` | `separator` | `disabled` | `tertiaryLabel` |
+  | `line-strong` | `opaqueSeparator` | `success` | `systemGreen` |
+  | `danger` | `systemRed` | `warning` | `systemOrange` |
 
-  The dark theme uses the dark values of the same tokens from `DESIGN.md` and follows the
-  system appearance. No raw colour in a view.
+  No raw colour in a view.
 - **No shadows.** Surfaces differ by fill and by 1 pt rules.
 - **Targets.** Each control is 44 × 44 pt or larger (G5).
 
@@ -404,7 +408,7 @@ is ticked in the day log (§4.4).
 **In (v1):**
 
 - iPhone, portrait. One graph.
-- Today screen: the day log and the compose box (§4). Scroll up for earlier days.
+- Today screen: the day log of today and the compose box (§4). Earlier days open from Find.
 - A draft outline with Return, Deeper, Shallower, To-do, Link, Date and Send.
 - Tap-to-link suggestions from existing page titles and aliases.
 - Tick a to-do, and remove the tick, in the day log and on a page screen (K9).
@@ -598,7 +602,7 @@ The tick of a to-do is in IO-5.)*
   characters are not suggested. The Link control still finds them.
 - **A typed date that is ambiguous** (`11/6/26`). Never linked as a date (existing PRD
   §5.5). A month and day without a year (`Nov 26`) mean that day in the current year, even
-  when it has already passed (ADR 0013).
+  when it has already passed (ADR 0015).
 - **A new title that differs from an existing one only by case or spacing.** It links to
   the existing page. No second page is made.
 - **Widget tapped while the graph is locked** (encrypted at rest). The unlock screen
@@ -697,7 +701,7 @@ goes below an entry sent before; each Send starts new top-level blocks, K11).
 - A8. The existing shell is a starting point to replace, not to extend as is. [ASSUMPTION]
 - A9. Attachments made on the Mac show as a name and type on the phone; images show a
   preview once downloaded. [ASSUMPTION]
-- A10. The reading parts (page screen, search, earlier days) stay in v1. K6 is about
+- A10. The reading parts (page screen, search, earlier days as pages) stay in v1. K6 is about
   writing. [ASSUMPTION]
 - A11. The system font is used, as on the desktop by default; the prototype used IBM
   Plex. [ASSUMPTION]

@@ -255,3 +255,24 @@ final class LineTextView: UITextView {
         super.deleteBackward()
     }
 }
+
+#if DEBUG
+#Preview("Line editor") {
+    LineEditor(
+        line: DraftLine(text: "Meeting with Dana"),
+        parts: PreviewData.parts([.plain("Meeting with "), .page("Dana", PreviewData.danaID)]),
+        isActive: false,
+        caret: nil,
+        size: 16,
+        onText: { _ in },
+        onReturn: {},
+        onDeleteAtStart: {},
+        onPicker: {},
+        onCaret: { _ in },
+        onFocus: {},
+        onPasteLines: { _ in }
+    )
+    .frame(height: 22)
+    .padding()
+}
+#endif

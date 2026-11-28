@@ -482,6 +482,13 @@ fn parse_date(store: &Store, s: &str) -> Result<NaiveDate, ApiError> {
 /// Run one operation against the store. Writes commit before returning and name the pages
 /// they touched in [`Outcome::changed`]; [`Op::kind`] says which ops those are.
 pub fn handle(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
+    if op.kind() == OpKind::Write {
+        store.end_undo_run();
+    }
+    handle_op(store, op)
+}
+
+fn handle_op(store: &mut Store, op: Op) -> Result<Outcome, ApiError> {
     match op {
         Op::ListPages { daily } => {
             let pages = store.list_pages(daily)?;

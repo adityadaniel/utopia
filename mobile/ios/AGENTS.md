@@ -13,7 +13,8 @@ change, and write its id in tests and comments. A change to §4 goes through the
 | Path | What it is |
 |---|---|
 | `UtopiaMobile/` | The SwiftUI app. One graph, the Today screen, read-only pages, Find, Sync, first run. |
-| `UtopiaMobile/Tokens.swift` | The colour tokens of `DESIGN.md` §2.1, light and dark, under the Mac names. |
+| `UtopiaMobile/Tokens.swift` | The colours under the Mac token names: the blue `link` accent of `DESIGN.md` §2.1, and iOS system colours for the rest (ios-prd §4.7). |
+| `UtopiaMobile/PreviewData.swift` | Mock pages, blocks and a draft for the SwiftUI previews (`DEBUG` only). |
 | `UtopiaMobile/CoreClient.swift` | The one place that calls the generated bindings. It runs each call off the main actor. |
 | `UtopiaMobile/Draft.swift` | The draft outline in the compose box, and its rules (§4.5). |
 | `UtopiaMobile/Storage.swift` | Paths, relay settings (`UserDefaults`) and secrets (Keychain). |
@@ -119,6 +120,10 @@ cargo run -p xtask -- seed-phone target/phone/g.utopia   # the scratch graph the
 5. **Local state stays local (C7).** The draft, recents and scroll position never sync.
    Secrets go only to the Keychain (C6).
 6. **VoiceOver.** Each control has a spoken label from §4.5.
+7. **Previews.** Every view file ends with `#Preview`s inside `#if DEBUG`, one for each state
+   that matters (empty, error, picker open, dark). They use `AppModel.preview(...)` and
+   `PreviewData`; a preview model never opens a graph or calls the relay. A new view adds
+   its previews, and new mock data goes into `PreviewData.swift`.
 
 ## Skills
 
@@ -139,12 +144,20 @@ Read these before you write Swift:
 - The day log shows equal times for seeded blocks: a block's creation time is its ULID's
   timestamp, so a seed cannot fake it.
 - Open review findings for the first build (Send and typing at the same time, a kill during
-  Send, the first Send in two commits, and others) are listed in the pull request that
-  added the app.
-- An edit that touches a chip, picker or date link drops that link; an edit elsewhere on
-  the line shifts it. A typed `[[Title]]` link follows an edit inside its words and is
-  written verbatim again; a typed relative-date link becomes a typed page link when edited
-  that way. An edit that covers a typed link or crosses either edge drops it.
+  Send, the first Send in two commits, link ranges after edits, and others) are listed in
+  the pull request that added the app.
+- Editing text before or after a link moves its stored range with the single edit the
+  text view reports (`rebase_links`; when none is reported the core's `edit_between`
+  computes one on whole Unicode scalars, so it never splits a surrogate pair, and for a
+  pure insertion or deletion picks an equivalent position outside an accepted link, date
+  or typed, when one exists). A chip or picker title link is dropped when an edit touches
+  its words and shifted otherwise. A replacement inside or across a date chip's words
+  keeps the date while the resulting words still match the stored words in any letter
+  case, including replacing the whole phrase; replacing them with other words drops it. A
+  typed `[[Title]]` link follows an edit inside its words and is written verbatim again;
+  a typed relative-date link becomes a typed page link when edited that way; an edit that
+  covers a typed link or crosses either edge drops it. A picker insert rebases the older
+  links before it appends the new one.
 - A date link whose graph date format is ambiguous (`MM/dd/yyyy`) is displayed with the
   formatted title but sent as the ISO date, because the formatted title does not resolve
   back to the chosen day.

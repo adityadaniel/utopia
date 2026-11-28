@@ -515,6 +515,316 @@ fn insert_after(
     (cmds, focus)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeRow {
+    pub depth: usize,
+    pub text: String,
+    pub kind: BlockKind,
+    pub checked: bool,
+}
+
+pub fn block_roots(
+    st: &PageState,
+    id: &BlockId,
+    count: usize,
+) -> Result<Vec<BlockId>, DomainError> {
+    node(st, id)?;
+    let mut roots = vec![id.clone()];
+    let mut cur = id.clone();
+    for _ in 1..count.max(1) {
+        let Some(next) = st.next_sibling(&cur, true) else {
+            break;
+        };
+        roots.push(next.clone());
+        cur = next;
+    }
+    Ok(roots)
+}
+
+pub fn block_ids(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<BlockId>, DomainError> {
+    let mut ids = Vec::new();
+    for r in block_roots(st, id, count)? {
+        ids.extend(st.subtree(&r, true));
+    }
+    Ok(ids)
+}
+
+pub fn block_tree(st: &PageState, id: &BlockId, count: usize) -> Result<Vec<TreeRow>, DomainError> {
+    let mut rows = Vec::new();
+    for r in block_roots(st, id, count)? {
+        let base = st.depth(&r);
+        for b in st.subtree(&r, true) {
+            let Some(n) = st.block(&b) else { continue };
+            rows.push(TreeRow {
+                depth: st.depth(&b) - base,
+                text: n.text.clone(),
+                kind: n.kind,
+                checked: n.checked,
+            });
+        }
+    }
+    Ok(rows)
+}
+
+pub fn delete_blocks(
+    st: &PageState,
+    id: &BlockId,
+    count: usize,
+    now: i64,
+    zoom: Option<&BlockId>,
+    collapsed: &dyn Fn(&BlockId) -> bool,
+) -> Result<Plan, DomainError> {
+    let ids = block_ids(st, id, count)?;
+    if ids.is_empty() {
+        return Err(DomainError::NoOp);
+    }
+    let rows = st.visible_rows(zoom, collapsed);
+    let find = |rows: &[(BlockId, usize)]| {
+        let ix = rows.iter().position(|(r, _)| r == id)?;
+        rows[ix..]
+            .iter()
+            .find(|(r, _)| !ids.contains(r))
+            .map(|(r, _)| (r.clone(), 0))
+            .or_else(|| {
+                rows[..ix]
+                    .iter()
+                    .rev()
+                    .find(|(r, _)| !ids.contains(r))
+                    .map(|(r, _)| (r.clone(), st.block(r).map_or(0, |b| b.text.len())))
+            })
+    };
+    let focus = find(&rows).or_else(|| find(&st.live_preorder()));
+    let plan = Plan {
+        cmds: vec![Command::SetDeleted {
+            ids,
+            deleted_at: Some(now),
+        }],
+        focus: None,
+    };
+    Ok(match focus {
+        Some((block, offset)) => plan.focus(&block, offset),
+        None => plan,
+    })
+}
+
+pub fn join_next(
+    st: &PageState,
+    id: &BlockId,
+    count: usize,
+    zoom: Option<&BlockId>,
+    collapsed: &dyn Fn(&BlockId) -> bool,
+    now: i64,
+) -> Result<Plan, DomainError> {
+    let start = node(st, id)?;
+    let mut sim = st.clone();
+    let mut cmds: Vec<Command> = Vec::new();
+    let mut caret = None;
+    for _ in 0..count.max(1) {
+        let rows = sim.visible_rows(zoom, collapsed);
+        let Some(ix) = rows.iter().position(|(r, _)| r == id) else {
+            break;
+        };
+        let Some(next) = rows.get(ix + 1).map(|(r, _)| r.clone()) else {
+            break;
+        };
+        let Some(n) = sim.block(&next).cloned() else {
+            break;
+        };
+        let text = sim.block(id).map(|b| b.text.clone()).unwrap_or_default();
+        let mut join = Vec::new();
+        if !n.text.is_empty() {
+            let space = !text.is_empty()
+                && !text.ends_with(char::is_whitespace)
+                && !n.text.starts_with(char::is_whitespace);
+            caret.get_or_insert(text.len() + usize::from(space));
+            join.push(Command::SetBlockText {
+                id: id.clone(),
+                edit: crate::command::TextEdit {
+                    range: text.len()..text.len(),
+                    insert: format!("{}{}", if space { " " } else { "" }, n.text),
+                },
+            });
+        }
+        let mut after = if n.parent.as_ref() == Some(id) {
+            sim.prev_sibling(&next, false)
+        } else {
+            sim.last_child(Some(id), false)
+        };
+        for c in &n.children {
+            if sim.block(c).is_none_or(|b| !b.present) {
+                continue;
+            }
+            let deepest = sim
+                .subtree(c, false)
+                .into_iter()
+                .filter(|d| sim.block(d).is_some_and(|b| b.present))
+                .map(|d| sim.depth(&d).saturating_sub(sim.depth(c)))
+                .max()
+                .unwrap_or(0);
+            if sim.depth(id) + 1 + deepest >= MAX_DROP_DEPTH {
+                return Err(DomainError::TooDeep);
+            }
+        }
+        for c in &n.children {
+            if sim.block(c).is_some_and(|b| b.present) {
+                join.push(Command::MoveBlock {
+                    id: c.clone(),
+                    parent: Some(id.clone()),
+                    after: after.clone(),
+                });
+                after = Some(c.clone());
+            }
+        }
+        join.push(Command::SetDeleted {
+            ids: vec![next.clone()],
+            deleted_at: Some(now),
+        });
+        for c in &join {
+            sim.apply(c, now)?;
+        }
+        cmds.extend(join);
+    }
+    if cmds.is_empty() {
+        return Err(DomainError::NoOp);
+    }
+    let caret = caret.unwrap_or(start.text.len());
+    Ok(Plan { cmds, focus: None }.focus(id, caret))
+}
+
+pub fn insert_tree_after(
+    st: &PageState,
+    id: &BlockId,
+    tree: &[TreeRow],
+    before: bool,
+    count: usize,
+) -> Result<Plan, DomainError> {
+    node(st, id)?;
+    if tree.is_empty() {
+        return Err(DomainError::NoOp);
+    }
+    let deepest = tree.iter().map(|r| r.depth).max().unwrap_or(0);
+    if st.depth(id) + deepest >= MAX_DROP_DEPTH {
+        return Err(DomainError::TooDeep);
+    }
+    let parent = st.parent_of(id);
+    let anchor = if before {
+        st.prev_sibling(id, false)
+    } else {
+        Some(id.clone())
+    };
+    let mut last: Vec<Option<BlockId>> = vec![anchor];
+    let mut parents: Vec<Option<BlockId>> = vec![parent];
+    let mut cmds: Vec<Command> = Vec::new();
+    let mut focus: Option<Focus> = None;
+    for _ in 0..count.max(1) {
+        for row in tree {
+            let d = row.depth.min(last.len());
+            let (parent, after) = if d < last.len() {
+                (parents[d].clone(), last[d].clone())
+            } else {
+                (last[d - 1].clone(), None)
+            };
+            let new_id = BlockId::new();
+            cmds.push(Command::InsertBlock {
+                id: new_id.clone(),
+                parent: parent.clone(),
+                after,
+                text: row.text.clone(),
+                kind: row.kind,
+            });
+            if row.checked {
+                cmds.push(Command::SetBlockKind {
+                    id: new_id.clone(),
+                    kind: row.kind,
+                    checked: true,
+                });
+            }
+            last.truncate(d);
+            parents.truncate(d);
+            last.push(Some(new_id.clone()));
+            parents.push(parent);
+            focus.get_or_insert(Focus {
+                block: new_id,
+                offset: 0,
+            });
+        }
+    }
+    Ok(Plan { cmds, focus })
+}
+
+pub fn restore_after(
+    st: &PageState,
+    ids: &[BlockId],
+    target: &BlockId,
+    before: bool,
+) -> Result<Plan, DomainError> {
+    node(st, target)?;
+    if ids.is_empty() {
+        return Err(DomainError::NoOp);
+    }
+    for id in ids {
+        match st.block(id) {
+            None => return Err(DomainError::BlockNotFound(id.clone())),
+            Some(b) if b.deleted_at.is_none() || b.moved_to.is_some() => {
+                return Err(DomainError::NoOp)
+            }
+            Some(_) => {}
+        }
+    }
+    if ids.contains(target) || ids.iter().any(|id| st.is_ancestor(id, target)) {
+        return Err(DomainError::NoOp);
+    }
+    let roots: Vec<BlockId> = ids
+        .iter()
+        .filter(|id| !st.parent_of(id).is_some_and(|p| ids.contains(&p)))
+        .cloned()
+        .collect();
+    let Some(first) = roots.first().cloned() else {
+        return Err(DomainError::NoOp);
+    };
+    let root_depth = st.depth(&first);
+    let deepest = ids
+        .iter()
+        .map(|id| st.depth(id))
+        .max()
+        .unwrap_or(root_depth);
+    if st.depth(target) + deepest.saturating_sub(root_depth) >= MAX_DROP_DEPTH {
+        return Err(DomainError::TooDeep);
+    }
+    let parent = st.parent_of(target);
+    let mut after = if before {
+        let mut prev = st.prev_sibling(target, false);
+        while let Some(p) = prev.clone() {
+            if !ids.contains(&p) {
+                break;
+            }
+            prev = st.prev_sibling(&p, false);
+        }
+        prev
+    } else {
+        Some(target.clone())
+    };
+    let mut cmds = vec![Command::SetDeleted {
+        ids: ids.to_vec(),
+        deleted_at: None,
+    }];
+    for root in &roots {
+        cmds.push(Command::MoveBlock {
+            id: root.clone(),
+            parent: parent.clone(),
+            after,
+        });
+        after = Some(root.clone());
+    }
+    Ok(Plan {
+        cmds,
+        focus: Some(Focus {
+            block: first,
+            offset: 0,
+        }),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -831,5 +1141,383 @@ mod tests {
         apply(&mut st, &plan);
         assert_eq!(rows(&st), vec![("a".into(), 0)]);
         assert!(st.block(&ids[2]).unwrap().deleted_at.is_some());
+    }
+
+    fn siblings(roots: usize, kids: usize) -> (PageState, Vec<BlockId>) {
+        let mut lines: Vec<(String, usize)> = Vec::new();
+        for r in 0..roots {
+            lines.push((format!("r{r}"), 0));
+            for k in 0..kids {
+                lines.push((format!("r{r}k{k}"), 1));
+            }
+        }
+        let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
+        page_with(&refs)
+    }
+
+    #[test]
+    fn vm_8_delete_blocks_takes_siblings_with_their_subtrees() {
+        let (mut st, ids) = siblings(3, 2);
+        let plan = delete_blocks(&st, &ids[0], 3, 9, None, &|_| false).unwrap();
+        assert_eq!(plan.cmds.len(), 1, "one SetDeleted, so one undo step");
+        assert_eq!(plan.focus, None, "the whole page went with it");
+        apply(&mut st, &plan);
+        assert_eq!(st.live_count(), 0);
+        for (i, id) in ids.iter().enumerate() {
+            assert_eq!(
+                st.block(id).unwrap().deleted_at,
+                Some(9),
+                "block {i} is a tombstone, not gone"
+            );
+        }
+        assert_eq!(st.blocks.len(), 9, "nine rows, none purged");
+    }
+
+    #[test]
+    fn vm_8_delete_blocks_focuses_the_next_then_the_previous() {
+        let (mut st, ids) = siblings(3, 2);
+        let plan = delete_blocks(&st, &ids[3], 1, 1, None, &|_| false).unwrap();
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[6].clone(),
+                offset: 0
+            })
+        );
+        apply(&mut st, &plan);
+        let plan = delete_blocks(&st, &ids[6], 1, 1, None, &|_| false).unwrap();
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[2].clone(),
+                offset: "r0k1".len()
+            })
+        );
+    }
+
+    #[test]
+    fn vm_10_the_roots_ids_and_rows_agree() {
+        let (mut st, ids) = siblings(3, 2);
+        assert_eq!(
+            block_roots(&st, &ids[6], 9).unwrap(),
+            vec![ids[6].clone()],
+            "the last root has no sibling below"
+        );
+        assert_eq!(
+            block_roots(&st, &ids[0], 2).unwrap(),
+            vec![ids[0].clone(), ids[3].clone()]
+        );
+        let cut = block_ids(&st, &ids[0], 2).unwrap();
+        assert_eq!(cut.len(), 6, "two roots, each with two children");
+        assert_eq!(cut[0], ids[0]);
+        let tree = block_tree(&st, &ids[0], 2).unwrap();
+        assert_eq!(tree.len(), 6);
+        assert_eq!(tree[0].depth, 0);
+        assert_eq!(tree[1].depth, 1);
+        assert_eq!(tree[3].depth, 0, "the second root is back at the top");
+        st.apply(
+            &Command::SetBlockKind {
+                id: ids[1].clone(),
+                kind: BlockKind::Todo,
+                checked: true,
+            },
+            1,
+        )
+        .unwrap();
+        let tree = block_tree(&st, &ids[0], 1).unwrap();
+        assert_eq!(tree[1].kind, BlockKind::Todo);
+        assert!(tree[1].checked);
+    }
+
+    #[test]
+    fn vm_8_join_next_keeps_the_text_and_the_children() {
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("b1", 1), ("c", 0)]);
+        let plan = join_next(&st, &ids[0], 1, None, &|_| false, 4).unwrap();
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[0].clone(),
+                offset: 2
+            })
+        );
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![("a b".into(), 0), ("b1".into(), 1), ("c".into(), 0)],
+            "the joined block's child moved up, the joined block is a tombstone"
+        );
+        assert_eq!(st.block(&ids[1]).unwrap().deleted_at, Some(4));
+        assert_eq!(st.block(&ids[1]).unwrap().text, "b", "its text is not lost");
+
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("c", 0), ("d", 0)]);
+        let plan = join_next(&st, &ids[0], 3, None, &|_| false, 4).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(rows(&st), vec![("a b c d".into(), 0)]);
+        assert_eq!(st.live_count(), 1);
+        assert!(plan
+            .cmds
+            .iter()
+            .all(|c| !matches!(c, Command::PurgeBlock { .. })));
+    }
+
+    #[test]
+    fn vm_8_join_next_refuses_a_join_that_would_pass_the_ceiling() {
+        let mut lines: Vec<(String, usize)> = vec![("a".into(), 0)];
+        lines.extend((0..(MAX_DROP_DEPTH - 1)).map(|d| (format!("c{d}"), d + 1)));
+        lines.push(("b".into(), 0));
+        lines.push(("b1".into(), 1));
+        let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
+        let (mut st, ids) = page_with(&refs);
+        let deepest = ids[MAX_DROP_DEPTH - 1].clone();
+        let before = rows(&st);
+        let r = join_next(&st, &deepest, 1, None, &|_| false, 7);
+        assert!(
+            matches!(r, Err(DomainError::TooDeep)),
+            "`b1` would land at depth {MAX_DROP_DEPTH}: {r:?}"
+        );
+        assert_eq!(rows(&st), before, "and nothing was planned");
+
+        let shallow = ids[MAX_DROP_DEPTH - 2].clone();
+        let plan = join_next(&st, &shallow, 1, None, &|_| false, 7).unwrap();
+        apply(&mut st, &plan);
+        assert!(
+            st.live_preorder().iter().all(|(_, d)| *d < MAX_DROP_DEPTH),
+            "the outline stays inside the ceiling: {:?}",
+            st.live_preorder()
+        );
+    }
+
+    #[test]
+    fn vm_10_restore_after_refuses_a_target_inside_the_cut() {
+        let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let cut = block_ids(&st, &ids[0], 1).unwrap();
+        let plan = delete_blocks(&st, &ids[0], 1, 3, None, &|_| false).unwrap();
+        apply(&mut st, &plan);
+        let arrived = BlockId::new();
+        st.apply(
+            &Command::InsertBlock {
+                id: arrived.clone(),
+                parent: Some(ids[0].clone()),
+                after: None,
+                text: "from another device".into(),
+                kind: BlockKind::Bullet,
+            },
+            4,
+        )
+        .unwrap();
+        let before = st.clone();
+        assert!(matches!(
+            restore_after(&st, &cut, &arrived, false),
+            Err(DomainError::NoOp)
+        ));
+        assert_eq!(st.canonical(), before.canonical(), "nothing was written");
+    }
+
+    #[test]
+    fn vm_10_restore_after_refuses_a_block_that_moved_away() {
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0)]);
+        let cut = block_ids(&st, &ids[0], 1).unwrap();
+        let plan = delete_blocks(&st, &ids[0], 1, 3, None, &|_| false).unwrap();
+        apply(&mut st, &plan);
+        st.apply(
+            &Command::SetMoved {
+                ids: vec![ids[0].clone()],
+                to: Some("elsewhere".into()),
+            },
+            5,
+        )
+        .unwrap();
+        assert!(matches!(
+            restore_after(&st, &cut, &ids[1], false),
+            Err(DomainError::NoOp)
+        ));
+    }
+
+    #[test]
+    fn vm_8_delete_blocks_focus_ignores_rows_a_collapse_hides() {
+        let (st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let collapsed = |b: &BlockId| b == &ids[0];
+        let plan = delete_blocks(&st, &ids[2], 1, 9, None, &collapsed).unwrap();
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[0].clone(),
+                offset: "a".len()
+            }),
+            "the row above is `a`, not its hidden child"
+        );
+    }
+    #[test]
+    fn vm_8_join_next_takes_the_next_visible_row() {
+        let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let collapsed = |_b: &BlockId| false;
+        let plan = join_next(&st, &ids[0], 1, None, &collapsed, 1).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(rows(&st), vec![("a a1".into(), 0), ("b".into(), 0)]);
+
+        let (mut st, ids) = page_with(&[("a", 0), ("a1", 1), ("b", 0)]);
+        let collapsed = |b: &BlockId| b == &ids[0];
+        let plan = join_next(&st, &ids[0], 1, None, &collapsed, 1).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(rows(&st), vec![("a b".into(), 0), ("a1".into(), 1)]);
+    }
+
+    #[test]
+    fn vm_10_insert_tree_keeps_kind_and_done_state() {
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0)]);
+        let tree = vec![
+            TreeRow {
+                depth: 0,
+                text: "todo".into(),
+                kind: BlockKind::Todo,
+                checked: true,
+            },
+            TreeRow {
+                depth: 1,
+                text: "heading".into(),
+                kind: BlockKind::Heading(2),
+                checked: false,
+            },
+        ];
+        let plan = insert_tree_after(&st, &ids[0], &tree, false, 1).unwrap();
+        let first = plan.focus.as_ref().unwrap().block.clone();
+        assert_ne!(
+            first, ids[0],
+            "new ids, so the copy does not take the original's place"
+        );
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![
+                ("a".into(), 0),
+                ("todo".into(), 0),
+                ("heading".into(), 1),
+                ("b".into(), 0)
+            ]
+        );
+        let inserted = st.block(&first).unwrap();
+        assert_eq!(inserted.kind, BlockKind::Todo);
+        assert!(inserted.checked, "a checked to-do stays checked");
+        let child = st.live_children(Some(&first))[0].clone();
+        assert_eq!(st.block(&child).unwrap().kind, BlockKind::Heading(2));
+
+        let plan = insert_tree_after(&st, &ids[1], &tree, true, 1).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st)[3..].to_vec(),
+            vec![("todo".into(), 0), ("heading".into(), 1), ("b".into(), 0)]
+        );
+        let plan = insert_tree_after(&st, &ids[0], &tree[..1], false, 2).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st)[1..3].to_vec(),
+            vec![("todo".into(), 0), ("todo".into(), 0)]
+        );
+    }
+
+    #[test]
+    fn vm_10_insert_tree_refuses_past_the_depth_ceiling() {
+        let mut lines: Vec<(String, usize)> =
+            (0..MAX_DROP_DEPTH).map(|d| (format!("d{d}"), d)).collect();
+        lines.push(("leaf".into(), 0));
+        let refs: Vec<(&str, usize)> = lines.iter().map(|(t, d)| (t.as_str(), *d)).collect();
+        let (st, ids) = page_with(&refs);
+        let deep = ids[MAX_DROP_DEPTH - 1].clone();
+        let shallow = ids[MAX_DROP_DEPTH].clone();
+        let tree = vec![
+            TreeRow {
+                depth: 0,
+                text: "x".into(),
+                kind: BlockKind::Bullet,
+                checked: false,
+            },
+            TreeRow {
+                depth: 1,
+                text: "y".into(),
+                kind: BlockKind::Bullet,
+                checked: false,
+            },
+        ];
+        assert_eq!(
+            insert_tree_after(&st, &deep, &tree, false, 1),
+            Err(DomainError::TooDeep)
+        );
+        assert!(insert_tree_after(&st, &shallow, &tree, false, 1).is_ok());
+    }
+
+    #[test]
+    fn vm_10_restore_after_keeps_the_ids() {
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("b1", 1), ("c", 0)]);
+        let cut = block_ids(&st, &ids[1], 1).unwrap();
+        {
+            let p = delete_blocks(&st, &ids[1], 1, 5, None, &|_| false).unwrap();
+            apply(&mut st, &p);
+        }
+        assert_eq!(rows(&st), vec![("a".into(), 0), ("c".into(), 0)]);
+        let plan = restore_after(&st, &cut, &ids[3], false).unwrap();
+        assert!(matches!(
+            plan.cmds[0],
+            Command::SetDeleted {
+                deleted_at: None,
+                ..
+            }
+        ));
+        assert_eq!(
+            plan.focus,
+            Some(Focus {
+                block: ids[1].clone(),
+                offset: 0
+            })
+        );
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![
+                ("a".into(), 0),
+                ("c".into(), 0),
+                ("b".into(), 0),
+                ("b1".into(), 1)
+            ]
+        );
+        assert_eq!(
+            st.block(&ids[2]).unwrap().deleted_at,
+            None,
+            "the subtree came back too"
+        );
+
+        let (mut st, ids) = page_with(&[("a", 0), ("b", 0), ("c", 0)]);
+        let cut = block_ids(&st, &ids[1], 1).unwrap();
+        {
+            let p = delete_blocks(&st, &ids[1], 1, 5, None, &|_| false).unwrap();
+            apply(&mut st, &p);
+        }
+        let plan = restore_after(&st, &cut, &ids[2], true).unwrap();
+        apply(&mut st, &plan);
+        assert_eq!(
+            rows(&st),
+            vec![("a".into(), 0), ("b".into(), 0), ("c".into(), 0)]
+        );
+        assert_eq!(
+            st.live_roots(),
+            vec![ids[0].clone(), ids[1].clone(), ids[2].clone()]
+        );
+    }
+
+    #[test]
+    fn vm_10_restore_after_refuses_live_and_missing_blocks() {
+        let (st, ids) = page_with(&[("a", 0), ("b", 0)]);
+        assert_eq!(
+            restore_after(&st, &[ids[1].clone()], &ids[0], false),
+            Err(DomainError::NoOp)
+        );
+        assert_eq!(
+            restore_after(&st, &[], &ids[0], false),
+            Err(DomainError::NoOp)
+        );
+        let missing = BlockId::new();
+        assert_eq!(
+            restore_after(&st, std::slice::from_ref(&missing), &ids[0], false),
+            Err(DomainError::BlockNotFound(missing))
+        );
     }
 }

@@ -1234,6 +1234,18 @@ impl Store {
         self.undo.seal();
     }
 
+    pub fn begin_undo_run(&mut self) {
+        self.undo.begin_run();
+    }
+
+    pub fn end_undo_run(&mut self) {
+        self.undo.end_run();
+    }
+
+    pub fn in_undo_run(&self) -> bool {
+        self.undo.in_run()
+    }
+
     pub fn can_undo(&self) -> bool {
         self.undo.can_undo()
     }

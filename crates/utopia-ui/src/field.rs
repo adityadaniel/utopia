@@ -12,7 +12,7 @@ use gpui::{
 };
 use utopia_core::text as t;
 
-use crate::theme::theme;
+use crate::theme::{theme, Theme, VIM_CURSOR_MIN_WIDTH};
 
 mod caret_motion;
 use caret_motion::{CaretMotion, Target as CaretTarget};
@@ -396,6 +396,12 @@ impl TextField {
 }
 
 /// Implemented by entities that own a [`TextField`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaretShape {
+    Bar,
+    Block,
+}
+
 pub trait FieldHost: EntityInputHandler + 'static {
     fn field(&self) -> &TextField;
     fn field_mut(&mut self) -> &mut TextField;
@@ -410,6 +416,16 @@ pub trait FieldHost: EntityInputHandler + 'static {
     fn caret_visible(&self) -> bool {
         true
     }
+
+    fn accepts_marked_text(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn caret_shape(&self, _cx: &App) -> CaretShape {
+        CaretShape::Bar
+    }
+
+    fn clamp_cursor(&mut self, _cx: &App) {}
 }
 
 /// How long the caret stays in one state while blinking, and how long it holds steady
@@ -596,6 +612,9 @@ macro_rules! impl_field_input_handler {
                 window: &mut gpui::Window,
                 cx: &mut gpui::Context<Self>,
             ) {
+                if !$crate::field::FieldHost::accepts_marked_text(self, cx) {
+                    return;
+                }
                 let f = $crate::field::FieldHost::field_mut(self);
                 let range = range_utf16
                     .as_ref()
@@ -685,7 +704,28 @@ impl<V: FieldHost> FieldElement<V> {
 
 pub struct Paint {
     selection: Vec<PaintQuad>,
+    block: Option<PaintQuad>,
     cursor: Option<PaintQuad>,
+}
+
+fn block_cursor(
+    at: Point<Pixels>,
+    f: &TextField,
+    pos: impl Fn(usize) -> Option<Point<Pixels>>,
+    line_height: Pixels,
+    th: &Theme,
+) -> PaintQuad {
+    let ix = f.cursor().min(f.text.len());
+    let next = t::next_grapheme(&f.text, ix);
+    let end = (next > ix).then(|| pos(next)).flatten();
+    let width = match end {
+        Some(e) if (e.y - at.y).abs() < px(1.) => (e.x - at.x).max(px(0.)),
+        _ => px(0.),
+    }
+    .max(px(VIM_CURSOR_MIN_WIDTH));
+    fill(Bounds::new(at, size(width, line_height)), th.selection)
+        .border_widths(px(1.))
+        .border_color(th.link)
 }
 
 impl<V: FieldHost> IntoElement for FieldElement<V> {
@@ -737,15 +777,22 @@ impl<V: FieldHost> Element for FieldElement<V> {
         let lh = layout.line_height();
         let caret = self.view.update(cx, |v, cx| {
             let smooth = v.smooth_caret(cx) && v.focus_handle_ref().is_focused(window);
-            let f = v.field_mut();
-            f.layout = Some(layout_now);
-            f.layout_text = shown;
-            f.bounds = Some(bounds);
-            let had_goal = f.goal.is_some();
-            f.resolve_goal();
-            if had_goal && f.goal.is_none() {
+            let (resolved, had_goal) = {
+                let f = v.field_mut();
+                f.layout = Some(layout_now);
+                f.layout_text = shown;
+                f.bounds = Some(bounds);
+                let had_goal = f.goal.is_some();
+                f.resolve_goal();
+                (had_goal && f.goal.is_none(), had_goal)
+            };
+            if resolved {
+                v.clamp_cursor(cx);
+            }
+            if had_goal && resolved {
                 cx.notify();
             }
+            let f = v.field_mut();
 
             let ix = if f.layout_text == f.text {
                 f.cursor().min(f.text.len())
@@ -821,8 +868,20 @@ impl<V: FieldHost> Element for FieldElement<V> {
                 }
             }
         }
-        let cursor = caret.map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.link));
-        Paint { selection, cursor }
+        let shape = self.view.read(cx).caret_shape(cx);
+        let block = match shape {
+            CaretShape::Block => caret.map(|at| block_cursor(at, f, pos, lh, &th)),
+            CaretShape::Bar => None,
+        };
+        let cursor = match shape {
+            CaretShape::Bar => caret.map(|p| fill(Bounds::new(p, size(px(2.), lh)), th.link)),
+            CaretShape::Block => None,
+        };
+        Paint {
+            selection,
+            block,
+            cursor,
+        }
     }
 
     fn paint(
@@ -841,8 +900,14 @@ impl<V: FieldHost> Element for FieldElement<V> {
             ElementInputHandler::new(bounds, self.view.clone()),
             cx,
         );
+        let focused = focus.is_focused(window);
         for q in prepaint.selection.drain(..) {
             window.paint_quad(q);
+        }
+        if focused {
+            if let Some(q) = prepaint.block.take() {
+                window.paint_quad(q);
+            }
         }
         Element::paint(
             &mut self.text,
@@ -854,7 +919,7 @@ impl<V: FieldHost> Element for FieldElement<V> {
             window,
             cx,
         );
-        if focus.is_focused(window) && self.view.read(cx).caret_visible() {
+        if focused && self.view.read(cx).caret_visible() {
             if let Some(c) = prepaint.cursor.take() {
                 window.paint_quad(c);
             }

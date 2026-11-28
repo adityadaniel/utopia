@@ -77,7 +77,7 @@ struct ComposeBox: View {
                 if line.text.isEmpty {
                     Text(placeholder(line))
                         .font(.system(size: textSize))
-                        .foregroundStyle(Tokens.muted)
+                        .foregroundStyle(Tokens.placeholder)
                         .padding(.top, textInset)
                         .allowsHitTesting(false)
                 }
@@ -178,7 +178,7 @@ struct ComposeBox: View {
         } label: {
             Image(systemName: symbol)
                 .font(.system(size: iconSize))
-                .foregroundStyle(enabled ? (on ? Tokens.linkHover : Tokens.ink3) : Tokens.disabled)
+                .foregroundStyle(enabled ? (on ? Tokens.link : Tokens.ink3) : Tokens.disabled)
                 .frame(width: Metrics.control, height: Metrics.control)
                 .background(
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
@@ -260,3 +260,32 @@ struct SuggestionRow: View {
         .accessibilityLabel(words.map { "Link \(title), \($0)" } ?? "Link \(title)")
     }
 }
+
+#if DEBUG
+#Preview("Compose box") {
+    ComposeBox()
+        .padding(12)
+        .environment(AppModel.preview())
+}
+
+#Preview("Compose box · Empty") {
+    ComposeBox()
+        .padding(12)
+        .environment(AppModel.preview(draft: PreviewData.emptyDraft))
+}
+
+#Preview("Compose box · Dark") {
+    ComposeBox()
+        .padding(12)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        .background(Tokens.paper)
+        .environment(AppModel.preview())
+        .preferredColorScheme(.dark)
+}
+
+#Preview("Suggestion chips") {
+    SuggestionRow()
+        .padding(12)
+        .environment(AppModel.preview(suggestions: PreviewData.suggestions))
+}
+#endif

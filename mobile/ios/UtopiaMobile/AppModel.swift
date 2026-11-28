@@ -106,6 +106,9 @@ final class AppModel {
     private var composingLines: Set<UUID> = []
     private var caretOffsets: [UUID: Int] = [:]
     private let work = LineWork()
+    #if DEBUG
+    private var fixture: PreviewFixture?
+    #endif
 
     var hasSuggestions: Bool { !suggestions.isEmpty || !dateSuggestions.isEmpty }
 
@@ -120,6 +123,9 @@ final class AppModel {
     // MARK: - Launch
 
     func launch() async {
+        #if DEBUG
+        if fixture != nil { return }
+        #endif
         errorMessage = nil
         let exists = FileManager.default.fileExists(atPath: Paths.graph.path)
         guard exists else {
@@ -186,7 +192,7 @@ final class AppModel {
             let day = try await core.today()
             today = day
             if let date = day.date {
-                earlier = try await core.daysBefore(date, count: 20)
+                earlier = try await core.daysBefore(date, count: 1)
             }
             if draft.lines.isEmpty {
                 draft = Draft()
@@ -207,22 +213,25 @@ final class AppModel {
         }
     }
 
-    /// Earlier days load as the log is scrolled up past today (§4.4).
-    func loadEarlier() async {
-        guard let core, let date = today?.date, earlier.count < 60 else { return }
-        do {
-            earlier = try await core.daysBefore(date, count: UInt32(earlier.count + 20))
-        } catch {
-            errorMessage = Self.describe(error)
-        }
-    }
-
     func page(_ id: String) async -> PageView? {
-        try? await core?.page(id)
+        #if DEBUG
+        if let fixture { return fixture.pages[id] }
+        #endif
+        return try? await core?.page(id)
     }
 
     func backlinks(_ id: String) async -> [(pageTitle: String, hits: [RefView])] {
-        guard let refs = try? await core?.backlinks(id) else { return [] }
+        let found: [RefView]?
+        #if DEBUG
+        if let fixture {
+            found = fixture.backlinks[id] ?? []
+        } else {
+            found = try? await core?.backlinks(id)
+        }
+        #else
+        found = try? await core?.backlinks(id)
+        #endif
+        guard let refs = found else { return [] }
         var order: [String] = []
         var grouped: [String: [RefView]] = [:]
         for ref in refs {
@@ -235,11 +244,17 @@ final class AppModel {
     }
 
     func search(_ words: String) async -> SearchResults? {
-        try? await core?.search(words)
+        #if DEBUG
+        if let fixture { return fixture.search(words) }
+        #endif
+        return try? await core?.search(words)
     }
 
     func recent() async -> [PageRef] {
-        (try? await core?.recentPages()) ?? []
+        #if DEBUG
+        if let fixture { return fixture.recent }
+        #endif
+        return (try? await core?.recentPages()) ?? []
     }
 
     func refreshRecents() async {
@@ -269,24 +284,19 @@ final class AppModel {
         let links = draft.lines[index].links
         draft.lines[index].text = text
         if Array(oldText.utf16) != Array(text.utf16) {
-            var change: LineEdit?
+            let change: LineEdit
             if let edit, edit.matches(text, oldText: oldText) {
                 change = edit
-            } else if let fallback = fallbackEdit(oldText, text, caret: caretOffsets[id]),
-                      fallback.matches(text, oldText: oldText) {
-                change = fallback
-            }
-            if let change {
-                draft.lines[index].links = rebaseLinks(
-                    textBefore: oldText,
-                    editStart: UInt32(max(0, change.start)),
-                    editRemovedLen: UInt32(max(0, change.removed)),
-                    replacement: change.replacement,
-                    links: links.map(\.accepted)
-                ).map(DraftLink.init)
             } else {
-                draft.lines[index].links = []
+                change = Self.fallbackEdit(oldText, text, links: links.map(\.accepted))
             }
+            draft.lines[index].links = rebaseLinks(
+                textBefore: oldText,
+                editStart: UInt32(max(0, change.start)),
+                editRemovedLen: UInt32(max(0, change.removed)),
+                replacement: change.replacement,
+                links: links.map(\.accepted)
+            ).map(DraftLink.init)
         }
         draft.lines[index].dropStaleLinks()
         draft.applyDepthRule()
@@ -304,6 +314,15 @@ final class AppModel {
         if !composing {
             absorbTypedLinks(in: id)
         }
+    }
+
+    private static func fallbackEdit(_ old: String, _ new: String, links: [AcceptedLink]) -> LineEdit {
+        let edit = editBetween(old: old, new: new, links: links)
+        return LineEdit(
+            start: Int(edit.start),
+            removed: Int(edit.removed),
+            replacement: edit.replacement
+        )
     }
 
     /// Rule 3: Return makes a new line below and puts the caret in it.
@@ -491,6 +510,7 @@ final class AppModel {
             DraftLink(title: title, start: caret, end: caret + title.utf16.count)
         )
         DraftStore.save(draft)
+        refreshParts(for: draft.lines[index])
         absorbTypedLinks(in: line.id)
         picker = nil
         focusLine(line.id, at: caret + title.utf16.count + 1)
@@ -548,6 +568,12 @@ final class AppModel {
     // MARK: - A to-do (§4.4, K9)
 
     func toggleTodo(block: BlockView) async {
+        #if DEBUG
+        if fixture != nil {
+            paintTodo(block.id, done: !block.checked)
+            return
+        }
+        #endif
         guard let core else { return }
         let done = !block.checked
         // The tick shows at once and does not wait for sync (AC-5.3).
@@ -636,34 +662,6 @@ final class AppModel {
         }
     }
 
-    private func fallbackEdit(_ oldText: String, _ newText: String, caret: Int?) -> LineEdit? {
-        let oldChars = Array(oldText)
-        let newChars = Array(newText)
-        let newLength = newText.utf16.count
-        let anchor = min(max(caret ?? newLength, 0), newLength)
-        let maxSuffix = max(0, newLength - anchor)
-        var suffix = 0
-        var suffixLength = 0
-        while suffix < oldChars.count && suffix < newChars.count {
-            let character = oldChars[oldChars.count - 1 - suffix]
-            guard character == newChars[newChars.count - 1 - suffix] else { break }
-            let length = String(character).utf16.count
-            guard suffixLength + length <= maxSuffix else { break }
-            suffix += 1
-            suffixLength += length
-        }
-        let shortest = min(oldChars.count, newChars.count) - suffix
-        var prefix = 0
-        while prefix < shortest && oldChars[prefix] == newChars[prefix] {
-            prefix += 1
-        }
-        let start = oldChars[..<prefix].reduce(0) { $0 + String($1).utf16.count }
-        let removed = oldChars[prefix..<(oldChars.count - suffix)]
-            .reduce(0) { $0 + String($1).utf16.count }
-        let replacement = String(newChars[prefix..<(newChars.count - suffix)])
-        return LineEdit(start: start, removed: removed, replacement: replacement)
-    }
-
     private func absorbTypedLinks(in id: UUID) {
         guard let core, let index = draft.index(of: id) else { return }
         let text = draft.lines[index].text
@@ -732,3 +730,54 @@ final class AppModel {
         return error.localizedDescription
     }
 }
+
+#if DEBUG
+struct PreviewFixture {
+    var pages: [String: PageView] = [:]
+    var backlinks: [String: [RefView]] = [:]
+    var recent: [PageRef] = []
+
+    func search(_ words: String) -> SearchResults {
+        let needle = words.lowercased()
+        let found = pages.values
+            .filter { $0.title.lowercased().contains(needle) }
+            .sorted { $0.title < $1.title }
+            .map { PageRef(id: $0.id, title: $0.title, date: $0.date) }
+        let hits = pages.values.sorted { $0.title < $1.title }.flatMap { page in
+            page.blocks
+                .filter { $0.plain.lowercased().contains(needle) }
+                .map { SearchHit(pageId: page.id, pageTitle: page.title, blockId: $0.id, text: $0.plain) }
+        }
+        return SearchResults(pages: found, blocks: hits)
+    }
+}
+
+extension AppModel {
+    static func preview(
+        phase: Phase = .ready,
+        today: PageView? = PreviewData.today,
+        earlier: [PageView] = [PreviewData.yesterday],
+        syncState: SyncState = .synced,
+        draft: Draft = PreviewData.draft,
+        suggestions: [TitleMatch] = [],
+        picker: Picker? = nil,
+        errorMessage: String? = nil,
+        fixture: PreviewFixture = PreviewData.fixture
+    ) -> AppModel {
+        let model = AppModel()
+        model.fixture = fixture
+        model.phase = phase
+        model.today = today
+        model.earlier = earlier
+        model.syncState = syncState
+        model.draft = draft
+        model.activeLine = draft.lines.last?.id
+        model.suggestions = suggestions
+        model.suggestionLine = suggestions.isEmpty ? nil : draft.lines.last?.id
+        model.picker = picker
+        model.errorMessage = errorMessage
+        model.recentPages = fixture.recent
+        return model
+    }
+}
+#endif
