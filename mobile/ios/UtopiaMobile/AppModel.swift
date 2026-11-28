@@ -103,7 +103,6 @@ final class AppModel {
     private var syncTask: Task<Void, Never>?
     private var suggestionTask: Task<Void, Never>?
     #if DEBUG
-    /// The mock answers of a SwiftUI preview. A model that has one never opens a graph.
     private var fixture: PreviewFixture?
     #endif
 
@@ -186,8 +185,6 @@ final class AppModel {
         do {
             let day = try await core.today()
             today = day
-            // The log shows today only (§4.4); the day before is kept for Find's "Yesterday"
-            // row (AC-8.2).
             if let date = day.date {
                 earlier = try await core.daysBefore(date, count: 1)
             }
@@ -589,13 +586,11 @@ final class AppModel {
 }
 
 #if DEBUG
-/// The mock answers a preview model gives in place of the core (`PreviewData`).
 struct PreviewFixture {
     var pages: [String: PageView] = [:]
     var backlinks: [String: [RefView]] = [:]
     var recent: [PageRef] = []
 
-    /// A title search over the mock pages, and a word search over their blocks.
     func search(_ words: String) -> SearchResults {
         let needle = words.lowercased()
         let found = pages.values
@@ -612,8 +607,6 @@ struct PreviewFixture {
 }
 
 extension AppModel {
-    /// A model with no graph, filled with mock data, for SwiftUI previews. It never opens a
-    /// graph and never calls the relay.
     static func preview(
         phase: Phase = .ready,
         today: PageView? = PreviewData.today,

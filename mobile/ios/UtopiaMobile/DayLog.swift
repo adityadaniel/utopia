@@ -1,7 +1,3 @@
-// The day log: today's note in time order, for reading (ios-prd §4.4). It shows today only;
-// earlier days are pages that Find opens. A row is not editable, except the tick of a to-do
-// (K9). Which words are links comes from the core (C1).
-
 import SwiftUI
 
 /// One top-level block with the blocks below it (§4.2 "Entry").
@@ -50,8 +46,6 @@ struct DayLog: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                // Only today: the main screen is pinned to today's note. Earlier days open
-                // from Find as page screens (§4.4).
                 LazyVStack(alignment: .leading, spacing: 0) {
                     if let today = model.today {
                         if today.exists && !today.entries.isEmpty {
