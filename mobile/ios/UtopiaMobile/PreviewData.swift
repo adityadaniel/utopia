@@ -1,11 +1,7 @@
-// Mock data for the SwiftUI previews: a small graph with today, yesterday and a few pages
-// that link to each other. Debug builds only; the app never reads it.
-
 #if DEBUG
 import Foundation
 
 enum PreviewData {
-    // MARK: - Pages
 
     static let todayID = "page-today"
     static let yesterdayID = "page-yesterday"
@@ -100,8 +96,6 @@ enum PreviewData {
         recent: recent
     )
 
-    // MARK: - The draft
-
     static let draft = Draft(lines: [
         DraftLine(text: "Meeting with Dana about the budget"),
         DraftLine(text: "Move the launch", depth: 1),
@@ -114,8 +108,6 @@ enum PreviewData {
         TitleMatch(title: "Dana", pageId: danaID, start: 13, end: 17),
         TitleMatch(title: "Budget", pageId: budgetID, start: 28, end: 34),
     ]
-
-    // MARK: - Building blocks
 
     enum Piece {
         case plain(String)
@@ -146,7 +138,6 @@ enum PreviewData {
         }
     }
 
-    /// The parts of a block's text, with UTF-16 ranges like the core gives them.
     static func parts(_ pieces: [Piece]) -> [TextPart] {
         var offset: UInt32 = 0
         return pieces.map { piece in
@@ -183,7 +174,6 @@ enum PreviewData {
         )
     }
 
-    /// A time on 2026-11-23 in the device's time zone, in milliseconds.
     static func time(_ hour: Int, _ minute: Int) -> Int64 {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = .current

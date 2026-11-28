@@ -11,7 +11,6 @@ struct UtopiaMobileApp: App {
         WindowGroup {
             RootScreen()
                 .environment(model)
-                // The one accent of the app (Tokens.swift); every system control takes it.
                 .tint(Tokens.link)
         }
     }
