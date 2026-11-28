@@ -42,6 +42,9 @@ struct DayLog: View {
     @ScaledMetric(relativeTo: .body) private var childLineHeight: CGFloat = 22
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .caption) private var timeWidth: CGFloat = 52
+    @ScaledMetric(relativeTo: .body) private var rowPaddingTop: CGFloat = 6
+    @ScaledMetric(relativeTo: .body) private var rowPaddingBottom: CGFloat = 6
+    @ScaledMetric(relativeTo: .body) private var todoLineHeight: CGFloat = 44
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -106,8 +109,8 @@ struct DayLog: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(.top, 12)
-        .padding(.bottom, 12)
+        .padding(.top, rowPaddingTop)
+        .padding(.bottom, rowPaddingBottom)
         .padding(.leading, 20)
         .padding(.trailing, 16)
         .accessibilityElement(children: .contain)
@@ -121,11 +124,12 @@ struct DayLog: View {
                     .fontWeight(.medium)
             } else if block.kind == "todo" {
                 HStack(alignment: .top, spacing: 0) {
-                    TodoBox(done: block.checked, lineHeight: lineHeight) {
+                    TodoBox(done: block.checked, lineHeight: lineHeight, blockHeight: max(44, todoLineHeight)) {
                         Task { await model.toggleTodo(block: block) }
                     }
                     text(block, size: bodySize, weight: .medium, colour: Tokens.ink)
                 }
+                .frame(minHeight: max(44, todoLineHeight), alignment: .topLeading)
             } else {
                 text(block, size: bodySize, weight: .medium, colour: Tokens.ink)
             }
@@ -137,7 +141,7 @@ struct DayLog: View {
             Color.clear
                 .frame(width: CGFloat(max(0, block.depth - 1)) * 16)
             if block.kind == "todo" {
-                TodoBox(done: block.checked, lineHeight: childLineHeight) {
+                TodoBox(done: block.checked, lineHeight: childLineHeight, blockHeight: max(44, todoLineHeight)) {
                     Task { await model.toggleTodo(block: block) }
                 }
             } else {
@@ -152,6 +156,7 @@ struct DayLog: View {
                 text(block, size: childSize, weight: .regular, colour: Tokens.ink3)
             }
         }
+        .frame(minHeight: block.kind == "todo" ? max(44, todoLineHeight) : nil, alignment: .topLeading)
     }
 
     @ViewBuilder
@@ -184,9 +189,10 @@ struct DayLog: View {
 struct TodoBox: View {
     let done: Bool
     let lineHeight: CGFloat
+    let blockHeight: CGFloat
     let toggle: () -> Void
 
-    private var topInset: CGFloat { max(0, (lineHeight - 16) / 2) }
+    private var topInset: CGFloat { max(4.5, (lineHeight - 16) / 2) }
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -211,10 +217,10 @@ struct TodoBox: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .offset(x: 16 - 44, y: topInset - 11)
+            .offset(x: 16 - 44)
             .accessibilityLabel(done ? "Mark not done" : "Mark done")
         }
-        .frame(width: Metrics.markColumn, height: lineHeight, alignment: .topLeading)
+        .frame(width: Metrics.markColumn, height: blockHeight, alignment: .topLeading)
     }
 }
 

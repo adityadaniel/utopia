@@ -17,6 +17,8 @@ struct PageScreen: View {
     @ScaledMetric(relativeTo: .body) private var childSize: CGFloat = 15
     @ScaledMetric(relativeTo: .caption) private var labelSize: CGFloat = 12
     @ScaledMetric(relativeTo: .body) private var lineHeight: CGFloat = 22
+    @ScaledMetric(relativeTo: .body) private var blockRowPadding: CGFloat = 2
+    @ScaledMetric(relativeTo: .body) private var todoLineHeight: CGFloat = 44
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -100,7 +102,7 @@ struct PageScreen: View {
             if block.kind == "todo" {
                 // A to-do has its box at every depth; it is the one thing the phone may change
                 // on a block that is already in the graph (K9).
-                TodoBox(done: block.checked, lineHeight: lineHeight) {
+                TodoBox(done: block.checked, lineHeight: lineHeight, blockHeight: max(44, todoLineHeight)) {
                     Task { await model.toggleTodo(block: block) }
                 }
             } else if block.depth > 0 {
@@ -111,7 +113,7 @@ struct PageScreen: View {
             }
             if block.placeholder != nil {
                 BlockPlaceholderView(text: block.placeholder ?? "", size: block.depth == 0 ? bodySize : childSize)
-                    .padding(.vertical, 4)
+                    .padding(.vertical, blockRowPadding)
             } else {
                 PartTextView(
                     parts: block.parts,
@@ -120,11 +122,12 @@ struct PageScreen: View {
                     colour: block.kind == "todo" && block.checked ? Tokens.muted : (block.depth == 0 ? Tokens.ink : Tokens.ink3),
                     struck: block.kind == "todo" && block.checked
                 )
-                .padding(.vertical, 4)
+                .padding(.vertical, blockRowPadding)
             }
         }
         .padding(.leading, 20)
         .padding(.trailing, 16)
+        .frame(minHeight: block.kind == "todo" ? max(44, todoLineHeight) : nil, alignment: .topLeading)
     }
 
     @ViewBuilder
