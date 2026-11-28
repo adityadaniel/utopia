@@ -1,6 +1,6 @@
 # Comment ratchet: comment lines each file may still hold (docs/adr/0001-no-code-comments.md).
 # A count may only go down. Regenerate with `cargo run -p xtask -- comments --update`.
-# total 10682
+# total 10671
 34 crates/utopia-api/src/access.rs
 25 crates/utopia-api/src/client.rs
 301 crates/utopia-api/src/lib.rs
@@ -23,7 +23,7 @@
 21 crates/utopia-app/tests/owner_lock.rs
 40 crates/utopia-app/tests/sync.rs
 43 crates/utopia-app/tests/sync_continuous.rs
-246 crates/utopia-ffi/src/lib.rs
+237 crates/utopia-ffi/src/lib.rs
 24 crates/utopia-ffi/tests/mobile.rs
 123 crates/utopia-mcp/src/backend.rs
 31 crates/utopia-mcp/src/clients.rs
@@ -122,7 +122,7 @@
 772 crates/utopia-ui/tests/workspace.rs
 7 mobile/ios/Check/main.swift
 46 mobile/ios/UtopiaMobile/AppModel.swift
-11 mobile/ios/UtopiaMobile/ComposeBox.swift
+9 mobile/ios/UtopiaMobile/ComposeBox.swift
 3 mobile/ios/UtopiaMobile/CoreClient.swift
 4 mobile/ios/UtopiaMobile/DayLog.swift
 25 mobile/ios/UtopiaMobile/Draft.swift

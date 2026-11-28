@@ -52,6 +52,10 @@ struct CoreClient: Sendable {
         try await run { try graph.titleSuggestions(text: text, accepted: accepted, limit: limit) }
     }
 
+    func dateSuggestions(_ text: String, accepted: [AcceptedLink], limit: UInt32 = 6) async throws -> [DateMatch] {
+        try await run { try graph.dateSuggestions(text: text, accepted: accepted, limit: limit) }
+    }
+
     func textWithLinks(_ text: String, links: [AcceptedLink]) async throws -> String {
         try await run { try graph.textWithLinks(text: text, links: links) }
     }
@@ -94,6 +98,16 @@ struct CoreClient: Sendable {
 /// A link the reader accepted, in the form the core takes.
 extension DraftLink {
     var accepted: AcceptedLink {
-        AcceptedLink(title: title, start: UInt32(max(0, start)), end: UInt32(max(0, end)))
+        AcceptedLink(title: title, start: UInt32(max(0, start)), end: UInt32(max(0, end)), day: day, words: words)
+    }
+
+    init(accepted: AcceptedLink) {
+        self.init(
+            title: accepted.title,
+            start: Int(accepted.start),
+            end: Int(accepted.end),
+            day: accepted.day,
+            words: accepted.words
+        )
     }
 }

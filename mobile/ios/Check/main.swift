@@ -39,19 +39,121 @@ let matches = try g.titleSuggestions(text: "Lunch with dana", accepted: [], limi
 check(matches.count == 1 && matches[0].title == "Dana", "a title in a line is suggested")
 let stored = try g.textWithLinks(
     text: "Lunch with dana",
-    links: [AcceptedLink(title: matches[0].title, start: matches[0].start, end: matches[0].end)]
+    links: [AcceptedLink(title: matches[0].title, start: matches[0].start, end: matches[0].end, day: nil, words: nil)]
 )
 check(stored == "Lunch with [[Dana]]", "an accepted link is written in the page's spelling")
 let stale = try g.textWithLinks(
     text: "Lunch with Dan",
-    links: [AcceptedLink(title: "Dana", start: 11, end: 15)]
+    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil)]
 )
 check(stale == "Lunch with Dan", "a changed word is plain text")
 let parts = try g.draftParts(
     text: "Lunch with dana",
-    links: [AcceptedLink(title: "Dana", start: 11, end: 15)]
+    links: [AcceptedLink(title: "Dana", start: 11, end: 15, day: nil, words: nil)]
 )
 check(parts.contains { $0.kind == .page }, "a draft line draws its link")
+
+try g.setToday(date: "2026-11-03")
+let dates = try g.dateSuggestions(text: "call Ana tomorrow", accepted: [], limit: 6)
+check(dates.count == 1 && dates[0].words == "tomorrow", "a date phrase is a suggestion")
+check(dates[0].title == "November 4th, 2026", "the chip names the day's title")
+check(dates[0].day == "2026-11-04", "the chip carries the day it resolved to")
+let dateLink = AcceptedLink(
+    title: dates[0].title,
+    start: dates[0].start,
+    end: dates[0].end,
+    day: dates[0].day,
+    words: dates[0].words
+)
+let dateText = try g.textWithLinks(text: "call Ana tomorrow", links: [dateLink])
+check(dateText == "call Ana [[November 4th, 2026]]", "an accepted date is written as its day's title")
+let dateParts = try g.draftParts(text: "call Ana tomorrow", links: [dateLink])
+check(dateParts.contains { $0.kind == .date && $0.text == "tomorrow" }, "a date link draws the typed words")
+try g.setToday(date: "2026-11-10")
+check(
+    try g.textWithLinks(text: "call Ana tomorrow", links: [dateLink]) == "call Ana [[November 4th, 2026]]",
+    "a Send a week later keeps the day the chip was tapped for"
+)
+let staleDate = try g.textWithLinks(
+    text: "call Ana next fri",
+    links: [
+        AcceptedLink(
+            title: dates[0].title,
+            start: dates[0].start,
+            end: dates[0].end,
+            day: "2026-11-04",
+            words: "tomorrow"
+        )
+    ]
+)
+check(staleDate == "call Ana next fri", "changed date words are plain text")
+let grown = try g.textWithLinks(text: "call Ana tomorrows", links: [dateLink])
+check(grown == "call Ana tomorrows", "a word that grows past the range drops the link")
+let nextWeekLink = AcceptedLink(
+    title: "November 10th, 2026",
+    start: 0,
+    end: 9,
+    day: "2026-11-10",
+    words: "next week"
+)
+let rebased = rebaseLinks(
+    textBefore: "next week",
+    editStart: 0,
+    editRemovedLen: 0,
+    replacement: "Call Ana ",
+    links: [nextWeekLink]
+)
+check(
+    rebased.count == 1 && rebased[0].start == 9 && rebased[0].end == 18,
+    "editing the prefix moves the accepted range"
+)
+check(
+    try g.textWithLinks(text: "Call Ana next week", links: rebased) == "Call Ana [[November 10th, 2026]]",
+    "editing the prefix keeps the accepted day"
+)
+let emojiDate = AcceptedLink(
+    title: "December 4th, 2026",
+    start: 3,
+    end: 12,
+    day: "2026-12-04",
+    words: "next week"
+)
+let emojiEdit = editBetween(
+    old: "\u{1F600} next week",
+    new: "\u{1F601} next week",
+    links: [emojiDate]
+)
+check(
+    emojiEdit.start == 0 && emojiEdit.removed == 2 && emojiEdit.replacement == "\u{1F601}",
+    "an emoji edit is one scalar-wide edit"
+)
+let emojiRebased = rebaseLinks(
+    textBefore: "\u{1F600} next week",
+    editStart: emojiEdit.start,
+    editRemovedLen: emojiEdit.removed,
+    replacement: emojiEdit.replacement,
+    links: [emojiDate]
+)
+check(
+    emojiRebased.count == 1 && emojiRebased[0].start == 3 && emojiRebased[0].end == 12,
+    "an emoji edit before an accepted date keeps its range"
+)
+check(
+    try g.textWithLinks(text: "\u{1F601} next week", links: emojiRebased) == "\u{1F601} [[December 4th, 2026]]",
+    "an emoji edit before an accepted date keeps the day"
+)
+check(
+    try g.dateSuggestions(text: "`next week` and next week", accepted: [], limit: 6).map(\.words) == ["next week"],
+    "a date inside inline code is no chip"
+)
+check(
+    try g.dateSuggestions(text: "🙂 tomorrow", accepted: [], limit: 6).first?.start == 3,
+    "a date after an emoji keeps UTF-16 offsets"
+)
+check(try g.dateSuggestions(text: "26", accepted: [], limit: 6).isEmpty, "a bare number is no date")
+check(try g.dateSuggestions(text: "may", accepted: [], limit: 6).isEmpty, "a bare month is no date")
+check(try g.dateSuggestions(text: "in May. 5 of us", accepted: [], limit: 6).isEmpty, "punctuation does not join a date")
+try g.setToday(date: "2026-11-02")
 
 // A tick is one command (AC-5.3), and a day's entries carry their time (K10, §4.4).
 let todo = written.blocks.first { $0.kind == "todo" }!
