@@ -1,4 +1,4 @@
-# 0013. Typed dates on the phone mean the day the chip was tapped
+# 0015. Typed dates on the phone mean the day the chip was tapped
 
 Status: Accepted (2026-11-25). Source: `crates/utopia-core/src/date.rs`,
 `crates/utopia-ffi/src/lib.rs`, `mobile/ios/UtopiaMobile` (ios-prd §4.6, AC-4.12, AC-4.13,

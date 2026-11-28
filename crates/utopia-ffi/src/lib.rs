@@ -2786,7 +2786,7 @@ mod tests {
             day: Some(found.day),
             words: Some(found.words),
         };
-        let edit = edit_between_in("next week", "note: next week", &[link.clone()]);
+        let edit = edit_between_in("next week", "note: next week", std::slice::from_ref(&link));
         assert_eq!(
             edit,
             TextEdit {
@@ -2823,7 +2823,7 @@ mod tests {
             day: Some(found.day),
             words: Some(found.words),
         };
-        let edit = edit_between_in("next week", "next week week", &[link.clone()]);
+        let edit = edit_between_in("next week", "next week week", std::slice::from_ref(&link));
         assert_eq!(
             edit,
             TextEdit {
